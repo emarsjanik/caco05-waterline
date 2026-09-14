@@ -1,0 +1,26 @@
+# Generated output. All of it is reproducible from the scripts and
+# the source imagery, and together it comes to about 5 GB -- which
+# does not belong in a repository whose code is a few hundred KB.
+debug/
+exp_dbg/
+exp_snap/
+exp_timex/
+exp_timex_gt/
+exp_timex_renamed/
+archive/
+processed/
+processed_timex/
+ground_truth/
+input/
+logs/
+__pycache__/
+
+*.png
+*.jpg
+*.csv
+*.xlsx
+result_*.txt
+
+# Stray saves from mangled editor sessions, superseded by the real
+# files. Kept on disk rather than deleted, but not tracked.
+yy
