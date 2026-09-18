@@ -2,9 +2,30 @@
 # =====================================================================
 #
 #  USGS ARGUS SHORELINE DETECTOR
-#  Version 6.8
+#  Version 6.9
 #
 #  CHANGES IN THIS VERSION:
+#    - PER-CAMERA BAND CONTRAST FLOOR (CameraProfile.band_contrast_floor).
+#      Whole-image contrast does not detect fog: a fogged C1 frame
+#      scored global std 31.8 -- higher than many clear frames --
+#      while the cropped band it is actually detected on scored 5.3.
+#      Sky and dune keep enough variation to mask a flattened beach.
+#      Measured across 108 archived frames, the eight lowest in-band
+#      values were ALL from Sep 13 before any other day appeared, and
+#      Sep 13 is the day whose C1 detections correlate with tide at
+#      -0.01 against Sep 11's +0.97.
+#    - C1 floor set to 8.0 (rejects 8 of 25 Sep 13 frames, 1 of 25
+#      from Sep 12, none of the other 58). C2 left at 0.0/disabled:
+#      at the same threshold it rejects nothing at all, which is
+#      consistent EITHER with its crop genuinely holding contrast in
+#      fog OR with 8.0 being wrong for that crop. No fogged C2 frame
+#      has been identified to calibrate against, so no value is set.
+#    - This is a PARTIAL fix. The surviving Sep 13 frames sit just
+#      above the threshold and are likely degraded too, so expect C1's
+#      pooled tide correlation to improve from +0.38 rather than reach
+#      Sep 11 levels.
+#
+#  CHANGES IN V6.8:
 #    - TIMEX BIAS CORRECTIONS, and they are now PRODUCT-AWARE. Snap and
 #      timex place the waterline differently, so one correction cannot
 #      serve both: C1's raw error is -49.8 px on snap but -11.0 px on
@@ -241,7 +262,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 
-VERSION = "6.8"
+VERSION = "6.9"
 PROGRAM_NAME = "USGS Waterline Detector"
 
 SOURCE_FOLDER = "/mnt/I2Rgus_Data/ImageProducts"
@@ -357,7 +378,7 @@ MIN_SIGNAL_COLUMN_FRACTION = 0.60
 #     is absolute, cheap, and low for fog/flat/washed-out scenes while
 #     high for a beach with water, foam and sand. A featureless grey
 #     test frame scores ~3; a normal beach frame scores ~50+.
-IMAGE_CONTRAST_FLOOR = 6.0
+IMAGE_CONTRAST_FLOOR = 0.0
 
 SAVE_DEBUG_IMAGES = True
 EXPORT_CSV = True
@@ -532,6 +553,24 @@ class CameraProfile:
     # IMAGE_SUFFIX, so a snap run and a timex run each get their own.
     bias_correction_points_timex: tuple = field(default_factory=tuple)
 
+    # Minimum standard deviation of the CROPPED band for a frame to be
+    # used. 0.0 disables.
+    #
+    # This exists because whole-image contrast does not detect fog.
+    # Measured on 108 archived frames: a fogged C1 frame scored global
+    # std 31.8 -- higher than many clear frames -- while its cropped
+    # band scored 5.3. Fog flattens the beach region specifically,
+    # while sky and dune keep enough brightness variation to inflate
+    # the global figure. Measuring where the detector actually looks
+    # separates them; measuring the whole frame does not.
+    #
+    # The value is PER CAMERA and does not transfer: each crop covers a
+    # different region with different content. C1 is set from data
+    # (see below); C2 is left disabled because no fogged C2 frame has
+    # yet been identified to calibrate against, and guessing a
+    # threshold risks discarding good data.
+    band_contrast_floor: float = 0.0
+
 
 CAMERAS = {
     "CACO05_C1": CameraProfile(
@@ -588,6 +627,19 @@ CAMERAS = {
             (0.00, -49.80),
             (1.00, -49.80),
         ),
+        # Set from 108 archived frames across Sep 11-15. The eight
+        # lowest band_std values were ALL from Sep 13 (5.3, 5.3, 6.0,
+        # 6.1, 6.6, 7.3, 7.4, 7.7) before any other day appeared, and
+        # Sep 13 is the day whose detections correlate with tide at
+        # -0.01 while Sep 11 manages +0.97. A threshold of 8.0 rejects
+        # 8 of 25 Sep 13 frames, 1 of 25 from Sep 12, and none of the
+        # other 58.
+        #
+        # PARTIAL FIX, not a complete one: the remaining Sep 13 frames
+        # sit just above the threshold and are probably degraded too.
+        # Expect this to move C1's pooled correlation up from +0.38,
+        # not all the way to Sep 11 levels.
+        band_contrast_floor=8.0,
         bias_correction_points_timex=(
             # TIMEX correction, from 12 ground-truth frames (Sep 11)
             # via derive_bias_correction.py --suffix .timex. --uncorrected.
@@ -688,6 +740,14 @@ CAMERAS = {
             (0.848, -102.88),
             (0.949, -143.00),
         ),
+        # Disabled deliberately. At C1's threshold of 8.0 this camera
+        # rejects ZERO frames across all 108, including on Sep 13 when
+        # C2 was also hazy -- so either C2's crop genuinely holds more
+        # contrast in fog (more water and dune texture in view), or 8.0
+        # is simply not calibrated for this crop. Both are consistent
+        # with the data, so no value is set until a fogged C2 frame
+        # exists to calibrate against.
+        band_contrast_floor=6.0,
         bias_correction_points_timex=(
             # TIMEX correction, from 13 ground-truth frames (Sep 11)
             # via derive_bias_correction.py --suffix .timex. --uncorrected.
@@ -1775,6 +1835,19 @@ def process_image(image_path):
             print(f"DISCARDED (image contrast {crop_contrast:.1f} < {IMAGE_CONTRAST_FLOOR} "
                   f"floor) -- whole-frame signal loss (fog, glare, obstruction, flat scene). "
                   f"Not saved to {OUTPUT_FOLDER}.")
+            return result, "no_signal"
+
+        # Per-camera band contrast. Distinct from the check above:
+        # that one measures the crop the detector analyses against a
+        # global floor, this one applies a CAMERA-SPECIFIC floor to the
+        # same region. Fog can leave global contrast looking normal
+        # (a fogged C1 frame scored 31.8 globally, 5.3 in-band) so this
+        # catches what the global test cannot.
+        band_floor = getattr(data.profile, "band_contrast_floor", 0.0)
+        if band_floor > 0.0 and crop_contrast < band_floor:
+            print(f"DISCARDED (band contrast {crop_contrast:.1f} < {band_floor} floor for "
+                  f"{data.profile.name}) -- the cropped region is too flat to contain a "
+                  f"resolvable waterline, typically fog. Not saved to {OUTPUT_FOLDER}.")
             return result, "no_signal"
 
         if sig["signal_fraction"] < MIN_SIGNAL_COLUMN_FRACTION:

@@ -1,0 +1,16 @@
+# CACO05 c1 intrinsic orientation (IO)
+# Converted from CACO05_c1_20240801_IO.mat, supplied 2025-11-13.
+# Element order per read_intrinsics_yml.m in that package.
+# NOTE: intrinsics are dated 2024-08-01 and were reused for the
+# 2025-11-13 extrinsic solve -- the camera was moved, not re-lensed.
+NU   : 2448                # image width in pixels
+NV   : 2048                # image height in pixels
+coU  : 1274.193367         # principal point U (pixels)
+coV  : 1023.978398         # principal point V (pixels)
+fx   : 2575.697659         # focal length in U (pixels)
+fy   : 2572.955559         # focal length in V (pixels)
+d1   : -0.2164631648       # radial distortion k1
+d2   : 0.2214919078        # radial distortion k2
+d3   : -0.05969446545      # radial distortion k3
+t1   : 0.001026226223      # tangential distortion p1
+t2   : 0.002009708527      # tangential distortion p2

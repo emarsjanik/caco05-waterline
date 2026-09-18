@@ -93,27 +93,91 @@ def load_contours(path, camera, date_filter=None):
     return dict(frames), elev_col
 
 
-def pick_background(frames, image_dir, target_hour, target_minute):
+def crop_bounds_for(camera, image_height):
     """
-    Chooses the frame closest to the requested time of day and returns
-    its image path. Falls back to any readable image from the day if
-    the preferred one is missing from disk.
+    Returns (top, bottom) rows of the region the detector analyses, so
+    clarity is judged on the beach rather than on sky and dune. Reads
+    the real crop from the detector when it can be imported; otherwise
+    falls back to the middle half of the frame, which is cruder but
+    still excludes most sky.
+    """
+    try:
+        import waterline_detector_v5 as detector
+        key = {"c1": "CACO05_C1", "c2": "CACO05_C2"}[camera]
+        profile = detector.CAMERAS[key]
+        return (int(profile.crop_top * image_height),
+                int(profile.crop_bottom * image_height))
+    except Exception:
+        return (int(0.25 * image_height), int(0.75 * image_height))
+
+
+def resolve_image(image_dir, key):
+    candidate = image_dir / (key + ".jpg")
+    if candidate.exists():
+        return candidate
+    matches = list(image_dir.glob(key + "*"))
+    return matches[0] if matches else None
+
+
+def pick_background(frames, image_dir, target_hour, target_minute,
+                    camera=None, select="clearest"):
+    """
+    Chooses the backdrop image.
+
+    select="clearest" (default) picks the frame with the highest
+    contrast INSIDE the detector's crop region. select="time" picks the
+    frame nearest a requested time of day.
+
+    Clearest is the default because time-of-day selection repeatedly
+    produced unusable backdrops: a midday frame on a foggy day is still
+    fog, and three separate maps came out drawn over a grey wash in
+    which no waterline was visible, making the overlay impossible to
+    check by eye. Contrast inside the crop separates these decisively
+    -- measured on this station, fogged frames scored 5-7 while clear
+    ones scored 45-58, an order of magnitude apart.
+
+    Contrast is measured on the crop, not the whole frame, because a
+    fogged beach under a bright sky can still show high whole-image
+    contrast: one fogged frame scored 31.8 globally and 5.3 in-band.
+
+    This affects ONLY which photo sits underneath. The contours drawn
+    on top are unchanged.
     """
     image_dir = Path(image_dir)
-    target = target_hour * 60 + target_minute
 
-    def minutes_from_target(item):
-        capture = datetime.fromisoformat(item[1]["capture"])
-        return abs((capture.hour * 60 + capture.minute) - target)
+    if select == "time":
+        target = target_hour * 60 + target_minute
 
-    for key, data in sorted(frames.items(), key=minutes_from_target):
-        candidate = image_dir / (key + ".jpg")
-        if candidate.exists():
-            return candidate, data["capture"]
-        matches = list(image_dir.glob(key + "*"))
-        if matches:
-            return matches[0], data["capture"]
-    return None, None
+        def minutes_from_target(item):
+            capture = datetime.fromisoformat(item[1]["capture"])
+            return abs((capture.hour * 60 + capture.minute) - target)
+
+        for key, data in sorted(frames.items(), key=minutes_from_target):
+            path = resolve_image(image_dir, key)
+            if path is not None:
+                return path, data["capture"], None
+        return None, None, None
+
+    best = None
+    for key, data in frames.items():
+        path = resolve_image(image_dir, key)
+        if path is None:
+            continue
+        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            continue
+        top, bottom = crop_bounds_for(camera, image.shape[0])
+        top = max(0, min(top, image.shape[0] - 1))
+        bottom = max(top + 1, min(bottom, image.shape[0]))
+        score = float(image[top:bottom, :].std())
+        if best is None or score > best[0]:
+            best = (score, path, data["capture"])
+
+    if best is None:
+        # Nothing readable -- fall back to time-based rather than failing.
+        return pick_background(frames, image_dir, target_hour, target_minute,
+                               camera=camera, select="time")
+    return best[1], best[2], best[0]
 
 
 def main():
@@ -136,6 +200,21 @@ def main():
                         help="Which day's image to use as the backdrop. Default: the last day "
                              "in the range, so the picture sits on the most recent view of the "
                              "beach.")
+    parser.add_argument("--max-lines", type=int, default=0,
+                        help="Cap how many waterlines are drawn, subsampling EVENLY IN TIME "
+                             "across the range (0 = draw all, the default). A 7-day map draws "
+                             "about 80 lines and stays readable; a 30-day map would draw 500+ "
+                             "and saturate the intertidal zone into a solid mass with the "
+                             "photo invisible behind it. Subsampling in time rather than "
+                             "taking the first N keeps the tidal range and the whole period "
+                             "represented.")
+    parser.add_argument("--background-select", choices=["clearest", "time"],
+                        default="clearest",
+                        help="How to choose the backdrop photo. 'clearest' (default) picks the "
+                             "highest-contrast frame within the detector's crop region; 'time' "
+                             "picks the one nearest --background-hour/minute. Time-based "
+                             "selection repeatedly chose fogged frames, since midday on a "
+                             "foggy day is still fog.")
     parser.add_argument("--background-hour", type=int, default=12)
     parser.add_argument("--background-minute", type=int, default=15)
     parser.add_argument("--elevation-bin", type=float, default=0.10,
@@ -186,6 +265,19 @@ def main():
         print(f"Dates available: {all_dates}")
         sys.exit(1)
 
+    if args.max_lines and len(frames) > args.max_lines:
+        # Even in TIME, not every Nth file: captures are irregular
+        # (nights and bad-weather frames are missing), so index-based
+        # thinning would over-sample dense periods and under-sample
+        # sparse ones.
+        ordered = sorted(frames.items(), key=lambda kv: kv[1]["capture"])
+        pick = np.linspace(0, len(ordered) - 1, args.max_lines).round().astype(int)
+        pick = sorted(set(pick.tolist()))
+        kept = {ordered[i][0]: ordered[i][1] for i in pick}
+        print(f"Subsampled        : {len(frames)} waterlines -> {len(kept)} "
+              f"(--max-lines {args.max_lines}), evenly spaced in time")
+        frames = kept
+
     dates_used = sorted({d["capture"][:10] for d in frames.values()})
     date_label = (dates_used[0] if len(dates_used) == 1
                   else f"{dates_used[0]} to {dates_used[-1]}  ({len(dates_used)} days)")
@@ -196,8 +288,9 @@ def main():
     bg_day = args.background_date or dates_used[-1]
     bg_candidates = {k: v for k, v in frames.items()
                      if v["capture"].startswith(bg_day)} or frames
-    bg_path, bg_capture = pick_background(
-        bg_candidates, args.image_dir, args.background_hour, args.background_minute)
+    bg_path, bg_capture, bg_score = pick_background(
+        bg_candidates, args.image_dir, args.background_hour, args.background_minute,
+        camera=args.camera, select=args.background_select)
     if bg_path is None:
         print(f"No background image found in {args.image_dir} for any frame on {bg_day}.")
         print("Frames needing an image:")
@@ -273,7 +366,14 @@ def main():
     if args.line_width is None:
         line_width = 1.6 if n_lines <= 25 else (1.1 if n_lines <= 60 else 0.8)
     fill_alpha = args.fill_alpha
-    if n_lines > 100:
+    if n_lines > 250:
+        # Beyond roughly 250 lines the band goes opaque whatever the
+        # alpha, so this is a floor rather than a fix -- prefer
+        # --max-lines to thin the set instead.
+        line_alpha = min(line_alpha, 0.18)
+        fill_alpha = min(fill_alpha, 0.05)
+        line_width = min(line_width, 0.5)
+    elif n_lines > 100:
         # A week of captures saturates the intertidal zone into a solid
         # ramp and the photo behind it disappears. Keep it translucent
         # so the line positions can still be checked against the image.
@@ -345,7 +445,12 @@ def main():
     print(f"Waterlines drawn  : {len(resampled)}")
     print(f"Elevation range   : {elevations.min():+.3f} to {elevations.max():+.3f} m NAVD88")
     print(f"Elevation bins    : {len(bins)}  ({filled_bins} had 2+ crossings and were filled)")
-    print(f"Background image  : {bg_path.name}  ({bg_capture} UTC)")
+    if bg_score is not None:
+        print(f"Background image  : {bg_path.name}")
+        print(f"                    {bg_capture} UTC, in-crop contrast {bg_score:.1f} "
+              f"(picked as clearest of {len(bg_candidates)} candidate(s))")
+    else:
+        print(f"Background image  : {bg_path.name}  ({bg_capture} UTC)")
     print(f"Saved             : {args.output_png}")
 
     if len(dates_used) > 1:

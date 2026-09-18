@@ -54,6 +54,7 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
+from collections import defaultdict
 import numpy as np
 import pandas as pd
 
@@ -326,6 +327,112 @@ def detect_camera(name):
     return None
 
 
+def tide_agreement_by_day(output_rows):
+    """
+    Measures, per camera-day, how often the detected waterline moves in
+    the SAME DIRECTION as the tide between consecutive frames.
+
+    A real waterline has no choice about this: if the water rises, the
+    line must move one way; if it falls, the other. The magnitude can
+    vary with beach slope, but the SIGN cannot. So this tests the one
+    thing that must hold, without needing to judge whether an image
+    looks degraded.
+
+    That distinction matters here. Four image-quality statistics --
+    brightness, whole-frame contrast, in-band contrast, and detector
+    confidence -- all failed to separate a day of torrential rain and
+    fog from clear days: the bad day scored 0.950-0.998 confidence and
+    its contrast overlapped the good days. Measured agreement on the
+    same three days was 81%, 89% and 56%, ranking them in the same
+    order as their correlation with tide (+0.97, +0.73, -0.17). A day
+    at 56% is a coin flip: those detections carry no information about
+    the water level at all.
+
+    Returns {(camera, date): (agreeing, total)}. Transitions are only
+    counted between frames less than ~90 min apart and where the tide
+    actually moved more than 0.05 m, since a near-stationary tide gives
+    the sign no meaning.
+    """
+    per_frame = {}
+    for row in output_rows:
+        stem, camera, capture, epoch = row[0], row[1], row[2], row[3]
+        key = (camera, stem)
+        if key not in per_frame:
+            per_frame[key] = {"epoch": epoch, "date": capture[:10],
+                              "elev": row[6], "rows": []}
+        per_frame[key]["rows"].append(row[5])
+
+    by_camera = defaultdict(list)
+    for (camera, _stem), v in per_frame.items():
+        by_camera[camera].append((v["epoch"], v["date"], v["elev"],
+                                  float(np.mean(v["rows"]))))
+
+    agreement = defaultdict(lambda: [0, 0])
+    for camera, entries in by_camera.items():
+        entries.sort()
+        previous = None
+        for epoch, date, elev, mean_row in entries:
+            if (previous is not None
+                    and epoch - previous[0] <= 5400
+                    and abs(elev - previous[1]) > 0.05):
+                agreement[(camera, date)][1] += 1
+                if np.sign(elev - previous[1]) == np.sign(mean_row - previous[2]):
+                    agreement[(camera, date)][0] += 1
+            previous = (epoch, elev, mean_row)
+    return agreement
+
+
+def straightness_mask(rows, window, min_residual):
+    """
+    Flags columns where the detected line is implausibly straight.
+
+    A dynamic-programming solver with no signal to follow falls back on
+    its smoothness penalty and emits a dead-straight run. A real
+    waterline never does: even after sub-pixel refinement it retains
+    small column-to-column wiggle from swash, foam and beach texture.
+
+    Measured on 40 archived C2 frames with a 31-column window, the RMS
+    deviation from a local straight-line fit was:
+        columns the detector kept     median 0.173 px
+        columns it flagged no-signal  median 0.004 px
+    a 43x separation, with 83% of flagged columns below 0.05 px against
+    only 6.9% of kept ones.
+
+    This is INDEPENDENT of the Has_Signal test, which is why it is
+    worth having as well: Has_Signal asks whether the energy was strong
+    enough, this asks whether the answer looks like a waterline. Some
+    straight segments pass the energy test and are caught only here.
+
+    Returns True for columns to KEEP.
+    """
+    n = len(rows)
+    if window < 5 or n < window or min_residual <= 0:
+        return np.ones(n, dtype=bool)
+
+    half = window // 2
+    x = np.arange(window, dtype=float)
+    A = np.vstack([x, np.ones(window)]).T
+    # Least-squares projection matrix, computed once: the residual for
+    # every window is then a single matrix multiply rather than a fit.
+    pinv = np.linalg.pinv(A)
+
+    keep = np.ones(n, dtype=bool)
+    for i in range(half, n - half):
+        seg = rows[i - half:i - half + window]
+        coef = pinv @ seg
+        residual = np.sqrt(np.mean((seg - (A @ coef)) ** 2))
+        if residual < min_residual:
+            keep[i] = False
+
+    # Window edges are never evaluated, so inherit from the nearest
+    # evaluated column rather than being kept by default -- otherwise a
+    # straight run reaching the frame edge keeps a fringe of survivors.
+    if n > 2 * half:
+        keep[:half] = keep[half]
+        keep[n - half:] = keep[n - half - 1]
+    return keep
+
+
 def local_coverage_mask(has_signal, window, min_fraction):
     """
     Marks columns that sit in a NEIGHBOURHOOD with adequate signal,
@@ -421,6 +528,52 @@ def main():
                               "(default: UTC, matching this project's GMT-labeled image filenames).")
     parser.add_argument("--max-gap-minutes", type=float, default=60.0)
     parser.add_argument("--include-stale", action="store_true")
+    parser.add_argument("--min-tide-agreement", type=float, default=0.70,
+                        help="Reject a whole camera-day if the detected waterline moves in "
+                             "the same direction as the tide less often than this (default "
+                             "0.70). Measured on three days: 81%%, 89%% and 56%%, ranking them "
+                             "as their tide correlation did (+0.97, +0.73, -0.17). The 56%% "
+                             "day was torrential rain and fog, which brightness, contrast, "
+                             "in-band contrast and confidence all failed to detect. Set 0 to "
+                             "disable. NOTE: this judges a whole DAY, so it discards usable "
+                             "frames within a mixed day -- appropriate for day-long weather, "
+                             "less so for an afternoon that fogs in.")
+    parser.add_argument("--min-agreement-transitions", type=int, default=5,
+                        help="Minimum consecutive-frame transitions before the agreement test "
+                             "is applied to a day (default 5). Below this the fraction is too "
+                             "noisy to act on, so the day is kept and reported rather than "
+                             "judged.")
+    parser.add_argument("--straightness-window", type=int, default=31,
+                        help="Columns used to judge local straightness (default 31). Measured "
+                             "on 40 archived frames this window separated known-bad from "
+                             "known-good columns by 43x in median residual -- better than 61 "
+                             "or 121.")
+    parser.add_argument("--straightness-residual-c1", type=float, default=0.0,
+                        help="Straightness threshold for c1, in pixels. DISABLED by default "
+                             "(0.0) on measurement: c1's flagged and kept columns separate by "
+                             "only 1.8x in median residual (0.083 vs 0.150), so a threshold "
+                             "catches just 34%% of known-bad while removing 13.2%% of "
+                             "known-good. c1's failures are fog days where the detector still "
+                             "found something with natural-looking wiggle -- wrong, but not "
+                             "straight. The tide-agreement filter is what catches those.")
+    parser.add_argument("--straightness-residual-c2", type=float, default=0.05,
+                        help="Straightness threshold for c2, in pixels (default 0.05). c2's "
+                             "populations separate by 43x (0.004 vs 0.173), because its "
+                             "failure mode is the far-field solver flat-lining, which is dead "
+                             "straight. Catches 83%% of known-bad for 6.9%% of known-good.")
+    parser.add_argument("--min-straightness-residual", type=float, default=None,
+                        help="Drop columns whose deviation from a local straight-line fit is "
+                             "below this, in pixels (default 0.05). Catches 83%% of columns the "
+                             "detector already flags as signal-free, and some it does not -- a "
+                             "DP with nothing to follow emits dead-straight runs. Costs about "
+                             "6.9%% of good columns, which are the flattest and least "
+                             "informative. Overrides BOTH per-camera values above when given "
+                             "-- use it to sweep a single value, not in production, since the "
+                             "cameras demonstrably need different thresholds.")
+    parser.add_argument("--max-straight-fraction", type=float, default=0.50,
+                        help="If more than this fraction of a frame's columns are straight, "
+                             "drop the frame entirely rather than trimming (default 0.50). A "
+                             "mostly-straight line is not a waterline with a bad patch.")
     parser.add_argument("--truncate-window", type=int, default=120,
                         help="Width in columns of the sliding window used to judge local "
                              "signal density (default 120). Columns whose neighbourhood is "
@@ -521,6 +674,8 @@ def main():
     skipped_low_coverage = 0
     low_coverage_detail = []
     truncated_columns = 0
+    straight_trimmed = 0
+    skipped_mostly_straight = 0
 
     for path in shoreline_files:
         epoch = extract_epoch_from_filename(path.name)
@@ -546,6 +701,11 @@ def main():
         columns, rows, sharpness, col_has_signal = load_shoreline_csv(path)
         capture_time = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
 
+        # Straightness is judged on the FULL row series before any
+        # columns are removed: dropping columns first would leave gaps
+        # that make a straight run look wiggly.
+        rows_full_for_straightness = rows.copy()
+
         if not args.include_no_signal:
             keep = col_has_signal
             total_columns = len(keep)
@@ -555,11 +715,40 @@ def main():
                 truncated_columns += int((col_has_signal & ~dense).sum())
                 keep = col_has_signal & dense
             dropped_no_signal += int((~keep).sum())
+
+            # Per-camera straightness threshold. The two cameras fail
+            # in different ways and one value cannot serve both --
+            # measured, not assumed (see the argument help above).
+            #
+            # This mask MUST be folded into `keep` BEFORE the arrays
+            # are subset below. An earlier version applied it after,
+            # which counted every trimmed column while removing none:
+            # the log reported 56426 trimmed and the output was
+            # unchanged. Order matters here, and the point counts are
+            # what reveal it -- the counter alone looked correct.
+            if args.min_straightness_residual is not None:
+                straight_threshold = args.min_straightness_residual
+            else:
+                straight_threshold = {"c1": args.straightness_residual_c1,
+                                      "c2": args.straightness_residual_c2}.get(camera, 0.0)
+
+            if straight_threshold > 0.0 and len(keep) >= args.straightness_window:
+                straight_ok = straightness_mask(rows_full_for_straightness,
+                                                args.straightness_window,
+                                                straight_threshold)
+                n_straight = int((keep & ~straight_ok).sum())
+                straight_trimmed += n_straight
+                if n_straight / max(int(keep.sum()), 1) > args.max_straight_fraction:
+                    skipped_mostly_straight += 1
+                    continue
+                keep = keep & straight_ok
+
             columns, rows, sharpness = columns[keep], rows[keep], sharpness[keep]
             col_has_signal = col_has_signal[keep]
             if len(columns) == 0:
                 skipped_all_no_signal += 1
                 continue
+
             coverage = len(columns) / max(total_columns, 1)
             if args.min_coverage > 0.0 and coverage < args.min_coverage:
                 skipped_low_coverage += 1
@@ -580,6 +769,38 @@ def main():
         print("No contour points produced -- check water-level source coverage and file naming.")
         sys.exit(1)
 
+    # Tide-direction agreement, per camera-day. Computed AFTER all
+    # frames are gathered because it needs consecutive frames -- it
+    # cannot judge a frame in isolation, unlike every other filter here.
+    agreement = tide_agreement_by_day(output_rows)
+    rejected_days = set()
+    if args.min_tide_agreement > 0.0 and agreement:
+        print()
+        print("Tide-direction agreement (detected line moves with the tide):")
+        for (camera, date) in sorted(agreement):
+            ok, total = agreement[(camera, date)]
+            frac = ok / total if total else float("nan")
+            if total < args.min_agreement_transitions:
+                note = f"  (only {total} transitions -- not judged)"
+            elif frac < args.min_tide_agreement:
+                rejected_days.add((camera, date))
+                note = "  <-- REJECTED, no directional signal"
+            else:
+                note = ""
+            print(f"   {camera}  {date}   {ok:2d}/{total:2d}  {100*frac:5.0f}%{note}")
+
+        if rejected_days:
+            before = len(output_rows)
+            output_rows = [r for r in output_rows
+                           if (r[1], r[2][:10]) not in rejected_days]
+            print(f"   dropped {before - len(output_rows)} point(s) from "
+                  f"{len(rejected_days)} camera-day(s)")
+            used -= sum(1 for _ in rejected_days)
+            if not output_rows:
+                print("No contour points left after the agreement filter.")
+                sys.exit(1)
+        print()
+
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", newline="") as f:
@@ -599,6 +820,17 @@ def main():
         print(f"No-signal columns        : KEPT (--include-no-signal)")
     else:
         print(f"Dropped (no signal)      : {dropped_no_signal} column(s) across all frames")
+        if straight_trimmed or skipped_mostly_straight:
+            if args.min_straightness_residual is not None:
+                thresh_note = f"{args.min_straightness_residual} px (both cameras)"
+            else:
+                thresh_note = (f"c1 {args.straightness_residual_c1} px, "
+                               f"c2 {args.straightness_residual_c2} px")
+            print(f"Trimmed (implausibly straight): {straight_trimmed} column(s) -- below "
+                  f"{thresh_note}, i.e. the solver was drawing, not detecting")
+            if skipped_mostly_straight:
+                print(f"Skipped (mostly straight) : {skipped_mostly_straight} frame(s) -- over "
+                      f"{100*args.max_straight_fraction:.0f}% of columns straight")
         if args.truncate_min_coverage > 0.0:
             print(f"Truncated (sparse region): {truncated_columns} column(s) -- passed the "
                   f"per-column test but sat in a neighbourhood below "
