@@ -1,0 +1,11 @@
+{
+  "target": "H",
+  "arch": "mobilenet",
+  "batch": 16,
+  "img_size": 128,
+  "n_train_unique": 1677,
+  "n_val": 621,
+  "val_rmse": 0.509523487779654,
+  "val_bias": 0.06854675840663098,
+  "val_r2": 0.37485970142358926
+}

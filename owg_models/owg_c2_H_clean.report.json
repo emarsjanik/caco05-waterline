@@ -1,0 +1,23 @@
+{
+  "target": "H",
+  "arch": "mobilenet",
+  "batch": 16,
+  "img_size": 256,
+  "img_height": 144,
+  "crop": [
+    0.13,
+    0.7,
+    0.0,
+    1.0
+  ],
+  "grey_weights_rgb": [
+    0.21,
+    0.72,
+    0.07
+  ],
+  "n_train_unique": 970,
+  "n_val": 402,
+  "val_rmse": 0.3400216630829328,
+  "val_bias": -0.06028133918124731,
+  "val_r2": 0.6763940160898971
+}
