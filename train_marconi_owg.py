@@ -54,9 +54,24 @@ import cv2
 
 # ---------------------------------------------------------------- data
 
-def load_image(path, size):
+def crop_box(shape, crop):
+    """Pixel bounds (r0, r1, c0, c1) from fractional (top, bottom, left, right)."""
+    h, w = shape[:2]
+    t, b, l, r = crop
+    return int(round(t * h)), int(round(b * h)), int(round(l * w)), int(round(r * w))
+
+
+def load_image(path, width, height=None, crop=None):
     """
-    Grayscale, resized, float32.
+    Grayscale, cropped, resized, float32.
+
+    CROPPING BEFORE RESIZING is the point of the crop option. The full
+    frame is 2448 x 2048; resizing it to 128 px discards 19 of every
+    20 pixels in each direction. On a reflective beach the surf zone is
+    a narrow band, and at that reduction it may shrink to a pixel or
+    two -- erasing the cue the network is meant to read. Cropping to
+    the nearshore band first spends the network's limited input
+    resolution where the signal is, rather than on sky and dune.
 
     The RGB-to-grey weights (0.21, 0.72, 0.07) are copied from the
     upstream pred_1image so that training and inference convert
@@ -65,9 +80,78 @@ def load_image(path, size):
     img = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if img is None:
         return None
+    if crop is not None:
+        r0, r1, c0, c1 = crop_box(img.shape, crop)
+        img = img[r0:r1, c0:c1]
+        if img.size == 0:
+            return None
     b, g, r = img[:, :, 0], img[:, :, 1], img[:, :, 2]
     grey = (0.21 * r + 0.72 * g + 0.07 * b).astype(np.float32)
-    return cv2.resize(grey, (size, size), interpolation=cv2.INTER_AREA)
+    return cv2.resize(grey, (width, height or width), interpolation=cv2.INTER_AREA)
+
+
+def parse_crop(text):
+    if not text:
+        return None
+    try:
+        vals = [float(v) for v in text.split(",")]
+    except ValueError:
+        sys.exit(f"--crop must be four fractions 'top,bottom,left,right', got '{text}'")
+    if len(vals) != 4:
+        sys.exit("--crop needs exactly four values: top,bottom,left,right")
+    t, b, l, r = vals
+    if not (0 <= t < b <= 1 and 0 <= l < r <= 1):
+        sys.exit(f"--crop fractions must satisfy 0 <= top < bottom <= 1 and "
+                 f"0 <= left < right <= 1; got {vals}")
+    return (t, b, l, r)
+
+
+def write_crop_preview(df, image_dir, crop, width, height, out_path, n=4, seed=0):
+    """
+    Shows, for a few training images, the crop box on the full frame
+    and the exact array the network receives. Choosing a crop by eye on
+    the actual training imagery matters here because the training
+    frames come from an earlier camera pose than the current one --
+    geometry derived from today's view would place the box wrongly.
+    """
+    rng = np.random.default_rng(seed)
+    # Spread the sample across the wave-height range so the preview
+    # shows calm and storm frames, where the surf zone differs most.
+    order = df.sort_values(df.columns[1]).reset_index(drop=True)
+    picks = order.iloc[np.linspace(0, len(order) - 1, n).astype(int)]
+    panels = []
+    for _, row in picks.iterrows():
+        full = cv2.imread(os.path.join(image_dir, f"{row['id']}.jpg"))
+        if full is None:
+            continue
+        show = full.copy()
+        if crop is not None:
+            r0, r1, c0, c1 = crop_box(full.shape, crop)
+            cv2.rectangle(show, (c0, r0), (c1 - 1, r1 - 1), (0, 255, 255), 12)
+        left = cv2.resize(show, (720, int(720 * full.shape[0] / full.shape[1])))
+        net = load_image(os.path.join(image_dir, f"{row['id']}.jpg"), width, height, crop)
+        net8 = cv2.normalize(net, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        # Enlarge the network input with nearest-neighbour so its true
+        # pixel coarseness stays visible rather than being smoothed.
+        scale = max(1, int(left.shape[0] / net8.shape[0]))
+        big = cv2.resize(net8, (net8.shape[1] * scale, net8.shape[0] * scale),
+                         interpolation=cv2.INTER_NEAREST)
+        big = cv2.cvtColor(big, cv2.COLOR_GRAY2BGR)
+        h = max(left.shape[0], big.shape[0])
+        pad = lambda im: cv2.copyMakeBorder(im, 0, h - im.shape[0], 0, 0,
+                                            cv2.BORDER_CONSTANT, value=(40, 40, 40))
+        row_img = np.hstack([pad(left), np.full((h, 12, 3), 40, np.uint8), pad(big)])
+        label = f"H = {row[df.columns[1]]:.2f}   network input {width}x{height or width}"
+        cv2.putText(row_img, label, (14, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.1,
+                    (255, 255, 255), 3, cv2.LINE_AA)
+        panels.append(row_img)
+    if not panels:
+        return False
+    wmax = max(p.shape[1] for p in panels)
+    panels = [cv2.copyMakeBorder(p, 0, 8, 0, wmax - p.shape[1], cv2.BORDER_CONSTANT,
+                                 value=(40, 40, 40)) for p in panels]
+    cv2.imwrite(out_path, np.vstack(panels), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return True
 
 
 def normalise(x):
@@ -101,7 +185,7 @@ def read_split(csv_path, image_dir, target):
     return df
 
 
-def preload(df, size):
+def preload(df, width, height=None, crop=None):
     """
     Loads each UNIQUE image once. The training file repeats rare
     images by design, so caching by id avoids reading one file up to
@@ -111,7 +195,7 @@ def preload(df, size):
     for pid, path in zip(df["id"], df["path"]):
         if pid in cache:
             continue
-        img = load_image(path, size)
+        img = load_image(path, width, height, crop)
         if img is None:
             missing.append(path)
             continue
@@ -157,7 +241,7 @@ class Batches:
 
 # ------------------------------------------------------------- model
 
-def build_model(size, arch, dropout):
+def build_model(height, width, arch, dropout):
     """Exact reproduction of the upstream network stack."""
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.layers import (BatchNormalization, GlobalAveragePooling2D,
@@ -167,9 +251,9 @@ def build_model(size, arch, dropout):
              "inceptionresnetv2": A.InceptionResNetV2, "densenet201": A.DenseNet201}
     # weights=None: trained from scratch. Upstream found transfer
     # learning from ImageNet weights ineffective for this task.
-    base = bases[arch](input_shape=(size, size, 1), include_top=False, weights=None)
+    base = bases[arch](input_shape=(height, width, 1), include_top=False, weights=None)
     model = Sequential([
-        BatchNormalization(input_shape=(size, size, 1)),
+        BatchNormalization(input_shape=(height, width, 1)),
         base,
         BatchNormalization(),
         GlobalAveragePooling2D(),
@@ -198,7 +282,19 @@ def main():
                     choices=["mobilenet", "inceptionv3", "inceptionresnetv2", "densenet201"],
                     help="Default mobilenet: best for wave height in Buscombe et al. (2020), "
                          "and 17x smaller than Inception-ResNetV2.")
-    ap.add_argument("--img-size", type=int, default=128)
+    ap.add_argument("--img-size", type=int, default=128,
+                    help="Network input WIDTH in pixels (default 128).")
+    ap.add_argument("--img-height", type=int, default=None,
+                    help="Network input height; defaults to --img-size (square). A cropped "
+                         "band is usually wider than tall, so a non-square input avoids "
+                         "stretching it.")
+    ap.add_argument("--crop", default=None,
+                    help="Crop before resizing, as fractions 'top,bottom,left,right' of the "
+                         "full frame, e.g. '0.10,0.60,0.00,1.00'. Choose it with "
+                         "--preview-crop first.")
+    ap.add_argument("--preview-crop", action="store_true",
+                    help="Write <output>.crop_preview.jpg showing the crop on real training "
+                         "frames and the exact network input, then stop. Needs no TensorFlow.")
     ap.add_argument("--batch", type=int, default=16,
                     help="Default 16: best in Buscombe et al. (2020), whose code nonetheless "
                          "runs 128.")
@@ -212,8 +308,11 @@ def main():
     args = ap.parse_args()
 
     print("=" * 70)
+    crop = parse_crop(args.crop)
+    height = args.img_height or args.img_size
     print(f"OWG TRAINING -- target {args.target}, {args.arch}, batch {args.batch}, "
-          f"{args.img_size}px")
+          f"input {args.img_size}x{height}px"
+          + (f", crop {args.crop}" if crop else ", full frame"))
     print("=" * 70)
 
     tr = read_split(args.train, args.image_dir, args.target)
@@ -233,9 +332,26 @@ def main():
     print(f"target range      : train {tr[args.target].min():.2f}-{tr[args.target].max():.2f}, "
           f"val {va[args.target].min():.2f}-{va[args.target].max():.2f}")
 
+    if args.preview_crop:
+        out = args.output + ".crop_preview.jpg"
+        ok = write_crop_preview(tr.drop_duplicates("id")[["id", args.target]],
+                                args.image_dir, crop, args.img_size, height, out)
+        print()
+        print(f"wrote {out}" if ok else "could not read any sample images")
+        print("Left: the full frame, crop in yellow. Right: exactly what the network sees,")
+        print("enlarged without smoothing so its real coarseness is visible. The surf zone")
+        print("should be clearly resolved on the right, in both calm and storm frames.")
+        return 0
+
+    if crop:
+        r0, r1, c0, c1 = crop_box((2048, 2448), crop)
+        eff = max((r1 - r0) / height, (c1 - c0) / args.img_size)
+        print(f"crop              : rows {r0}-{r1}, cols {c0}-{c1} of a 2448x2048 frame")
+        print(f"reduction         : {eff:.1f}x per pixel (full frame at 128px is 19.1x)")
+
     print("loading images ...")
-    cache_tr, miss_tr = preload(tr, args.img_size)
-    cache_va, miss_va = preload(va, args.img_size)
+    cache_tr, miss_tr = preload(tr, args.img_size, height, crop)
+    cache_va, miss_va = preload(va, args.img_size, height, crop)
     if miss_tr or miss_va:
         print(f"  WARNING: {len(miss_tr)} train / {len(miss_va)} validation image(s) unreadable")
         tr = tr[tr["id"].isin(cache_tr)]
@@ -280,7 +396,7 @@ def main():
         def __getitem__(self, i): return self.b[i]
         def on_epoch_end(self): self.b.on_epoch_end()
 
-    model = build_model(args.img_size, args.arch, args.dropout)
+    model = build_model(height, args.img_size, args.arch, args.dropout)
     model.compile(optimizer=tf.keras.optimizers.Adam(args.lr), loss="mse", metrics=["mae"])
 
     weights = args.output + ".weights.h5"
@@ -299,15 +415,21 @@ def main():
     pred = np.concatenate([model.predict(val_b[i][0], verbose=0).ravel()
                            for i in range(len(val_b))])
     truth = va[args.target].to_numpy()
+    # Preprocessing is recorded with the weights. Inference must crop
+    # and resize identically, or the network is fed images unlike any
+    # it trained on and its predictions are meaningless -- silently.
     report = {"target": args.target, "arch": args.arch, "batch": args.batch,
-              "img_size": args.img_size, "n_train_unique": int(tr["id"].nunique()),
+              "img_size": args.img_size, "img_height": height,
+              "crop": list(crop) if crop else None,
+              "grey_weights_rgb": [0.21, 0.72, 0.07],
+              "n_train_unique": int(tr["id"].nunique()),
               "n_val": int(len(va)), "val_rmse": rmse(pred, truth),
               "val_bias": float(np.mean(pred - truth)),
               "val_r2": float(np.corrcoef(pred, truth)[0, 1] ** 2)}
 
     if args.heldout and Path(args.heldout).exists():
         ho = read_split(args.heldout, args.image_dir, args.target)
-        cache_ho, _ = preload(ho, args.img_size)
+        cache_ho, _ = preload(ho, args.img_size, height, crop)
         ho = ho[ho["id"].isin(cache_ho)]
         ho_b = Batches(ho, cache_ho, args.target, args.batch, False, args.seed)
         hp = np.concatenate([model.predict(ho_b[i][0], verbose=0).ravel()
