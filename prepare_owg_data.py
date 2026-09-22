@@ -141,13 +141,24 @@ def main():
 
     # ---- split on UNIQUE images, before any oversampling ---------------
     if args.split_by_day:
-        days = np.array(sorted(m["day"].unique()))
-        rng.shuffle(days)
-        n_val_days = max(1, int(round(len(days) * args.val_fraction)))
-        val_days = set(days[:n_val_days])
+        # Days are ranked by their PEAK wave height and validation days
+        # taken systematically through that ranking, so both sides span
+        # the full range. A random choice of days can -- and on this
+        # dataset did -- put every storm day in training, leaving a
+        # validation set topping out at 2.35 m against a training range
+        # to 3.56 m. That score would describe calm conditions only.
+        day_peak = m.groupby("day")["H"].max().sort_values()
+        days = day_peak.index.to_numpy()
+        step = max(2, int(round(1.0 / args.val_fraction)))
+        offset = int(rng.integers(step))
+        val_days = set(days[offset::step])
+        # Guarantee the single most energetic day is validated too,
+        # otherwise the storm tail can still go entirely to training.
+        val_days.add(days[-2] if len(days) > 1 and days[-1] in val_days else days[-1])
         is_val = m["day"].isin(val_days)
-        print(f"split             : by day -- {len(days) - n_val_days} train days, "
-              f"{n_val_days} validation days")
+        n_val_days = len(val_days)
+        print(f"split             : by day, stratified on daily peak H -- "
+              f"{len(days) - n_val_days} train days, {n_val_days} validation days")
     else:
         is_val = pd.Series(rng.random(len(m)) < args.val_fraction, index=m.index)
         print("split             : random by image (WARNING: neighbouring frames leak)")
@@ -158,16 +169,22 @@ def main():
     edges = np.linspace(train["H"].min(), train["H"].max(), args.bins + 1)
     train["bin"] = np.clip(np.digitize(train["H"], edges) - 1, 0, args.bins - 1)
     counts = train["bin"].value_counts().reindex(range(args.bins), fill_value=0)
-    target = int(counts[counts > 0].median())
+    # Balance TOWARD THE LARGEST bin, so no real image is ever discarded.
+    # An earlier version balanced toward the median, which cut the common
+    # bins down -- 488 frames reduced to 77 -- and trained on 519 of 1746
+    # available images. Rebalancing should add copies of rare conditions,
+    # never throw away real ones.
+    target = int(counts.max())
     parts = []
     print()
-    print(f"rebalancing to ~{target} per bin, at most {args.max_repeat}x any image:")
+    print(f"rebalancing toward {target} per bin, at most {args.max_repeat}x any image, "
+          f"no image discarded:")
     print(f"  {'bin (m)':<14}{'unique':>8}{'drawn':>8}{'max rep':>9}")
     for b in range(args.bins):
         grp = train[train["bin"] == b]
         if len(grp) == 0:
             continue
-        want = min(target, len(grp) * args.max_repeat)
+        want = max(len(grp), min(target, len(grp) * args.max_repeat))
         # Deterministic tiling, not sampling with replacement. Random
         # draws with replacement bound the TOTAL count but not any one
         # image's count -- an earlier version promised "at most 8x" and
@@ -210,6 +227,11 @@ def main():
         shared = set(train["day"]) & set(val["day"])
         print(f"                    {len(shared)} day(s) in both train and validation"
               f"{'  -- OK' if not shared else '  -- PROBLEM'}")
+    kept = train_bal["id"].nunique()
+    print(f"                    {kept} of {len(train)} training images used"
+          f"{'  -- OK' if kept == len(train) else '  -- PROBLEM, images discarded'}")
+    print(f"                    validation range {val['H'].min():.2f}-{val['H'].max():.2f} m "
+          f"vs training {train['H'].min():.2f}-{train['H'].max():.2f} m")
     worst = train_bal["id"].value_counts().max()
     print(f"                    most-repeated training image: {worst}x "
           f"(cap {args.max_repeat}){'  -- OK' if worst <= args.max_repeat else '  -- PROBLEM'}")
