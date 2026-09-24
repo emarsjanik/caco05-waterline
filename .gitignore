@@ -26,3 +26,4 @@ __pycache__/
 *.xlsx
 result_*.txt
 exp_timex_gt/
+owg_models/*.weights.h5

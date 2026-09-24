@@ -61,9 +61,18 @@ import pandas as pd
 import cv2
 
 
-def score(path, work_width=612):
+def score(path, work_width=612, crop=None):
     """
-    Returns (brightness, sharpness) or (nan, nan) if unreadable.
+    Returns (brightness, sharpness, saturation) or NaNs if unreadable.
+
+    SATURATION is the fraction of pixels at 250 or above. It catches a
+    failure the other two miss entirely: low winter sun glinting off
+    the water drives a maximum-intensity (bright) composite to pure
+    white over large areas. Such a frame is bright, and the edge of the
+    white region is crisp so it scores WELL on sharpness, yet it
+    carries no usable structure. Measured over the crop region rather
+    than the whole frame, because a blown-out sky above the analysis
+    band does not matter.
 
     Scored at reduced resolution: Laplacian variance at full 2448 px is
     dominated by sensor noise and JPEG blocking, and a 4x reduction
@@ -72,13 +81,21 @@ def score(path, work_width=612):
     """
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
-        return np.nan, np.nan
+        return np.nan, np.nan, np.nan
     h, w = img.shape
     small = cv2.resize(img, (work_width, int(h * work_width / w)),
                        interpolation=cv2.INTER_AREA)
     brightness = float(small.mean())
     sharpness = float(cv2.Laplacian(small, cv2.CV_64F).var())
-    return brightness, sharpness
+    band = small
+    if crop is not None:
+        t, b, l, r = crop
+        hh, ww = small.shape
+        band = small[int(t * hh):int(b * hh), int(l * ww):int(r * ww)]
+        if band.size == 0:
+            band = small
+    saturation = float((band >= 250).mean())
+    return brightness, sharpness, saturation
 
 
 def contact_sheet(rows, image_dir, out_path, title_fn, cols=4, tile=360):
@@ -112,6 +129,15 @@ def main():
                     help="Manifest with brightness and sharpness columns added.")
     ap.add_argument("--min-brightness", type=float, default=45.0,
                     help="Default 45, the waterline detector's proven night threshold.")
+    ap.add_argument("--max-saturation", type=float, default=None,
+                    help="Reject frames where more than this FRACTION of pixels in the crop "
+                         "are at 250 or above (e.g. 0.25). Sun glare blows out "
+                         "maximum-intensity composites; such frames pass the brightness and "
+                         "sharpness tests while carrying no structure. No default -- choose "
+                         "it from the reported distribution and the contact sheet.")
+    ap.add_argument("--crop", default=None,
+                    help="Crop as 'top,bottom,left,right' fractions, matching the one used "
+                         "for training, so saturation is measured where the network looks.")
     ap.add_argument("--min-sharpness", type=float, default=None,
                     help="No default. Choose from the reported distribution and the "
                          "borderline contact sheet.")
@@ -130,24 +156,30 @@ def main():
 
     # Reuse scores from a previous run: the second invocation, with a
     # sharpness threshold chosen, should not re-decode every image.
+    crop = None
+    if args.crop:
+        crop = tuple(float(v) for v in args.crop.split(","))
+        if len(crop) != 4:
+            sys.exit("--crop needs four values: top,bottom,left,right")
+        print(f"crop for saturation: {crop}")
+
     cached = None
     if Path(args.output).exists():
         prev = pd.read_csv(args.output)
-        if {"filename", "brightness", "sharpness"}.issubset(prev.columns) and \
-                set(prev["filename"]) >= set(m["filename"]):
-            cached = prev.set_index("filename")[["brightness", "sharpness"]]
+        cols = {"filename", "brightness", "sharpness", "saturation"}
+        if cols.issubset(prev.columns) and set(prev["filename"]) >= set(m["filename"]):
+            cached = prev.set_index("filename")[["brightness", "sharpness", "saturation"]]
             print("scores            : reused from previous run")
 
     if cached is None:
         print("scoring ...")
-        b, s = [], []
+        b, sh, sa = [], [], []
         for i, f in enumerate(m["filename"], 1):
-            bb, ss = score(os.path.join(image_dir, f))
-            b.append(bb)
-            s.append(ss)
+            bb, ss, tt = score(os.path.join(image_dir, f), crop=crop)
+            b.append(bb); sh.append(ss); sa.append(tt)
             if i % 250 == 0:
                 print(f"  {i}/{len(m)}")
-        m["brightness"], m["sharpness"] = b, s
+        m["brightness"], m["sharpness"], m["saturation"] = b, sh, sa
     else:
         m = m.join(cached, on="filename")
 
@@ -188,6 +220,15 @@ def main():
     contact_sheet(mid, image_dir, stem + "_typical.jpg",
                   lambda r: f"sharp {r['sharpness']:.0f}  H {r['wave_height_m']:.2f}")
     print()
+    print("Saturation (fraction of crop at 250+), among frames bright enough to keep")
+    sv = np.percentile(lit["saturation"], [50, 75, 90, 95, 99])
+    print("  " + "  ".join(f"p{p}={v:.3f}" for p, v in zip([50, 75, 90, 95, 99], sv)))
+    hi = lit.nlargest(16, "saturation")
+    contact_sheet(hi, image_dir, stem + "_most_saturated.jpg",
+                  lambda r: f"sat {r['saturation']:.2f}  H {r['wave_height_m']:.2f}")
+    print(f"wrote {stem}_most_saturated.jpg (16 most blown-out of the bright frames)")
+
+    print()
     print(f"wrote {stem}_least_sharp.jpg   (16 least sharp of the bright frames)")
     print(f"wrote {stem}_typical.jpg       (8 frames near the median, for reference)")
     print("  Choose --min-sharpness just above the frames that show no beach detail.")
@@ -200,19 +241,25 @@ def main():
 
     # ---- apply both tests, and report what the filter costs -------------
     blurred = ~dark & (m["sharpness"] < args.min_sharpness)
-    keep = ~dark & ~blurred & m["brightness"].notna()
+    blown = pd.Series(False, index=m.index)
+    if args.max_saturation is not None:
+        blown = ~dark & ~blurred & (m["saturation"] > args.max_saturation)
+    keep = ~dark & ~blurred & ~blown & m["brightness"].notna()
     print()
     print(f"obscured (sharpness < {args.min_sharpness:g}): {int(blurred.sum())}")
+    if args.max_saturation is not None:
+        print(f"blown out (saturation > {args.max_saturation:g}): {int(blown.sum())}")
     print(f"KEPT              : {int(keep.sum())} of {len(m)} ({100*keep.mean():.0f}%)")
     print()
     print("What filtering removes, by wave height:")
-    print(f"  {'bin (m)':<12}{'total':>7}{'dark':>7}{'obscured':>10}{'kept':>7}")
+    print(f"  {'bin (m)':<12}{'total':>7}{'dark':>7}{'obscured':>10}{'blown':>7}{'kept':>7}")
     bins = [0, 0.5, 1.0, 1.5, 2.0, 2.5, 4.0]
     cat = pd.cut(m["wave_height_m"], bins)
     for b in cat.cat.categories:
         sel = cat == b
         print(f"  {b.left:.1f}-{b.right:.1f} m   {int(sel.sum()):>7}{int((sel & dark).sum()):>7}"
-              f"{int((sel & blurred).sum()):>10}{int((sel & keep).sum()):>7}")
+              f"{int((sel & blurred).sum()):>10}{int((sel & blown).sum()):>7}"
+              f"{int((sel & keep).sum()):>7}")
 
     storm = m["wave_height_m"] >= 2.0
     if storm.sum():
@@ -224,7 +271,8 @@ def main():
         print("  itself -- no model can read waves through water on the lens.")
 
     if args.write_clean:
-        m[keep].drop(columns=["brightness", "sharpness"]).to_csv(args.write_clean, index=False)
+        m[keep].drop(columns=["brightness", "sharpness", "saturation"]).to_csv(
+            args.write_clean, index=False)
         print()
         print(f"wrote {args.write_clean}   ({int(keep.sum())} usable frames)")
     return 0
