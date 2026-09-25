@@ -204,6 +204,33 @@ def looks_like_gnssr_spline(path):
     return False
 
 
+def load_wave_archive(path):
+    """
+    Reads the offshore wave archive written by fetch_buoy_waves.py.
+    Returns (epochs_hs, hs, epochs_tp, tp), each sorted by time, with
+    rows lacking a value dropped separately for height and period.
+    """
+    df = pd.read_csv(path)
+    hs = df.dropna(subset=["wvht_m"]).sort_values("epoch")
+    tp = df.dropna(subset=["dpd_s"]).sort_values("epoch")
+    return (hs["epoch"].to_numpy(float), hs["wvht_m"].to_numpy(float),
+            tp["epoch"].to_numpy(float), tp["dpd_s"].to_numpy(float))
+
+
+def nearest_within(epochs, values, epoch, max_gap_s):
+    """Value of the record nearest `epoch`, or None if none within max_gap_s."""
+    if len(epochs) == 0:
+        return None
+    i = int(np.searchsorted(epochs, epoch))
+    best = None
+    for j in (i - 1, i):
+        if 0 <= j < len(epochs):
+            gap = abs(epochs[j] - epoch)
+            if gap <= max_gap_s and (best is None or gap < best[0]):
+                best = (gap, values[j])
+    return None if best is None else float(best[1])
+
+
 def load_gnssr_spline(path):
     """
     Loads gnssrefl subdaily spline output as a water-level source.
@@ -599,6 +626,15 @@ def main():
                              "is fabricated. C2's far field runs 15-45%% such columns, so this "
                              "materially affects that camera. Pre-v6.7 output has no flag and "
                              "is treated as signal-bearing either way.")
+    parser.add_argument("--waves", default=None,
+                        help="Offshore wave archive from fetch_buoy_waves.py. Adds "
+                             "offshore_hs_m and offshore_tp_s to every point, so rough-water "
+                             "frames (whose waterline sits above still water by the wave "
+                             "setup) can be left out of the DEM.")
+    parser.add_argument("--wave-max-gap-minutes", type=float, default=90.0,
+                        help="Largest gap to the nearest wave record before a frame's wave "
+                             "columns are left blank (default 90; the buoy reports every "
+                             "10-60 min).")
     parser.add_argument("--vertical-datum-offset", type=float, default=0.0,
                          help="Meters to ADD to every tide elevation, converting the tide "
                               "model's vertical datum (mean sea level or a geoid, for global "
@@ -801,16 +837,37 @@ def main():
                 sys.exit(1)
         print()
 
+    header = [
+        "source_file", "camera", "capture_time_utc", "capture_epoch",
+        "pixel_column", "pixel_row", "tide_elevation_navd88", "tide_model_spread",
+        "tide_gap_minutes", "tide_is_stale", "peak_sharpness",
+        "water_level_source",
+    ]
+
+    # Offshore waves per frame, appended as the LAST columns so every
+    # positional index used above (r[1], r[2], ...) is unchanged.
+    if args.waves:
+        ep_hs, hs, ep_tp, tp = load_wave_archive(args.waves)
+        gap_s = args.wave_max_gap_minutes * 60.0
+        per_frame = {}
+        for r in output_rows:
+            if r[0] not in per_frame:
+                h = nearest_within(ep_hs, hs, r[3], gap_s)
+                t = nearest_within(ep_tp, tp, r[3], gap_s)
+                per_frame[r[0]] = ("" if h is None else round(h, 2),
+                                   "" if t is None else round(t, 1))
+            r.extend(per_frame[r[0]])
+        header += ["offshore_hs_m", "offshore_tp_s"]
+        tagged = [v[0] for v in per_frame.values() if v[0] != ""]
+        print(f"Offshore waves           : {len(tagged)}/{len(per_frame)} frame(s) tagged"
+              + (f", Hs {min(tagged):.2f}-{max(tagged):.2f} m, "
+                 f"median {float(np.median(tagged)):.2f} m" if tagged else ""))
+
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "source_file", "camera", "capture_time_utc", "capture_epoch",
-            "pixel_column", "pixel_row", "tide_elevation_navd88", "tide_model_spread",
-            "tide_gap_minutes", "tide_is_stale", "peak_sharpness",
-            "water_level_source",
-        ])
+        writer.writerow(header)
         writer.writerows(output_rows)
 
     print(f"Frames used              : {used}")

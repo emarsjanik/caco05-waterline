@@ -29,10 +29,11 @@ SOURCES OF ERROR, roughly in order of size:
   * Georectification: 0.33 m horizontal RMS against surveyed control,
     as of the Nov 2025 calibration. Unverified since.
   * Water level: GNSS-R, a measurement rather than a model.
-  * Wave runup: the detected edge is the runup limit, which sits ABOVE
-    the still-water line by an amount that grows with wave height. This
-    is a systematic positive bias in elevation and is NOT corrected
-    here -- it needs wave data the station does not currently provide.
+  * Wave setup: the detected edge sits ABOVE the still-water line by an
+    amount that grows with wave height, but is assigned the still-water
+    elevation -- so the DEM reads LOW where rough-water frames land.
+    Not corrected here; --max-hs leaves those frames out instead, using
+    the offshore wave record (fetch_buoy_waves.py).
 
 Usage:
     python3 dem_from_contours.py contour_points_ground.csv dem_out \\
@@ -48,16 +49,21 @@ from pathlib import Path
 import numpy as np
 
 
-def load_points(path, camera=None, start_date=None, end_date=None):
+def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None):
     """Reads georectified contour points. Rows without ground coordinates are skipped."""
     E, N, Z, cams, dates, frames = [], [], [], [], [], []
     missing_ground = 0
+    rough_frames, unknown_hs_frames = set(), set()
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
         if "easting_utm19" not in (reader.fieldnames or []):
             print("ERROR: no 'easting_utm19' column. Run georectify.py on the contour file first.")
             sys.exit(1)
         has_source = "source_file" in (reader.fieldnames or [])
+        if max_hs is not None and "offshore_hs_m" not in (reader.fieldnames or []):
+            print("ERROR: --max-hs needs an 'offshore_hs_m' column. Run "
+                  "extract_elevation_contours.py with --waves first.")
+            sys.exit(1)
         if not has_source:
             print("WARNING: no 'source_file' column -- cannot tell which points share a "
                   "frame, so every point is counted as an independent sample.")
@@ -72,12 +78,22 @@ def load_points(path, camera=None, start_date=None, end_date=None):
                 continue
             if end_date and day > end_date:
                 continue
+            if max_hs is not None:
+                hs = r.get("offshore_hs_m", "")
+                if hs == "":
+                    unknown_hs_frames.add(r.get("source_file", ""))
+                elif float(hs) > max_hs:
+                    rough_frames.add(r.get("source_file", ""))
+                    continue
             E.append(float(r["easting_utm19"]))
             N.append(float(r["northing_utm19"]))
             Z.append(float(r["tide_elevation_navd88"]))
             cams.append(r["camera"])
             dates.append(day)
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
+    if max_hs is not None:
+        print(f"Wave filter       : {len(rough_frames)} frame(s) left out, offshore Hs > "
+              f"{max_hs} m; {len(unknown_hs_frames)} frame(s) with no wave record kept")
     return (np.array(E), np.array(N), np.array(Z),
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
 
@@ -212,6 +228,12 @@ def main():
                          "metres (default 0.5). A cell where repeat crossings disagree by more "
                          "than half a metre is not measuring one surface.")
     ap.add_argument("--camera", default="both", choices=["c1", "c2", "both"])
+    ap.add_argument("--max-hs", type=float, default=None,
+                    help="Leave out frames whose offshore wave height (offshore_hs_m, from "
+                         "extract_elevation_contours.py --waves) exceeds this, in metres. In "
+                         "big waves the waterline sits above still water by the wave setup, "
+                         "so its GNSS-R elevation is too low for where it lies. Frames with no "
+                         "wave record are kept. Off by default.")
     ap.add_argument("--start-date"); ap.add_argument("--end-date")
     ap.add_argument("--fill-gaps", action="store_true",
                     help="Close isolated single-cell holes from neighbours. Off by default: an "
@@ -220,7 +242,7 @@ def main():
     args = ap.parse_args()
 
     E, N, Z, cams, dates, frames, missing = load_points(
-        args.contour_csv, args.camera, args.start_date, args.end_date)
+        args.contour_csv, args.camera, args.start_date, args.end_date, args.max_hs)
 
     if len(E) == 0:
         print("No georectified points matched. Check --camera and the date range.")
@@ -315,8 +337,9 @@ def main():
     print()
     print("REMINDER: intertidal zone only, between the lowest and highest water")
     print("levels observed. No data above or below, and none invented. The detected")
-    print("edge is the wave RUNUP limit, which sits above still water by an amount")
-    print("that grows with wave height -- a systematic positive bias not corrected here.")
+    print("edge sits above still water by the wave setup, which grows with wave height,")
+    print("but is given the still-water elevation -- so the DEM reads LOW where rough-")
+    print("water frames land. Not corrected here; --max-hs leaves those frames out.")
 
 
 if __name__ == "__main__":
