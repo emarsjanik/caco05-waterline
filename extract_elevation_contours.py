@@ -309,11 +309,14 @@ def load_gnssr_spline(path):
 def interpolate_tide(epoch, tide_timestamps, tide_levels, tide_spreads):
     """
     Linear interpolation between the two nearest tide readings.
-    Returns (elevation, spread, gap_minutes) where gap_minutes is the
-    time from `epoch` to the NEAREST single tide reading used (a
-    measure of how much we're extrapolating/interpolating across, for
-    quality flagging) -- not the interpolation error itself, which
-    isn't knowable without denser ground truth.
+    Returns (elevation, spread, gap_minutes). gap_minutes is the distance
+    from `epoch` to the FARTHER of the two readings it is interpolated
+    between -- i.e. how far the straight line is stretched. An earlier
+    version used the NEARER reading, so an image 10 min after the last
+    reading before a 6-hour GNSS-R outage passed a 60-min check while
+    its level was a straight line drawn across the whole outage.
+    Outside the record the end value is held, and the gap is the
+    distance to that end.
     """
     if epoch <= tide_timestamps[0]:
         gap_minutes = abs(epoch - tide_timestamps[0]) / 60.0
@@ -329,7 +332,7 @@ def interpolate_tide(epoch, tide_timestamps, tide_levels, tide_spreads):
     frac = (epoch - t0) / (t1 - t0)
     elevation = l0 + frac * (l1 - l0)
     spread = s0 + frac * (s1 - s0)
-    gap_minutes = min(abs(epoch - t0), abs(epoch - t1)) / 60.0
+    gap_minutes = max(abs(epoch - t0), abs(epoch - t1)) / 60.0
     return float(elevation), float(spread), gap_minutes
 
 
@@ -352,6 +355,21 @@ def detect_camera(name):
     if ".c2." in name:
         return "c2"
     return None
+
+
+# Fewest pixel columns two consecutive frames must share for their
+# tide-direction comparison to count.
+MIN_COMMON_COLUMNS = 50
+
+# The station's local time zone. "Day" filters are judged on local days:
+# UTC dates split each evening's captures (20:00 EDT = 00:00 UTC) into
+# the next day.
+LOCAL_TZ = "America/New_York"
+
+
+def local_date(epoch):
+    """YYYY-MM-DD of `epoch` in the station's local time zone."""
+    return pd.Timestamp(int(epoch), unit="s", tz="UTC").tz_convert(LOCAL_TZ).strftime("%Y-%m-%d")
 
 
 def tide_agreement_by_day(output_rows):
@@ -379,33 +397,42 @@ def tide_agreement_by_day(output_rows):
     counted between frames less than ~90 min apart and where the tide
     actually moved more than 0.05 m, since a near-stationary tide gives
     the sign no meaning.
+
+    Consecutive frames are compared over the pixel columns BOTH kept.
+    Averaging each frame over whichever columns survived its own
+    filtering (as an earlier version did) compares different stretches
+    of beach whenever far-field coverage varies, which alone can flip
+    the sign of a transition. Days are LOCAL days (see local_date).
     """
     per_frame = {}
     for row in output_rows:
-        stem, camera, capture, epoch = row[0], row[1], row[2], row[3]
+        stem, camera, epoch = row[0], row[1], row[3]
         key = (camera, stem)
         if key not in per_frame:
-            per_frame[key] = {"epoch": epoch, "date": capture[:10],
-                              "elev": row[6], "rows": []}
-        per_frame[key]["rows"].append(row[5])
+            per_frame[key] = {"epoch": epoch, "date": local_date(epoch),
+                              "elev": row[6], "rows": {}}
+        per_frame[key]["rows"][row[4]] = row[5]
 
     by_camera = defaultdict(list)
     for (camera, _stem), v in per_frame.items():
-        by_camera[camera].append((v["epoch"], v["date"], v["elev"],
-                                  float(np.mean(v["rows"]))))
+        by_camera[camera].append((v["epoch"], v["date"], v["elev"], v["rows"]))
 
     agreement = defaultdict(lambda: [0, 0])
     for camera, entries in by_camera.items():
-        entries.sort()
+        entries.sort(key=lambda e: e[0])
         previous = None
-        for epoch, date, elev, mean_row in entries:
+        for epoch, date, elev, rows in entries:
             if (previous is not None
                     and epoch - previous[0] <= 5400
                     and abs(elev - previous[1]) > 0.05):
-                agreement[(camera, date)][1] += 1
-                if np.sign(elev - previous[1]) == np.sign(mean_row - previous[2]):
-                    agreement[(camera, date)][0] += 1
-            previous = (epoch, elev, mean_row)
+                common = rows.keys() & previous[2].keys()
+                if len(common) >= MIN_COMMON_COLUMNS:
+                    now = float(np.mean([rows[c] for c in common]))
+                    before = float(np.mean([previous[2][c] for c in common]))
+                    agreement[(camera, date)][1] += 1
+                    if np.sign(elev - previous[1]) == np.sign(now - before):
+                        agreement[(camera, date)][0] += 1
+            previous = (epoch, elev, rows)
     return agreement
 
 
@@ -828,10 +855,9 @@ def main():
         if rejected_days:
             before = len(output_rows)
             output_rows = [r for r in output_rows
-                           if (r[1], r[2][:10]) not in rejected_days]
+                           if (r[1], local_date(r[3])) not in rejected_days]
             print(f"   dropped {before - len(output_rows)} point(s) from "
                   f"{len(rejected_days)} camera-day(s)")
-            used -= sum(1 for _ in rejected_days)
             if not output_rows:
                 print("No contour points left after the agreement filter.")
                 sys.exit(1)
@@ -870,6 +896,7 @@ def main():
         writer.writerow(header)
         writer.writerows(output_rows)
 
+    used = len({r[0] for r in output_rows})
     print(f"Frames used              : {used}")
     print(f"Skipped (no epoch prefix): {skipped_no_epoch}")
     print(f"Skipped (no c1/c2 in name): {skipped_no_camera}")

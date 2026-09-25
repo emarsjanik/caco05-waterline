@@ -425,7 +425,13 @@ def main():
               "n_train_unique": int(tr["id"].nunique()),
               "n_val": int(len(va)), "val_rmse": rmse(pred, truth),
               "val_bias": float(np.mean(pred - truth)),
-              "val_r2": float(np.corrcoef(pred, truth)[0, 1] ** 2)}
+              # val_r2 is the coefficient of determination, 1 - SSres/SStot:
+              # bias and scale errors count against it. The squared
+              # correlation reported before ignores both, so it flattered
+              # any model with a consistent offset; kept as val_corr2.
+              "val_r2": float(1.0 - np.sum((pred - truth) ** 2)
+                              / np.sum((truth - np.mean(truth)) ** 2)),
+              "val_corr2": float(np.corrcoef(pred, truth)[0, 1] ** 2)}
 
     if args.heldout and Path(args.heldout).exists():
         ho = read_split(args.heldout, args.image_dir, args.target)

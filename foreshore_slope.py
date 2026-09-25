@@ -178,6 +178,12 @@ def main():
                          "--wave-height and --wave-period.")
     ap.add_argument("--wave-height", type=float, help="Representative H0 (m), for --iterate")
     ap.add_argument("--wave-period", type=float, help="Representative T0 (s), for --iterate")
+    ap.add_argument("--still-water", type=float, default=None,
+                    help="Still-water level (m NAVD88) the swash region is centred on, for "
+                         "--iterate. Setup and swash are measured from still water, not "
+                         "from 0 m NAVD88; without this the band assumed still water at "
+                         "0 m. Default: the middle of the DEM's elevation range, i.e. the "
+                         "middle of the water levels that built it.")
     ap.add_argument("--passes", type=int, default=3)
     args = ap.parse_args()
 
@@ -207,8 +213,14 @@ def main():
     if args.iterate:
         if args.wave_height is None or args.wave_period is None:
             sys.exit("--iterate needs --wave-height and --wave-period")
+        swl = args.still_water
+        if swl is None:
+            swl = 0.5 * (float(np.nanmin(dem)) + float(np.nanmax(dem)))
         print()
         print("Iterating: slope sets the swash region, which sets where slope is measured.")
+        print(f"  still-water level {swl:+.2f} m NAVD88"
+              + ("" if args.still_water is not None else " (middle of the DEM range; "
+                 "set --still-water)"))
         for i in range(args.passes):
             med = float(np.nanmedian(slope))
             if not np.isfinite(med) or med <= 0:
@@ -216,7 +228,7 @@ def main():
                 break
             setup = stockdon_setup(args.wave_height, args.wave_period, med)
             S = stockdon_swash(args.wave_height, args.wave_period, med)
-            lo, hi = setup - S / 2.0, setup + S / 2.0
+            lo, hi = swl + setup - S / 2.0, swl + setup + S / 2.0
             band = np.where((dem >= lo) & (dem <= hi), dem, np.nan)
             n_band = int(np.isfinite(band).sum())
             print(f"  pass {i+1}: slope 1:{1/med:.1f}  ->  swash region "

@@ -23,9 +23,8 @@ INPUTS.
     starts a new line. Lines are numbered from 1 in file order.
   * IO/EO calibration, to turn the detected pixel into ground
     coordinates.
-  * Optionally the GNSS-R spline (still-water level at capture time)
-    and the intertidal DEM (to read an elevation at the detected
-    positions).
+  * Optionally the GNSS-R spline (still-water level at capture time),
+    used as the plane the positions are georectified onto.
 
 HOW THE EDGE IS FOUND. Each column's bare-sand brightness (its 3rd
 percentile within ~100 s blocks, split also wherever the light on the
@@ -62,9 +61,16 @@ WHAT IT CANNOT DO.
     still-water level. The swash sits above it, so positions are
     slightly biased along the camera ray. Small for position, but it
     is one more reason elevations here are approximate.
-  * Elevations (z_mean, z_r2, setup, R2) come from the DEM, which is
-    itself built from waterlines biased by setup. Treat them as
-    relative until the DEM is anchored to an independent survey.
+  * NO ELEVATIONS. An earlier version read setup and R2 off the
+    intertidal DEM, but that DEM is built by giving each timex
+    waterline -- which sits at the mean swash position -- the
+    still-water level. At the mean swash position the DEM therefore
+    equals still water by construction and "setup" came out near zero
+    whatever the waves did. Elevations need a beach profile measured
+    independently of the waterlines (RTK, UAS or lidar survey).
+  * Swash statistics are HORIZONTAL distances along the line (the
+    *_horiz_m columns), not the vertical S of Stockdon et al. (2006).
+    Converting needs the same independent profile.
   * A line that does not cross the swash at the time (e.g. C2 lines 3
     and 4 except at high water), or a stack with faint foam, gives a
     low valid_fraction; results below --min-valid are flagged, not
@@ -74,12 +80,12 @@ RUNNING IT ROUTINELY. The station's cleanup moves ras.tiff files off
 the machine, while GNSS-R lags about 2 days, so waterline_timex_cron.sh
 copies the C2 stacks into archive/ras_c2 and runs this script over that
 archive with --require-water-level: each stack is processed once, on
-the first run after GNSS-R covers it, and its setup and R2 are filled.
+the first run after GNSS-R covers it.
 
 Usage:
     python3 runup_from_timestack.py /mnt/I2Rgus_Data/ImageProducts/products/*c2.ras.tiff \\
         --line 1 --gnssr /home/argus_user/GNSS/.../usgs_spline_out.txt \\
-        --dem dem_intertidal_dem.asc --output runup_c2_line1.csv --plot-dir runup_plots
+        --output runup_c2_line1.csv --plot-dir runup_plots
 """
 
 import re
@@ -225,9 +231,27 @@ def runup_peaks(series, half_width=4):
     return series[is_peak]
 
 
+MAX_FILL_SAMPLES = 10    # gaps up to 5 s are bridged before spectral analysis
+
+
 def band_sig(series, lo_hz, hi_hz):
-    """Significant excursion (4 x std) of the part of the signal in [lo, hi) Hz."""
-    x = series[np.isfinite(series)]
+    """
+    Significant excursion (4 x std) of the part of the signal in
+    [lo, hi) Hz. Gaps of up to MAX_FILL_SAMPLES are bridged linearly;
+    with any longer gap the series is no longer an evenly sampled 2 Hz
+    record and NaN is returned. (An earlier version dropped the NaNs and
+    joined the remainder, which shifts every frequency.)
+    """
+    x = np.asarray(series, float)
+    bad = ~np.isfinite(x)
+    if bad.all() or bad.sum() > 0.1 * len(x):
+        return np.nan
+    if bad.any():
+        edges = np.flatnonzero(np.diff(np.r_[0, bad.astype(int), 0]))
+        if (edges[1::2] - edges[::2]).max() > MAX_FILL_SAMPLES:
+            return np.nan
+        idx = np.arange(len(x))
+        x = np.interp(idx, idx[~bad], x[~bad])
     if len(x) < 64:
         return np.nan
     x = x - x.mean()
@@ -235,28 +259,6 @@ def band_sig(series, lo_hz, hi_hz):
     X = np.fft.rfft(x)
     X[(f < lo_hz) | (f >= hi_hz)] = 0
     return 4.0 * np.std(np.fft.irfft(X, len(x)))
-
-
-def read_dem(path):
-    grid, hdr = None, {}
-    with open(path) as f:
-        for _ in range(6):
-            key, val = f.readline().split()
-            hdr[key.lower()] = float(val)
-    grid = np.loadtxt(path, skiprows=6)
-    grid = np.where(grid == hdr.get("nodata_value", -9999.0), np.nan, grid)
-    return np.flipud(grid), hdr
-
-
-def dem_at(dem, e, n):
-    if dem is None or not (np.isfinite(e) and np.isfinite(n)):
-        return np.nan
-    grid, hdr = dem
-    c = int((e - hdr["xllcorner"]) // hdr["cellsize"])
-    r = int((n - hdr["yllcorner"]) // hdr["cellsize"])
-    if 0 <= r < grid.shape[0] and 0 <= c < grid.shape[1]:
-        return float(grid[r, c])
-    return np.nan
 
 
 def save_plot(path, anomaly, edge, threshold):
@@ -281,7 +283,27 @@ def save_plot(path, anomaly, edge, threshold):
     cv2.imwrite(str(path), cv2.resize(img, (w, max(h, 1)), interpolation=cv2.INTER_AREA))
 
 
-def process(ras_path, args, pix_cache, gnssr, dem):
+WL_MAX_GAP_S = 3600.0    # same rule as extract_elevation_contours.py --max-gap-minutes
+
+
+def water_level_at(gnssr, epoch):
+    """
+    GNSS-R level at `epoch`, linearly interpolated -- or NaN if `epoch`
+    is outside the record or either bracketing reading is more than
+    WL_MAX_GAP_S away (i.e. the line would be drawn across an outage).
+    """
+    g_ep, g_lv = gnssr
+    if not g_ep[0] <= epoch <= g_ep[-1]:
+        return np.nan
+    i = int(np.searchsorted(g_ep, epoch))
+    if g_ep[i] == epoch:
+        return float(g_lv[i])
+    if max(epoch - g_ep[i - 1], g_ep[i] - epoch) > WL_MAX_GAP_S:
+        return np.nan
+    return float(np.interp(epoch, g_ep, g_lv))
+
+
+def process(ras_path, args, pix_cache, gnssr):
     name = Path(ras_path).name
     cam = args.camera or camera_from_name(name)
     epoch = epoch_from_name(name)
@@ -323,11 +345,7 @@ def process(ras_path, args, pix_cache, gnssr, dem):
     valid = float(np.isfinite(edge).mean())
 
     mid_epoch = epoch + BURST_MID_OFFSET_S
-    wl = np.nan
-    if gnssr is not None:
-        g_ep, g_lv = gnssr
-        if g_ep[0] <= mid_epoch <= g_ep[-1]:
-            wl = float(np.interp(mid_epoch, g_ep, g_lv))
+    wl = water_level_at(gnssr, mid_epoch) if gnssr is not None else np.nan
     z_plane = wl if np.isfinite(wl) else args.z_plane
 
     # Ground coordinates of every pixel on the line, and distance along
@@ -359,7 +377,6 @@ def process(ras_path, args, pix_cache, gnssr, dem):
 
     mE, mN = at(mean_pos)
     rE, rN = at(r2_pos)
-    z_mean, z_r2 = dem_at(dem, mE, mN), dem_at(dem, rE, rN)
 
     if args.plot_dir:
         Path(args.plot_dir).mkdir(parents=True, exist_ok=True)
@@ -382,14 +399,11 @@ def process(ras_path, args, pix_cache, gnssr, dem):
         "sd_pos_m": round(float(np.nanstd(pos)), 2),
         "r2_pos_m": round(r2_pos, 2),
         "max_pos_m": round(float(np.nanmax(pos)), 2) if np.isfinite(pos).any() else np.nan,
-        "swash_sig_m": round(band_sig(pos, 0.0, SAMPLE_HZ), 2),
-        "swash_ig_sig_m": round(band_sig(pos, 1e-9, IG_CUTOFF_HZ), 2),
-        "swash_inc_sig_m": round(band_sig(pos, IG_CUTOFF_HZ, SAMPLE_HZ), 2),
+        "swash_sig_horiz_m": round(band_sig(pos, 0.0, SAMPLE_HZ), 2),
+        "swash_ig_sig_horiz_m": round(band_sig(pos, 1e-9, IG_CUTOFF_HZ), 2),
+        "swash_inc_sig_horiz_m": round(band_sig(pos, IG_CUTOFF_HZ, SAMPLE_HZ), 2),
         "mean_easting": round(mE, 2), "mean_northing": round(mN, 2),
         "r2_easting": round(rE, 2), "r2_northing": round(rN, 2),
-        "z_mean_dem": round(z_mean, 3), "z_r2_dem": round(z_r2, 3),
-        "setup_m": round(z_mean - wl, 3) if np.isfinite(z_mean) and np.isfinite(wl) else "",
-        "r2_m": round(z_r2 - wl, 3) if np.isfinite(z_r2) and np.isfinite(wl) else "",
     }
 
 
@@ -409,7 +423,6 @@ def main():
     ap.add_argument("--z-plane", type=float, default=0.0,
                     help="Plane elevation (m NAVD88) for georectifying when no GNSS-R "
                          "value is available (default 0).")
-    ap.add_argument("--dem", help="Intertidal DEM (.asc) to read elevations from.")
     ap.add_argument("--k", type=float, default=4.0,
                     help="Foam threshold in multiples of the dry-sand noise (default 4).")
     ap.add_argument("--min-threshold", type=float, default=4.0,
@@ -443,7 +456,6 @@ def main():
         g_ep, g_lv, _, _ = load_gnssr_spline(args.gnssr)
         order = np.argsort(g_ep)
         gnssr = (np.asarray(g_ep, float)[order], np.asarray(g_lv, float)[order])
-    dem = read_dem(args.dem) if args.dem else None
 
     out = Path(args.output)
     existing = []
@@ -472,7 +484,7 @@ def main():
             if epoch is None or not gnssr[0][0] <= mid <= gnssr[0][-1]:
                 waiting += 1
                 continue
-        row = process(ras_path, args, pix_cache, gnssr, dem)
+        row = process(ras_path, args, pix_cache, gnssr)
         if row is None:
             continue
         rows.append(row)
