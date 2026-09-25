@@ -110,6 +110,19 @@ RUNUP_ENABLE=1
 RUNUP_LINES="1 2"
 RAS_SOURCE=/mnt/I2Rgus_Data/ImageProducts/products
 
+# Offshore waves (fetch_buoy_waves.py). NDBC keeps only 45 days online,
+# so every run merges the buoy's recent record into WAVES_CSV. Each
+# waterline is then tagged with the offshore wave height at its capture
+# time, and the DEM leaves out frames above DEM_MAX_HS: in big waves the
+# swash sits above still water by the wave setup, so those waterlines
+# are given an elevation that is too low for where they lie. On Sep 23
+# 2026 frames in 3.8-3.9 m waves (week median 1.0 m) plotted ~0.5 m high.
+# 44008 faces the open Atlantic like Marconi; heights are an offshore
+# index, not the breaking height. Set DEM_MAX_HS="" to keep all frames.
+WAVE_BUOY=44008
+WAVES_CSV="$BASE/archive/waves_${WAVE_BUOY}.csv"
+DEM_MAX_HS=1.5
+
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
@@ -175,6 +188,13 @@ if [ "$recent" -eq 0 ]; then
     log "         quietly go stale rather than erroring."
 fi
 
+# 5a. Offshore waves. A failed download is only a warning: the archive
+#     still covers everything up to the last successful run.
+python3 "$BASE/fetch_buoy_waves.py" --station "$WAVE_BUOY" --output "$WAVES_CSV" >> "$LOG" 2>&1 \
+    || log "WARNING: buoy $WAVE_BUOY download failed; using the existing wave archive"
+waves_arg=""
+[ -f "$WAVES_CSV" ] && waves_arg="--waves $WAVES_CSV"
+
 # 5. Match detections to measured water level, then draw the maps.
 #    Both read from the ARCHIVE, not the working folders, so they see
 #    the full accumulated record rather than just this run.
@@ -196,7 +216,7 @@ else
     fi
 
     python3 "$BASE/extract_elevation_contours.py" "$GNSSR_SPLINE" \
-        --processed-dir "$ARCHIVE_CSV" \
+        --processed-dir "$ARCHIVE_CSV" $waves_arg \
         --output "$CONTOURS" >> "$LOG" 2>&1
     if [ $? -ne 0 ]; then
         log "ERROR: contour extraction failed -- see above. Maps not regenerated."
@@ -247,7 +267,9 @@ else
                 georef_n=$(( $(wc -l < "$GROUND") - 1 ))
                 log "georectified: $georef_n point(s) -> $(basename "$GROUND")"
 
-                python3 "$BASE/dem_from_contours.py" "$GROUND" "$DEM_STEM" \
+                hs_arg=""
+                [ -n "$waves_arg" ] && [ -n "$DEM_MAX_HS" ] && hs_arg="--max-hs $DEM_MAX_HS"
+                python3 "$BASE/dem_from_contours.py" "$GROUND" "$DEM_STEM" $hs_arg \
                     --cell "$DEM_CELL" \
                     --min-points "$DEM_MIN_POINTS" \
                     --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1
