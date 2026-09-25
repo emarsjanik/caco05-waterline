@@ -432,6 +432,9 @@ class DetectorState:
     # bias_analysis.py on both cameras.
     previous_shoreline: dict = field(default_factory=dict)
     previous_confidence: dict = field(default_factory=dict)
+    # Capture epoch of the frame stored in previous_shoreline, so
+    # temporal_filter can refuse to blend across a time gap.
+    previous_epoch: dict = field(default_factory=dict)
     processed_images: int = 0
     warned_timex_bias: bool = False
 
@@ -1659,14 +1662,33 @@ def smooth_shoreline(shoreline, kernel_size):
     return smoothed.astype(np.float32)
 
 
-def temporal_filter(shoreline, camera_name):
+# Longest gap, in minutes, across which temporal_filter will blend two
+# frames. Captures are half-hourly, so this admits only the immediately
+# preceding capture. Without it the blend reached across overnight gaps
+# and across runs of rejected frames, pulling the first morning frame
+# toward the previous evening's waterline -- a different tide stage
+# entirely.
+TEMPORAL_MAX_GAP_MINUTES = 35.0
+
+
+def temporal_filter(shoreline, camera_name, epoch=None):
     """
-    Blends with the previous frame's (pre-correction) shoreline for
-    the SAME camera. Operates on and returns float32 to preserve
-    sub-pixel precision through the blend.
+    Blends with the previous SAVED frame's (pre-correction) shoreline
+    for the SAME camera, but only if that frame was captured within
+    TEMPORAL_MAX_GAP_MINUTES. If either epoch is unknown the blend is
+    skipped rather than guessed. Operates on and returns float32 to
+    preserve sub-pixel precision through the blend.
     """
     previous = STATE.previous_shoreline.get(camera_name)
     if previous is None or len(previous) != len(shoreline):
+        return shoreline.astype(np.float32)
+    previous_epoch = STATE.previous_epoch.get(camera_name)
+    if epoch is None or previous_epoch is None:
+        return shoreline.astype(np.float32)
+    gap_minutes = abs(epoch - previous_epoch) / 60.0
+    if gap_minutes > TEMPORAL_MAX_GAP_MINUTES:
+        print(f"Temporal blend  : skipped (previous saved frame {gap_minutes:.0f} min earlier, "
+              f"limit {TEMPORAL_MAX_GAP_MINUTES:.0f})")
         return shoreline.astype(np.float32)
     alpha = 0.70
     blended = alpha * shoreline.astype(np.float32) + (1.0 - alpha) * previous.astype(np.float32)
@@ -1858,7 +1880,8 @@ def process_image(image_path):
             return result, "no_signal"
 
         shoreline = smooth_shoreline(result.subpixel_shoreline, CONFIG.smoothing_kernel)
-        shoreline = temporal_filter(shoreline, data.profile.name)
+        epoch = extract_epoch_from_filename(image_path.name)
+        shoreline = temporal_filter(shoreline, data.profile.name, epoch)
 
         # Store the PRE-correction shoreline for next frame's temporal
         # blending, not the corrected one. Storing the corrected value
@@ -1871,8 +1894,12 @@ def process_image(image_path):
         # this. Bias correction should be applied fresh, once, per
         # frame, right before export -- never baked into temporal
         # state.
-        STATE.previous_shoreline[data.profile.name] = shoreline.copy()
-        STATE.previous_confidence[data.profile.name] = result.confidence.copy()
+        #
+        # The copy is only COMMITTED to STATE once the frame passes the
+        # confidence gate below. Committing it before the gate let a
+        # discarded frame still pull the next saved frame 30% toward
+        # itself.
+        uncorrected_shoreline = shoreline.copy()
 
         shoreline = apply_bias_correction(shoreline, data.profile)
         shoreline = clip_shoreline(shoreline, result.image_height)
@@ -1884,6 +1911,10 @@ def process_image(image_path):
             print(f"DISCARDED (mean confidence {mean_confidence:.4f} < "
                   f"{CONFIDENCE_DISCARD_THRESHOLD} threshold) -- not saved to {OUTPUT_FOLDER}.")
             return result, "low_confidence"
+
+        STATE.previous_shoreline[data.profile.name] = uncorrected_shoreline
+        STATE.previous_confidence[data.profile.name] = result.confidence.copy()
+        STATE.previous_epoch[data.profile.name] = epoch
 
         export_csv(data, shoreline, result.confidence, result.peak_sharpness,
                    column_has_signal)

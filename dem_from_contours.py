@@ -50,13 +50,17 @@ import numpy as np
 
 def load_points(path, camera=None, start_date=None, end_date=None):
     """Reads georectified contour points. Rows without ground coordinates are skipped."""
-    E, N, Z, cams, dates = [], [], [], [], []
+    E, N, Z, cams, dates, frames = [], [], [], [], [], []
     missing_ground = 0
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
         if "easting_utm19" not in (reader.fieldnames or []):
             print("ERROR: no 'easting_utm19' column. Run georectify.py on the contour file first.")
             sys.exit(1)
+        has_source = "source_file" in (reader.fieldnames or [])
+        if not has_source:
+            print("WARNING: no 'source_file' column -- cannot tell which points share a "
+                  "frame, so every point is counted as an independent sample.")
         for r in reader:
             if not r.get("easting_utm19") or not r.get("northing_utm19"):
                 missing_ground += 1
@@ -73,11 +77,12 @@ def load_points(path, camera=None, start_date=None, end_date=None):
             Z.append(float(r["tide_elevation_navd88"]))
             cams.append(r["camera"])
             dates.append(day)
+            frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
     return (np.array(E), np.array(N), np.array(Z),
-            np.array(cams), np.array(dates), missing_ground)
+            np.array(cams), np.array(dates), np.array(frames), missing_ground)
 
 
-def build_grid(E, N, Z, cell, min_points, max_spread):
+def build_grid(E, N, Z, cell, min_points, max_spread, frames=None):
     """
     Bins points into cells and takes the MEDIAN elevation of each.
 
@@ -85,6 +90,16 @@ def build_grid(E, N, Z, cell, min_points, max_spread):
     bad detection, and one wild value would drag a mean while barely
     moving a median. With repeat tidal crossings most cells hold many
     samples, so the median is well determined.
+
+    Samples are counted per FRAME, not per point. In the far field one
+    waterline puts many adjacent pixel columns into the same cell, all
+    with the same elevation (one water level per frame). Counted as
+    separate points they satisfied min_points with zero spread, so a
+    cell resting on a single detection looked perfectly repeatable.
+    Each frame's points in a cell are therefore collapsed to one sample
+    first; count, min_points and spread then refer to independent
+    crossings. `frames` gives the frame of each point; None falls back
+    to treating every point as its own frame.
     """
     e0 = np.floor(E.min() / cell) * cell
     n0 = np.floor(N.min() / cell) * cell
@@ -94,6 +109,19 @@ def build_grid(E, N, Z, cell, min_points, max_spread):
     col = ((E - e0) / cell).astype(int)
     row = ((N - n0) / cell).astype(int)
     flat = row * ncols + col
+
+    if frames is not None:
+        # One sample per (cell, frame): the median of that frame's
+        # points in the cell.
+        _, frame_id = np.unique(frames, return_inverse=True)
+        key = flat.astype(np.int64) * (int(frame_id.max()) + 1) + frame_id
+        korder = np.argsort(key, kind="stable")
+        key_s, kz = key[korder], Z[korder]
+        kedges = np.flatnonzero(np.diff(key_s)) + 1
+        kstarts = np.concatenate([[0], kedges])
+        kends = np.concatenate([kedges, [len(key_s)]])
+        Z = np.array([np.median(kz[a:b]) for a, b in zip(kstarts, kends)])
+        flat = flat[korder][kstarts]
 
     order = np.argsort(flat)
     flat_s, Z_s = flat[order], Z[order]
@@ -176,7 +204,8 @@ def main():
                          "own 0.33 m accuracy there is nothing to gain; well above it the "
                          "beach profile gets smoothed away.")
     ap.add_argument("--min-points", type=int, default=3,
-                    help="Minimum samples for a cell to be filled (default 3). One point is a "
+                    help="Minimum FRAMES (independent waterline crossings) for a cell to be filled "
+                         "(default 3). One frame is a "
                          "single detection with no way to tell whether it was a good one.")
     ap.add_argument("--max-spread", type=float, default=0.5,
                     help="Blank cells whose 16-84 percentile elevation range exceeds this, in "
@@ -190,7 +219,7 @@ def main():
     ap.add_argument("--no-plot", action="store_true")
     args = ap.parse_args()
 
-    E, N, Z, cams, dates, missing = load_points(
+    E, N, Z, cams, dates, frames, missing = load_points(
         args.contour_csv, args.camera, args.start_date, args.end_date)
 
     if len(E) == 0:
@@ -212,7 +241,7 @@ def main():
     print()
 
     dem, count, spread, e0, n0, ncols, nrows = build_grid(
-        E, N, Z, args.cell, args.min_points, args.max_spread)
+        E, N, Z, args.cell, args.min_points, args.max_spread, frames)
 
     total_cells = dem.size
     with_any = int((count > 0).sum())
@@ -223,12 +252,12 @@ def main():
     print(f"cells with points : {with_any} ({100*with_any/total_cells:.1f}% of grid)")
     print(f"cells filled      : {filled}")
     if blanked:
-        print(f"cells blanked     : {blanked}  (fewer than {args.min_points} points, "
+        print(f"cells blanked     : {blanked}  (fewer than {args.min_points} frames, "
               f"or spread > {args.max_spread} m)")
 
     occupied = count[count > 0]
     if len(occupied):
-        print(f"points per cell   : median {int(np.median(occupied))}, "
+        print(f"frames per cell   : median {int(np.median(occupied))}, "
               f"p10 {int(np.percentile(occupied,10))}, p90 {int(np.percentile(occupied,90))}")
     valid_spread = spread[np.isfinite(spread) & np.isfinite(dem)]
     if len(valid_spread):
