@@ -29,3 +29,18 @@ Image sharpness falls 20-fold from calm to storm (median 122 at
 waves are largest. Wave period was not predictable (R2 0.10); peak
 period changes 1.70 s RMS per hour against a total spread of 2.45 s,
 so a single time-averaged image cannot resolve it.
+
+## What quality filtering is worth
+Running the trained model over frames it never saw, split by whether
+they passed quality control:
+
+| frames                | n   | RMSE (m) | bias (m) |
+|-----------------------|-----|----------|----------|
+| passed QC (validation)| 360 | 0.288    | -0.054   |
+| rejected by QC        | 954 | 1.974    | +1.398   |
+
+Rejected frames are dark, hazy or glare-blown. Normalised to zero mean
+and unit variance, a dark frame becomes amplified noise, and the model
+reads that texture as heavy breaking: it over-predicts by 1.4 m on
+average and fails confidently rather than visibly. Without the filter
+the gauge is not usable; with it, it measures.
