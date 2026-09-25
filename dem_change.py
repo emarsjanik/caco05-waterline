@@ -20,6 +20,12 @@ a difference is called significant only where
 (95% level of detection). --min-lod (default 0.05 m) is a floor for
 errors a single DEM cannot see: errors shared by every crossing in a
 week (e.g. a week-long water-level or setup bias) do not show in s.
+Cells are compared only where BOTH DEMs rest on at least --min-count
+(default 5) tide crossings. At the edge of coverage a cell may hold only
+3 or 4 crossings; their spread then badly understates the noise, the
+level of detection comes out too small, and isolated "changes" of up to
+1 m appeared along the edge of the first real Sep 2026 map.
+
 For the same reason a change covering the whole overlap by a similar
 amount is flagged: sand does not usually move uniformly; a water-level
 or calibration shift does.
@@ -90,14 +96,15 @@ def overlap(ha, hb):
     return sl(ha), sl(hb), x0, y0, cell
 
 
-def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True):
+def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5):
     A, sA, nA, ha = load_dem(stem_a)
     B, sB, nB, hb = load_dem(stem_b)
     ia, ib, x0, y0, cell = overlap(ha, hb)
     A, sA, nA = A[ia], sA[ia], nA[ia]
     B, sB, nB = B[ib], sB[ib], nB[ib]
 
-    both = np.isfinite(A) & np.isfinite(B) & (nA > 0) & (nB > 0)
+    in_both = np.isfinite(A) & np.isfinite(B) & (nA > 0) & (nB > 0)
+    both = in_both & (nA >= min_count) & (nB >= min_count)
     diff = np.where(both, B - A, np.nan)
     seA = 1.25 * (np.nan_to_num(sA) / 2.0) / np.sqrt(np.maximum(nA, 1))
     seB = 1.25 * (np.nan_to_num(sB) / 2.0) / np.sqrt(np.maximum(nB, 1))
@@ -116,7 +123,8 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True):
     print("=" * 72)
     print(f"BEACH CHANGE  {name_a}  ->  {name_b}")
     print("=" * 72)
-    print(f"cells in both DEMs      : {n_both}  ({n_both * cell * cell:.0f} m2)")
+    print(f"cells in both DEMs      : {n_both}  ({n_both * cell * cell:.0f} m2) with >= {min_count} "
+          f"crossings in each; {int(in_both.sum()) - n_both} thinner cell(s) not compared")
     if n_both == 0:
         print("No overlapping cells -- nothing to compare.")
         return None
@@ -189,6 +197,9 @@ def main():
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--min-lod", type=float, default=0.05,
                     help="Floor on the level of detection, m (default 0.05).")
+    ap.add_argument("--min-count", type=int, default=5,
+                    help="Compare only cells with at least this many tide crossings in BOTH "
+                         "DEMs (default 5). Thinner cells have unreliable spreads.")
     ap.add_argument("--output-dir")
     ap.add_argument("--no-plot", action="store_true")
     args = ap.parse_args()
@@ -204,7 +215,7 @@ def main():
         a, b = args.a, args.b
     else:
         ap.error("give --a and --b, or --series")
-    compare(a, b, args.min_lod, args.output_dir, not args.no_plot)
+    compare(a, b, args.min_lod, args.output_dir, not args.no_plot, args.min_count)
 
 
 if __name__ == "__main__":
