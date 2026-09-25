@@ -130,6 +130,15 @@ DEM_MAX_HS=1.5
 # (direction only) cannot see. Set to "" to disable.
 DEM_MAX_DAY_OFFSET=0.15
 
+# Rolling-window DEMs. The whole-archive DEM pools weeks of data, which
+# blurs real beach change into "spread" (Sep 2026: 0.278 m for Sep 11-23
+# against 0.231 m for Sep 11-14 alone, with more cells filled). Each run
+# also builds a DEM from the last DEM_WINDOW_DAYS days, keeps a dated copy
+# in DEM_SERIES, and maps the change from the DEM a window earlier
+# (dem_change.py). Set DEM_WINDOW_DAYS="" to skip.
+DEM_WINDOW_DAYS=7
+DEM_SERIES="$BASE/archive/dems"
+
 # Wave-setup correction (extract_elevation_contours.py --setup-coef): each
 # waterline's elevation becomes water level + C*sqrt(Hs*L0). Fit C with
 #   python3 dem_from_contours.py contour_points_ground.csv /tmp/fit --fit-setup --no-plot
@@ -297,6 +306,22 @@ else
                     log "DEM written: $(basename "$DEM_STEM")_dem.asc (+ spread, count, png)"
                 else
                     log "WARNING: DEM build failed (see above)"
+                fi
+
+                # 6b. Rolling-window DEM and week-to-week change.
+                if [ -n "$DEM_WINDOW_DAYS" ]; then
+                    python3 "$BASE/dem_from_contours.py" "$GROUND" "${DEM_STEM}_${DEM_WINDOW_DAYS}day" $hs_arg \
+                        --last-days "$DEM_WINDOW_DAYS" --series-dir "$DEM_SERIES" \
+                        --cell "$DEM_CELL" \
+                        --min-points "$DEM_MIN_POINTS" \
+                        --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1
+                    if [ $? -eq 0 ]; then
+                        log "window DEM written: $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_dem.asc (+ dated copy in $DEM_SERIES)"
+                        python3 "$BASE/dem_change.py" --series "$DEM_SERIES" --days "$DEM_WINDOW_DAYS" >> "$LOG" 2>&1 \
+                            || log "WARNING: beach-change map failed (see above)"
+                    else
+                        log "WARNING: window DEM build failed (see above)"
+                    fi
                 fi
             fi
         fi

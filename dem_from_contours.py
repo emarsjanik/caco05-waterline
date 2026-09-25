@@ -100,6 +100,21 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None):
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
 
 
+def latest_date(path, camera=None):
+    """Latest UTC capture date (YYYY-MM-DD) among georectified rows."""
+    latest = None
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            if not r.get("easting_utm19"):
+                continue
+            if camera and camera != "both" and r["camera"] != camera:
+                continue
+            d = r.get("capture_time_utc", "")[:10]
+            if d and (latest is None or d > latest):
+                latest = d
+    return latest
+
+
 def build_grid(E, N, Z, cell, min_points, max_spread, frames=None):
     """
     Bins points into cells and takes the MEDIAN elevation of each.
@@ -350,11 +365,30 @@ def main():
                          "so its GNSS-R elevation is too low for where it lies. Frames with no "
                          "wave record are kept. Off by default.")
     ap.add_argument("--start-date"); ap.add_argument("--end-date")
+    ap.add_argument("--last-days", type=int, default=None,
+                    help="Build the DEM from only the last N days of data, ending on the "
+                         "latest date in the file (or --end-date). Pooling weeks of data "
+                         "blurs real beach change into 'spread': on C2+C1 in Sep 2026 the "
+                         "whole-archive spread was 0.278 m against 0.231 m for Sep 11-14 "
+                         "alone, with more cells filled.")
+    ap.add_argument("--series-dir", default=None,
+                    help="Also save this DEM as <dir>/dem_<end date>_<N>d_{dem,spread,count}.asc "
+                         "(with --last-days), building a dated series that dem_change.py "
+                         "differences week to week.")
     ap.add_argument("--fill-gaps", action="store_true",
                     help="Close isolated single-cell holes from neighbours. Off by default: an "
                          "interpolated cell looks identical to a measured one in the output.")
     ap.add_argument("--no-plot", action="store_true")
     args = ap.parse_args()
+
+    if args.last_days:
+        end = args.end_date or latest_date(args.contour_csv, args.camera)
+        if end is None:
+            print("No georectified points in the file."); sys.exit(1)
+        from datetime import date, timedelta
+        args.end_date = end
+        args.start_date = (date.fromisoformat(end) - timedelta(days=args.last_days - 1)).isoformat()
+        print(f"Window            : last {args.last_days} day(s), {args.start_date} to {args.end_date}")
 
     E, N, Z, cams, dates, frames, missing = load_points(
         args.contour_csv, args.camera, args.start_date, args.end_date, args.max_hs)
@@ -478,6 +512,19 @@ def main():
     print(f"wrote {stem}_dem.asc     (elevation, m NAVD88)")
     print(f"wrote {stem}_spread.asc  (16-84 percentile range, m)")
     print(f"wrote {stem}_count.asc   (samples per cell)")
+
+    if args.series_dir:
+        if not args.last_days:
+            print("NOTE: --series-dir needs --last-days (the window defines the date); not saved.")
+        else:
+            sdir = Path(args.series_dir)
+            sdir.mkdir(parents=True, exist_ok=True)
+            sstem = sdir / f"dem_{args.end_date}_{args.last_days}d"
+            write_ascii_grid(str(sstem) + "_dem.asc", dem, e0, n0, args.cell)
+            write_ascii_grid(str(sstem) + "_spread.asc", spread, e0, n0, args.cell)
+            write_ascii_grid(str(sstem) + "_count.asc", count.astype(float), e0, n0,
+                             args.cell, nodata=0.0)
+            print(f"series            : {sstem}_{{dem,spread,count}}.asc")
 
     if not args.no_plot:
         try:
