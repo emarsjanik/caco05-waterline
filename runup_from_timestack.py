@@ -66,8 +66,15 @@ WHAT IT CANNOT DO.
     itself built from waterlines biased by setup. Treat them as
     relative until the DEM is anchored to an independent survey.
   * A line that does not cross the swash at the time (e.g. C2 lines 3
-    and 4 except at high water) gives a low valid_fraction; results
-    below --min-valid are flagged, not trusted.
+    and 4 except at high water), or a stack with faint foam, gives a
+    low valid_fraction; results below --min-valid are flagged, not
+    trusted.
+
+RUNNING IT ROUTINELY. The station's cleanup moves ras.tiff files off
+the machine, while GNSS-R lags about 2 days, so waterline_timex_cron.sh
+copies the C2 stacks into archive/ras_c2 and runs this script over that
+archive with --require-water-level: each stack is processed once, on
+the first run after GNSS-R covers it, and its setup and R2 are filled.
 
 Usage:
     python3 runup_from_timestack.py /mnt/I2Rgus_Data/ImageProducts/products/*c2.ras.tiff \\
@@ -388,7 +395,9 @@ def process(ras_path, args, pix_cache, gnssr, dem):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("ras", nargs="+", help="One or more *.ras.tiff timestacks.")
+    ap.add_argument("ras", nargs="+",
+                    help="*.ras.tiff timestacks, or folders of them (all *.ras.tiff inside "
+                         "matching --camera, or the camera in the filename).")
     ap.add_argument("--line", type=int, default=1,
                     help="Which line of the .pix file to analyse (1-based, default 1). "
                          "For C2, lines 1 and 2 cross the swash; 3 and 4 only at high water.")
@@ -411,11 +420,20 @@ def main():
                     help="Fastest the swash edge may move seaward, m/s (default 3). "
                          "Stops single-row drop-outs during backwash reading as retreats "
                          "of tens of metres.")
-    ap.add_argument("--min-valid", type=float, default=0.5,
-                    help="Minimum fraction of time rows with a detected edge (default 0.5).")
+    ap.add_argument("--min-valid", type=float, default=0.8,
+                    help="Minimum fraction of time rows with a detected edge for a stack to "
+                         "be trusted (default 0.8). Stacks with faint foam came in at 65-67%% "
+                         "and gave fragmented edges; clear ones at 92-100%%.")
     ap.add_argument("--min-peaks", type=int, default=20,
                     help="Minimum number of uprush peaks for an R2%% value (default 20).")
-    ap.add_argument("--output", required=True, help="CSV to append results to.")
+    ap.add_argument("--require-water-level", action="store_true",
+                    help="Skip (without recording) stacks that --gnssr does not yet cover, so "
+                         "a later run processes them once GNSS-R catches up (~2 days).")
+    ap.add_argument("--reprocess", action="store_true",
+                    help="Redo stacks already in --output, replacing their rows. Use after "
+                         "the method or its settings change.")
+    ap.add_argument("--output", required=True,
+                    help="CSV of results. Stacks already in it are skipped unless --reprocess.")
     ap.add_argument("--plot-dir", help="Write a diagnostic PNG per stack with the edge in red.")
     args = ap.parse_args()
 
@@ -428,15 +446,32 @@ def main():
     dem = read_dem(args.dem) if args.dem else None
 
     out = Path(args.output)
-    done = set()
+    existing = []
     if out.exists():
         with open(out, newline="") as f:
-            done = {(r["source_file"], r["line"]) for r in csv.DictReader(f)}
+            existing = list(csv.DictReader(f))
+    done = {(r["source_file"], r["line"]) for r in existing}
 
-    pix_cache, rows = {}, []
-    for ras_path in sorted(args.ras):
-        if (Path(ras_path).name, str(args.line)) in done:
+    paths = []
+    for item in args.ras:
+        item = Path(item)
+        if item.is_dir():
+            pattern = f"*.{args.camera}.ras.tiff" if args.camera else "*.ras.tiff"
+            paths.extend(item.glob(pattern))
+        else:
+            paths.append(item)
+
+    pix_cache, rows, waiting = {}, [], 0
+    for ras_path in sorted(paths, key=lambda q: q.name):
+        name = Path(ras_path).name
+        if (name, str(args.line)) in done and not args.reprocess:
             continue
+        if args.require_water_level and gnssr is not None:
+            epoch = epoch_from_name(name)
+            mid = (epoch or 0) + BURST_MID_OFFSET_S
+            if epoch is None or not gnssr[0][0] <= mid <= gnssr[0][-1]:
+                waiting += 1
+                continue
         row = process(ras_path, args, pix_cache, gnssr, dem)
         if row is None:
             continue
@@ -445,16 +480,26 @@ def main():
         print(f"  {row['source_file']}: mean {row['mean_pos_m']} m, R2% {row['r2_pos_m']} m, "
               f"valid {row['valid_fraction']:.0%}, {row['n_peaks']} uprushes{flag}")
 
+    if waiting:
+        print(f"{waiting} stack(s) not yet covered by GNSS-R -- left for a later run.")
     if not rows:
         print("No new timestacks processed.")
         return
-    write_header = not out.exists()
-    with open(out, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        if write_header:
-            w.writeheader()
-        w.writerows(rows)
-    print(f"Appended {len(rows)} row(s) to {out}")
+
+    # Rewrite the whole file: kept rows plus new ones, in time order.
+    # Rows being redone (--reprocess) are replaced, never duplicated.
+    redone = {(r["source_file"], str(r["line"])) for r in rows}
+    kept = [r for r in existing if (r["source_file"], r["line"]) not in redone]
+    merged = kept + rows
+    merged.sort(key=lambda r: (int(r["line"]), int(r["capture_epoch"])))
+    fields = list(rows[0].keys())
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    with open(tmp, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields, restval="", extrasaction="ignore")
+        w.writeheader()
+        w.writerows(merged)
+    tmp.replace(out)
+    print(f"Wrote {len(rows)} new row(s) to {out} ({len(merged)} total)")
 
 
 if __name__ == "__main__":

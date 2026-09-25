@@ -37,6 +37,7 @@ SCRATCH_INPUT="$BASE/input_timex"
 LOCK="$BASE/.timex_cron.lock"
 ARCHIVE_CSV="$BASE/archive/processed_timex"
 ARCHIVE_IMG="$BASE/archive/images_timex"
+ARCHIVE_RAS="$BASE/archive/ras_c2"
 LOG="$BASE/logs/timex_cron.log"
 
 # Keep every timex image. Disk is not the constraint (1.7 TB free, this
@@ -95,11 +96,25 @@ DEM_CELL=2.0
 DEM_MIN_POINTS=3
 DEM_MAX_SPREAD=0.5
 
+# Runup from C2 timestacks (runup_from_timestack.py).
+#
+# cleanup.sh moves ras.tiff files to S3, but GNSS-R lags ~2 days, so
+# the C2 stacks are copied into $ARCHIVE_RAS (~9 MB each, ~270 MB/day,
+# ~100 GB/year) and the runup script runs over that archive with
+# --require-water-level: each stack is processed once, on the first run
+# after GNSS-R covers it. C2 lines 1 and 2 cross the swash; 3 and 4 sit
+# on the upper beach and dune foot. Results: runup_c2_line<N>.csv.
+#
+# Set RUNUP_ENABLE=0 to skip this stage (stacks are still archived).
+RUNUP_ENABLE=1
+RUNUP_LINES="1 2"
+RAS_SOURCE=/mnt/I2Rgus_Data/ImageProducts/products
+
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
 
-mkdir -p "$SCRATCH" "$SCRATCH_INPUT" "$ARCHIVE_CSV" "$ARCHIVE_IMG" "$(dirname "$LOG")"
+mkdir -p "$SCRATCH" "$SCRATCH_INPUT" "$ARCHIVE_CSV" "$ARCHIVE_IMG" "$ARCHIVE_RAS" "$(dirname "$LOG")"
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
 
@@ -144,6 +159,10 @@ else
 fi
 img_count=$(find "$ARCHIVE_IMG" -name '*.jpg' 2>/dev/null | wc -l)
 log "images in archive: $img_count"
+
+cp -pn "$RAS_SOURCE"/*.c2.ras.tiff "$ARCHIVE_RAS"/ 2>/dev/null
+ras_count=$(find "$ARCHIVE_RAS" -name '*.ras.tiff' 2>/dev/null | wc -l)
+log "C2 timestacks in archive: $ras_count"
 
 # 4. Flag if today produced nothing -- this is the failure mode that
 #    would otherwise go unnoticed, since the maps still render from
@@ -238,6 +257,28 @@ else
                     log "WARNING: DEM build failed (see above)"
                 fi
             fi
+        fi
+
+        # 7. Runup from the archived C2 timestacks. Needs only GNSS-R
+        #    and the calibration; the DEM, when present, adds setup and
+        #    R2 elevations.
+        if [ "$RUNUP_ENABLE" != "1" ]; then
+            log "runup stage disabled (RUNUP_ENABLE=$RUNUP_ENABLE)"
+        else
+            dem_arg=""
+            [ -f "${DEM_STEM}_dem.asc" ] && dem_arg="--dem ${DEM_STEM}_dem.asc"
+            for line in $RUNUP_LINES; do
+                python3 "$BASE/runup_from_timestack.py" "$ARCHIVE_RAS" \
+                    --camera c2 --line "$line" \
+                    --gnssr "$GNSSR_SPLINE" --require-water-level \
+                    $dem_arg \
+                    --output "$BASE/runup_c2_line${line}.csv" >> "$LOG" 2>&1
+                if [ $? -eq 0 ]; then
+                    log "runup updated: runup_c2_line${line}.csv"
+                else
+                    log "WARNING: runup failed for C2 line $line (see above)"
+                fi
+            done
         fi
     fi
 fi
