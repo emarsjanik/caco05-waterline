@@ -28,7 +28,10 @@ INPUTS.
     positions).
 
 HOW THE EDGE IS FOUND. Each column's bare-sand brightness (its 3rd
-percentile over the 10 minutes) is subtracted from it, which removes the
+percentile within ~100 s blocks, split also wherever the light on the
+water changes suddenly, so such a change partway through the stack
+does not turn everything after it into "foam")
+is subtracted from it, which removes the
 strong seaward-to-landward brightness gradient along the line; in the result every uprush
 is a bright tongue of foam with a sharp landward tip, on uniform sand.
 Whole-row brightness changes (exposure, passing cloud) are removed
@@ -38,6 +41,12 @@ times the noise measured on the landward 15% of the line. The edge in
 each time row is the landward end of the most landward run of at least
 --min-run foam pixels, so isolated bright specks do not count. A
 5-sample (2.5 s) running median then removes single-row flicker.
+
+Backwash is thin, clear water with little foam, so in some rows the
+foam test briefly loses it and the edge would jump most of the way to
+the sea for half a second. No real backwash moves that fast, so the
+edge may retreat by at most --max-retreat-speed (default 3 m/s)
+between rows; uprush is not limited.
 
 An earlier version compared every column against one dry-sand level
 taken from the landward end. On real stacks the sand itself brightens
@@ -105,7 +114,47 @@ def split_lines(pix):
     return list(zip(starts, ends))
 
 
-def find_edge(gray, k, min_threshold, min_run=15):
+def light_steps(g, threshold, half=60, min_gap=60):
+    """
+    Rows where the brightness of the seaward half of the line jumps
+    suddenly (light on the water changing), found by comparing the
+    median level over `half` rows before and after each row. Returns
+    the row indices of jumps larger than `threshold`.
+    """
+    sea = np.median(g[:, : g.shape[1] // 2], axis=1)
+    T = len(sea)
+    jump = np.zeros(T)
+    for t in range(half, T - half):
+        jump[t] = abs(np.median(sea[t:t + half]) - np.median(sea[t - half:t]))
+    steps = []
+    for t in np.argsort(jump)[::-1]:
+        if jump[t] <= threshold:
+            break
+        if all(abs(t - u) >= min_gap for u in steps):
+            steps.append(int(t))
+    return sorted(steps)
+
+
+def local_percentile(g, pct, block, steps=(), min_len=60):
+    """
+    Per-row baseline: the percentile of each column within time segments
+    of about `block` rows, split additionally at `steps` (sudden light
+    changes). Constant within a segment -- interpolating between
+    segments smeared a sudden change over ~100 rows.
+    """
+    T = g.shape[0]
+    nb = max(int(round(T / block)), 1)
+    cuts = set(np.linspace(0, T, nb + 1).astype(int)[1:-1])
+    cuts = sorted(c for c in cuts if all(abs(c - s) >= min_len for s in steps))
+    cuts = sorted(set(cuts) | set(steps))
+    bounds = [0] + [c for c in cuts if min_len <= c <= T - min_len] + [T]
+    out = np.empty_like(g)
+    for a, b in zip(bounds[:-1], bounds[1:]):
+        out[a:b] = np.percentile(g[a:b], pct, axis=0)
+    return out
+
+
+def find_edge(gray, k, min_threshold, min_run=15, block=200):
     """
     Landward swash edge per time row, as a column index counted from the
     SEA end (column 0 = sea). NaN where no foam tongue is found in that
@@ -120,7 +169,10 @@ def find_edge(gray, k, min_threshold, min_run=15):
     land_level = np.median(g[:, land], axis=1, keepdims=True)
     g = g - (land_level - np.median(land_level))
 
-    # Bare-sand reference per column: its 3rd-percentile brightness.
+    # Bare-sand reference per column: its 3rd-percentile brightness,
+    # taken over ~100 s blocks rather than the whole stack -- a change in
+    # the light on the water partway through otherwise made the whole
+    # brighter half register as foam.
     # The median would not do -- in the inner swash a column is under
     # foam more than half the time, so its median IS foam and foam there
     # would never stand out. The 3rd percentile stays on sand for any
@@ -128,10 +180,10 @@ def find_edge(gray, k, min_threshold, min_run=15):
     # synthetic stack it halved the large errors of a 10th percentile
     # with no extra false detections. In pure noise it sits 1.88 sigma
     # below the median, hence the offset on the threshold.
-    anomaly = g - np.percentile(g, 3, axis=0)
     land_part = g[:, land]
     noise = 1.4826 * np.median(np.abs(land_part - np.median(land_part, axis=0)))
     threshold = max(k * noise, min_threshold) + 1.88 * noise
+    anomaly = g - local_percentile(g, 3, block, light_steps(g, threshold))
     foam = anomaly > threshold
 
     # Length of the run of consecutive foam pixels ending at each column.
@@ -281,6 +333,13 @@ def process(ras_path, args, pix_cache, gnssr, dem):
     pos = np.interp(edge, idx, dist)          # NaN edge stays NaN
     pos[~np.isfinite(edge)] = np.nan
 
+    # Limit how fast the edge may retreat seaward (see docstring).
+    step_m = args.max_retreat_speed / SAMPLE_HZ
+    for t in range(1, len(pos)):
+        if np.isfinite(pos[t - 1]) and np.isfinite(pos[t]) and pos[t] < pos[t - 1] - step_m:
+            pos[t] = pos[t - 1] - step_m
+    edge = np.where(np.isfinite(pos), np.interp(pos, dist, idx), np.nan)
+
     peaks = runup_peaks(pos)
     enough = len(peaks) >= args.min_peaks and valid >= args.min_valid
     mean_pos = float(np.nanmean(pos)) if np.isfinite(pos).any() else np.nan
@@ -348,6 +407,10 @@ def main():
                     help="Floor on the foam threshold, in grey levels (default 4).")
     ap.add_argument("--min-run", type=int, default=15,
                     help="Minimum length, in pixels, of a foam tongue (default 15).")
+    ap.add_argument("--max-retreat-speed", type=float, default=3.0,
+                    help="Fastest the swash edge may move seaward, m/s (default 3). "
+                         "Stops single-row drop-outs during backwash reading as retreats "
+                         "of tens of metres.")
     ap.add_argument("--min-valid", type=float, default=0.5,
                     help="Minimum fraction of time rows with a detected edge (default 0.5).")
     ap.add_argument("--min-peaks", type=int, default=20,
