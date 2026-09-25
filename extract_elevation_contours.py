@@ -662,6 +662,16 @@ def main():
                         help="Largest gap to the nearest wave record before a frame's wave "
                              "columns are left blank (default 90; the buoy reports every "
                              "10-60 min).")
+    parser.add_argument("--setup-coef", type=float, default=None,
+                        help="Wave-setup correction coefficient C (needs --waves). Each "
+                             "frame's beach elevation becomes water level + C*sqrt(Hs*L0), "
+                             "L0 = g*Tp^2/(2*pi), from the offshore buoy record: the timex "
+                             "waterline is the MEAN swash position, which sits above still "
+                             "water by the setup. Stockdon et al. (2006) give C = 0.35*slope; "
+                             "fit it for this site with dem_from_contours.py --fit-setup. "
+                             "Adds setup_correction_m and beach_elevation_navd88 columns, "
+                             "which georectify.py and dem_from_contours.py then use; "
+                             "tide_elevation_navd88 stays the water level.")
     parser.add_argument("--vertical-datum-offset", type=float, default=0.0,
                          help="Meters to ADD to every tide elevation, converting the tide "
                               "model's vertical datum (mean sea level or a geoid, for global "
@@ -870,6 +880,10 @@ def main():
         "water_level_source",
     ]
 
+    if args.setup_coef is not None and not args.waves:
+        print("ERROR: --setup-coef needs --waves (the wave height and period per frame).")
+        sys.exit(1)
+
     # Offshore waves per frame, appended as the LAST columns so every
     # positional index used above (r[1], r[2], ...) is unchanged.
     if args.waves:
@@ -884,6 +898,26 @@ def main():
                                    "" if t is None else round(t, 1))
             r.extend(per_frame[r[0]])
         header += ["offshore_hs_m", "offshore_tp_s"]
+
+        if args.setup_coef is not None:
+            # Wave setup per frame; frames without a height AND period
+            # get no correction and a blank setup column, so they can be
+            # told apart from a genuine zero.
+            no_waves = set()
+            for r in output_rows:
+                hs, tp = r[-2], r[-1]
+                if hs != "" and tp != "":
+                    setup = args.setup_coef * np.sqrt(float(hs) * 9.81 * float(tp) ** 2 / (2 * np.pi))
+                    r.extend([round(float(setup), 4), round(r[6] + float(setup), 4)])
+                else:
+                    no_waves.add(r[0])
+                    r.extend(["", r[6]])
+            header += ["setup_correction_m", "beach_elevation_navd88"]
+            setups = [r[-2] for r in output_rows if r[-2] != ""]
+            print(f"Setup correction         : C = {args.setup_coef}, "
+                  + (f"{min(setups):.3f}-{max(setups):.3f} m" if setups else "none applied")
+                  + (f"; {len(no_waves)} frame(s) without wave height+period left uncorrected"
+                     if no_waves else ""))
         tagged = [v[0] for v in per_frame.values() if v[0] != ""]
         print(f"Offshore waves           : {len(tagged)}/{len(per_frame)} frame(s) tagged"
               + (f", Hs {min(tagged):.2f}-{max(tagged):.2f} m, "
