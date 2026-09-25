@@ -87,7 +87,9 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None):
                     continue
             E.append(float(r["easting_utm19"]))
             N.append(float(r["northing_utm19"]))
-            Z.append(float(r["tide_elevation_navd88"]))
+            # Beach elevation = water level + setup when the contours were
+            # extracted with --setup-coef; otherwise the water level.
+            Z.append(float(r.get("beach_elevation_navd88") or r["tide_elevation_navd88"]))
             cams.append(r["camera"])
             dates.append(day)
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
@@ -169,6 +171,107 @@ def build_grid(E, N, Z, cell, min_points, max_spread, frames=None):
             spread.reshape(nrows, ncols), e0, n0, ncols, nrows)
 
 
+# ---------------------------------------------------------------------
+# Frame-level analyses: setup-coefficient fit and day consistency.
+#
+# Both work on (cell, frame) PAIRS -- one sample per frame per cell, as
+# build_grid counts them -- on a fixed grid origin, so a subset of the
+# data can be compared against the rest cell by cell.
+# ---------------------------------------------------------------------
+
+def load_frame_info(path):
+    """Per source_file: capture epoch, water level, offshore Hs and Tp."""
+    info = {}
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            k = r.get("source_file")
+            if k in info or k is None:
+                continue
+            num = lambda v: float(v) if v not in ("", None) else np.nan
+            info[k] = {"epoch": num(r.get("capture_epoch")),
+                       "tide": num(r.get("tide_elevation_navd88")),
+                       "hs": num(r.get("offshore_hs_m")),
+                       "tp": num(r.get("offshore_tp_s"))}
+    return info
+
+
+def local_day(epoch):
+    import pandas as pd
+    return pd.Timestamp(int(epoch), unit="s", tz="UTC").tz_convert("America/New_York").strftime("%Y-%m-%d")
+
+
+def frame_pairs(E, N, frames, cell):
+    """Unique (cell, frame) pairs on a fixed origin. Returns (pair_cell, pair_frame_name)."""
+    e0 = np.floor(E.min() / cell) * cell
+    n0 = np.floor(N.min() / cell) * cell
+    ncols = int(np.ceil((E.max() - e0) / cell)) + 1
+    flat = ((N - n0) / cell).astype(np.int64) * ncols + ((E - e0) / cell).astype(np.int64)
+    names, fid = np.unique(frames, return_inverse=True)
+    key = np.unique(flat * len(names) + fid)
+    return key // len(names), names[key % len(names)]
+
+
+def cell_groups(pair_cell):
+    order = np.argsort(pair_cell, kind="stable")
+    c = pair_cell[order]
+    edges = np.flatnonzero(np.diff(c)) + 1
+    return order, c, np.r_[0, edges], np.r_[edges, len(c)]
+
+
+def median_spread_by_cell(groups, vals, min_frames):
+    """Median of the 16-84 percentile spread over cells with >= min_frames samples."""
+    order, c, starts, ends = groups
+    v = vals[order]
+    spreads = []
+    for a, b in zip(starts, ends):
+        x = v[a:b]
+        x = x[np.isfinite(x)]
+        if len(x) >= min_frames:
+            spreads.append(np.percentile(x, 84) - np.percentile(x, 16))
+    return float(np.median(spreads)) if spreads else np.nan, len(spreads)
+
+
+def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames):
+    """
+    Finds C in beach elevation = water level + C*sqrt(Hs*L0) that makes
+    repeat crossings of each cell agree best (smallest median spread).
+    Only frames with both Hs and Tp take part, at every C, so the
+    comparison is like for like.
+    """
+    tide = np.array([info[f]["tide"] for f in pair_frame])
+    hs = np.array([info[f]["hs"] for f in pair_frame])
+    tp = np.array([info[f]["tp"] for f in pair_frame])
+    phi = np.sqrt(hs * 9.81 * tp ** 2 / (2 * np.pi))
+    ok = np.isfinite(phi) & np.isfinite(tide)
+    groups = cell_groups(pair_cell[ok])
+    coefs = np.round(np.arange(-0.04, 0.1201, 0.002), 3)
+    result = [(c,) + median_spread_by_cell(groups, tide[ok] + c * phi[ok], min_frames)
+              for c in coefs]
+    return result, int(ok.sum()), len(set(pair_frame[ok]))
+
+
+def day_offsets(pair_cell, pair_vals, pair_key, min_frames, min_pairs=30):
+    """
+    For each (camera, local day): the median difference between that
+    day's samples and the DEM built WITHOUT that day, cell by cell.
+    Leaving the day out matters: a day with many frames dominates the
+    cells it covers and would otherwise hide its own error.
+    """
+    out = {}
+    for k in sorted(set(pair_key)):
+        mine = pair_key == k
+        groups = cell_groups(pair_cell[~mine])
+        order, c, starts, ends = groups
+        others = pair_vals[~mine][order]
+        med = {}
+        for a, b in zip(starts, ends):
+            if b - a >= min_frames:
+                med[int(c[a])] = float(np.median(others[a:b]))
+        res = [v - med[int(cc)] for cc, v in zip(pair_cell[mine], pair_vals[mine]) if int(cc) in med]
+        out[k] = (float(np.median(res)) if len(res) >= min_pairs else np.nan, len(res))
+    return out
+
+
 def fill_small_gaps(dem, max_iterations=3):
     """
     Fills isolated nodata cells from their immediate neighbours.
@@ -228,6 +331,18 @@ def main():
                          "metres (default 0.5). A cell where repeat crossings disagree by more "
                          "than half a metre is not measuring one surface.")
     ap.add_argument("--camera", default="both", choices=["c1", "c2", "both"])
+    ap.add_argument("--max-day-offset", type=float, default=None,
+                    help="Leave out camera-days whose samples sit, on median, more than this "
+                         "many metres from the DEM built without that day (e.g. 0.15). "
+                         "Catches days whose waterlines are consistently displaced -- a "
+                         "different failure from the tide-direction check, which only sees "
+                         "direction. Days with fewer than 30 comparable samples are kept.")
+    ap.add_argument("--fit-setup", action="store_true",
+                    help="Report the wave-setup coefficient C (extract_elevation_contours.py "
+                         "--setup-coef) that makes repeat crossings agree best, from the "
+                         "water level and offshore Hs/Tp of each frame. Diagnostic only: the "
+                         "DEM is built from whatever correction the contours already carry. "
+                         "Run it on contours WITHOUT a correction applied.")
     ap.add_argument("--max-hs", type=float, default=None,
                     help="Leave out frames whose offshore wave height (offshore_hs_m, from "
                          "extract_elevation_contours.py --waves) exceeds this, in metres. In "
@@ -261,6 +376,66 @@ def main():
     print(f"elevation range   : {Z.min():+.2f} to {Z.max():+.2f} m NAVD88")
     print(f"extent            : {E.max()-E.min():.1f} m E-W by {N.max()-N.min():.1f} m N-S")
     print()
+
+    if args.fit_setup or args.max_day_offset:
+        info = load_frame_info(args.contour_csv)
+        pair_cell, pair_frame = frame_pairs(E, N, frames, args.cell)
+
+    if args.fit_setup:
+        result, n_pairs, n_frames = fit_setup_coefficient(pair_cell, pair_frame, info,
+                                                          args.min_points)
+        valid = [r for r in result if np.isfinite(r[1])]
+        if not valid:
+            print("Setup fit         : no frames with both Hs and Tp -- run "
+                  "extract_elevation_contours.py with --waves.")
+        else:
+            base = next(r for r in valid if r[0] == 0.0)
+            best = min(valid, key=lambda r: r[1])
+            print(f"Setup fit         : {n_frames} frame(s), {n_pairs} cell samples")
+            print(f"   C = 0      median spread {base[1]:.3f} m ({base[2]} cells)")
+            print(f"   C = {best[0]:<6} median spread {best[1]:.3f} m  <-- best"
+                  f"  (implied slope C/0.35 = {best[0] / 0.35:.3f})")
+            for c, sp, n in valid:
+                if round(c * 1000) % 20 == 0:
+                    print(f"      C {c:+.2f}: {sp:.3f} m")
+            if best[0] in (valid[0][0], valid[-1][0]):
+                print("   WARNING: best C is at the edge of the search range -- the data do "
+                      "not constrain it; do not apply.")
+            elif best[0] <= 0:
+                print("   The data do not favour a positive setup correction.")
+            else:
+                print(f"   To apply: extract_elevation_contours.py ... --waves ... "
+                      f"--setup-coef {best[0]}")
+        print()
+
+    if args.max_day_offset:
+        epoch = {f: info[f]["epoch"] for f in info}
+        cam_of = dict(zip(frames, cams))
+        pair_key = np.array([f"{cam_of[f]} {local_day(epoch[f])}" for f in pair_frame])
+        z_of = {}
+        for f, z in zip(frames, Z):
+            z_of.setdefault(f, z)
+        pair_vals = np.array([z_of[f] for f in pair_frame])
+        offsets = day_offsets(pair_cell, pair_vals, pair_key, args.min_points)
+        rejected = set()
+        print(f"Day consistency (median offset from the DEM without that day, limit "
+              f"+/-{args.max_day_offset} m):")
+        for k, (off, n) in offsets.items():
+            if not np.isfinite(off):
+                note = "  (too few comparable samples -- kept)"
+            elif abs(off) > args.max_day_offset:
+                rejected.add(k)
+                note = "  <-- REJECTED"
+            else:
+                note = ""
+            off_s = f"{off:+.3f} m" if np.isfinite(off) else "   --   "
+            print(f"   {k}   {off_s}   ({n} samples){note}")
+        if rejected:
+            frame_key = {f: f"{cam_of[f]} {local_day(epoch[f])}" for f in set(frames)}
+            keep = np.array([frame_key[f] not in rejected for f in frames])
+            E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
+            print(f"   left out {len(rejected)} camera-day(s), {int((~keep).sum())} point(s)")
+        print()
 
     dem, count, spread, e0, n0, ncols, nrows = build_grid(
         E, N, Z, args.cell, args.min_points, args.max_spread, frames)

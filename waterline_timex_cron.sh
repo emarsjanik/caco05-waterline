@@ -124,6 +124,19 @@ WAVE_BUOY=44008
 WAVES_CSV="$BASE/archive/waves_${WAVE_BUOY}.csv"
 DEM_MAX_HS=1.5
 
+# Day consistency: leave out a camera-day whose waterlines sit, on median,
+# more than this far (m) from the DEM built without that day. Catches days
+# whose lines are displaced as a whole, which the tide-direction check
+# (direction only) cannot see. Set to "" to disable.
+DEM_MAX_DAY_OFFSET=0.15
+
+# Wave-setup correction (extract_elevation_contours.py --setup-coef): each
+# waterline's elevation becomes water level + C*sqrt(Hs*L0). Fit C with
+#   python3 dem_from_contours.py contour_points_ground.csv /tmp/fit --fit-setup --no-plot
+# on contours built WITHOUT the correction. It changes the DEM's absolute
+# level (typically by a few tenths of a metre), which the fit cannot check,
+# so it stays off ("") until confirmed against a survey or the runup data.
+SETUP_COEF=""
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
@@ -219,8 +232,10 @@ else
         fi
     fi
 
+    setup_arg=""
+    [ -n "$SETUP_COEF" ] && [ -n "$waves_arg" ] && setup_arg="--setup-coef $SETUP_COEF"
     python3 "$BASE/extract_elevation_contours.py" "$GNSSR_SPLINE" \
-        --processed-dir "$ARCHIVE_CSV" $waves_arg \
+        --processed-dir "$ARCHIVE_CSV" $waves_arg $setup_arg \
         --output "$CONTOURS" >> "$LOG" 2>&1
     if [ $? -ne 0 ]; then
         log "ERROR: contour extraction failed -- see above. Maps not regenerated."
@@ -273,6 +288,7 @@ else
 
                 hs_arg=""
                 [ -n "$waves_arg" ] && [ -n "$DEM_MAX_HS" ] && hs_arg="--max-hs $DEM_MAX_HS"
+                [ -n "$DEM_MAX_DAY_OFFSET" ] && hs_arg="$hs_arg --max-day-offset $DEM_MAX_DAY_OFFSET"
                 python3 "$BASE/dem_from_contours.py" "$GROUND" "$DEM_STEM" $hs_arg \
                     --cell "$DEM_CELL" \
                     --min-points "$DEM_MIN_POINTS" \

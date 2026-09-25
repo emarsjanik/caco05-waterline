@@ -320,7 +320,11 @@ def main():
         intr, extr = cams[cam]
         U = np.array([float(r["pixel_column"]) for r in group])
         V = np.array([float(r["pixel_row"]) for r in group])
-        Z = np.array([float(r["tide_elevation_navd88"]) for r in group])
+        # The plane each waterline point lies on: the beach elevation
+        # (water level + wave setup) when extract_elevation_contours.py
+        # was run with --setup-coef, otherwise the water level.
+        Z = np.array([float(r.get("beach_elevation_navd88") or r["tide_elevation_navd88"])
+                      for r in group])
         E, N = pixel_to_ground(U, V, Z, intr, extr)
         for r, e, n in zip(group, E, N):
             if np.isfinite(e) and np.isfinite(n):
