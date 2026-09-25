@@ -96,7 +96,8 @@ DEM_CELL=2.0
 DEM_MIN_POINTS=3
 DEM_MAX_SPREAD=0.5
 
-# Runup from C2 timestacks (runup_from_timestack.py).
+# Runup from C2 timestacks (runup_from_timestack.py): swash positions
+# along each line, in metres.
 #
 # cleanup.sh moves ras.tiff files to S3, but GNSS-R lags ~2 days, so
 # the C2 stacks are copied into $ARCHIVE_RAS (~9 MB each, ~270 MB/day,
@@ -180,7 +181,10 @@ log "C2 timestacks in archive: $ras_count"
 # 4. Flag if today produced nothing -- this is the failure mode that
 #    would otherwise go unnoticed, since the maps still render from
 #    older archived data and look fine.
-today=$(date -u '+%Y-%m-%d')
+# LOCAL date: find -newermt reads the string as local midnight, so a UTC
+# date put the reference in the future at the 20:55 run (already the
+# next day in UTC) and the warning fired every evening.
+today=$(date '+%Y-%m-%d')
 recent=$(find "$ARCHIVE_CSV" -name '*.csv' -newermt "$today" 2>/dev/null | wc -l)
 if [ "$recent" -eq 0 ]; then
     log "WARNING: no detections archived with today's date ($today). If this repeats,"
@@ -282,18 +286,16 @@ else
         fi
 
         # 7. Runup from the archived C2 timestacks. Needs only GNSS-R
-        #    and the calibration; the DEM, when present, adds setup and
-        #    R2 elevations.
+        #    and the calibration. Positions only: elevations would need
+        #    an independently surveyed beach profile (the DEM is built
+        #    from the waterlines, so reading setup off it is circular).
         if [ "$RUNUP_ENABLE" != "1" ]; then
             log "runup stage disabled (RUNUP_ENABLE=$RUNUP_ENABLE)"
         else
-            dem_arg=""
-            [ -f "${DEM_STEM}_dem.asc" ] && dem_arg="--dem ${DEM_STEM}_dem.asc"
             for line in $RUNUP_LINES; do
                 python3 "$BASE/runup_from_timestack.py" "$ARCHIVE_RAS" \
                     --camera c2 --line "$line" \
                     --gnssr "$GNSSR_SPLINE" --require-water-level \
-                    $dem_arg \
                     --output "$BASE/runup_c2_line${line}.csv" >> "$LOG" 2>&1
                 if [ $? -eq 0 ]; then
                     log "runup updated: runup_c2_line${line}.csv"

@@ -961,6 +961,14 @@ def check_timestamp_mismatch(image_path):
 
 def discover_source_images(limit=None):
     images = sorted(Path(SOURCE_FOLDER).rglob(f"*{IMAGE_SUFFIX}"))
+    # Files without a leading epoch cannot be placed in time, so they
+    # can never be matched to a water level. ImageProducts/latest/ holds
+    # such "latest image" copies (c1.timex.jpg), which used to be copied
+    # in and then logged as an ERROR on every run.
+    undated = [i for i in images if extract_epoch_from_filename(i.name) is None]
+    if undated:
+        images = [i for i in images if extract_epoch_from_filename(i.name) is not None]
+        log(f"Skipped {len(undated)} undated file(s) (no leading epoch), e.g. {undated[0]}")
     log(f"Discovered {len(images)} source images.")
 
     mismatches = []
@@ -1670,6 +1678,15 @@ def smooth_shoreline(shoreline, kernel_size):
 # entirely.
 TEMPORAL_MAX_GAP_MINUTES = 35.0
 
+# The blend mixes in 30% of the previous frame, captured up to 30 min
+# earlier, while the frame is later given ITS OWN water level. Around
+# mid-tide the water moves ~0.3 m in 30 min, so the blended line lags the
+# tide -- an error of opposite sign on rising and falling tides that
+# reads as scatter in the DEM. --no-temporal-filter switches it off so
+# the effect can be measured before the default is changed (the bias
+# corrections were fitted with the blend on).
+TEMPORAL_FILTER_ENABLED = True
+
 
 def temporal_filter(shoreline, camera_name, epoch=None):
     """
@@ -1787,7 +1804,10 @@ def export_csv(data, shoreline, confidence, peak_sharpness=None, column_has_sign
             # real evidence. Such columns should be EXCLUDED from
             # elevation contours rather than trusted equally.
             has_sig = int(bool(column_has_signal[x])) if column_has_signal is not None else ""
-            writer.writerow([x, full_image_row, float(confidence[x]), precise_row,
+            # Column is written in FULL-IMAGE coordinates, like Row: georectify
+            # and the ground-truth files both use full-image pixels. (Only
+            # correct by luck before, while every crop_left was 0.)
+            writer.writerow([x + data.crop_left, full_image_row, float(confidence[x]), precise_row,
                              sharpness, has_sig])
 
 
@@ -1881,7 +1901,8 @@ def process_image(image_path):
 
         shoreline = smooth_shoreline(result.subpixel_shoreline, CONFIG.smoothing_kernel)
         epoch = extract_epoch_from_filename(image_path.name)
-        shoreline = temporal_filter(shoreline, data.profile.name, epoch)
+        if TEMPORAL_FILTER_ENABLED:
+            shoreline = temporal_filter(shoreline, data.profile.name, epoch)
 
         # Store the PRE-correction shoreline for next frame's temporal
         # blending, not the corrected one. Storing the corrected value
@@ -2029,6 +2050,7 @@ def apply_cli_overrides():
     tuned parameters.
     """
     global SOURCE_FOLDER, INPUT_FOLDER, OUTPUT_FOLDER, DEBUG_FOLDER, IMAGE_SUFFIX
+    global TEMPORAL_FILTER_ENABLED
 
     parser = argparse.ArgumentParser(
         description="USGS Argus shoreline detector. All arguments are optional; "
@@ -2046,6 +2068,10 @@ def apply_cli_overrides():
     parser.add_argument("--input-dir", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--debug-dir", default=None)
+    parser.add_argument("--no-temporal-filter", action="store_true",
+                        help="Do not blend each frame with the previous one. The blend lags "
+                             "the tide (see TEMPORAL_FILTER_ENABLED); use this to measure "
+                             "the effect on the DEM before changing the default.")
     parser.add_argument("--no-bias-correction", action="store_true",
                         help="Run with bias_correction_points disabled for every camera. "
                              "Use this when comparing image products: the existing "
@@ -2063,6 +2089,10 @@ def apply_cli_overrides():
         OUTPUT_FOLDER = args.output_dir
     if args.debug_dir:
         DEBUG_FOLDER = args.debug_dir
+
+    if args.no_temporal_filter:
+        TEMPORAL_FILTER_ENABLED = False
+        print("TEMPORAL FILTER DISABLED (--no-temporal-filter).")
 
     if args.no_bias_correction:
         for key, profile in CAMERAS.items():
