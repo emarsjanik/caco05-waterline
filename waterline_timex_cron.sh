@@ -29,6 +29,12 @@ set -u
 
 BASE=/mnt/I2Rgus_Data/waterline
 SCRATCH="$BASE/processed_timex"
+# The detector also CLEARS its input folder every run. Its default,
+# $BASE/input, is where collect_all_ground_truth.py looks for images to
+# click, so this job must never use it -- it would wipe images staged
+# for ground-truth collection three times a day.
+SCRATCH_INPUT="$BASE/input_timex"
+LOCK="$BASE/.timex_cron.lock"
 ARCHIVE_CSV="$BASE/archive/processed_timex"
 ARCHIVE_IMG="$BASE/archive/images_timex"
 LOG="$BASE/logs/timex_cron.log"
@@ -93,9 +99,18 @@ DEM_MAX_SPREAD=0.5
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
 
-mkdir -p "$SCRATCH" "$ARCHIVE_CSV" "$ARCHIVE_IMG" "$(dirname "$LOG")"
+mkdir -p "$SCRATCH" "$SCRATCH_INPUT" "$ARCHIVE_CSV" "$ARCHIVE_IMG" "$(dirname "$LOG")"
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
+
+# One run at a time. The detector clears its scratch folders on start,
+# so an overlapping run (a slow run meeting the next cron slot, or a
+# manual run) would delete the files the first run is still working on.
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    log "SKIPPED: another run holds $LOCK"
+    exit 0
+fi
 
 log "=== run start ==="
 
@@ -106,6 +121,7 @@ cd "$BASE" || { log "FATAL: cannot cd to $BASE"; exit 1; }
 #    a timex run no longer picks up the snap-tuned values.
 python3 waterline_detector_v5.py \
     --image-suffix timex.jpg \
+    --input-dir "$SCRATCH_INPUT" \
     --output-dir "$SCRATCH" \
     --debug-dir "$BASE/debug" >> "$LOG" 2>&1
 status=$?

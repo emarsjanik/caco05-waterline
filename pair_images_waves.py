@@ -179,6 +179,14 @@ def main():
                          "(default 30). Images further away are dropped rather than matched "
                          "to an interpolated value, because interpolating across an hour "
                          "smooths the storm peaks the model most needs to learn.")
+    ap.add_argument("--on-tie", default="mean", choices=["mean", "earlier", "later", "drop"],
+                    help="What to do when an image is exactly equidistant from two wave "
+                         "records -- every :30 image against hourly ADCP records. 'mean' "
+                         "(default) averages the two; 'earlier'/'later' take one side, which "
+                         "is right only if the ADCP timestamp marks the start/end of its "
+                         "burst; 'drop' discards the image. The previous behaviour was "
+                         "an implicit 'earlier' via argmin, which silently labelled half of "
+                         "all images with the previous hour's waves.")
     ap.add_argument("--wave-height-col", default="wh_4061")
     ap.add_argument("--wave-period-col", default="wp_peak")
     ap.add_argument("--assume-tz", default="UTC")
@@ -256,24 +264,42 @@ def main():
         if c not in waves.columns:
             sys.exit(f"wave file has no column '{c}'")
 
-    rows, too_far, outside = [], 0, 0
+    hvals = waves[hcol].to_numpy(dtype=float)
+    pvals = waves[pcol].to_numpy(dtype=float)
+
+    rows, too_far, outside, ties, tie_dropped = [], 0, 0, 0, 0
     for epoch, cam, name in parsed:
         if epoch < wep.min() or epoch > wep.max():
             outside += 1
             continue
-        i = int(np.argmin(np.abs(wep - epoch)))
-        gap_min = abs(int(wep[i]) - epoch) / 60.0
+        dist = np.abs(wep - epoch)
+        gap_s = int(dist.min())
+        gap_min = gap_s / 60.0
         if gap_min > args.max_gap:
             too_far += 1
             continue
+        # All records at the minimum distance: one normally, two when
+        # the image sits exactly halfway between records. argmin alone
+        # would always resolve that tie to the earlier record.
+        nearest = np.flatnonzero(dist == gap_s)
+        if len(nearest) > 1:
+            ties += 1
+            if args.on_tie == "drop":
+                tie_dropped += 1
+                continue
+            if args.on_tie == "earlier":
+                nearest = nearest[:1]
+            elif args.on_tie == "later":
+                nearest = nearest[-1:]
         rows.append({
             "filename": name,
             "camera": cam,
             "epoch": epoch,
             "time_utc": datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(),
             "gap_minutes": round(gap_min, 1),
-            "wave_height_m": float(waves[hcol].iloc[i]),
-            "wave_period_s": float(waves[pcol].iloc[i]),
+            "n_records": len(nearest),
+            "wave_height_m": float(np.mean(hvals[nearest])),
+            "wave_period_s": float(np.mean(pvals[nearest])),
         })
 
     print(f"paired            : {len(rows)}")
@@ -281,6 +307,10 @@ def main():
         print(f"  outside record  : {outside} image(s) with no overlapping wave data")
     if too_far:
         print(f"  gap > {args.max_gap:.0f} min    : {too_far} image(s) dropped")
+    if ties:
+        print(f"  equidistant     : {ties} image(s) between two records "
+              f"(--on-tie {args.on_tie}"
+              + (f", {tie_dropped} dropped)" if tie_dropped else ")"))
     if not rows:
         sys.exit("No pairs produced.")
 
