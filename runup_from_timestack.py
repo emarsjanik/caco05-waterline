@@ -27,16 +27,22 @@ INPUTS.
     and the intertidal DEM (to read an elevation at the detected
     positions).
 
-HOW THE EDGE IS FOUND. Foam in the uprush is brighter than the sand it
-runs over. Each column's 25th-percentile brightness over the 10 minutes
-approximates that column's bare-sand value; the "excess" above it is
-foam. The noise level of that excess is measured on the landward 20%
-of the line, which the swash never reaches, and the threshold is set
-at --k times that noise. The edge in each time row is the most
-landward pixel that is above threshold AND sits in a stretch that is
-mostly above threshold, so isolated bright specks on dry sand are
-ignored. A 5-sample (2.5 s) running median then removes single-row
-flicker.
+HOW THE EDGE IS FOUND. Each column's bare-sand brightness (its 3rd
+percentile over the 10 minutes) is subtracted from it, which removes the
+strong seaward-to-landward brightness gradient along the line; in the result every uprush
+is a bright tongue of foam with a sharp landward tip, on uniform sand.
+Whole-row brightness changes (exposure, passing cloud) are removed
+first, using the landward end of the line as reference. A pixel counts
+as foam when it is brighter than its column's bare-sand level by more than --k
+times the noise measured on the landward 15% of the line. The edge in
+each time row is the landward end of the most landward run of at least
+--min-run foam pixels, so isolated bright specks do not count. A
+5-sample (2.5 s) running median then removes single-row flicker.
+
+An earlier version compared every column against one dry-sand level
+taken from the landward end. On real stacks the sand itself brightens
+steadily toward the sea, so that marked bare sand as foam and put the
+edge well landward of the true tips.
 
 WHICH END IS THE SEA is decided from the data: the end with more
 temporal variability is the swash end. It is reported as sea_at so a
@@ -99,34 +105,44 @@ def split_lines(pix):
     return list(zip(starts, ends))
 
 
-def find_edge(gray, k, min_threshold, window=10, fill=0.5):
+def find_edge(gray, k, min_threshold, min_run=15):
     """
-    Landward swash edge per time row, as a fractional column index
-    counted from the SEA end (column 0 = sea). NaN where no swash is
-    detected in that row.
+    Landward swash edge per time row, as a column index counted from the
+    SEA end (column 0 = sea). NaN where no foam tongue is found in that
+    row. Also returns the threshold used and the foam-anomaly image (for
+    the diagnostic plot).
     """
-    g = cv2.GaussianBlur(gray, (5, 3), 0)
-    baseline = np.percentile(g, 25, axis=0)
-    # Columns in the inner swash are under foam most of the time, so
-    # their own 25th percentile is foam, not sand. Cap every column's
-    # baseline at the dry-sand level measured on the landward part of
-    # the line, or those columns never register as covered.
-    dry_level = np.percentile(baseline[int(0.6 * len(baseline)):], 75)
-    baseline = np.minimum(baseline, dry_level)
-    excess = g - baseline
+    g = cv2.GaussianBlur(gray.astype(np.float32), (3, 3), 0)
+    n = g.shape[1]
+    land = slice(int(0.85 * n), n)
 
-    land = excess[:, int(0.8 * excess.shape[1]):]
-    mad = np.median(np.abs(land - np.median(land)))
-    threshold = max(k * 1.4826 * mad, min_threshold)
+    # Whole-row brightness changes: exposure steps or cloud shadow.
+    land_level = np.median(g[:, land], axis=1, keepdims=True)
+    g = g - (land_level - np.median(land_level))
 
-    above = excess > threshold
-    csum = np.cumsum(np.pad(above, ((0, 0), (1, 0))).astype(np.int32), axis=1)
-    lo = np.clip(np.arange(above.shape[1]) - window + 1, 0, None)
-    frac = (csum[:, 1:] - csum[:, lo]) / (np.arange(above.shape[1]) - lo + 1)
-    ok = above & (frac >= fill)
+    # Bare-sand reference per column: its 3rd-percentile brightness.
+    # The median would not do -- in the inner swash a column is under
+    # foam more than half the time, so its median IS foam and foam there
+    # would never stand out. The 3rd percentile stays on sand for any
+    # column exposed at least ~3% of the time (36 of 1200 rows); on a
+    # synthetic stack it halved the large errors of a 10th percentile
+    # with no extra false detections. In pure noise it sits 1.88 sigma
+    # below the median, hence the offset on the threshold.
+    anomaly = g - np.percentile(g, 3, axis=0)
+    land_part = g[:, land]
+    noise = 1.4826 * np.median(np.abs(land_part - np.median(land_part, axis=0)))
+    threshold = max(k * noise, min_threshold) + 1.88 * noise
+    foam = anomaly > threshold
+
+    # Length of the run of consecutive foam pixels ending at each column.
+    run = np.zeros(foam.shape, np.int32)
+    run[:, 0] = foam[:, 0]
+    for x in range(1, n):
+        run[:, x] = np.where(foam[:, x], run[:, x - 1] + 1, 0)
+    ok = run >= min_run
 
     has = ok.any(axis=1)
-    last = above.shape[1] - 1 - np.argmax(ok[:, ::-1], axis=1)
+    last = n - 1 - np.argmax(ok[:, ::-1], axis=1)
     edge = np.where(has, last, np.nan).astype(float)
 
     # 5-sample running median, ignoring gaps.
@@ -136,7 +152,7 @@ def find_edge(gray, k, min_threshold, window=10, fill=0.5):
         warnings.simplefilter("ignore", RuntimeWarning)
         smoothed = np.nanmedian(stack, axis=0)
     smoothed[~has] = np.nan
-    return smoothed, threshold
+    return smoothed, threshold, anomaly
 
 
 def runup_peaks(series, half_width=4):
@@ -184,15 +200,26 @@ def dem_at(dem, e, n):
     return np.nan
 
 
-def save_plot(path, colour_segment, edge):
-    img = colour_segment.copy()
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+def save_plot(path, anomaly, edge, threshold):
+    """
+    Left: the foam anomaly (each column minus its median), contrast-
+    stretched so the uprush tongues stand out. Right: the same with the
+    detected edge as a thin red line. The left panel is never drawn on,
+    so the tips can always be checked against the line.
+    """
+    scale = 128.0 / max(4.0 * threshold, 1.0)
+    grey = np.clip(128 + anomaly * scale, 0, 255).astype(np.uint8)
+    left = cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR)
+    right = left.copy()
     pts = [(int(round(x)), t) for t, x in enumerate(edge) if np.isfinite(x)]
-    for x, t in pts:
-        cv2.circle(img, (x, t), 1, (0, 0, 255), -1)
-    h = int(900 * img.shape[0] / max(img.shape[1], 1))
-    cv2.imwrite(str(path), cv2.resize(img, (900, max(h, 1))))
+    for (x0, t0), (x1, t1) in zip(pts[:-1], pts[1:]):
+        if t1 - t0 == 1:
+            cv2.line(right, (x0, t0), (x1, t1), (0, 0, 255), 1)
+    gap = np.zeros((left.shape[0], 8, 3), np.uint8)
+    img = np.hstack([left, gap, right])
+    w = 1400
+    h = int(w * img.shape[0] / img.shape[1])
+    cv2.imwrite(str(path), cv2.resize(img, (w, max(h, 1)), interpolation=cv2.INTER_AREA))
 
 
 def process(ras_path, args, pix_cache, gnssr, dem):
@@ -233,7 +260,7 @@ def process(ras_path, args, pix_cache, gnssr, dem):
     if sea_at == "end":
         gray, seg, line_uv = gray[:, ::-1], seg[:, ::-1], line_uv[::-1]
 
-    edge, threshold = find_edge(gray, args.k, args.min_threshold)
+    edge, threshold, anomaly = find_edge(gray, args.k, args.min_threshold, args.min_run)
     valid = float(np.isfinite(edge).mean())
 
     mid_epoch = epoch + BURST_MID_OFFSET_S
@@ -270,7 +297,8 @@ def process(ras_path, args, pix_cache, gnssr, dem):
 
     if args.plot_dir:
         Path(args.plot_dir).mkdir(parents=True, exist_ok=True)
-        save_plot(Path(args.plot_dir) / (Path(name).stem + f".line{args.line}.png"), seg, edge)
+        save_plot(Path(args.plot_dir) / (Path(name).stem + f".line{args.line}.png"),
+                  anomaly, edge, threshold)
 
     return {
         "source_file": name,
@@ -314,10 +342,12 @@ def main():
                     help="Plane elevation (m NAVD88) for georectifying when no GNSS-R "
                          "value is available (default 0).")
     ap.add_argument("--dem", help="Intertidal DEM (.asc) to read elevations from.")
-    ap.add_argument("--k", type=float, default=5.0,
-                    help="Foam threshold in multiples of the dry-sand noise (default 5).")
-    ap.add_argument("--min-threshold", type=float, default=8.0,
-                    help="Floor on the foam threshold, in grey levels (default 8).")
+    ap.add_argument("--k", type=float, default=4.0,
+                    help="Foam threshold in multiples of the dry-sand noise (default 4).")
+    ap.add_argument("--min-threshold", type=float, default=4.0,
+                    help="Floor on the foam threshold, in grey levels (default 4).")
+    ap.add_argument("--min-run", type=int, default=15,
+                    help="Minimum length, in pixels, of a foam tongue (default 15).")
     ap.add_argument("--min-valid", type=float, default=0.5,
                     help="Minimum fraction of time rows with a detected edge (default 0.5).")
     ap.add_argument("--min-peaks", type=int, default=20,
