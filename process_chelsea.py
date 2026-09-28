@@ -289,6 +289,10 @@ def main():
     ap.add_argument("--max-gap-minutes", type=float, default=60.0,
                     help="Largest distance to the ADCP reading on either side (ADCP is hourly).")
     ap.add_argument("--cell", type=float, default=2.0, help="DEM cell size, m.")
+    ap.add_argument("--envelope-pad", type=float, default=0.3,
+                    help="Widen the detector's search envelope by this fraction of the crop "
+                         "height (default 0.3). The envelope was tuned on the 2026 beach; with "
+                         "0 the winter 2025 waterline fell outside it in 324 of 336 frames.")
     ap.add_argument("--no-overlays", action="store_true", help="Skip the per-frame overlay images.")
     ap.add_argument("--skip-geometry-check", action="store_true")
     args = ap.parse_args()
@@ -396,7 +400,14 @@ def main():
     # --- 5-7. detect, water level, georectify ---------------------------------
     say()
     say("5. Detecting waterlines (roughly 3-4 s per frame)")
+    # A rerun must not mix in detections from an earlier run's settings.
+    for d in (work / "in", work / "detections", work / "debug"):
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
+    if args.envelope_pad:
+        say(f"  search envelope widened by {args.envelope_pad:.2f} of the crop height")
     if not run([sys.executable, HERE / "waterline_detector_v5.py",
+                "--envelope-pad", args.envelope_pad,
                 "--image-suffix", "timex.jpg",
                 "--source-dir", work / "src", "--input-dir", work / "in",
                 "--output-dir", work / "detections", "--debug-dir", work / "debug"],
