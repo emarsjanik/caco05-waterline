@@ -448,12 +448,15 @@ def main():
     ap.add_argument("--output", required=True,
                     help="CSV of results. Stacks already in it are skipped unless --reprocess.")
     ap.add_argument("--plot-dir", help="Write a diagnostic PNG per stack with the edge in red.")
+    ap.add_argument("--gnssr-qc-reference", default=None,
+                    help="Tide-gauge archive for GNSS-R quality control (gnssr_qc.py); failed "
+                         "readings are removed, so stacks at those times get no water level.")
     args = ap.parse_args()
 
     gnssr = None
     if args.gnssr:
         from extract_elevation_contours import load_gnssr_spline
-        g_ep, g_lv, _, _ = load_gnssr_spline(args.gnssr)
+        g_ep, g_lv, _, _ = load_gnssr_spline(args.gnssr, args.gnssr_qc_reference)
         order = np.argsort(g_ep)
         gnssr = (np.asarray(g_ep, float)[order], np.asarray(g_lv, float)[order])
 
