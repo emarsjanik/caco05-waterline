@@ -32,10 +32,12 @@ WHAT IT CHECKS BEFORE PROCESSING, and why each check exists:
 
 VERTICAL DATUM. A tide MODEL is not the same measurement as GNSS-R.
 Compared over a 47-day overlap at this site the model sat 0.2574 m
-above the GNSS-R water level, so a -0.25 m offset is applied by
+above the GNSS-R water level -- but that GNSS-R was itself 0.349 m low
+(its antenna height was a CGVD2013 value, not NAVD88; OPUS 2026-09-28).
+Against NAVD88 the model therefore sits ~0.09 m LOW, so +0.09 m is applied by
 default to bring modelled levels onto the same datum as the
-operational product. Without it every elevation is about a quarter of
-a metre too high. Override with care.
+operational product. Without it every elevation is about 0.09 m too
+low. Override with care.
 
 Usage:
     python3 process_historical.py                 (prompts for everything)
@@ -57,7 +59,7 @@ from datetime import datetime, timezone
 CALIBRATION_VALID_FROM = "2025-11-13"
 
 # Tide model minus GNSS-R, measured over a 47-day overlap at this site.
-DEFAULT_DATUM_OFFSET = -0.25
+DEFAULT_DATUM_OFFSET = +0.09   # was -0.25 before the GNSS-R NAVD88 correction
 
 REQUIRED_SCRIPTS = [
     "waterline_detector_v5.py",

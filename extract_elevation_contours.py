@@ -231,22 +231,45 @@ def nearest_within(epochs, values, epoch, max_gap_s):
     return None if best is None else float(best[1])
 
 
+# NAVD88 height of the GNSS-R antenna. gnssrefl computes each water
+# level as (station orthometric height - reflector height), so any error
+# in that height shifts EVERY water level -- and every waterline and DEM
+# elevation -- by the same amount.
+#
+# The height in the gnssrefl station setup, 18.665 m, came from a
+# CSRS-PPP solution (NRCan, 24 h of RINEX, 2026-07-11). CSRS-PPP reports
+# orthometric heights in CGVD2013 (Canadian datum, geoid CGG2013a), not
+# NAVD88. NGS OPUS on the same RINEX (2026-09-28; NAD83(2011) epoch
+# 2010.0, GEOID18) gives 19.014 m NAVD88 (+/-0.061 m, mostly geoid model
+# uncertainty); the two solutions agree on the ITRF2020 ellipsoid height
+# to 2 mm (-10.025 vs -10.023 m), so the antenna position is not in
+# question -- only the height system. GNSS-R levels were therefore
+# 0.349 m LOW, consistent with the Chatham gauge (-0.37 m, including a
+# harbour effect) and the tide-model offset (0.26 m).
+#
+# The correction applied is GNSSR_ANTENNA_NAVD88_M minus the height
+# written in the spline file's header, so if the gnssrefl station file is
+# later corrected to 19.014 m, the correction falls to zero by itself
+# rather than being applied twice.
+GNSSR_ANTENNA_NAVD88_M = 19.014
+
+
 def load_gnssr_spline(path):
     """
     Loads gnssrefl subdaily spline output as a water-level source.
 
     Columns (1-indexed): 1 MJD, 2 RH(m), 3 YYYY, 4 MM, 5 DD, 6 HH,
     7 MM, 8 SS, 9 quasi-sea-level(m). Column 9 is computed upstream as
-    (station orthometric height - reflector height), and orthometric
-    height in the US means NAVD88 -- the SAME datum as the camera EO
-    z-coordinates. So GNSS-R needs NO vertical datum offset at all,
-    unlike the global tide models.
+    (station orthometric height - reflector height). The levels are
+    shifted onto NAVD88 -- the datum of the camera EO z-coordinates --
+    using GNSSR_ANTENNA_NAVD88_M (see there: the header height was a
+    CGVD2013 value, 0.349 m below NAVD88).
 
     It is also a MEASUREMENT at this station, so it includes storm
     surge, wind setup and local bias that an astronomical tide model
-    cannot predict. Against ~47 days of overlap the model differed
-    from GNSS-R by about -0.25 m in the mean with a 0.08 m standard
-    deviation; using GNSS-R removes both of those terms.
+    cannot predict. Against ~47 days of overlap a global tide model
+    differed from the (uncorrected) GNSS-R by about 0.26 m in the mean
+    with a 0.08 m standard deviation.
 
     Returns (epochs, levels, spreads, hortho). `spreads` is zeros:
     there is no cross-model spread for a single measured series, and
@@ -295,14 +318,22 @@ def load_gnssr_spline(path):
     epoch = epoch[order]
     levels = np.array(levels)[order]
 
-    print(f"Water-level source: GNSS-R MEASURED (gnssrefl spline)")
-    if hortho is not None:
-        print(f"  station orthometric height (NAVD88): {hortho:.3f} m")
-        print(f"  water elevation = {hortho:.3f} - reflector height  (already NAVD88)")
+    print("Water-level source: GNSS-R MEASURED (gnssrefl spline)")
     print(f"  Loaded {len(epoch)} readings, spanning "
           f"{datetime.fromtimestamp(epoch[0], tz=timezone.utc)} to "
           f"{datetime.fromtimestamp(epoch[-1], tz=timezone.utc)}")
-    print("  No vertical datum offset required -- this source is already NAVD88.")
+    if hortho is None:
+        print("  WARNING: no antenna orthometric height in the file header, so the NAVD88")
+        print("  correction cannot be checked; levels used as written.")
+    else:
+        correction = GNSSR_ANTENNA_NAVD88_M - hortho
+        print(f"  antenna height in file {hortho:.3f} m; NAVD88 (OPUS/GEOID18) "
+              f"{GNSSR_ANTENNA_NAVD88_M:.3f} m")
+        if abs(correction) >= 0.001:
+            levels = levels + correction
+            print(f"  -> {correction:+.3f} m added to every level to put it on NAVD88")
+        else:
+            print("  -> already NAVD88, no correction")
     return epoch, levels, np.zeros(len(epoch)), hortho
 
 
@@ -678,9 +709,9 @@ def main():
                               "ocean models like EOT20/GOT/FES) into NAVD88 -- the datum the "
                               "camera EO z-coordinates use. The preferred way to obtain this "
                               "is compare_gnssr_to_tidemodel.py, which measures it against "
-                              "GNSS-R water levels that are already in NAVD88 (about -0.25 m "
-                              "at this station, +/- 0.04 m depending on the comparison "
-                              "window). NOAA's VDatum tool is an alternative but gives a "
+                              "GNSS-R water levels on NAVD88 (about +0.09 m at this station "
+                              "after the GNSS-R datum correction; it was -0.25 m against the "
+                              "uncorrected GNSS-R). NOAA's VDatum tool is an alternative but gives a "
                               "modelled rather than measured value. Defaults to 0.0, which "
                               "is almost certainly WRONG -- see the warning printed if unset.")
     args = parser.parse_args()
@@ -724,8 +755,9 @@ def main():
         print("then re-run with:")
         print("    --vertical-datum-offset <value_in_meters>")
         print()
-        print("At this station that came out near -0.25 m, though it varied by about 0.04 m")
-        print("between comparison windows -- so treat it as approximate, not exact. Where")
+        print("At this station that comes out near +0.09 m with GNSS-R on NAVD88 (it was")
+        print("-0.25 m before the GNSS-R datum correction of +0.349 m) and varied by about")
+        print("0.04 m between comparison windows -- so treat it as approximate. Where")
         print("GNSS-R covers the imagery directly it is better still: no offset is needed.")
         print("=" * 90)
         print()

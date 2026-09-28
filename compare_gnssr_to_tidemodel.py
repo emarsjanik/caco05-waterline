@@ -151,6 +151,14 @@ def main():
         sys.exit(1)
 
     g_epoch, g_level, g_rh, hortho = load_gnssr_spline(sys.argv[1])
+    # Put GNSS-R on NAVD88 exactly as extract_elevation_contours.py does
+    # (the header height was a CGVD2013 value; see GNSSR_ANTENNA_NAVD88_M).
+    from extract_elevation_contours import GNSSR_ANTENNA_NAVD88_M
+    if hortho is not None and abs(GNSSR_ANTENNA_NAVD88_M - hortho) >= 0.001:
+        g_level = g_level + (GNSSR_ANTENNA_NAVD88_M - hortho)
+        print(f"GNSS-R shifted {GNSSR_ANTENNA_NAVD88_M - hortho:+.3f} m onto NAVD88 "
+              f"(antenna {hortho:.3f} m in file, {GNSSR_ANTENNA_NAVD88_M:.3f} m NAVD88)")
+        hortho = GNSSR_ANTENNA_NAVD88_M
     t_epoch, t_level, height_cols = load_tide_model(sys.argv[2])
 
     def fmt(e):
