@@ -16,6 +16,11 @@ gnssrefl settings, geoid model) and before publishing elevations.
 GAUGE. 8447435 Chatham, Lydia Cove, MA -- inside Chatham Harbor, ~30 km
 south of Marconi. Its tide is not the open-coast tide at Marconi: the
 amplitude and timing differ, and storm setup in the harbour differs.
+Lydia Cove is also a back-barrier harbour: its inlet damps the tide,
+low waters most (Sep 2026: lows ~-0.5 m against ~-1.0 m at Marconi),
+which raises the harbour's mean level relative to the open coast by a
+few cm. Expect a small negative offset even with both on NAVD88.
+
 So the script does not trust a point-by-point difference. It reports:
 
   1. TIDALLY AVERAGED OFFSET (the answer). Mean GNSS-R minus mean gauge
@@ -200,6 +205,14 @@ def main():
     print(f"   median {offset:+.3f} m   (spread of days {np.std(daily):.3f} m, "
           f"standard error ~{sem:.3f} m)")
     print()
+    poor_fit = best is not None and best[0] < 0.8
+    if poor_fit:
+        print(f"WARNING: GNSS-R tracks the gauge poorly in this window (R2 {best[0]:.2f}; "
+              "above ~0.9 is normal).")
+        print("   Typical in storms, when GNSS reflections degrade and harbour water levels")
+        print("   depart from the open coast. The offset below is NOT a reliable datum check;")
+        print("   repeat on a calm period.")
+        print()
     if abs(offset) < 0.05:
         verdict = ("CONSISTENT: GNSS-R agrees with NAVD88 at the gauge to within what two "
                    "sites 30 km apart can show. No datum correction indicated.")
@@ -211,6 +224,8 @@ def main():
                    f"{'LOW' if offset < 0 else 'HIGH'} against NAVD88. Every DEM elevation "
                    "carries about this error. Check the geoid model (EGM96 vs GEOID18) and "
                    "antenna height in the gnssrefl station settings.")
+    if poor_fit:
+        verdict = "UNRELIABLE (poor tide fit -- see warning above). " + verdict
     print("VERDICT: " + verdict)
 
     if args.plot:
