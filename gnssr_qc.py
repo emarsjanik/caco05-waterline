@@ -231,8 +231,15 @@ def main():
         sel = ep >= ep.max() - args.plot_days * 86400
         t = np.array([datetime.fromtimestamp(e, tz=timezone.utc) for e in ep[sel]])
         fig, ax = plt.subplots(figsize=(13, 4.5), dpi=110)
-        if np.isfinite(predicted[sel]).any():
-            ax.plot(t, predicted[sel], color="#e0a060", lw=1.5, label="expected from Chatham gauge")
+        if fit and reference is not None:
+            # Expected level on a 6-minute grid, so it follows the gauge
+            # through GNSS-R gaps instead of joining them with straight
+            # lines; NaN where the gauge itself has a gap.
+            a, lag_s, b, _ = fit
+            grid = np.arange(ep[sel][0], ep[sel][-1] + 1, 360.0)
+            exp_lv = a * reference_at(reference[0], reference[1], grid - lag_s) + b
+            ax.plot([datetime.fromtimestamp(e, tz=timezone.utc) for e in grid], exp_lv,
+                    color="#e0a060", lw=1.5, label="expected from Chatham gauge")
         good = flags[sel] < FAIL
         ax.plot(t[good], lv[sel][good], ".", ms=4, color="#1f77b4", label="GNSS-R, passed QC")
         if (~good).any():
