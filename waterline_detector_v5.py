@@ -2050,7 +2050,7 @@ def apply_cli_overrides():
     tuned parameters.
     """
     global SOURCE_FOLDER, INPUT_FOLDER, OUTPUT_FOLDER, DEBUG_FOLDER, IMAGE_SUFFIX
-    global TEMPORAL_FILTER_ENABLED
+    global TEMPORAL_FILTER_ENABLED, MIN_SIGNAL_COLUMN_FRACTION
 
     parser = argparse.ArgumentParser(
         description="USGS Argus shoreline detector. All arguments are optional; "
@@ -2077,6 +2077,12 @@ def apply_cli_overrides():
                              "Use this when comparing image products: the existing "
                              "corrections were fit against snap imagery, so leaving them on "
                              "would confound an otherwise clean comparison.")
+    parser.add_argument("--min-signal-fraction", type=float, default=None,
+                        help=f"Share of columns that must carry signal for a frame to be kept "
+                             f"(default {MIN_SIGNAL_COLUMN_FRACTION}). Columns without signal are "
+                             f"flagged per column either way and dropped downstream, so a lower "
+                             f"value keeps the visible part of a partly faint waterline, e.g. the "
+                             f"hazy far field of a winter frame, instead of losing the frame.")
     parser.add_argument("--envelope-pad", type=float, default=0.0,
                         help="Widen every camera's search envelope by this fraction of the "
                              "cropped image height on both sides (0 = as tuned). For imagery "
@@ -2107,6 +2113,10 @@ def apply_cli_overrides():
             CAMERAS[key] = replace(profile, bias_correction_points=(),
                                    bias_correction_points_timex=())
         print("BIAS CORRECTION DISABLED for all cameras (--no-bias-correction).")
+
+    if args.min_signal_fraction is not None:
+        MIN_SIGNAL_COLUMN_FRACTION = args.min_signal_fraction
+        print(f"MINIMUM SIGNAL FRACTION set to {MIN_SIGNAL_COLUMN_FRACTION:.2f} (--min-signal-fraction).")
 
     if args.envelope_pad > 0:
         pad = args.envelope_pad

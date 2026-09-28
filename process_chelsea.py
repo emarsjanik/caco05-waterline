@@ -202,13 +202,20 @@ def geometry_check(frames, out_csv):
     return rows, moved
 
 
-def back_to_original_view(contours_in, contours_out, levels, calib):
-    """Rewrite pixel_column/pixel_row from the current view into the original photo's pixels."""
+def back_to_original_view(contours_in, contours_out, levels, calib, current_view_out):
+    """
+    Rewrite pixel_column/pixel_row from the current view into the original
+    photo's pixels (contours_out). Points the old camera never saw -- i.e.
+    detected in the nearest-filled margin of a resampled frame -- are not
+    real and are dropped from BOTH outputs; current_view_out keeps the
+    surviving points in current-view pixels for georectification.
+    """
     from view_reproject import dst_to_src_points
     with open(contours_in, newline="") as f:
         reader = csv.DictReader(f)
         fields = reader.fieldnames
         rows = list(reader)
+    current = [dict(r) for r in rows]
     groups = defaultdict(list)
     for i, r in enumerate(rows):
         groups[r["source_file"]].append(i)
@@ -226,13 +233,14 @@ def back_to_original_view(contours_in, contours_out, levels, calib):
                 rows[i]["pixel_row"] = f"{sv[k]:.1f}"
             else:
                 keep[i] = False
-    with open(contours_out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        for r, k in zip(rows, keep):
-            if k:
-                w.writerow(r)
-    return int(keep.sum())
+    for path, table in ((contours_out, rows), (current_view_out, current)):
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            for r, k in zip(table, keep):
+                if k:
+                    w.writerow(r)
+    return int(keep.sum()), int((~keep).sum())
 
 
 def draw_overlays(contours_csv, originals, out_dir, max_frames=None):
@@ -293,6 +301,12 @@ def main():
                     help="Widen the detector's search envelope by this fraction of the crop "
                          "height (default 0.3). The envelope was tuned on the 2026 beach; with "
                          "0 the winter 2025 waterline fell outside it in 324 of 336 frames.")
+    ap.add_argument("--min-signal-fraction", type=float, default=0.35,
+                    help="Share of a frame's columns that must show the waterline (default "
+                         "0.35; the station uses 0.60). On overcast winter frames the far field "
+                         "is too hazy: a real 21 Jan frame had signal in 95-100%% of the near and "
+                         "middle columns but 20-40%% of the far third, 44%% overall. Columns "
+                         "without signal are dropped one by one, so only visible parts are used.")
     ap.add_argument("--no-overlays", action="store_true", help="Skip the per-frame overlay images.")
     ap.add_argument("--skip-geometry-check", action="store_true")
     args = ap.parse_args()
@@ -373,6 +387,12 @@ def main():
     # --- 4. reproject into the current view -------------------------------------
     say()
     say("4. Resampling frames into the 2025-11-13 view on the water surface")
+    from view_reproject import REPROJECT_VERSION
+    marker = work / "src" / ".reproject_version"
+    if not marker.exists() or marker.read_text().strip() != REPROJECT_VERSION:
+        shutil.rmtree(work / "src", ignore_errors=True)       # made by an older resampling
+        (work / "src").mkdir(parents=True)
+        marker.write_text(REPROJECT_VERSION + "\n")
     with open(work / "frame_levels.csv", "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["frame", "camera", "water_level_navd88"])
@@ -408,6 +428,7 @@ def main():
         say(f"  search envelope widened by {args.envelope_pad:.2f} of the crop height")
     if not run([sys.executable, HERE / "waterline_detector_v5.py",
                 "--envelope-pad", args.envelope_pad,
+                "--min-signal-fraction", args.min_signal_fraction,
                 "--image-suffix", "timex.jpg",
                 "--source-dir", work / "src", "--input-dir", work / "in",
                 "--output-dir", work / "detections", "--debug-dir", work / "debug"],
@@ -415,14 +436,25 @@ def main():
         sys.exit(f"Detection failed; see {log}")
     say(f"    {len(list((work / 'detections').glob('*.csv')))} frame(s) passed the detector's quality filters")
 
-    contours = out / "contour_points.csv"
+    all_contours = work / "contour_points_all.csv"
     if not run([sys.executable, HERE / "extract_elevation_contours.py", wl_csv,
                 "--time-col", "time", "--level-col", "water_level_navd88",
                 "--max-gap-minutes", args.max_gap_minutes,
-                "--processed-dir", work / "detections", "--output", contours],
-               log, "matching water levels and filtering contours") or not contours.exists():
+                "--min-coverage", args.min_signal_fraction,
+                "--processed-dir", work / "detections", "--output", all_contours],
+               log, "matching water levels and filtering contours") or not all_contours.exists():
         sys.exit(f"Contour extraction failed; see {log}")
 
+    # --- 6. drop detections outside the original photo, map the rest back ----------------
+    say()
+    say("6. Keeping only waterline points the original photo actually shows")
+    level_by_stem = {Path(n).name.rsplit(".jpg", 1)[0]: z for n, z in levels.items()}
+    contours = out / "contour_points.csv"
+    orig_contours = out / "contour_points_original_view.csv"
+    n_pts, n_out = back_to_original_view(all_contours, orig_contours, level_by_stem, calib, contours)
+    say(f"  {n_pts} point(s) kept; {n_out} dropped (in the filled margin the old camera did not see)")
+
+    # --- 7. georectify ------------------------------------------------------------------
     ground = out / "contour_points_ground.csv"
     if not run([sys.executable, HERE / "georectify.py", contours, ground,
                 "--io-c1", CAL / "CACO05_c1_20240801_IO.yaml",
@@ -432,17 +464,9 @@ def main():
                log, "georectifying to UTM Zone 19 (2025-11-13 geometry = the resampled view)"):
         sys.exit(f"Georectification failed; see {log}")
 
-    # --- 8. back to the original photos --------------------------------------------
-    say()
-    say("8. Mapping waterlines back onto the original photos")
-    level_by_stem = {Path(n).name.rsplit(".jpg", 1)[0]: z for n, z in levels.items()}
-    orig_contours = out / "contour_points_original_view.csv"
-    n_pts = back_to_original_view(contours, orig_contours, level_by_stem, calib)
-    say(f"  {n_pts} contour point(s) written to {orig_contours.name}")
-
     # --- 9. maps and overlays --------------------------------------------------------
     say()
-    say("9. Maps")
+    say("7. Maps")
     dates = defaultdict(set)
     with open(orig_contours, newline="") as fh:
         for r in csv.DictReader(fh):
@@ -462,7 +486,7 @@ def main():
 
     # --- 10. DEMs ---------------------------------------------------------------------
     say()
-    say("10. DEMs")
+    say("8. DEMs")
     periods = sorted({f["period"] for n, f in frames.items() if n in levels})
     made = []
     for p in periods:
