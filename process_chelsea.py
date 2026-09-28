@@ -297,10 +297,17 @@ def main():
     ap.add_argument("--max-gap-minutes", type=float, default=60.0,
                     help="Largest distance to the ADCP reading on either side (ADCP is hourly).")
     ap.add_argument("--cell", type=float, default=2.0, help="DEM cell size, m.")
-    ap.add_argument("--envelope-pad", type=float, default=0.3,
+    ap.add_argument("--envelope-pad", type=float, default=0.1,
                     help="Widen the detector's search envelope by this fraction of the crop "
-                         "height (default 0.3). The envelope was tuned on the 2026 beach; with "
-                         "0 the winter 2025 waterline fell outside it in 324 of 336 frames.")
+                         "height (default 0.1). The mass rejection of the winter frames was "
+                         "caused by the black border of the resampled frames, not the envelope; "
+                         "at 0.3 the detector wandered onto the bluff's shadow on the dry beach.")
+    ap.add_argument("--utc-hours", default="13-18",
+                    help="Only use frames from this UTC hour range, start inclusive, end "
+                         "exclusive (default 13-18, i.e. 8 am - 1 pm EST). In winter the low "
+                         "afternoon sun throws the bluff's shadow across the beach, and the "
+                         "detector followed its edge (and snow patches) instead of the water. "
+                         "'0-24' uses every frame.")
     ap.add_argument("--min-signal-fraction", type=float, default=0.35,
                     help="Share of a frame's columns that must show the waterline (default "
                          "0.35; the station uses 0.60). On overcast winter frames the far field "
@@ -355,6 +362,14 @@ def main():
     say(f"  {len(ep_wl)} readings, "
         f"{datetime.fromtimestamp(ep_wl[0], tz=timezone.utc):%Y-%m-%d %H:%M} to "
         f"{datetime.fromtimestamp(ep_wl[-1], tz=timezone.utc):%Y-%m-%d %H:%M} UTC")
+    h0, h1 = (int(x) for x in args.utc_hours.split("-"))
+    wrong_hour = [n for n, f in frames.items()
+                  if not h0 <= datetime.fromtimestamp(f["epoch"], tz=timezone.utc).hour < h1]
+    for n in wrong_hour:
+        del frames[n]
+    if wrong_hour:
+        say(f"  {len(wrong_hour)} frame(s) outside {h0:02d}:00-{h1:02d}:00 UTC skipped "
+            f"(afternoon shadow of the bluff; --utc-hours)")
     levels, no_level = {}, defaultdict(int)
     for name, f in frames.items():
         z = level_at(ep_wl, lv_wl, f["epoch"], args.max_gap_minutes * 60)
@@ -393,6 +408,12 @@ def main():
         shutil.rmtree(work / "src", ignore_errors=True)       # made by an older resampling
         (work / "src").mkdir(parents=True)
         marker.write_text(REPROJECT_VERSION + "\n")
+    # The detector reads every frame in work/src, so frames cached by an
+    # earlier run with other settings (e.g. --utc-hours) must go.
+    for sub in ("src", "original"):
+        for p in (work / sub).glob("*.jpg"):
+            if p.name not in levels:
+                p.unlink()
     with open(work / "frame_levels.csv", "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["frame", "camera", "water_level_navd88"])
