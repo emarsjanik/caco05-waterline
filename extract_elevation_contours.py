@@ -254,7 +254,7 @@ def nearest_within(epochs, values, epoch, max_gap_s):
 GNSSR_ANTENNA_NAVD88_M = 19.014
 
 
-def load_gnssr_spline(path):
+def load_gnssr_spline(path, qc_reference=None):
     """
     Loads gnssrefl subdaily spline output as a water-level source.
 
@@ -334,6 +334,12 @@ def load_gnssr_spline(path):
             print(f"  -> {correction:+.3f} m added to every level to put it on NAVD88")
         else:
             print("  -> already NAVD88, no correction")
+    if qc_reference:
+        # Drop readings that fail quality control (gnssr_qc.py); they
+        # become gaps, so nothing near them gets a wrong water level.
+        from gnssr_qc import qc_filter
+        epoch, levels, summary = qc_filter(epoch, levels, qc_reference)
+        print("  " + summary)
     return epoch, levels, np.zeros(len(epoch)), hortho
 
 
@@ -693,6 +699,11 @@ def main():
                         help="Largest gap to the nearest wave record before a frame's wave "
                              "columns are left blank (default 90; the buoy reports every "
                              "10-60 min).")
+    parser.add_argument("--gnssr-qc-reference", default=None,
+                        help="Tide-gauge archive (fetch_tide_gauge.py) for GNSS-R quality control "
+                             "(gnssr_qc.py): readings that fail are removed and become gaps, so "
+                             "frames at those times are skipped as stale instead of getting a "
+                             "wrong level. Without this option no QC is applied.")
     parser.add_argument("--setup-coef", type=float, default=None,
                         help="Wave-setup correction coefficient C (needs --waves). Each "
                              "frame's beach elevation becomes water level + C*sqrt(Hs*L0), "
@@ -720,7 +731,7 @@ def main():
 
     if using_gnssr:
         tide_timestamps, tide_levels, tide_spreads, _hortho = load_gnssr_spline(
-            args.tide_model_csv)
+            args.tide_model_csv, args.gnssr_qc_reference)
         source_label = "gnssr_measured"
         if args.vertical_datum_offset != 0.0:
             print()

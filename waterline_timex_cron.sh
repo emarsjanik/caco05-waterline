@@ -120,6 +120,15 @@ RAS_SOURCE=/mnt/I2Rgus_Data/ImageProducts/products
 # 2026 frames in 3.8-3.9 m waves (week median 1.0 m) plotted ~0.5 m high.
 # 44008 faces the open Atlantic like Marconi; heights are an offshore
 # index, not the breaking height. Set DEM_MAX_HS="" to keep all frames.
+# GNSS-R quality control (gnssr_qc.py). GNSS-R degrades in big waves
+# (Sep 25-26 2026: up to ~4 m above the tide). Each run archives the NOAA
+# Chatham gauge in NAVD88, checks every GNSS-R reading against it
+# (plus gross-range, spike and rate tests), writes a report and a 7-day
+# plot, and the contour and runup stages drop failed readings.
+TIDE_GAUGE=8447435
+GAUGE_CSV="$BASE/archive/gauge_${TIDE_GAUGE}.csv"
+GNSSR_QC_CSV="$BASE/archive/gnssr_qc.csv"
+
 WAVE_BUOY=44008
 WAVES_CSV="$BASE/archive/waves_${WAVE_BUOY}.csv"
 DEM_MAX_HS=1.5
@@ -221,6 +230,14 @@ python3 "$BASE/fetch_buoy_waves.py" --station "$WAVE_BUOY" --output "$WAVES_CSV"
 waves_arg=""
 [ -f "$WAVES_CSV" ] && waves_arg="--waves $WAVES_CSV"
 
+# 5b. Tide gauge for GNSS-R QC. First run backfills 120 days.
+gauge_days=7
+[ -f "$GAUGE_CSV" ] || gauge_days=120
+python3 "$BASE/fetch_tide_gauge.py" --station "$TIDE_GAUGE" --days "$gauge_days" --output "$GAUGE_CSV" >> "$LOG" 2>&1 \
+    || log "WARNING: tide gauge $TIDE_GAUGE download failed; using the existing gauge archive"
+qc_arg=""
+[ -f "$GAUGE_CSV" ] && qc_arg="--gnssr-qc-reference $GAUGE_CSV"
+
 # 5. Match detections to measured water level, then draw the maps.
 #    Both read from the ARCHIVE, not the working folders, so they see
 #    the full accumulated record rather than just this run.
@@ -243,8 +260,16 @@ else
 
     setup_arg=""
     [ -n "$SETUP_COEF" ] && [ -n "$waves_arg" ] && setup_arg="--setup-coef $SETUP_COEF"
+    # GNSS-R QC report and plot (the contour and runup stages apply the
+    # same QC themselves through $qc_arg).
+    if [ -f "$GAUGE_CSV" ]; then
+        python3 "$BASE/gnssr_qc.py" "$GNSSR_SPLINE" --reference "$GAUGE_CSV" \
+            --output "$GNSSR_QC_CSV" --plot "$BASE/gnssr_qc_7day.png" >> "$LOG" 2>&1 \
+            || log "WARNING: GNSS-R QC report failed (see above)"
+    fi
+
     python3 "$BASE/extract_elevation_contours.py" "$GNSSR_SPLINE" \
-        --processed-dir "$ARCHIVE_CSV" $waves_arg $setup_arg \
+        --processed-dir "$ARCHIVE_CSV" $waves_arg $setup_arg $qc_arg \
         --output "$CONTOURS" >> "$LOG" 2>&1
     if [ $? -ne 0 ]; then
         log "ERROR: contour extraction failed -- see above. Maps not regenerated."
@@ -336,7 +361,7 @@ else
             for line in $RUNUP_LINES; do
                 python3 "$BASE/runup_from_timestack.py" "$ARCHIVE_RAS" \
                     --camera c2 --line "$line" \
-                    --gnssr "$GNSSR_SPLINE" --require-water-level \
+                    --gnssr "$GNSSR_SPLINE" --require-water-level $qc_arg \
                     --output "$BASE/runup_c2_line${line}.csv" >> "$LOG" 2>&1
                 if [ $? -eq 0 ]; then
                     log "runup updated: runup_c2_line${line}.csv"
@@ -347,5 +372,12 @@ else
         fi
     fi
 fi
+
+# 8. Station health summary (station_status.py): also written to
+#    station_status.txt; exit status 1 = warnings, 2 = alerts.
+python3 "$BASE/station_status.py" --base "$BASE" --gnssr "$GNSSR_SPLINE" > "$BASE/station_status.txt" 2>&1
+status_rc=$?
+log "station status: $(head -1 "$BASE/station_status.txt")"
+[ "$status_rc" -ge 1 ] && grep -E "^ +(WARN|ALERT)" "$BASE/station_status.txt" | while read -r l; do log "  $l"; done
 
 log "=== run end ==="
