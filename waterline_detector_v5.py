@@ -2077,6 +2077,14 @@ def apply_cli_overrides():
                              "Use this when comparing image products: the existing "
                              "corrections were fit against snap imagery, so leaving them on "
                              "would confound an otherwise clean comparison.")
+    parser.add_argument("--envelope-pad", type=float, default=0.0,
+                        help="Widen every camera's search envelope by this fraction of the "
+                             "cropped image height on both sides (0 = as tuned). For imagery "
+                             "whose beach sat elsewhere than the 2026 beach the envelope was "
+                             "tuned on, e.g. the winter 2025 frames: there the waterline "
+                             "fell outside the band and 324 of 336 frames were rejected as "
+                             "'no usable signal'. Wider means more room to lock onto other "
+                             "edges, so check the overlays.")
     args = parser.parse_args()
 
     if args.image_suffix:
@@ -2099,6 +2107,14 @@ def apply_cli_overrides():
             CAMERAS[key] = replace(profile, bias_correction_points=(),
                                    bias_correction_points_timex=())
         print("BIAS CORRECTION DISABLED for all cameras (--no-bias-correction).")
+
+    if args.envelope_pad > 0:
+        pad = args.envelope_pad
+        for key, profile in CAMERAS.items():
+            CAMERAS[key] = replace(profile, envelope_points=tuple(
+                (x, max(0.0, lo - pad), min(1.0, hi + pad))
+                for x, lo, hi in profile.envelope_points))
+        print(f"SEARCH ENVELOPE WIDENED by {pad:.2f} of the crop height (--envelope-pad).")
 
     return args
 
