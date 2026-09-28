@@ -45,6 +45,8 @@ from georectify import build_P, load_extrinsics, load_intrinsics, pixel_to_groun
 
 HERE = Path(__file__).resolve().parent
 MAP_STEP = 4            # remap tables are computed every MAP_STEP px, then interpolated
+# Bump when the resampling changes, so cached resampled frames are redone.
+REPROJECT_VERSION = "3-blurred-fill"
 
 
 def distort_uv(U, V, intrinsics):
@@ -93,15 +95,26 @@ def _tables(io_key, src_key, dst_key, z_cm):
     gv = np.arange(0, nv + MAP_STEP, MAP_STEP, dtype=float)
     UU, VV = np.meshgrid(gu, gv)
     su, sv, ok = dst_to_src_points(UU.ravel(), VV.ravel(), z_cm / 100.0, intrinsics, eo_src, eo_dst)
-    su = np.where(ok, su, -1e4).reshape(UU.shape).astype(np.float32)
-    sv = np.where(ok, sv, -1e4).reshape(UU.shape).astype(np.float32)
-    return su, sv
+    su, sv, ok = su.reshape(UU.shape), sv.reshape(UU.shape), ok.reshape(UU.shape)
+    # Parts of the current view the old camera never saw are filled from
+    # the NEAREST part it did see, not left black. A black border is the
+    # strongest edge in the frame: the detector scores each column
+    # against the frame's peak, so on a calm, low-contrast winter frame
+    # the real waterline looked like noise next to it and 324 of 336
+    # real frames were rejected as "no usable signal". Nearest fill has
+    # no step edge. Detections that land in the filled area are dropped
+    # afterwards (dst_to_src_points reports them as not visible).
+    if ok.any() and not ok.all():
+        from scipy.ndimage import distance_transform_edt
+        _, (iy, ix) = distance_transform_edt(~ok, return_indices=True)
+        su, sv = su[iy, ix], sv[iy, ix]
+    return su.astype(np.float32), sv.astype(np.float32), ok.astype(np.float32)
 
 
 def remap_tables(intrinsics, eo_src, eo_dst, z):
     """Full-resolution cv2.remap tables: destination pixel -> source pixel, at plane z."""
     import cv2
-    su, sv = _tables(tuple(intrinsics), tuple(eo_src), tuple(eo_dst), int(round(z * 100)))
+    su, sv, _ = _tables(tuple(intrinsics), tuple(eo_src), tuple(eo_dst), int(round(z * 100)))
     nu, nv = int(intrinsics[0]), int(intrinsics[1])
     # The tables are smooth, so a coarse grid interpolated up is exact to
     # a small fraction of a pixel and ~16x faster than every pixel.
@@ -116,11 +129,27 @@ def remap_tables(intrinsics, eo_src, eo_dst, z):
 
 
 def reproject_image(img, intrinsics, eo_src, eo_dst, z):
-    """Old-view image -> current-view image on plane z. Unseen areas are black."""
+    """
+    Old-view image -> current-view image on plane z. Areas the old camera
+    never saw take the nearest seen pixel (see _tables) and are then
+    heavily blurred: nearest fill copies the waterline outward as
+    perfectly clean streaks, which on a real winter frame became the
+    frame's strongest "waterline" and again pushed the real one under the
+    detector's signal threshold (54% of columns, needs 60%). Blurred, the
+    margin carries no edges and blends into the photo without a step.
+    """
     import cv2
     map_x, map_y = remap_tables(intrinsics, eo_src, eo_dst, z)
-    return cv2.remap(img, map_x, map_y, cv2.INTER_LINEAR,
-                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    out = cv2.remap(img, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    _, _, ok = _tables(tuple(intrinsics), tuple(eo_src), tuple(eo_dst), int(round(z * 100)))
+    if ok.all():
+        return out
+    h, w = out.shape[:2]
+    seen = cv2.resize(ok, (w, h), interpolation=cv2.INTER_LINEAR) > 0.5
+    small = cv2.resize(out, (w // 8, h // 8), interpolation=cv2.INTER_AREA)
+    blurred = cv2.resize(cv2.GaussianBlur(small, (0, 0), 6), (w, h), interpolation=cv2.INTER_LINEAR)
+    out[~seen] = blurred[~seen]
+    return out
 
 
 def self_test():
