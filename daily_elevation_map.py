@@ -406,14 +406,17 @@ def main():
                 hi = np.nanmax(stack, axis=0)
             valid = ~np.isnan(lo) & ~np.isnan(hi)
             if valid.any():
-                ax.fill_between(grid[valid], lo[valid], hi[valid],
+                # where= (not indexing) so a gap stays a gap instead of being
+                # bridged by a straight edge across columns with no data.
+                ax.fill_between(grid, lo, hi, where=valid,
                                 color=colour, alpha=fill_alpha, linewidth=0)
                 filled_bins += 1
 
         for k in keys:
-            y = resampled[k]
-            valid = ~np.isnan(y)
-            ax.plot(grid[valid], y[valid], color=colour,
+            # NaNs break the line: plotting only the valid columns joined the
+            # two sides of every gap with a straight segment, which looked like
+            # a detected (flat) waterline where there was none.
+            ax.plot(grid, resampled[k], color=colour,
                     alpha=line_alpha, linewidth=line_width)
 
     ax.set_xlim(0, width)

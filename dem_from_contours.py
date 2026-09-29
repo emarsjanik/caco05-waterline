@@ -352,6 +352,11 @@ def main():
                          "Catches days whose waterlines are consistently displaced -- a "
                          "different failure from the tide-direction check, which only sees "
                          "direction. Days with fewer than 30 comparable samples are kept.")
+    ap.add_argument("--max-frame-offset", type=float, default=None,
+                    help="Leave out single frames whose samples sit, on median, more than this "
+                         "many metres from the DEM built without that frame (e.g. 0.2). Runs "
+                         "before --max-day-offset, so one bad waterline does not cost its whole "
+                         "day. Frames with fewer than 10 comparable cells are kept.")
     ap.add_argument("--fit-setup", action="store_true",
                     help="Report the wave-setup coefficient C (extract_elevation_contours.py "
                          "--setup-coef) that makes repeat crossings agree best, from the "
@@ -411,9 +416,34 @@ def main():
     print(f"extent            : {E.max()-E.min():.1f} m E-W by {N.max()-N.min():.1f} m N-S")
     print()
 
-    if args.fit_setup or args.max_day_offset:
+    if args.fit_setup or args.max_day_offset or args.max_frame_offset:
         info = load_frame_info(args.contour_csv)
         pair_cell, pair_frame = frame_pairs(E, N, frames, args.cell)
+
+    if args.max_frame_offset:
+        # Same test as the day check below, one frame at a time, and run first:
+        # a single bad waterline (e.g. a high-tide line drawn seaward of the
+        # low-tide ones) is removed on its own instead of taking its whole day
+        # with it.
+        z_of = {}
+        for f, z in zip(frames, Z):
+            z_of.setdefault(f, z)
+        pair_vals = np.array([z_of[f] for f in pair_frame])
+        offsets = day_offsets(pair_cell, pair_vals, pair_frame, args.min_points, min_pairs=10)
+        bad = {k: o for k, (o, n) in offsets.items()
+               if np.isfinite(o) and abs(o) > args.max_frame_offset}
+        tested = sum(np.isfinite(o) for o, n in offsets.values())
+        print(f"Frame consistency (median offset from the DEM without that frame, limit "
+              f"+/-{args.max_frame_offset} m): {tested} of {len(offsets)} frames testable, "
+              f"{len(bad)} rejected")
+        for k in sorted(bad):
+            print(f"   {k}   {bad[k]:+.3f} m  <-- REJECTED")
+        if bad:
+            keep = np.array([f not in bad for f in frames])
+            E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
+            print(f"   left out {len(bad)} frame(s), {int((~keep).sum())} point(s)")
+            pair_cell, pair_frame = frame_pairs(E, N, frames, args.cell)
+        print()
 
     if args.fit_setup:
         result, n_pairs, n_frames = fit_setup_coefficient(pair_cell, pair_frame, info,
