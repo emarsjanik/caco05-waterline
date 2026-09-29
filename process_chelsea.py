@@ -325,6 +325,10 @@ def main():
     images_root = Path(args.images)
     out = Path(args.output)
     work = out / "work"
+    # Products are rebuilt every run; leftovers from a run with other
+    # settings (e.g. afternoon frames) would otherwise sit among them.
+    for d in (out / "maps", out / "dem", out / "overlays"):
+        shutil.rmtree(d, ignore_errors=True)
     for d in (out, work / "src", work / "in", work / "detections", work / "debug",
               work / "original", out / "maps", out / "dem"):
         d.mkdir(parents=True, exist_ok=True)
