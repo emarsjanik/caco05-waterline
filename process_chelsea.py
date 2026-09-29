@@ -305,6 +305,10 @@ def main():
                     help="Leave out whole days whose elevations differ from the other days' "
                          "DEM by more than this (m, default 0.15, as the station cron): catches "
                          "days where the detector followed snow or shadow. 0 disables.")
+    ap.add_argument("--max-frame-offset", type=float, default=0.2,
+                    help="Leave out single frames whose waterline sits more than this (m, "
+                         "default 0.2) from the DEM of all the other frames, before the day "
+                         "check: one bad line no longer costs its whole day. 0 disables.")
     ap.add_argument("--envelope-pad", type=float, default=0.1,
                     help="Widen the detector's search envelope by this fraction of the crop "
                          "height (default 0.1). The mass rejection of the winter frames was "
@@ -556,6 +560,8 @@ def main():
     dem_filters = []
     if args.max_hs:
         dem_filters += ["--max-hs", args.max_hs]
+    if args.max_frame_offset:
+        dem_filters += ["--max-frame-offset", args.max_frame_offset]
     if args.max_day_offset:
         dem_filters += ["--max-day-offset", args.max_day_offset]
     if dem_filters:
