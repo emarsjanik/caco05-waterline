@@ -11,8 +11,12 @@ Per day and camera it reports how far off the horizon is (median over
 up to --per-day frames nearest 17:00 UTC) and the tilt and roll change
 that best explains it. A camera that was knocked or re-aimed shows as a
 run of days with the same large offset; those days need their own
-calibration, which estimate_eo_rotation.py solves -- the exact command
-is printed.
+calibration. --write-setups writes one per run of days with the same
+pointing (tilt and roll from the horizon fit, azimuth and position kept)
+and lists them in calibration/chelsea_setups.csv, which
+process_chelsea.py reads. --against-setups then checks every day against
+its own calibration: all should match. estimate_eo_rotation.py solves
+all three angles instead, when photos with a known pointing exist.
 
 LIMITS. The horizon fixes tilt and roll. A pure left-right turn
 (azimuth) barely moves it, so a small pan can pass unnoticed here;
@@ -21,6 +25,8 @@ horizon: such days show as "unclear".
 
 Usage:
     python3 horizon_check.py /mnt/I2Rgus_Data/Chelsea_calibration/work/original
+    python3 horizon_check.py <same folder> --write-setups
+    python3 horizon_check.py <same folder> --against-setups
 """
 
 import re
@@ -33,12 +39,13 @@ from collections import defaultdict
 import numpy as np
 
 from georectify import load_extrinsics, load_intrinsics
-from estimate_eo_rotation import horizon_rows, observed_horizon
+from estimate_eo_rotation import horizon_rows, observed_horizon, write_eo
 
 HERE = Path(__file__).resolve().parent
 CAL = HERE / "calibration"
 MOVED_PX = 12.0          # median horizon offset above this = different pointing
 FIT_OK_PX = 8.0          # a tilt+roll fit must explain the horizon this well to trust it
+RUN_TOL_DEG = 0.3        # days whose tilt and roll agree this well share one pointing
 
 
 def fit_tilt_roll(io, eo, cols, obs, iterations=15):
@@ -72,7 +79,21 @@ def main():
     ap.add_argument("image_dir", help="folder of original *.timex.jpg frames")
     ap.add_argument("--eo-date", default="20250219", help="calibration to test against")
     ap.add_argument("--per-day", type=int, default=3)
+    ap.add_argument("--write-setups", action="store_true",
+                    help="write a calibration for each run of days with a different pointing "
+                         "(tilt and roll from the horizon, azimuth kept) and list them in "
+                         "calibration/chelsea_setups.csv for process_chelsea.py")
+    ap.add_argument("--against-setups", action="store_true",
+                    help="compare each day with ITS calibration from calibration/chelsea_setups.csv "
+                         "(a check after --write-setups: every day should then match)")
     args = ap.parse_args()
+    setups = []
+    if args.against_setups:
+        import csv
+        sc = CAL / "chelsea_setups.csv"
+        if sc.exists():
+            with open(sc, newline="") as f:
+                setups = list(csv.DictReader(f))
 
     frames = defaultdict(list)
     for p in sorted(Path(args.image_dir).glob("*.timex.jpg")):
@@ -84,18 +105,24 @@ def main():
     if not frames:
         sys.exit(f"No *.timex.jpg in {args.image_dir}")
 
-    moved = defaultdict(list)
+    moved = defaultdict(list)          # cam -> [(day, dtilt, droll)]
     for cam in ("c1", "c2"):
         days = sorted(d for c, d in frames if c == cam)
         if not days:
             continue
         io = load_intrinsics(CAL / f"CACO05_{cam}_20240801_IO.yaml")
-        eo = load_extrinsics(CAL / f"CACO05_{cam}_{args.eo_date}_EO.yaml")
+        eo_default = load_extrinsics(CAL / f"CACO05_{cam}_{args.eo_date}_EO.yaml")
         cols = np.arange(150, int(io[0]) - 150, 100)
-        pred = horizon_rows(io, eo, cols)
-        print(f"\n{cam}: sea horizon against the {args.eo_date} calibration")
+        against = "each day's own calibration (chelsea_setups.csv)" if args.against_setups \
+            else f"the {args.eo_date} calibration"
+        print(f"\n{cam}: sea horizon against {against}")
         print("  date         frames  offset px   tilt change  roll change  fit px   verdict")
         for day in days:
+            eo = eo_default
+            for r in setups:
+                if r["camera"] == cam and r["first_date"] <= day <= r["last_date"]:
+                    eo = load_extrinsics(CAL / r["eo_file"])
+            pred = horizon_rows(io, eo, cols)
             offs, fits = [], []
             for _, p in sorted(frames[(cam, day)])[:args.per_day]:
                 g = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
@@ -113,7 +140,7 @@ def main():
                 verdict = "unclear (haze? horizon not found cleanly)"
             elif off > MOVED_PX:
                 verdict = "DIFFERENT POINTING"
-                moved[cam].append(day)
+                moved[cam].append((day, dt, dr))
             else:
                 verdict = "matches"
             print(f"  {day}   {len(offs):4d}   {off:8.1f}   {dt:+9.2f} deg  {dr:+9.2f} deg  "
@@ -122,22 +149,55 @@ def main():
     if not any(moved.values()):
         print("\nEvery day with a clear horizon matches the calibration.")
         return
-    print("\nDays with a different pointing need their own calibration. For each run of such "
-          "days, solve it from the photos (reference = days that match):")
-    for cam, days in moved.items():
-        runs, start, prev = [], days[0], days[0]
-        for d in days[1:]:
-            gap = (datetime.fromisoformat(d) - datetime.fromisoformat(prev)).days
-            if gap > 1:
-                runs.append((start, prev)); start = d
-            prev = d
-        runs.append((start, prev))
-        for a, b in runs:
-            print(f"  python3 {HERE / 'estimate_eo_rotation.py'} --camera {cam} "
-                  f"--images-dir {args.image_dir} --first {a} --last {b} --add-to-setups")
-    print("Check each run's dates against the table first: an 'unclear' day inside or next to a "
-          "run may belong to it.")
 
+    # Runs of consecutive days with the SAME pointing (a new run starts at a
+    # gap of more than a day or a change of more than RUN_TOL_DEG).
+    runs = []
+    for cam, days in moved.items():
+        cur = [days[0]]
+        for d in days[1:]:
+            gap = (datetime.fromisoformat(d[0]) - datetime.fromisoformat(cur[-1][0])).days
+            same = abs(d[1] - cur[-1][1]) < RUN_TOL_DEG and abs(d[2] - cur[-1][2]) < RUN_TOL_DEG
+            if gap > 1 or not same:
+                runs.append((cam, cur)); cur = [d]
+            else:
+                cur.append(d)
+        runs.append((cam, cur))
+    print("\nPointings found (each run: median tilt and roll change against the calibration):")
+    rows = []
+    for cam, run in runs:
+        a, b = run[0][0], run[-1][0]
+        dt = float(np.median([d[1] for d in run])); dr = float(np.median([d[2] for d in run]))
+        name = f"CACO05_{cam}_{a}_to_{b}_EO.yaml"
+        print(f"  {cam}  {a} to {b}  ({len(run)} day(s))  tilt {dt:+.2f} deg, roll {dr:+.2f} deg  -> {name}")
+        rows.append((cam, a, b, name, dt, dr))
+    print("  The horizon fixes tilt and roll; the azimuth (left-right pan) is kept from the "
+          f"{args.eo_date} calibration. A pan error moves points mostly ALONG the beach for these "
+          "cameras, little across it.")
+    if not args.write_setups:
+        print("\nTo write these calibrations and use them in process_chelsea.py, rerun with "
+              "--write-setups.")
+        return
+    import csv
+    sc = CAL / "chelsea_setups.csv"
+    old = []
+    if sc.exists():
+        with open(sc, newline="") as f:
+            old = [r for r in csv.DictReader(f) if r["camera"] not in {r_[0] for r_ in rows}]
+    for cam, a, b, name, dt, dr in rows:
+        eo = load_extrinsics(CAL / f"CACO05_{cam}_{args.eo_date}_EO.yaml")
+        ang = np.degrees(eo[3:6]) + [0.0, dt, dr]
+        write_eo(CAL / name, eo, ang,
+                 f"horizon_check.py: CACO05_{cam}_{args.eo_date}_EO.yaml with tilt {dt:+.3f} and "
+                 f"roll {dr:+.3f} deg fitted to the sea horizon, {a} to {b}; azimuth and position kept.")
+    with open(sc, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["camera", "first_date", "last_date", "eo_file"])
+        w.writeheader()
+        w.writerows(old)
+        w.writerows({"camera": c, "first_date": a, "last_date": b, "eo_file": n} for c, a, b, n, _, _ in rows)
+    print(f"\nWrote {len(rows)} calibration(s) and {sc}. Check: rerun horizon_check.py -- each "
+          f"day should then show a small offset against ITS setup (--against-setups) -- and "
+          f"then run process_chelsea.py.")
 
 if __name__ == "__main__":
     main()
