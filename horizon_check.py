@@ -41,18 +41,29 @@ MOVED_PX = 12.0          # median horizon offset above this = different pointing
 FIT_OK_PX = 8.0          # a tilt+roll fit must explain the horizon this well to trust it
 
 
-def fit_tilt_roll(io, eo, cols, obs):
-    from scipy.optimize import least_squares
+def fit_tilt_roll(io, eo, cols, obs, iterations=15):
+    """Tilt and roll change (deg) that best moves the predicted horizon onto obs.
+    Gauss-Newton with robust (soft-L1) weights, numpy only: the station's scipy is
+    too old for its numpy, so scipy.optimize cannot be imported there."""
     ok = np.isfinite(obs)
+    p = np.zeros(2)
 
-    def res(p):
+    def res(q):
         e = eo.copy()
-        e[4] += np.deg2rad(p[0]); e[5] += np.deg2rad(p[1])
+        e[4] += np.deg2rad(q[0]); e[5] += np.deg2rad(q[1])
         r = horizon_rows(io, e, cols[ok]) - obs[ok]
         return np.where(np.isfinite(r), r, 200.0)
 
-    f = least_squares(res, [0.0, 0.0], loss="soft_l1", f_scale=5.0)
-    return f.x, np.abs(f.fun)
+    for _ in range(iterations):
+        r = res(p)
+        J = np.column_stack([(res(p + d) - r) / 0.01 for d in (np.array([0.01, 0]), np.array([0, 0.01]))])
+        w = 1.0 / np.sqrt(1.0 + (r / 5.0) ** 2)          # soft-L1, scale 5 px
+        A, b = J * w[:, None], -r * w
+        step = np.linalg.lstsq(A, b, rcond=None)[0]
+        p = p + np.clip(step, -3, 3)
+        if np.abs(step).max() < 1e-4:
+            break
+    return p, np.abs(res(p))
 
 
 def main():
