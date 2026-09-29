@@ -13,6 +13,8 @@ one output folder:
     <output>/contour_points_ground.csv     same, UTM 19N easting/northing
     <output>/maps/<date>_<cam>.png         each day's waterlines on the photo, by elevation
     <output>/maps/all_<cam>.png            every waterline in the period on one photo
+                                           (one per camera setup, all_<cam>_<setup>.png, when
+                                           the camera was re-aimed during the period)
     <output>/overlays/<cam>/<frame>.jpg    each frame with its waterline (half size)
     <output>/dem/<period>_dem.*            DEM per image period, and for all periods
     <output>/processing.log                every stage's full output
@@ -20,7 +22,10 @@ one output folder:
 HOW, AND WHY IT DIFFERS FROM process_historical.py
 
   * Geometry. These frames were taken with the 2025-02-19 extrinsics
-    (calibration/CACO05_c?_20250219_EO.yaml); the detector is tuned in
+    (calibration/CACO05_c?_20250219_EO.yaml) -- except days when the
+    camera was aimed differently, which calibration/chelsea_setups.csv
+    maps to their own EO (horizon_check.py finds those days,
+    estimate_eo_rotation.py solves them); the detector is tuned in
     pixel positions of the 2025-11-13 view, ~300-350 px away. Each frame
     is first resampled into the 2025-11-13 view on the plane z = its
     water level (view_reproject.py). The waterline lies on that plane,
@@ -73,6 +78,13 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 CAL = HERE / "calibration"
 EO_OLD = "20250219"
+# Camera setups. The camera was re-aimed during the period: on 21 Jan 2025
+# the sea horizon sits up to 170 px from where the 2025-02-19 EO puts it,
+# on 24/25 Jan it matches. Dates with another pointing are listed in
+# calibration/chelsea_setups.csv (camera,first_date,last_date,eo_file --
+# horizon_check.py finds them, estimate_eo_rotation.py solves and adds
+# them); every other frame uses the 2025-02-19 EO.
+SETUPS_CSV = CAL / "chelsea_setups.csv"
 EO_NEW = "20251113"
 GEOMETRY_WARN_PX = 10.0
 GEOMETRY_MIN_CORRELATION = 0.2   # weaker matches say nothing either way
@@ -94,6 +106,33 @@ def run(cmd, log_path, label):
         say(f"    FAILED (exit {proc.returncode}) -- see {log_path}")
         return False
     return True
+
+
+def load_setups(path=SETUPS_CSV):
+    """[(camera, first_date, last_date, eo_file_name)] from chelsea_setups.csv, if present."""
+    out = []
+    if Path(path).exists():
+        with open(path, newline="") as f:
+            for r in csv.DictReader(f):
+                if r.get("camera", "").strip():
+                    out.append((r["camera"].strip(), r["first_date"].strip(),
+                                r["last_date"].strip(), r["eo_file"].strip()))
+    return out
+
+
+def setup_of(cam, epoch, setups):
+    """EO file name for a frame: a listed setup covering its UTC date, else the 2025-02-19 EO."""
+    day = datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d")
+    for c, first, last, eo in setups:
+        if c == cam and first <= day <= last:
+            return eo
+    return f"CACO05_{cam}_{EO_OLD}_EO.yaml"
+
+
+def setup_label(eo_name):
+    """'20250219' from CACO05_c1_20250219_EO.yaml -- used in map names."""
+    m = re.match(r"CACO05_c\d_(.+)_EO\.yaml$", eo_name)
+    return m.group(1) if m else Path(eo_name).stem
 
 
 def camera_of(name):
@@ -146,13 +185,12 @@ def level_at(ep_wl, lv_wl, epoch, max_gap_s):
 
 def geometry_check(frames, out_csv):
     """
-    Image shift of each day's midday frame against the 2025-02-19 frame
-    nearest 17:00 UTC, per camera. Gradient images at quarter size and a
+    Image shift of each day's midday frame against a reference frame of
+    the SAME camera setup -- the one nearest 17:00 UTC on its middle day. Gradient images at quarter size and a
     window keep the comparison on fixed edges (dune line, horizon,
     structures) more than on moving water.
     """
     import cv2
-    ref_day = datetime(2025, 2, 19, 17, tzinfo=timezone.utc).timestamp()
     rows = []
 
     def prep(path):
@@ -164,10 +202,11 @@ def geometry_check(frames, out_csv):
         mag = cv2.magnitude(cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1))
         return mag * cv2.createHanningWindow(mag.shape[::-1], cv2.CV_32F)
 
-    for cam in ("c1", "c2"):
-        mine = [f for f in frames.values() if f["camera"] == cam]
-        if not mine:
-            continue
+    for cam, setup in sorted({(f["camera"], f["eo"]) for f in frames.values()}):
+        mine = [f for f in frames.values() if f["camera"] == cam and f["eo"] == setup]
+        days = sorted({datetime.fromtimestamp(f["epoch"], tz=timezone.utc).date() for f in mine})
+        mid = days[len(days) // 2]
+        ref_day = datetime(mid.year, mid.month, mid.day, 17, tzinfo=timezone.utc).timestamp()
         ref = min(mine, key=lambda f: abs(f["epoch"] - ref_day))
         ref_img = prep(ref["path"])
         by_day = defaultdict(list)
@@ -190,7 +229,7 @@ def geometry_check(frames, out_csv):
                 note = ""
             rows.append([cam, day.isoformat(), f["path"].name, round(4 * dx, 1), round(4 * dy, 1),
                          round(resp, 3), note])
-        say(f"  {cam}: reference {ref['path'].name}")
+        say(f"  {cam} setup {setup_label(setup)}: reference {ref['path'].name}")
     with open(out_csv, "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["camera", "date", "frame", "shift_x_px", "shift_y_px", "correlation", "note"])
@@ -198,11 +237,12 @@ def geometry_check(frames, out_csv):
     moved = [r for r in rows if r[6].startswith("MOVED")]
     unsure = [r for r in rows if r[6].startswith("inconclusive")]
     if unsure:
-        say(f"  {len(unsure)} camera-day(s) inconclusive (weak image match) -- see geometry_check.csv")
+        say(f"  {len(unsure)} of {len(rows)} camera-day(s) inconclusive (weak image match) -- "
+            f"see geometry_check.csv; those were NOT checked")
     return rows, moved
 
 
-def back_to_original_view(contours_in, contours_out, levels, calib, current_view_out):
+def back_to_original_view(contours_in, contours_out, levels, calib, eo_by_stem, current_view_out):
     """
     Rewrite pixel_column/pixel_row from the current view into the original
     photo's pixels (contours_out). Points the old camera never saw -- i.e.
@@ -223,7 +263,7 @@ def back_to_original_view(contours_in, contours_out, levels, calib, current_view
     for src, idx in groups.items():
         cam = rows[idx[0]]["camera"]
         z = levels.get(src, float(rows[idx[0]]["tide_elevation_navd88"]))
-        io, eo_old, eo_new = calib[cam]
+        io, eo_old, eo_new = calib[eo_by_stem[src]]
         u = np.array([float(rows[i]["pixel_column"]) for i in idx])
         v = np.array([float(rows[i]["pixel_row"]) for i in idx])
         su, sv, ok = dst_to_src_points(u, v, z, io, eo_old, eo_new)
@@ -361,11 +401,6 @@ def main():
     log = out / "processing.log"
     log.write_text(f"process_chelsea.py started {datetime.now().isoformat()}\n")
 
-    calib = {}
-    for cam in ("c1", "c2"):
-        calib[cam] = (load_intrinsics(CAL / f"CACO05_{cam}_20240801_IO.yaml"),
-                      load_extrinsics(CAL / f"CACO05_{cam}_{EO_OLD}_EO.yaml"),
-                      load_extrinsics(CAL / f"CACO05_{cam}_{EO_NEW}_EO-CV.yaml"))
 
     # --- 1. images --------------------------------------------------------
     say("1. Collecting images")
@@ -378,6 +413,24 @@ def main():
     for p in sorted(by_period):
         say(f"  {p}: c1 {by_period[p]['c1']}, c2 {by_period[p]['c2']}")
     say(f"  {len(frames)} unique frames (duplicate copies and quarantine folders skipped)")
+
+    # Calibration per camera setup (the camera was re-aimed during the period).
+    setups = load_setups()
+    for f in frames.values():
+        f["eo"] = setup_of(f["camera"], f["epoch"], setups)
+    calib = {}
+    for eo in sorted({f["eo"] for f in frames.values()}):
+        cam = "c1" if "_c1_" in eo else "c2"
+        if not (CAL / eo).exists():
+            sys.exit(f"{SETUPS_CSV.name} names {eo}, which is not in {CAL}")
+        calib[eo] = (load_intrinsics(CAL / f"CACO05_{cam}_20240801_IO.yaml"),
+                     load_extrinsics(CAL / eo),
+                     load_extrinsics(CAL / f"CACO05_{cam}_{EO_NEW}_EO-CV.yaml"))
+        n = sum(f["eo"] == eo for f in frames.values())
+        say(f"  {cam}: {n} frame(s) with {eo}")
+    if not setups:
+        say(f"  (no {SETUPS_CSV.name}: every frame assumed to have the 2025-02-19 pointing -- "
+            f"check with horizon_check.py)")
 
     # --- 2. water level ----------------------------------------------------
     say()
@@ -434,25 +487,30 @@ def main():
         say("3. Camera stability check skipped")
         moved = []
     else:
-        say("3. Camera stability against the 2025-02-19 calibration")
+        say("3. Camera stability within each camera setup")
         _, moved = geometry_check({n: f for n, f in frames.items() if n in levels},
                                   out / "geometry_check.csv")
         if moved:
             say(f"  WARNING: {len(moved)} camera-day(s) shifted more than {GEOMETRY_WARN_PX:.0f} px "
-                f"from the 2025-02-19 view -- see geometry_check.csv. Their ground positions "
-                f"(and the DEM) are only as good as the 2025-02-19 calibration is for them.")
+                f"from their setup's reference -- see geometry_check.csv. Their ground positions "
+                f"(and the DEM) are only as good as that setup's calibration is for them.")
         else:
-            say(f"  all days within {GEOMETRY_WARN_PX:.0f} px of the 2025-02-19 view")
+            say(f"  every checkable day within {GEOMETRY_WARN_PX:.0f} px of its setup's reference")
 
     # --- 4. reproject into the current view -------------------------------------
     say()
     say("4. Resampling frames into the 2025-11-13 view on the water surface")
     from view_reproject import REPROJECT_VERSION
     marker = work / "src" / ".reproject_version"
-    if not marker.exists() or marker.read_text().strip() != REPROJECT_VERSION:
+    # A changed calibration (e.g. a newly solved CACO03 EO) makes every cached
+    # resampled frame wrong, so the calibrations are part of the version.
+    signature = REPROJECT_VERSION + " " + " ".join(
+        f"{eo}:" + ",".join(f"{v:.6f}" for v in c[1]) for eo, c in sorted(calib.items()))
+    signature += " " + str(sorted(setups))
+    if not marker.exists() or marker.read_text().strip() != signature:
         shutil.rmtree(work / "src", ignore_errors=True)       # made by an older resampling
         (work / "src").mkdir(parents=True)
-        marker.write_text(REPROJECT_VERSION + "\n")
+        marker.write_text(signature + "\n")
     # The detector reads every frame in work/src, so frames cached by an
     # earlier run with other settings (e.g. --utc-hours) must go.
     for sub in ("src", "original"):
@@ -475,7 +533,7 @@ def main():
                 img = cv2.imread(str(f["path"]))
                 if img is None:
                     continue
-                io, eo_old, eo_new = calib[f["camera"]]
+                io, eo_old, eo_new = calib[f["eo"]]
                 cv2.imwrite(str(dst), reproject_image(img, io, eo_old, eo_new, levels[name]),
                             [cv2.IMWRITE_JPEG_QUALITY, 95])
             w.writerow([name, f["camera"], f"{levels[name]:.4f}"])
@@ -519,9 +577,11 @@ def main():
     say()
     say("6. Keeping only waterline points the original photo actually shows")
     level_by_stem = {Path(n).name.rsplit(".jpg", 1)[0]: z for n, z in levels.items()}
+    eo_by_stem = {Path(n).name.rsplit(".jpg", 1)[0]: frames[n]["eo"] for n in levels}
     contours = out / "contour_points.csv"
     orig_contours = out / "contour_points_original_view.csv"
-    n_pts, n_out = back_to_original_view(all_contours, orig_contours, level_by_stem, calib, contours)
+    n_pts, n_out = back_to_original_view(all_contours, orig_contours, level_by_stem, calib,
+                                         eo_by_stem, contours)
     say(f"  {n_pts} point(s) kept; {n_out} dropped (in the filled margin the old camera did not see)")
 
     # --- 7. georectify ------------------------------------------------------------------
@@ -537,17 +597,26 @@ def main():
     # --- 9. maps and overlays --------------------------------------------------------
     say()
     say("7. Maps")
-    dates = defaultdict(set)
+    # One map per camera SETUP: lines of a differently aimed setup would be
+    # drawn in the wrong place on this setup's background photo.
+    dates, names = defaultdict(set), defaultdict(set)
     with open(orig_contours, newline="") as fh:
         for r in csv.DictReader(fh):
-            dates[r["camera"]].add(r["capture_time_utc"][:10])
-    for cam in sorted(dates):
+            key = (r["camera"], eo_by_stem.get(r["source_file"], ""))
+            dates[key].add(r["capture_time_utc"][:10])
+            names[key].add(r["source_file"])
+    many = len({eo for _, eo in dates}) > len({cam for cam, _ in dates})
+    for cam, eo in sorted(dates):
+        tag = f"{cam}_{setup_label(eo)}" if many else cam
+        lst = work / f"frames_{tag}.txt"
+        lst.write_text("\n".join(sorted(names[(cam, eo)])) + "\n")
+        sel = ["--frames-list", lst]
         run([sys.executable, HERE / "daily_elevation_map.py", orig_contours, work / "original",
-             cam, out / "maps" / f"all_{cam}.png", "--days", "36500"],
-            log, f"all waterlines, {cam}")
-        for d in sorted(dates[cam]):
+             cam, out / "maps" / f"all_{tag}.png", "--days", "36500"] + sel,
+            log, f"all waterlines, {cam} (setup {setup_label(eo)})")
+        for d in sorted(dates[(cam, eo)]):
             run([sys.executable, HERE / "daily_elevation_map.py", orig_contours, work / "original",
-                 cam, out / "maps" / f"{d}_{cam}.png", "--date", d],
+                 cam, out / "maps" / f"{d}_{tag}.png", "--date", d] + sel,
                 log, f"waterlines {d} {cam}")
     say(f"  {len(list((out / 'maps').glob('*.png')))} map(s) in {out / 'maps'}")
     if not args.no_overlays:
