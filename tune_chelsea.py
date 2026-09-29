@@ -14,6 +14,7 @@ Whether those settings suit them is measured here, not assumed.
     python3 collect_all_ground_truth.py ...   (you trace them; the command is printed)
     python3 tune_chelsea.py score    run detector settings on those frames, score each
     python3 tune_chelsea.py derive   fit a Chelsea bias correction, tested day by day
+    python3 tune_chelsea.py diagnose where and why a scored setting goes wrong
 
 SAMPLE. Frames come from <out>/work/src -- the RESAMPLED frames the
 detector actually sees -- so the traced line and the detector's line are
@@ -38,6 +39,13 @@ correction. Fitted on all days and saved as JSON for the detector
 is reported leave-one-day-out -- each day corrected with a fit to the
 OTHER days -- so the number is what to expect on frames it has not
 seen, not a fit to itself.
+
+DIAGNOSE. For one scored setting (default "current"): each traced
+frame's signal fraction and whether the detector kept or discarded it
+(and why), with its error; then the error by column segment (tenths of
+the image width, left to right). Separates a correctable, consistent
+offset from scatter, and a threshold problem from a real absence of
+signal.
 """
 
 import os
@@ -63,6 +71,9 @@ CONFIGS = {
     "no_bias":  BASE + ["--envelope-pad", "0.1", "--no-bias-correction"],
     "pad_0.05": BASE + ["--envelope-pad", "0.05", "--no-bias-correction"],
     "pad_0.2":  BASE + ["--envelope-pad", "0.2", "--no-bias-correction"],
+    # lower signal thresholds: more frames kept -- at what cost in error?
+    "signal_0.25": ["--image-suffix", "timex.jpg", "--min-signal-fraction", "0.25", "--envelope-pad", "0.1"],
+    "signal_0.15": ["--image-suffix", "timex.jpg", "--min-signal-fraction", "0.15", "--envelope-pad", "0.1"],
 }
 
 
@@ -314,6 +325,100 @@ def cmd_derive(args):
     print(report)
 
 
+# --------------------------------------------------------------------- diagnose
+
+def parse_log(log, name):
+    """frame -> {"signal": % of columns with signal, "status": kept / why discarded},
+    from the LAST run of setting `name` in tuning.log."""
+    if not log.exists():
+        return {}
+    text = "\n" + log.read_text(errors="replace")
+    start = text.rfind(f"\n=== {name}: ")
+    if start < 0:
+        return {}
+    end = text.find("\n=== ", start + 5)
+    info, cur = {}, None
+    for line in text[start:end if end > 0 else None].splitlines():
+        line = line.strip()
+        if line.startswith("Processing:"):
+            cur = line.split(":", 1)[1].strip()
+            info[cur] = {"signal": None, "status": "kept"}
+        elif cur and line.startswith("Signal columns"):
+            try:
+                info[cur]["signal"] = float(line.split(":", 1)[1].split("%")[0])
+            except ValueError:
+                pass
+        elif cur and line.startswith("DISCARDED"):
+            why = line[len("DISCARDED"):].strip()
+            info[cur]["status"] = "DISCARDED " + why[1:why.find(")")] if why.startswith("(") else why
+    return info
+
+
+def cmd_diagnose(args):
+    out = Path(args.out)
+    det_dir = out / "tuning" / args.config / "det"
+    if not det_dir.exists():
+        sys.exit(f"Run 'score' first (no {args.config} run in {out / 'tuning'}).")
+    levels, cal = frame_levels(out), calib()
+    res = errors_for(det_dir, out, levels, cal)
+    log = parse_log(out / "tuning" / "tuning.log", args.config)
+    lines = [f"Diagnosis of the '{args.config}' run ({len(res)} traced frames)"]
+    for cam in ("c1", "c2"):
+        fr = {k: v for k, v in res.items() if v["cam"] == cam}
+        if not fr:
+            continue
+        io, eo = cal[cam]
+        lines += ["", f"{cam} -- per frame (signal = share of columns the detector finds signal in)",
+                  f"  {'frame (UTC)':16s} {'z m':>6s} {'signal':>7s}  {'scored':>9s}  {'|err| px':>8s} "
+                  f"{'bias px':>7s} {'ground m':>8s}  status"]
+        for k in sorted(fr, key=lambda k: fr[k]["z"]):
+            v = fr[k]
+            lg = log.get(k, {})
+            sig = f"{lg['signal']:5.1f}%" if lg.get("signal") is not None else "     ?"
+            status = lg.get("status", "?" if v["cols"] is None else "kept")
+            if v["cols"] is not None and len(v["cols"]):
+                e = v["det"] - v["gt"]
+                g = ground_error(v["cols"], v["gt"], v["det"], v["z"], io, eo)
+                err = (f"{len(v['cols']):4d}/{v['n_gt']:<4d}  {np.median(np.abs(e)):8.1f} "
+                       f"{np.median(e):+7.1f} {np.nanmedian(g):8.1f}")
+            else:
+                err = f"{'0':>4s}/{v['n_gt']:<4d}  {'-':>8s} {'-':>7s} {'-':>8s}"
+            parts = k.split(".")
+            label = ".".join(parts[2:4]) if len(parts) > 4 else k[:16]
+            lines.append(f"  {label[:16]:16s} {v['z']:+6.2f} {sig:>7s}  {err}  {status}")
+        found = [v for v in fr.values() if v["cols"] is not None and len(v["cols"])]
+        lines += ["", f"{cam} -- by column segment (0.0 = left edge, 1.0 = right edge)",
+                  f"  {'segment':9s} {'traced':>6s} {'scored':>6s}  {'|err| px':>8s} {'bias px':>7s} "
+                  f"{'spread px':>9s}  {'ground m':>8s} {'P90 m':>6s}"]
+        if not found:
+            lines.append("  (no detected frames)")
+            continue
+        x = np.concatenate([v["cols"] for v in found]) / (WIDTH - 1)
+        e = np.concatenate([v["det"] - v["gt"] for v in found])
+        g = np.concatenate([ground_error(v["cols"], v["gt"], v["det"], v["z"], io, eo) for v in found])
+        xt = np.concatenate([np.array(list(load_gt(out / "ground_truth" / (Path(k).stem + ".csv"))), float)
+                             for k in fr]) / (WIDTH - 1)
+        edges = np.linspace(0, 1, N_SEGMENTS + 1)
+        for a, b in zip(edges[:-1], edges[1:]):
+            m = (x >= a) & (x < b) if b < 1 else (x >= a)
+            nt = int(((xt >= a) & (xt < b)).sum() if b < 1 else (xt >= a).sum())
+            if m.sum() < 5:
+                lines.append(f"  {a:.1f}-{b:.1f}   {nt:6d} {int(m.sum()):6d}")
+                continue
+            q25, q75 = np.percentile(e[m], [25, 75])
+            gm = g[m][np.isfinite(g[m])]
+            lines.append(f"  {a:.1f}-{b:.1f}   {nt:6d} {int(m.sum()):6d}  {np.median(np.abs(e[m])):8.1f} "
+                         f"{np.median(e[m]):+7.1f} {q75 - q25:9.1f}  "
+                         f"{np.median(gm) if len(gm) else np.nan:8.1f} "
+                         f"{np.percentile(gm, 90) if len(gm) else np.nan:6.1f}")
+    lines += ["", "bias = detected minus traced row (negative: detected line is HIGHER in the image); "
+              "spread = interquartile range of the signed error (large spread = scatter, which a "
+              "bias correction cannot fix)."]
+    report = "\n".join(lines)
+    (out / "tuning" / f"diagnose_{args.config}.txt").write_text(report + "\n")
+    print(report)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--out", default="/mnt/I2Rgus_Data/Chelsea_calibration",
@@ -326,8 +431,11 @@ def main():
     sc.add_argument("--bias-correction-file", default=None,
                     help="also score the detector with this correction (e.g. from 'derive')")
     sub.add_parser("derive")
+    dg = sub.add_parser("diagnose")
+    dg.add_argument("--config", default="current", help="a setting already run by 'score'")
     args = ap.parse_args()
-    {"sample": cmd_sample, "score": cmd_score, "derive": cmd_derive}[args.cmd](args)
+    {"sample": cmd_sample, "score": cmd_score, "derive": cmd_derive,
+     "diagnose": cmd_diagnose}[args.cmd](args)
 
 
 if __name__ == "__main__":
