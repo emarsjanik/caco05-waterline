@@ -322,6 +322,9 @@ def main():
                          "is too hazy: a real 21 Jan frame had signal in 95-100%% of the near and "
                          "middle columns but 20-40%% of the far third, 44%% overall. Columns "
                          "without signal are dropped one by one, so only visible parts are used.")
+    ap.add_argument("--bias-correction-file", default=None,
+                    help="Per-camera bias correction for the detector (JSON from "
+                         "tune_chelsea.py derive), instead of the one fitted to 2026 imagery.")
     ap.add_argument("--no-overlays", action="store_true", help="Skip the per-frame overlay images.")
     ap.add_argument("--skip-geometry-check", action="store_true")
     args = ap.parse_args()
@@ -472,6 +475,7 @@ def main():
     if not run([sys.executable, HERE / "waterline_detector_v5.py",
                 "--envelope-pad", args.envelope_pad,
                 "--min-signal-fraction", args.min_signal_fraction,
+                *(["--bias-correction-file", args.bias_correction_file] if args.bias_correction_file else []),
                 "--image-suffix", "timex.jpg",
                 "--source-dir", work / "src", "--input-dir", work / "in",
                 "--output-dir", work / "detections", "--debug-dir", work / "debug"],
