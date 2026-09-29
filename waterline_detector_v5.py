@@ -310,6 +310,13 @@ IMAGES_PER_RUN = None  # None = process every matching image in SOURCE_FOLDER, n
 # errors.
 CONFIDENCE_DISCARD_THRESHOLD = 0.9
 
+# Per camera (profile name -> (lo, hi) fractions of the image width):
+# columns outside are flagged Has_Signal=0, so they never reach the
+# contours or DEM. Empty = every column as detected. Set with
+# --column-limits, e.g. for a far field where a few pixels of error are
+# tens of metres on the ground.
+COLUMN_LIMITS = {}
+
 # Mean grayscale brightness (0-255) below which an image is treated as
 # a night/dark frame containing no usable waterline, and is rejected
 # BEFORE detection runs.
@@ -1937,6 +1944,15 @@ def process_image(image_path):
         STATE.previous_confidence[data.profile.name] = result.confidence.copy()
         STATE.previous_epoch[data.profile.name] = epoch
 
+        limits = COLUMN_LIMITS.get(data.profile.name)
+        if limits is not None and column_has_signal is not None:
+            width = data.original.shape[1]
+            frac = (np.arange(len(shoreline)) + data.crop_left) / max(width - 1, 1)
+            column_has_signal = np.asarray(column_has_signal, bool) & \
+                (frac >= limits[0]) & (frac <= limits[1])
+            print(f"Column limits   : {limits[0]:.2f}-{limits[1]:.2f} of the width "
+                  f"(--column-limits); {100 * column_has_signal.mean():.1f}% of columns kept")
+
         export_csv(data, shoreline, result.confidence, result.peak_sharpness,
                    column_has_signal)
         export_overlay(data, shoreline)
@@ -2050,7 +2066,7 @@ def apply_cli_overrides():
     tuned parameters.
     """
     global SOURCE_FOLDER, INPUT_FOLDER, OUTPUT_FOLDER, DEBUG_FOLDER, IMAGE_SUFFIX
-    global TEMPORAL_FILTER_ENABLED, MIN_SIGNAL_COLUMN_FRACTION
+    global TEMPORAL_FILTER_ENABLED, MIN_SIGNAL_COLUMN_FRACTION, CONFIDENCE_DISCARD_THRESHOLD
 
     parser = argparse.ArgumentParser(
         description="USGS Argus shoreline detector. All arguments are optional; "
@@ -2096,6 +2112,15 @@ def apply_cli_overrides():
                              "fell outside the band and 324 of 336 frames were rejected as "
                              "'no usable signal'. Wider means more room to lock onto other "
                              "edges, so check the overlays.")
+    parser.add_argument("--min-confidence", type=float, default=None,
+                        help=f"Mean confidence below which a frame is discarded (default "
+                             f"{CONFIDENCE_DISCARD_THRESHOLD}). Tuned on 2026 imagery; frames from "
+                             f"other seasons can be accurate yet score lower, so check any lower "
+                             f"value against ground truth (tune_chelsea.py score).")
+    parser.add_argument("--column-limits", default=None,
+                        help='Keep only columns in this range of the image width, per camera, '
+                             'e.g. "c2=0:0.7" or "c1=0:0.9,c2=0.1:0.7". Columns outside are '
+                             'flagged Has_Signal=0 and so dropped from contours and the DEM.')
     args = parser.parse_args()
 
     if args.image_suffix:
@@ -2133,6 +2158,20 @@ def apply_cli_overrides():
     if args.min_signal_fraction is not None:
         MIN_SIGNAL_COLUMN_FRACTION = args.min_signal_fraction
         print(f"MINIMUM SIGNAL FRACTION set to {MIN_SIGNAL_COLUMN_FRACTION:.2f} (--min-signal-fraction).")
+
+    if args.min_confidence is not None:
+        CONFIDENCE_DISCARD_THRESHOLD = args.min_confidence
+        print(f"CONFIDENCE THRESHOLD set to {CONFIDENCE_DISCARD_THRESHOLD:.2f} (--min-confidence).")
+
+    if args.column_limits:
+        for item in args.column_limits.split(","):
+            cam, rng = item.split("=")
+            lo, hi = (float(v) for v in rng.split(":"))
+            key = f"CACO05_{cam.strip().upper()}"
+            if key not in CAMERAS:
+                parser.error(f"--column-limits: unknown camera {cam!r}")
+            COLUMN_LIMITS[key] = (lo, hi)
+            print(f"COLUMN LIMITS for {key}: {lo:.2f}-{hi:.2f} of the width (--column-limits).")
 
     if args.envelope_pad > 0:
         pad = args.envelope_pad
