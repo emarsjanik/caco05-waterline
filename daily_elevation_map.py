@@ -56,7 +56,7 @@ from matplotlib.lines import Line2D
 ELEVATION_COLUMNS = ("tide_elevation_navd88", "tide_elevation")
 
 
-def load_contours(path, camera, date_filter=None):
+def load_contours(path, camera, date_filter=None, only=None):
     """
     Groups contour points by source frame. Returns a dict keyed by
     source_file, each with sorted column/row arrays, the elevation,
@@ -80,6 +80,8 @@ def load_contours(path, camera, date_filter=None):
             if date_filter and not capture.startswith(date_filter):
                 continue
             key = row["source_file"]
+            if only is not None and key not in only:
+                continue
             frames[key]["columns"].append(float(row["pixel_column"]))
             frames[key]["rows"].append(float(row["pixel_row"]))
             frames[key]["elevation"] = float(row[elev_col])
@@ -190,6 +192,10 @@ def main():
     parser.add_argument("--date", default=None,
                         help="Single YYYY-MM-DD to plot. Shorthand for --start-date X "
                              "--end-date X.")
+    parser.add_argument("--frames-list", default=None,
+                        help="File with one source_file name per line: draw only those frames "
+                             "(e.g. one camera setup's, as lines from a differently aimed setup "
+                             "land in the wrong place on this setup's background photo).")
     parser.add_argument("--days", type=int, default=1,
                         help="Number of days to include, ending at --end-date (or at the most "
                              "recent date present). Use --days 7 for a rolling week. Ignored "
@@ -241,7 +247,11 @@ def main():
     parser.add_argument("--dpi", type=int, default=130)
     args = parser.parse_args()
 
-    frames, elev_col = load_contours(args.contour_csv, args.camera)
+    only = None
+    if args.frames_list:
+        with open(args.frames_list) as fh:
+            only = {line.strip() for line in fh if line.strip()}
+    frames, elev_col = load_contours(args.contour_csv, args.camera, only=only)
     if not frames:
         print(f"No contour points for camera '{args.camera}' in {args.contour_csv}")
         sys.exit(1)
