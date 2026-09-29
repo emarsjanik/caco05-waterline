@@ -32,6 +32,18 @@ TESTS (flags follow IOOS QARTOD: 1 good, 2 not evaluated, 3 suspect,
   rate of change  Faster than MAX_RATE m/h between consecutive readings
                 -- more than tide plus surge can move.        -> SUSPECT
 
+WAVE SETUP. Chatham (Lydia Cove) is a harbour gauge; the GNSS-R footprint
+at Marconi is the surf zone, where breaking waves raise the mean water
+level (setup) by an amount the gauge never records. A reading ABOVE the
+gauge-predicted level fails the reference test only if it exceeds the
+limit PLUS the largest shoreline setup the waves could produce
+(Stockdon et al. 2006: 0.35 * beta * sqrt(Hs * L0), L0 = g Tp^2 / 2 pi,
+beta = SETUP_BETA), with Hs/Tp from the buoy archive written by
+fetch_buoy_waves.py (archive/waves_44008.csv, found next to the gauge
+archive). Inside that allowance it is kept as SUSPECT "possible_setup":
+in a storm the GNSS-R may be measuring real water the gauge cannot see.
+Readings below the gauge are unaffected. No wave archive -> plain limit.
+
 Only FAIL readings are removed by the pipeline; SUSPECT ones are kept
 and reported. Where the gauge has no data the reference test is simply
 not applied (the other tests still are).
@@ -60,6 +72,9 @@ REF_SIGMAS = 5.0
 REF_FIT_DAYS = 30
 MAX_RATE = 1.0                         # m per hour
 MAX_LAG_MIN = 180
+SETUP_COEF = 0.35                      # Stockdon et al. (2006)
+SETUP_BETA = 0.10                      # foreshore slope (winter 2025 Marconi DEM)
+WAVE_MAX_GAP_S = 3 * 3600
 
 
 def load_reference(path):
@@ -71,6 +86,43 @@ def load_reference(path):
                 lv.append(float(r["level_navd88"]))
     order = np.argsort(ep)
     return np.asarray(ep)[order], np.asarray(lv)[order]
+
+
+def load_waves(path):
+    """Buoy archive from fetch_buoy_waves.py -> (epochs, hs, tp), or None."""
+    try:
+        with open(path, newline="") as f:
+            rows = [(float(r["epoch"]), float(r["wvht_m"]), float(r["dpd_s"]))
+                    for r in csv.DictReader(f) if r.get("wvht_m") and r.get("dpd_s")]
+    except (OSError, KeyError, ValueError):
+        return None
+    if not rows:
+        return None
+    a = np.array(sorted(rows))
+    return a[:, 0], a[:, 1], a[:, 2]
+
+
+def default_waves_path(reference_path):
+    """The buoy archive the cron keeps next to the gauge archive, if there is one."""
+    if not reference_path:
+        return None
+    from pathlib import Path
+    p = Path(reference_path).parent / "waves_44008.csv"
+    return p if p.exists() else None
+
+
+def setup_allowance(epochs, waves):
+    """Largest plausible shoreline wave setup (m) at each epoch; 0 where no wave record."""
+    epochs = np.asarray(epochs, dtype=float)
+    if waves is None:
+        return np.zeros(len(epochs))
+    w_ep, hs, tp = waves
+    j = np.clip(np.searchsorted(w_ep, epochs), 0, len(w_ep) - 1)
+    jm = np.clip(j - 1, 0, len(w_ep) - 1)
+    k = np.where(np.abs(w_ep[jm] - epochs) < np.abs(w_ep[j] - epochs), jm, j)
+    ok = np.abs(w_ep[k] - epochs) <= WAVE_MAX_GAP_S
+    l0 = 9.81 * tp[k] ** 2 / (2 * np.pi)
+    return np.where(ok, SETUP_COEF * SETUP_BETA * np.sqrt(np.maximum(hs[k] * l0, 0.0)), 0.0)
 
 
 def reference_at(r_ep, r_lv, epochs):
@@ -108,10 +160,11 @@ def fit_reference(ep, lv, r_ep, r_lv, keep):
     return None if best is None else best[:4]
 
 
-def run_qc(ep, lv, reference=None):
+def run_qc(ep, lv, reference=None, waves=None):
     """
     Returns (flags, reasons, predicted, fit). `reference` is (r_ep, r_lv)
     or None. `predicted` is the reference-based level (NaN if none).
+    `waves` is (epochs, hs, tp) or None -- see WAVE SETUP.
     """
     n = len(lv)
     flags = np.full(n, GOOD, dtype=np.int8)
@@ -134,8 +187,12 @@ def run_qc(ep, lv, reference=None):
             a, lag_s, b, sigma = fit
             predicted = a * reference_at(reference[0], reference[1], ep - lag_s) + b
             limit = max(REF_LIMIT, REF_SIGMAS * sigma)
+            allowance = setup_allowance(ep, waves)
             for i in np.flatnonzero(np.isfinite(predicted) & (np.abs(lv - predicted) > limit)):
-                mark(i, FAIL, "reference")
+                if 0 < lv[i] - predicted[i] <= limit + allowance[i]:
+                    mark(i, SUSPECT, "possible_setup")
+                else:
+                    mark(i, FAIL, "reference")
 
     ok = flags < FAIL
     for i in range(n):
@@ -158,13 +215,14 @@ def run_qc(ep, lv, reference=None):
     return flags, [";".join(r) for r in reasons], predicted, fit
 
 
-def qc_filter(ep, lv, reference_path):
+def qc_filter(ep, lv, reference_path, waves_path=None):
     """For the pipeline: drop FAIL readings. Returns (ep, lv, summary text)."""
     try:
         reference = load_reference(reference_path)
     except OSError:
         reference = None
-    flags, reasons, _, fit = run_qc(ep, lv, reference)
+    waves = load_waves(waves_path or default_waves_path(reference_path) or "")
+    flags, reasons, _, fit = run_qc(ep, lv, reference, waves)
     keep = flags < FAIL
     counts = {}
     for r, f in zip(reasons, flags):
@@ -174,6 +232,7 @@ def qc_filter(ep, lv, reference_path):
     text = (f"GNSS-R QC: {int((~keep).sum())} of {len(lv)} reading(s) failed and removed"
             + (f" ({', '.join(f'{k} {v}' for k, v in sorted(counts.items()))})" if counts else "")
             + f"; {int((flags == SUSPECT).sum())} suspect kept"
+            + f" ({sum('possible_setup' in r for r in reasons)} within wave setup of the gauge)"
             + ("" if fit else "; reference test NOT applied (no gauge overlap)"))
     return ep[keep], lv[keep], text
 
@@ -182,6 +241,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("gnssr", help="gnssrefl spline file")
     ap.add_argument("--reference", help="Gauge archive from fetch_tide_gauge.py")
+    ap.add_argument("--waves", help="Buoy archive from fetch_buoy_waves.py (default: waves_44008.csv "
+                                    "next to --reference, if present)")
     ap.add_argument("--output", help="Write every reading with its flag and reasons (CSV).")
     ap.add_argument("--plot", help="Figure of the last --plot-days with failed readings marked.")
     ap.add_argument("--plot-days", type=int, default=7)
@@ -190,7 +251,10 @@ def main():
     from extract_elevation_contours import load_gnssr_spline
     ep, lv, _, _ = load_gnssr_spline(args.gnssr)
     reference = load_reference(args.reference) if args.reference else None
-    flags, reasons, predicted, fit = run_qc(ep, lv, reference)
+    waves_path = args.waves or default_waves_path(args.reference)
+    waves = load_waves(waves_path) if waves_path else None
+    print(f"Wave setup allowance: {'from ' + str(waves_path) if waves else 'OFF (no wave archive)'}")
+    flags, reasons, predicted, fit = run_qc(ep, lv, reference, waves)
 
     print()
     print(f"GNSS-R QC over {len(lv)} readings "
@@ -244,9 +308,13 @@ def main():
         ax.plot(t[good], lv[sel][good], ".", ms=4, color="#1f77b4", label="GNSS-R, passed QC")
         if (~good).any():
             ax.plot(t[~good], lv[sel][~good], "x", ms=6, color="#c0392b", label="GNSS-R, failed QC (not used)")
-        sus = flags[sel] == SUSPECT
+        setup = np.array(["possible_setup" in r for r in np.asarray(reasons, dtype=object)[sel]], bool)
+        sus = (flags[sel] == SUSPECT) & ~setup
         if sus.any():
             ax.plot(t[sus], lv[sel][sus], "o", ms=7, mfc="none", color="#8e44ad", label="suspect (kept)")
+        if setup.any():
+            ax.plot(t[setup], lv[sel][setup], "D", ms=6, mfc="none", color="#e67e22",
+                    label="above gauge by no more than wave setup (kept)")
         ax.set_ylabel("water level (m NAVD88)")
         ax.grid(alpha=0.3)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))

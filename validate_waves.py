@@ -115,7 +115,12 @@ def compare(truth, src, name, lines):
                 best = (r, lag)
     j = pd.concat([truth.rename("adcp"), src.rename("src")], axis=1, join="inner").dropna()
     if len(j) < 48:
-        lines.append(f"{name}: only {len(j)} overlapping hours -- not compared")
+        have = src.dropna()
+        span = (f"it has wave data {have.index.min():%Y-%m-%d} to {have.index.max():%Y-%m-%d}"
+                if len(have) else "it reported no wave heights at all in the files read")
+        lines.append(f"{name}: only {len(j)} hours with a wave height during the ADCP record -- "
+                     f"not compared ({span}; the buoy was probably off station or not reporting "
+                     f"waves). Try a neighbouring buoy, e.g. --ndbc-station 44018 or 44020.")
         return None
     x, y = j.src, j.adcp
     ratio = float(np.sum(x * y) / np.sum(x * x))
@@ -187,10 +192,26 @@ def wave_bias(contours, lines):
     lines.append("   median offset by Hs: " + ", ".join(
         f"{iv.left:g}-{iv.right:g} m {r['median']:+.2f} (n={int(r['count'])})"
         for iv, r in by.iterrows() if r["count"]))
-    worse = [iv.left for iv, r in by.iterrows() if r["count"] >= 3 and abs(r["median"]) > BIAS_LIMIT]
-    lines.append(f"   => recommended --max-hs: {min(worse):g} m (first Hs bin with |median offset| > "
-                 f"{BIAS_LIMIT} m)" if worse else
-                 f"   => no Hs bin exceeds {BIAS_LIMIT} m median offset: no wave filter needed at these heights")
+    # A wave effect is a CHANGE with Hs: compare rougher bins with the
+    # calm-sea baseline (Hs < 1 m), whose own offset is frame-to-frame
+    # noise (detector scatter, beach change between days), not waves.
+    calm = f[f.hs < 1.0]["offset"]
+    spread = float(np.subtract(*np.percentile(f.offset, [84, 16])) / 2)
+    lines.append(f"   frame-to-frame scatter (half 16-84% range): {spread:.2f} m")
+    if len(calm) < 5:
+        lines.append("   => too few calm frames (Hs < 1 m) for a baseline; no recommendation")
+        return f
+    base = float(calm.median())
+    worse = [iv.left for iv, r in by.iterrows()
+             if iv.left >= 1.0 and r["count"] >= 3 and abs(r["median"] - base) > BIAS_LIMIT]
+    rough_n = int((f.hs >= 1.0).sum())
+    if worse:
+        lines.append(f"   => recommended --max-hs: {min(worse):g} m (first Hs bin whose median offset "
+                     f"differs from the calm baseline {base:+.2f} m by more than {BIAS_LIMIT} m)")
+    else:
+        lines.append(f"   => no wave dependence detected: rougher bins stay within {BIAS_LIMIT} m of "
+                     f"the calm baseline ({base:+.2f} m); {rough_n} frame(s) with Hs >= 1 m"
+                     + (" -- too few to be sure" if rough_n < 15 else ""))
     return f
 
 
@@ -212,7 +233,8 @@ def adcp_clock(adcp, tide_path, lines):
         if best is None or r > best[1]:
             best = (lag_min, r, int(ok.sum()))
     if best is None:
-        lines.append("C. the tide model does not cover the ADCP period")
+        lines += ["C. the tide model does not cover the ADCP period (Dec 2024 - Mar 2025).",
+                  "   Generate the same model output for those months and pass it with --tide-model."]
         return
     lines += [f"C. ADCP water level vs tide model: best lag {best[0]:+d} min (r {best[1]:.3f}, {best[2]} h)",
               "   A lag near 0 means the ADCP timestamps are right (the model is for Marconi itself);",
