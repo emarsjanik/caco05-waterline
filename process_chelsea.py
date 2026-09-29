@@ -297,6 +297,14 @@ def main():
     ap.add_argument("--max-gap-minutes", type=float, default=60.0,
                     help="Largest distance to the ADCP reading on either side (ADCP is hourly).")
     ap.add_argument("--cell", type=float, default=2.0, help="DEM cell size, m.")
+    ap.add_argument("--max-hs", type=float, default=1.5,
+                    help="Leave frames with ADCP Hs above this out of the DEMs (default 1.5, as "
+                         "the station cron). Waves push the timex waterline up the beach; "
+                         "validate_waves.py part B measures by how much. 0 keeps every frame.")
+    ap.add_argument("--max-day-offset", type=float, default=0.15,
+                    help="Leave out whole days whose elevations differ from the other days' "
+                         "DEM by more than this (m, default 0.15, as the station cron): catches "
+                         "days where the detector followed snow or shadow. 0 disables.")
     ap.add_argument("--envelope-pad", type=float, default=0.1,
                     help="Widen the detector's search envelope by this fraction of the crop "
                          "height (default 0.1). The mass rejection of the winter frames was "
@@ -363,6 +371,16 @@ def main():
             sys.exit("Could not make the ADCP water level. Run adcp_to_navd88.py by hand "
                      "(add --offset 0.09 if the NOAA gauge cannot be reached).")
     ep_wl, lv_wl = load_water_level(wl_csv)
+    # The ADCP's own wave record, in the format fetch_buoy_waves.py writes,
+    # so every frame is tagged with the waves measured AT Marconi.
+    waves_csv = out / "adcp_waves.csv"
+    import pandas as pd
+    wv = pd.read_csv(args.adcp)
+    wt = pd.to_datetime(wv["time"], utc=True)
+    pd.DataFrame({"time_utc": wt.dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "epoch": (wt - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(seconds=1),
+                  "wvht_m": wv["wh_4061"].round(3), "dpd_s": wv["wp_peak"].round(2),
+                  "mwd_deg": wv["wvdir"]}).to_csv(waves_csv, index=False)
     say(f"  {len(ep_wl)} readings, "
         f"{datetime.fromtimestamp(ep_wl[0], tz=timezone.utc):%Y-%m-%d %H:%M} to "
         f"{datetime.fromtimestamp(ep_wl[-1], tz=timezone.utc):%Y-%m-%d %H:%M} UTC")
@@ -466,6 +484,7 @@ def main():
                 "--time-col", "time", "--level-col", "water_level_navd88",
                 "--max-gap-minutes", args.max_gap_minutes,
                 "--min-coverage", args.min_signal_fraction,
+                "--waves", waves_csv, "--wave-max-gap-minutes", 60,
                 "--processed-dir", work / "detections", "--output", all_contours],
                log, "matching water levels and filtering contours") or not all_contours.exists():
         sys.exit(f"Contour extraction failed; see {log}")
@@ -512,6 +531,13 @@ def main():
     # --- 10. DEMs ---------------------------------------------------------------------
     say()
     say("8. DEMs")
+    dem_filters = []
+    if args.max_hs:
+        dem_filters += ["--max-hs", args.max_hs]
+    if args.max_day_offset:
+        dem_filters += ["--max-day-offset", args.max_day_offset]
+    if dem_filters:
+        say(f"  filters: {' '.join(str(x) for x in dem_filters)}")
     periods = sorted({f["period"] for n, f in frames.items() if n in levels})
     made = []
     for p in periods:
@@ -521,11 +547,11 @@ def main():
         start = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
         end = f"{m.group(4)}-{m.group(5)}-{m.group(6)}"
         if run([sys.executable, HERE / "dem_from_contours.py", ground, out / "dem" / p,
-                "--cell", args.cell, "--start-date", start, "--end-date", end],
+                "--cell", args.cell, "--start-date", start, "--end-date", end] + dem_filters,
                log, f"DEM {start} to {end}"):
             made.append(p)
     if run([sys.executable, HERE / "dem_from_contours.py", ground, out / "dem" / "all_periods",
-            "--cell", args.cell], log, "DEM, all periods together"):
+            "--cell", args.cell] + dem_filters, log, "DEM, all periods together"):
         made.append("all_periods")
 
     say()

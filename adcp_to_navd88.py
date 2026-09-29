@@ -59,12 +59,19 @@ def main():
     ap.add_argument("--adcp", default="sig1000_waves_ALL.csv")
     ap.add_argument("--output", required=True)
     ap.add_argument("--station", default="8447435", help="NOAA gauge (default Chatham)")
+    ap.add_argument("--time-shift", type=float, default=0.0,
+                    help="Minutes to add to the ADCP timestamps (default 0). Use if "
+                         "validate_waves.py part C shows the ADCP lags the tide model, i.e. "
+                         "the stamps mark the start or end of an averaging burst.")
     ap.add_argument("--offset", type=float, default=None,
                     help="Use this ADCP -> NAVD88 offset (m) instead of deriving it from the gauge.")
     args = ap.parse_args()
 
     adcp = pd.read_csv(args.adcp)
     adcp["time"] = pd.to_datetime(adcp["time"], utc=True)      # naive timestamps are UTC
+    if args.time_shift:
+        adcp["time"] += pd.Timedelta(minutes=args.time_shift)
+        print(f"ADCP timestamps shifted by {args.time_shift:+.0f} min (--time-shift)")
     adcp = adcp.dropna(subset=["water_level"]).sort_values("time")
     a_ep = to_epoch(adcp["time"])
     a_wl = adcp["water_level"].to_numpy(float)
