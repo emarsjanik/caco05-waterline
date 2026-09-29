@@ -72,7 +72,7 @@ N_SEGMENTS = 10
 
 BASE = ["--image-suffix", "timex.jpg", "--min-signal-fraction", "0.35"]
 CONFIGS = {
-    "current":  BASE + ["--envelope-pad", "0.1"],                         # as process_chelsea runs
+    "current":  BASE + ["--envelope-pad", "0.1"],   # process_chelsea before tuning; now = signal_0.15
     "no_bias":  BASE + ["--envelope-pad", "0.1", "--no-bias-correction"],
     "pad_0.05": BASE + ["--envelope-pad", "0.05", "--no-bias-correction"],
     "pad_0.2":  BASE + ["--envelope-pad", "0.2", "--no-bias-correction"],
