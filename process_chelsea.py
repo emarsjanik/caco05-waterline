@@ -310,17 +310,18 @@ def main():
                          "height (default 0.1). The mass rejection of the winter frames was "
                          "caused by the black border of the resampled frames, not the envelope; "
                          "at 0.3 the detector wandered onto the bluff's shadow on the dry beach.")
-    ap.add_argument("--utc-hours", default="13-18",
+    ap.add_argument("--utc-hours", default="13.5-18",
                     help="Only use frames from this UTC hour range, start inclusive, end "
-                         "exclusive (default 13-18, i.e. 8 am - 1 pm EST). In winter the low "
+                         "exclusive (default 13.5-18, i.e. 8:30 am - 1 pm EST). In winter the low "
                          "afternoon sun throws the bluff's shadow across the beach, and the "
                          "detector followed its edge (and snow patches) instead of the water. "
                          "'0-24' uses every frame; fractions allowed, e.g. 13.5-18 starts at "
                          "13:30, as the 13:00 frames (an hour after sunrise) were the worst "
                          "against ground truth.")
-    ap.add_argument("--min-signal-fraction", type=float, default=0.35,
+    ap.add_argument("--min-signal-fraction", type=float, default=0.15,
                     help="Share of a frame's columns that must show the waterline (default "
-                         "0.35; the station uses 0.60). On overcast winter frames the far field "
+                         "0.15, which kept 4 more of 20 traced c1 frames than 0.35 at the same "
+                         "error; the station uses 0.60). On overcast winter frames the far field "
                          "is too hazy: a real 21 Jan frame had signal in 95-100%% of the near and "
                          "middle columns but 20-40%% of the far third, 44%% overall. Columns "
                          "without signal are dropped one by one, so only visible parts are used.")
@@ -330,9 +331,11 @@ def main():
     ap.add_argument("--min-confidence", type=float, default=None,
                     help="Detector's mean-confidence gate (its default 0.9 was tuned on 2026 "
                          "imagery; check a lower value with tune_chelsea.py score).")
-    ap.add_argument("--column-limits", default=None,
+    ap.add_argument("--column-limits", default="c2=0:0.7",
                     help='Use only this range of each camera\'s image width, e.g. "c2=0:0.7": '
-                         "drops the far field, where a few pixels are tens of metres.")
+                         "drops the far field, where a few pixels are tens of metres (default "
+                         "c2=0:0.7: right of that the traced c2 error scattered by 100-350 px, "
+                         "tens of metres on the ground). '' keeps every column.")
     ap.add_argument("--no-overlays", action="store_true", help="Skip the per-frame overlay images.")
     ap.add_argument("--skip-geometry-check", action="store_true")
     args = ap.parse_args()
