@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""
+Fine-Tune The Detector On The Chelsea (pre-Nov-2025) Imagery
+===============================================================
+Ground truth in, measured accuracy and a fitted correction out.
+
+The detector's settings -- search envelope, signal threshold, and above
+all the per-column bias correction -- were tuned on 2026 imagery. The
+Chelsea frames are winter 2025, taken with the 2025-02-19 camera
+pointing and resampled into the 2025-11-13 view (process_chelsea.py).
+Whether those settings suit them is measured here, not assumed.
+
+    python3 tune_chelsea.py sample   pick frames to trace
+    python3 collect_all_ground_truth.py ...   (you trace them; the command is printed)
+    python3 tune_chelsea.py score    run detector settings on those frames, score each
+    python3 tune_chelsea.py derive   fit a Chelsea bias correction, tested day by day
+
+SAMPLE. Frames come from <out>/work/src -- the RESAMPLED frames the
+detector actually sees -- so the traced line and the detector's line are
+in the same pixels. Per camera, frames are spread evenly over the water
+levels (low to high tide) and rotated over the days, so the correction
+is not fitted to one tide stage or one morning. Traced on the resampled
+view, the blurred margins are areas the old camera never saw: trace only
+where the photo is sharp.
+
+SCORE. Each setting runs the detector on the traced frames only (a few
+minutes), then per camera reports: frames detected, coverage (share of
+traced columns the detector also found), and the error of the detected
+line -- in pixels (median |error|, bias, RMS, 90th percentile) and in
+METRES on the ground (both lines georectified at the frame's water
+level), which is what matters for the DEM. Only columns the detector
+flagged as carrying signal are scored, as only those reach the DEM.
+
+DERIVE. From the setting run WITHOUT any bias correction ("no_bias"),
+the median signed error in 10 column segments per camera is the
+correction. Fitted on all days and saved as JSON for the detector
+(--bias-correction-file, also passed by process_chelsea.py). Its benefit
+is reported leave-one-day-out -- each day corrected with a fit to the
+OTHER days -- so the number is what to expect on frames it has not
+seen, not a fit to itself.
+"""
+
+import os
+import csv
+import sys
+import json
+import shutil
+import argparse
+import subprocess
+from pathlib import Path
+from collections import defaultdict
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+CAL = HERE / "calibration"
+WIDTH = 2448
+N_SEGMENTS = 10
+
+BASE = ["--image-suffix", "timex.jpg", "--min-signal-fraction", "0.35"]
+CONFIGS = {
+    "current":  BASE + ["--envelope-pad", "0.1"],                         # as process_chelsea runs
+    "no_bias":  BASE + ["--envelope-pad", "0.1", "--no-bias-correction"],
+    "pad_0.05": BASE + ["--envelope-pad", "0.05", "--no-bias-correction"],
+    "pad_0.2":  BASE + ["--envelope-pad", "0.2", "--no-bias-correction"],
+}
+
+
+def frame_levels(out):
+    levels = {}
+    with open(out / "work" / "frame_levels.csv", newline="") as f:
+        for r in csv.DictReader(f):
+            levels[r["frame"]] = (r["camera"], float(r["water_level_navd88"]))
+    return levels
+
+
+def day_of(name):
+    return name.split(".")[2] + "." + name.split(".")[3].split("_")[0]
+
+
+# --------------------------------------------------------------------- sample
+
+def cmd_sample(args):
+    out = Path(args.out)
+    levels = frame_levels(out)
+    src = out / "work" / "src"
+    dst = out / "ground_truth_images"
+    dst.mkdir(parents=True, exist_ok=True)
+    picked = []
+    for cam in ("c1", "c2"):
+        frames = sorted((n for n, (c, _) in levels.items() if c == cam and (src / n).exists()),
+                        key=lambda n: levels[n][1])
+        if not frames:
+            continue
+        bins = np.array_split(np.array(frames), min(args.per_camera, len(frames)))
+        used = defaultdict(int)
+        for b in bins:
+            # the frame whose day is least used so far, nearest the bin's middle
+            mid = len(b) // 2
+            best = min(range(len(b)), key=lambda i: (used[day_of(b[i])], abs(i - mid)))
+            used[day_of(b[best])] += 1
+            picked.append(b[best])
+    for n in picked:
+        target = dst / n
+        if not target.exists():
+            try:
+                os.link(src / n, target)
+            except OSError:
+                shutil.copy2(src / n, target)
+    by = defaultdict(list)
+    for n in picked:
+        by[levels[n][0]].append(levels[n][1])
+    for cam, z in sorted(by.items()):
+        print(f"{cam}: {len(z)} frames, water level {min(z):+.2f} to {max(z):+.2f} m NAVD88, "
+              f"{len({day_of(n) for n in picked if levels[n][0] == cam})} day(s)")
+    print(f"\nFrames in {dst}. Trace them (MobaXterm opens the window over X11):")
+    print(f"  python3 {HERE / 'collect_all_ground_truth.py'} --input-dir {dst} "
+          f"--ground-truth-dir {out / 'ground_truth'}")
+    print("Click along the water's edge, left to right, only where the photo is sharp "
+          "(not in the blurred margins); Save & Next. It resumes where you stop.")
+
+
+# --------------------------------------------------------------------- score
+
+def load_gt(path):
+    cols, rows = [], []
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            cols.append(int(r["Column"]))
+            rows.append(float(r["Row"]))
+    return dict(zip(cols, rows))
+
+
+def load_det(path):
+    det = {}
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            if r.get("Has_Signal", "1") not in ("1", "1.0", "True", ""):
+                continue
+            try:
+                row = float(r.get("Row_Precise") or r["Row"])
+            except ValueError:
+                row = float(r["Row"])
+            det[int(r["Column"])] = row
+    return det
+
+
+def calib():
+    from georectify import load_extrinsics, load_intrinsics
+    return {cam: (load_intrinsics(CAL / f"CACO05_{cam}_20240801_IO.yaml"),
+                  load_extrinsics(CAL / f"CACO05_{cam}_20251113_EO-CV.yaml")) for cam in ("c1", "c2")}
+
+
+def ground_error(cols, gt_rows, det_rows, z, io, eo):
+    """Horizontal distance (m) between the traced and detected lines, per column."""
+    from georectify import pixel_to_ground
+    gx, gy = pixel_to_ground(cols, gt_rows, z, io, eo)
+    dx, dy = pixel_to_ground(cols, det_rows, z, io, eo)
+    return np.hypot(dx - gx, dy - gy)
+
+
+def errors_for(det_dir, out, levels, cal):
+    """Per traced frame: columns, gt rows, det rows (np), z, camera. Missing detection -> None."""
+    res = {}
+    for gt_path in sorted((out / "ground_truth").glob("*.csv")):
+        name = gt_path.stem + ".jpg"
+        if name not in levels:
+            continue
+        cam, z = levels[name]
+        gt = load_gt(gt_path)
+        det_path = det_dir / gt_path.name
+        if not det_path.exists():
+            res[name] = dict(cam=cam, z=z, n_gt=len(gt), cols=None)
+            continue
+        det = load_det(det_path)
+        common = sorted(set(gt) & set(det))
+        res[name] = dict(cam=cam, z=z, n_gt=len(gt), cols=np.array(common, float),
+                         gt=np.array([gt[c] for c in common]), det=np.array([det[c] for c in common]))
+    return res
+
+
+def summarise(res, cal, label, lines):
+    for cam in ("c1", "c2"):
+        fr = [v for v in res.values() if v["cam"] == cam]
+        if not fr:
+            continue
+        found = [v for v in fr if v["cols"] is not None and len(v["cols"])]
+        cov = sum(len(v["cols"]) for v in found) / max(sum(v["n_gt"] for v in fr), 1)
+        if not found:
+            lines.append(f"  {label:10s} {cam}: 0/{len(fr)} frames detected")
+            continue
+        e = np.concatenate([v["det"] - v["gt"] for v in found])
+        io, eo = cal[cam]
+        m = np.concatenate([ground_error(v["cols"], v["gt"], v["det"], v["z"], io, eo) for v in found])
+        m = m[np.isfinite(m)]
+        lines.append(f"  {label:10s} {cam}: {len(found):2d}/{len(fr):2d} frames, coverage {100 * cov:3.0f}%  "
+                     f"|err| median {np.median(np.abs(e)):5.1f} px, bias {e.mean():+6.1f}, RMS "
+                     f"{np.sqrt(np.mean(e ** 2)):5.1f}, P90 {np.percentile(np.abs(e), 90):5.1f} px  |  "
+                     f"ground median {np.median(m):4.1f} m, P90 {np.percentile(m, 90):4.1f} m")
+
+
+def run_detector(cfg_args, out, name, log):
+    d = out / "tuning" / name
+    for sub in ("in", "det", "debug"):
+        shutil.rmtree(d / sub, ignore_errors=True)
+        (d / sub).mkdir(parents=True)
+    cmd = [sys.executable, str(HERE / "waterline_detector_v5.py")] + cfg_args + [
+        "--source-dir", str(out / "ground_truth_images"), "--input-dir", str(d / "in"),
+        "--output-dir", str(d / "det"), "--debug-dir", str(d / "debug")]
+    with open(log, "a") as fh:
+        fh.write(f"\n=== {name}: {' '.join(cmd)}\n")
+        fh.flush()
+        ok = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT).returncode == 0
+    return d / "det" if ok else None
+
+
+def cmd_score(args):
+    out = Path(args.out)
+    if not list((out / "ground_truth").glob("*.csv")):
+        sys.exit(f"No traced frames in {out / 'ground_truth'} -- run 'sample' and trace first.")
+    levels, cal = frame_levels(out), calib()
+    configs = {n: CONFIGS[n] for n in (args.configs or CONFIGS)}
+    if args.bias_correction_file:
+        configs["chelsea_bias"] = BASE + ["--envelope-pad", "0.1", "--bias-correction-file",
+                                          args.bias_correction_file]
+    log = out / "tuning" / "tuning.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    n_gt = len(list((out / "ground_truth").glob("*.csv")))
+    lines = [f"Detector settings scored on {n_gt} traced frame(s)"]
+    for name, cfg in configs.items():
+        print(f"running {name} ...", flush=True)
+        det_dir = run_detector(cfg, out, name, log)
+        if det_dir is None:
+            lines.append(f"  {name}: detector failed, see {log}")
+            continue
+        summarise(errors_for(det_dir, out, levels, cal), cal, name, lines)
+    report = "\n".join(lines)
+    (out / "tuning" / "score_report.txt").write_text(report + "\n")
+    print("\n" + report)
+    print(f"\nFull detector output: {log}")
+
+
+# --------------------------------------------------------------------- derive
+
+def fit_correction(frames):
+    """Median signed error (px) in N_SEGMENTS column segments -> [(x_fraction, correction)]."""
+    x = np.concatenate([v["cols"] for v in frames]) / (WIDTH - 1)
+    e = np.concatenate([v["det"] - v["gt"] for v in frames])
+    edges = np.linspace(0, 1, N_SEGMENTS + 1)
+    pts = []
+    for a, b in zip(edges[:-1], edges[1:]):
+        m = (x >= a) & (x <= b)
+        if m.sum() >= 20:
+            pts.append((round(float((a + b) / 2), 4), round(float(np.median(e[m])), 1)))
+    if not pts:
+        return []
+    return [(0.0, pts[0][1])] + pts + [(1.0, pts[-1][1])]
+
+
+def apply(points, v):
+    if not points:
+        return v["det"]
+    xs, cs = zip(*points)
+    return v["det"] - np.interp(v["cols"] / (WIDTH - 1), xs, cs)
+
+
+def cmd_derive(args):
+    out = Path(args.out)
+    det_dir = out / "tuning" / "no_bias" / "det"
+    if not det_dir.exists():
+        sys.exit("Run 'score' first (it runs the no_bias setting this needs).")
+    levels, cal = frame_levels(out), calib()
+    res = {k: v for k, v in errors_for(det_dir, out, levels, cal).items()
+           if v["cols"] is not None and len(v["cols"])}
+    result, lines = {}, ["Chelsea bias correction (from the no_bias run)"]
+    for cam in ("c1", "c2"):
+        fr = {k: v for k, v in res.items() if v["cam"] == cam}
+        if len(fr) < 4:
+            lines.append(f"  {cam}: only {len(fr)} detected traced frame(s) -- not fitted")
+            continue
+        pts = fit_correction(list(fr.values()))
+        result[cam] = pts
+        # leave-one-day-out: correct each day with a fit to the other days
+        days = sorted({day_of(k) for k in fr})
+        before, after, mb, ma = [], [], [], []
+        io, eo = cal[cam]
+        for d in days:
+            train = [v for k, v in fr.items() if day_of(k) != d]
+            test = [v for k, v in fr.items() if day_of(k) == d]
+            p = fit_correction(train) if len(train) >= 3 else []
+            for v in test:
+                corrected = apply(p, v)
+                before.append(v["det"] - v["gt"])
+                after.append(corrected - v["gt"])
+                mb.append(ground_error(v["cols"], v["gt"], v["det"], v["z"], io, eo))
+                ma.append(ground_error(v["cols"], v["gt"], corrected, v["z"], io, eo))
+        b, a = np.concatenate(before), np.concatenate(after)
+        gb, ga = np.concatenate(mb), np.concatenate(ma)
+        lines += [f"  {cam}: {len(fr)} frames over {len(days)} day(s); correction (x fraction, px): "
+                  + ", ".join(f"{x:.2f}:{c:+.0f}" for x, c in pts[1:-1]),
+                  f"      leave-one-day-out  median |err| {np.median(np.abs(b)):.1f} -> "
+                  f"{np.median(np.abs(a)):.1f} px, bias {b.mean():+.1f} -> {a.mean():+.1f} px, "
+                  f"ground median {np.nanmedian(gb):.1f} -> {np.nanmedian(ga):.1f} m"]
+        if len(days) < 3:
+            lines.append("      (fewer than 3 days: the leave-one-day-out estimate is weak)")
+    path = out / "chelsea_bias_correction.json"
+    path.write_text(json.dumps(result, indent=1) + "\n")
+    lines += ["", f"Saved {path}.",
+              "Check it:   python3 tune_chelsea.py score --configs current no_bias "
+              f"--bias-correction-file {path}",
+              "Use it:     python3 process_chelsea.py ... --bias-correction-file " + str(path)]
+    report = "\n".join(lines)
+    (out / "tuning" / "derive_report.txt").write_text(report + "\n")
+    print(report)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap.add_argument("--out", default="/mnt/I2Rgus_Data/Chelsea_calibration",
+                    help="process_chelsea.py output folder")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("sample")
+    s.add_argument("--per-camera", type=int, default=20)
+    sc = sub.add_parser("score")
+    sc.add_argument("--configs", nargs="*", choices=list(CONFIGS), default=None)
+    sc.add_argument("--bias-correction-file", default=None,
+                    help="also score the detector with this correction (e.g. from 'derive')")
+    sub.add_parser("derive")
+    args = ap.parse_args()
+    {"sample": cmd_sample, "score": cmd_score, "derive": cmd_derive}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

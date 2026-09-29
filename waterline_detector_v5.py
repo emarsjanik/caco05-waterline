@@ -2083,6 +2083,11 @@ def apply_cli_overrides():
                              f"flagged per column either way and dropped downstream, so a lower "
                              f"value keeps the visible part of a partly faint waterline, e.g. the "
                              f"hazy far field of a winter frame, instead of losing the frame.")
+    parser.add_argument("--bias-correction-file", default=None,
+                        help='JSON {"c1": [[x_fraction, correction_px], ...], "c2": [...]} '
+                             "used as each camera's correction instead of the built-in one "
+                             "(e.g. from tune_chelsea.py derive, for imagery the built-in "
+                             "correction was not fitted to). Cameras not in the file keep theirs.")
     parser.add_argument("--envelope-pad", type=float, default=0.0,
                         help="Widen every camera's search envelope by this fraction of the "
                              "cropped image height on both sides (0 = as tuned). For imagery "
@@ -2113,6 +2118,17 @@ def apply_cli_overrides():
             CAMERAS[key] = replace(profile, bias_correction_points=(),
                                    bias_correction_points_timex=())
         print("BIAS CORRECTION DISABLED for all cameras (--no-bias-correction).")
+
+    if args.bias_correction_file:
+        import json
+        custom = json.loads(Path(args.bias_correction_file).read_text())
+        for cam, pts in custom.items():
+            key = f"CACO05_{cam.upper()}"
+            if key in CAMERAS:
+                pts = tuple((float(x), float(c)) for x, c in pts)
+                CAMERAS[key] = replace(CAMERAS[key], bias_correction_points=pts,
+                                       bias_correction_points_timex=pts)
+                print(f"BIAS CORRECTION for {key} from {args.bias_correction_file} ({len(pts)} points).")
 
     if args.min_signal_fraction is not None:
         MIN_SIGNAL_COLUMN_FRACTION = args.min_signal_fraction
