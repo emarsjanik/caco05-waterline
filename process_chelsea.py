@@ -315,7 +315,9 @@ def main():
                          "exclusive (default 13-18, i.e. 8 am - 1 pm EST). In winter the low "
                          "afternoon sun throws the bluff's shadow across the beach, and the "
                          "detector followed its edge (and snow patches) instead of the water. "
-                         "'0-24' uses every frame.")
+                         "'0-24' uses every frame; fractions allowed, e.g. 13.5-18 starts at "
+                         "13:30, as the 13:00 frames (an hour after sunrise) were the worst "
+                         "against ground truth.")
     ap.add_argument("--min-signal-fraction", type=float, default=0.35,
                     help="Share of a frame's columns that must show the waterline (default "
                          "0.35; the station uses 0.60). On overcast winter frames the far field "
@@ -325,6 +327,12 @@ def main():
     ap.add_argument("--bias-correction-file", default=None,
                     help="Per-camera bias correction for the detector (JSON from "
                          "tune_chelsea.py derive), instead of the one fitted to 2026 imagery.")
+    ap.add_argument("--min-confidence", type=float, default=None,
+                    help="Detector's mean-confidence gate (its default 0.9 was tuned on 2026 "
+                         "imagery; check a lower value with tune_chelsea.py score).")
+    ap.add_argument("--column-limits", default=None,
+                    help='Use only this range of each camera\'s image width, e.g. "c2=0:0.7": '
+                         "drops the far field, where a few pixels are tens of metres.")
     ap.add_argument("--no-overlays", action="store_true", help="Skip the per-frame overlay images.")
     ap.add_argument("--skip-geometry-check", action="store_true")
     args = ap.parse_args()
@@ -387,14 +395,19 @@ def main():
     say(f"  {len(ep_wl)} readings, "
         f"{datetime.fromtimestamp(ep_wl[0], tz=timezone.utc):%Y-%m-%d %H:%M} to "
         f"{datetime.fromtimestamp(ep_wl[-1], tz=timezone.utc):%Y-%m-%d %H:%M} UTC")
-    h0, h1 = (int(x) for x in args.utc_hours.split("-"))
-    wrong_hour = [n for n, f in frames.items()
-                  if not h0 <= datetime.fromtimestamp(f["epoch"], tz=timezone.utc).hour < h1]
+    h0, h1 = (float(x) for x in args.utc_hours.split("-"))
+
+    def hour_of(ep):
+        t = datetime.fromtimestamp(ep, tz=timezone.utc)
+        return t.hour + t.minute / 60
+
+    wrong_hour = [n for n, f in frames.items() if not h0 <= hour_of(f["epoch"]) < h1]
     for n in wrong_hour:
         del frames[n]
     if wrong_hour:
-        say(f"  {len(wrong_hour)} frame(s) outside {h0:02d}:00-{h1:02d}:00 UTC skipped "
-            f"(afternoon shadow of the bluff; --utc-hours)")
+        say(f"  {len(wrong_hour)} frame(s) outside {int(h0):02d}:{round(h0 % 1 * 60):02d}-"
+            f"{int(h1):02d}:{round(h1 % 1 * 60):02d} UTC skipped (low sun and the bluff's "
+            f"shadow; --utc-hours)")
     levels, no_level = {}, defaultdict(int)
     for name, f in frames.items():
         z = level_at(ep_wl, lv_wl, f["epoch"], args.max_gap_minutes * 60)
@@ -476,6 +489,8 @@ def main():
                 "--envelope-pad", args.envelope_pad,
                 "--min-signal-fraction", args.min_signal_fraction,
                 *(["--bias-correction-file", args.bias_correction_file] if args.bias_correction_file else []),
+                *(["--min-confidence", args.min_confidence] if args.min_confidence is not None else []),
+                *(["--column-limits", args.column_limits] if args.column_limits else []),
                 "--image-suffix", "timex.jpg",
                 "--source-dir", work / "src", "--input-dir", work / "in",
                 "--output-dir", work / "detections", "--debug-dir", work / "debug"],

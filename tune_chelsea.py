@@ -46,6 +46,11 @@ frame's signal fraction and whether the detector kept or discarded it
 the image width, left to right). Separates a correctable, consistent
 offset from scatter, and a threshold problem from a real absence of
 signal.
+
+FILTERS. score and diagnose take --column-limits "c2=0:0.7" (score only
+those columns, exactly what the detector's --column-limits keeps) and
+--utc-hours "13.5-18" (score only those frames), so a cut can be judged
+on runs already made.
 """
 
 import os
@@ -74,7 +79,30 @@ CONFIGS = {
     # lower signal thresholds: more frames kept -- at what cost in error?
     "signal_0.25": ["--image-suffix", "timex.jpg", "--min-signal-fraction", "0.25", "--envelope-pad", "0.1"],
     "signal_0.15": ["--image-suffix", "timex.jpg", "--min-signal-fraction", "0.15", "--envelope-pad", "0.1"],
+    # c2 frames with 50-75% signal were thrown out by the 0.9 confidence gate
+    "conf_0.75": ["--image-suffix", "timex.jpg", "--min-signal-fraction", "0.15", "--envelope-pad", "0.1",
+                  "--min-confidence", "0.75"],
+    "conf_0.6":  ["--image-suffix", "timex.jpg", "--min-signal-fraction", "0.15", "--envelope-pad", "0.1",
+                  "--min-confidence", "0.6"],
 }
+
+
+def parse_limits(spec):
+    """"c2=0:0.7,c1=0:0.9" -> {"c2": (0.0, 0.7), ...}; None -> {}."""
+    out = {}
+    for item in (spec or "").split(","):
+        if item.strip():
+            cam, rng = item.split("=")
+            lo, hi = (float(v) for v in rng.split(":"))
+            out[cam.strip().lower()] = (lo, hi)
+    return out
+
+
+def frame_hour(name):
+    """UTC hour (fractional) from the epoch at the start of an Argus file name."""
+    from datetime import datetime, timezone
+    t = datetime.fromtimestamp(int(name.split(".")[0]), tz=timezone.utc)
+    return t.hour + t.minute / 60
 
 
 def frame_levels(out):
@@ -170,12 +198,16 @@ def ground_error(cols, gt_rows, det_rows, z, io, eo):
     return np.hypot(dx - gx, dy - gy)
 
 
-def errors_for(det_dir, out, levels, cal):
-    """Per traced frame: columns, gt rows, det rows (np), z, camera. Missing detection -> None."""
+def errors_for(det_dir, out, levels, cal, limits=None, hours=None):
+    """Per traced frame: columns, gt rows, det rows (np), z, camera. Missing detection -> None.
+    limits: {"c2": (lo, hi)} keeps only detected columns in that share of the width (as the
+    detector's --column-limits does); hours: (h0, h1) UTC keeps only frames in that range."""
     res = {}
     for gt_path in sorted((out / "ground_truth").glob("*.csv")):
         name = gt_path.stem + ".jpg"
         if name not in levels:
+            continue
+        if hours and not hours[0] <= frame_hour(name) < hours[1]:
             continue
         cam, z = levels[name]
         gt = load_gt(gt_path)
@@ -184,6 +216,9 @@ def errors_for(det_dir, out, levels, cal):
             res[name] = dict(cam=cam, z=z, n_gt=len(gt), cols=None)
             continue
         det = load_det(det_path)
+        if limits and cam in limits:
+            lo, hi = limits[cam]
+            det = {c: r for c, r in det.items() if lo <= c / (WIDTH - 1) <= hi}
         common = sorted(set(gt) & set(det))
         res[name] = dict(cam=cam, z=z, n_gt=len(gt), cols=np.array(common, float),
                          gt=np.array([gt[c] for c in common]), det=np.array([det[c] for c in common]))
@@ -225,6 +260,17 @@ def run_detector(cfg_args, out, name, log):
     return d / "det" if ok else None
 
 
+def parse_hours(spec):
+    return tuple(float(v) for v in spec.split("-")) if spec else None
+
+
+def filters_note(limits, hours):
+    parts = [f"{c} columns {lo:.2f}-{hi:.2f} of the width" for c, (lo, hi) in sorted(limits.items())]
+    if hours:
+        parts.append(f"frames {hours[0]:g}-{hours[1]:g} h UTC")
+    return f" [{'; '.join(parts)}]" if parts else ""
+
+
 def cmd_score(args):
     out = Path(args.out)
     if not list((out / "ground_truth").glob("*.csv")):
@@ -237,14 +283,15 @@ def cmd_score(args):
     log = out / "tuning" / "tuning.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     n_gt = len(list((out / "ground_truth").glob("*.csv")))
-    lines = [f"Detector settings scored on {n_gt} traced frame(s)"]
+    limits, hours = parse_limits(args.column_limits), parse_hours(args.utc_hours)
+    lines = [f"Detector settings scored on {n_gt} traced frame(s)" + filters_note(limits, hours)]
     for name, cfg in configs.items():
         print(f"running {name} ...", flush=True)
         det_dir = run_detector(cfg, out, name, log)
         if det_dir is None:
             lines.append(f"  {name}: detector failed, see {log}")
             continue
-        summarise(errors_for(det_dir, out, levels, cal), cal, name, lines)
+        summarise(errors_for(det_dir, out, levels, cal, limits, hours), cal, name, lines)
     report = "\n".join(lines)
     (out / "tuning" / "score_report.txt").write_text(report + "\n")
     print("\n" + report)
@@ -360,9 +407,12 @@ def cmd_diagnose(args):
     if not det_dir.exists():
         sys.exit(f"Run 'score' first (no {args.config} run in {out / 'tuning'}).")
     levels, cal = frame_levels(out), calib()
-    res = errors_for(det_dir, out, levels, cal)
+    limits, hours = parse_limits(args.column_limits), parse_hours(args.utc_hours)
+    res = errors_for(det_dir, out, levels, cal, limits, hours)
     log = parse_log(out / "tuning" / "tuning.log", args.config)
-    lines = [f"Diagnosis of the '{args.config}' run ({len(res)} traced frames)"]
+    lines = [f"Diagnosis of the '{args.config}' run ({len(res)} traced frames)"
+             + filters_note(limits, hours)]
+    summarise(res, cal, args.config, lines)
     for cam in ("c1", "c2"):
         fr = {k: v for k, v in res.items() if v["cam"] == cam}
         if not fr:
@@ -433,6 +483,12 @@ def main():
     sub.add_parser("derive")
     dg = sub.add_parser("diagnose")
     dg.add_argument("--config", default="current", help="a setting already run by 'score'")
+    for p in (sc, dg):
+        p.add_argument("--column-limits", default=None,
+                       help='score only these columns, e.g. "c2=0:0.7" (as the detector option '
+                            'of that name would keep); no detector rerun needed')
+        p.add_argument("--utc-hours", default=None,
+                       help='score only frames in this UTC range, e.g. "13.5-18"')
     args = ap.parse_args()
     {"sample": cmd_sample, "score": cmd_score, "derive": cmd_derive,
      "diagnose": cmd_diagnose}[args.cmd](args)
