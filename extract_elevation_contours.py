@@ -473,6 +473,39 @@ def tide_agreement_by_day(output_rows):
     return agreement
 
 
+def cliff_segments(columns, rows, window, cliff_px):
+    """
+    Label runs of a detected line separated by CLIFFS: places where the row
+    changes by more than cliff_px within `window` columns. A waterline is
+    smooth across the image (well under 1 px per column); a jump of tens of
+    pixels in a few columns is the solver leaving the water for another
+    edge -- on the winter imagery, the edges of snow patches, which gave
+    staircase lines climbing the dry beach. Across a column gap wider than
+    `window` nothing is compared (the gap is not a cliff, and does not
+    split the run). Returns (labels, number of cliffs).
+    """
+    n = len(rows)
+    labels = np.zeros(n, dtype=int)
+    if n < 2:
+        return labels, 0
+    cliffs = 0
+    run = 0
+    j = 0
+    for i in range(1, n):
+        if columns[i] - columns[i - 1] > window:
+            j = i
+        else:
+            while columns[i] - columns[j] > window:
+                j += 1
+            if abs(rows[i] - rows[j:i].min()) > cliff_px or abs(rows[i] - rows[j:i].max()) > cliff_px:
+                if labels[i - 1] == run:          # first column past the jump: new run
+                    run += 1
+                    cliffs += 1
+                j = i
+        labels[i] = run
+    return labels, cliffs
+
+
 def straightness_mask(rows, window, min_residual):
     """
     Flags columns where the detected line is implausibly straight.
@@ -665,6 +698,14 @@ def main():
                         help="If more than this fraction of a frame's columns are straight, "
                              "drop the frame entirely rather than trimming (default 0.50). A "
                              "mostly-straight line is not a waterline with a bad patch.")
+    parser.add_argument("--cliff-px", type=float, default=40.0,
+                        help="A row change of more than this within --cliff-window columns is a "
+                             "cliff: the line left the water for another edge (default 40; 0 "
+                             "disables). A waterline changes by well under 1 px per column.")
+    parser.add_argument("--cliff-window", type=int, default=10)
+    parser.add_argument("--cliff-min-run", type=float, default=0.6,
+                        help="With cliffs, keep the longest smooth run if it holds at least this "
+                             "share of the frame's columns (default 0.6), else drop the frame.")
     parser.add_argument("--truncate-window", type=int, default=120,
                         help="Width in columns of the sliding window used to judge local "
                              "signal density (default 120). Columns whose neighbourhood is "
@@ -792,6 +833,8 @@ def main():
     truncated_columns = 0
     straight_trimmed = 0
     skipped_mostly_straight = 0
+    skipped_staircase = 0
+    cliff_trimmed = 0
 
     for path in shoreline_files:
         epoch = extract_epoch_from_filename(path.name)
@@ -864,6 +907,20 @@ def main():
             if len(columns) == 0:
                 skipped_all_no_signal += 1
                 continue
+
+            # Staircase check: keep the longest smooth run, or drop the frame.
+            if args.cliff_px > 0 and len(columns) > 1:
+                labels, n_cliffs = cliff_segments(columns, rows, args.cliff_window, args.cliff_px)
+                if n_cliffs:
+                    sizes = np.bincount(labels)
+                    best = int(np.argmax(sizes))
+                    if sizes[best] < args.cliff_min_run * len(columns):
+                        skipped_staircase += 1
+                        continue
+                    run_keep = labels == best
+                    cliff_trimmed += int((~run_keep).sum())
+                    columns, rows, sharpness = columns[run_keep], rows[run_keep], sharpness[run_keep]
+                    col_has_signal = col_has_signal[run_keep]
 
             coverage = len(columns) / max(total_columns, 1)
             if args.min_coverage > 0.0 and coverage < args.min_coverage:
@@ -992,6 +1049,10 @@ def main():
             if skipped_mostly_straight:
                 print(f"Skipped (mostly straight) : {skipped_mostly_straight} frame(s) -- over "
                       f"{100*args.max_straight_fraction:.0f}% of columns straight")
+        if skipped_staircase or cliff_trimmed:
+            print(f"Staircase lines          : {skipped_staircase} frame(s) skipped, {cliff_trimmed} "
+                  f"column(s) trimmed -- jumps over {args.cliff_px:g} px within "
+                  f"{args.cliff_window} columns (the solver leaving the water, e.g. for snow edges)")
         if args.truncate_min_coverage > 0.0:
             print(f"Truncated (sparse region): {truncated_columns} column(s) -- passed the "
                   f"per-column test but sat in a neighbourhood below "
