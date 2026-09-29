@@ -44,6 +44,15 @@ archive). Inside that allowance it is kept as SUSPECT "possible_setup":
 in a storm the GNSS-R may be measuring real water the gauge cannot see.
 Readings below the gauge are unaffected. No wave archive -> plain limit.
 
+WAVE RUNUP. Above the setup allowance but within the Stockdon 2% runup
+R2 = 1.1 * (setup + sqrt(Hs L0 (0.563 beta^2 + 0.004)) / 2), the GNSS-R
+is reading the TOTAL water level at the shore (water running up the
+beach), not still water. Here such readings still FAIL -- a waterline
+labelled with a runup level would sit metres too high -- but with
+reason "possible_runup", so they are counted separately and drawn in
+their own colour. GPS_code's export_twl.py keeps them as observations
+for total water level model validation.
+
 Only FAIL readings are removed by the pipeline; SUSPECT ones are kept
 and reported. Where the gauge has no data the reference test is simply
 not applied (the other tests still are).
@@ -111,18 +120,25 @@ def default_waves_path(reference_path):
     return p if p.exists() else None
 
 
-def setup_allowance(epochs, waves):
-    """Largest plausible shoreline wave setup (m) at each epoch; 0 where no wave record."""
+def wave_allowances(epochs, waves):
+    """Stockdon (2006) shoreline setup and 2% runup (m) at each epoch; 0 where no wave record."""
     epochs = np.asarray(epochs, dtype=float)
     if waves is None:
-        return np.zeros(len(epochs))
+        return np.zeros(len(epochs)), np.zeros(len(epochs))
     w_ep, hs, tp = waves
     j = np.clip(np.searchsorted(w_ep, epochs), 0, len(w_ep) - 1)
     jm = np.clip(j - 1, 0, len(w_ep) - 1)
     k = np.where(np.abs(w_ep[jm] - epochs) < np.abs(w_ep[j] - epochs), jm, j)
     ok = np.abs(w_ep[k] - epochs) <= WAVE_MAX_GAP_S
-    l0 = 9.81 * tp[k] ** 2 / (2 * np.pi)
-    return np.where(ok, SETUP_COEF * SETUP_BETA * np.sqrt(np.maximum(hs[k] * l0, 0.0)), 0.0)
+    hl = np.maximum(hs[k] * 9.81 * tp[k] ** 2 / (2 * np.pi), 0.0)
+    setup = SETUP_COEF * SETUP_BETA * np.sqrt(hl)
+    r2 = 1.1 * (setup + np.sqrt(hl * (0.563 * SETUP_BETA ** 2 + 0.004)) / 2)
+    return np.where(ok, setup, 0.0), np.where(ok, r2, 0.0)
+
+
+def setup_allowance(epochs, waves):
+    """Largest plausible shoreline wave setup (m) at each epoch; 0 where no wave record."""
+    return wave_allowances(epochs, waves)[0]
 
 
 def reference_at(r_ep, r_lv, epochs):
@@ -187,10 +203,13 @@ def run_qc(ep, lv, reference=None, waves=None):
             a, lag_s, b, sigma = fit
             predicted = a * reference_at(reference[0], reference[1], ep - lag_s) + b
             limit = max(REF_LIMIT, REF_SIGMAS * sigma)
-            allowance = setup_allowance(ep, waves)
+            allowance, runup = wave_allowances(ep, waves)
             for i in np.flatnonzero(np.isfinite(predicted) & (np.abs(lv - predicted) > limit)):
-                if 0 < lv[i] - predicted[i] <= limit + allowance[i]:
+                excess = lv[i] - predicted[i]
+                if 0 < excess <= limit + allowance[i]:
                     mark(i, SUSPECT, "possible_setup")
+                elif 0 < excess <= limit + runup[i]:
+                    mark(i, FAIL, "possible_runup")    # total water level, not still water
                 else:
                     mark(i, FAIL, "reference")
 
@@ -307,7 +326,9 @@ def main():
         good = flags[sel] < FAIL
         ax.plot(t[good], lv[sel][good], ".", ms=4, color="#1f77b4", label="GNSS-R, passed QC")
         if (~good).any():
-            ax.plot(t[~good], lv[sel][~good], "x", ms=6, color="#c0392b", label="GNSS-R, failed QC (not used)")
+            bad = ~good & ~np.array(["possible_runup" in r for r in
+                                     np.asarray(reasons, dtype=object)[sel]], bool)
+            ax.plot(t[bad], lv[sel][bad], "x", ms=6, color="#c0392b", label="GNSS-R, failed QC (not used)")
         setup = np.array(["possible_setup" in r for r in np.asarray(reasons, dtype=object)[sel]], bool)
         sus = (flags[sel] == SUSPECT) & ~setup
         if sus.any():
@@ -315,6 +336,10 @@ def main():
         if setup.any():
             ax.plot(t[setup], lv[sel][setup], "D", ms=6, mfc="none", color="#e67e22",
                     label="above gauge by no more than wave setup (kept)")
+        runup_m = np.array(["possible_runup" in r for r in np.asarray(reasons, dtype=object)[sel]], bool)
+        if runup_m.any():
+            ax.plot(t[runup_m], lv[sel][runup_m], "s", ms=6, mfc="none", color="#7d3c98",
+                    label="total water level, within wave runup (not used)")
         ax.set_ylabel("water level (m NAVD88)")
         ax.grid(alpha=0.3)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
