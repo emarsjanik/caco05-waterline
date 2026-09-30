@@ -79,6 +79,9 @@ def main():
     ap.add_argument("image_dir", help="folder of original *.timex.jpg frames")
     ap.add_argument("--eo-date", default="20250219", help="calibration to test against")
     ap.add_argument("--per-day", type=int, default=3)
+    ap.add_argument("--max-gap-days", type=int, default=14,
+                    help="days without a clear horizon that a run of one pointing may span "
+                         "(default 14)")
     ap.add_argument("--write-setups", action="store_true",
                     help="write a calibration for each run of days with a different pointing "
                          "(tilt and roll from the horizon, azimuth kept) and list them in "
@@ -150,15 +153,17 @@ def main():
         print("\nEvery day with a clear horizon matches the calibration.")
         return
 
-    # Runs of consecutive days with the SAME pointing (a new run starts at a
-    # gap of more than a day or a change of more than RUN_TOL_DEG).
+    # Runs of days with the SAME pointing (a new run starts at a change of more
+    # than RUN_TOL_DEG, or a gap of more than --max-gap-days without data).
     runs = []
     for cam, days in moved.items():
         cur = [days[0]]
         for d in days[1:]:
             gap = (datetime.fromisoformat(d[0]) - datetime.fromisoformat(cur[-1][0])).days
             same = abs(d[1] - cur[-1][1]) < RUN_TOL_DEG and abs(d[2] - cur[-1][2]) < RUN_TOL_DEG
-            if gap > 1 or not same:
+            # Hazy ("unclear") or missing days in between do not split a run:
+            # a camera that points the same way on both sides has not moved.
+            if gap > args.max_gap_days or not same:
                 runs.append((cam, cur)); cur = [d]
             else:
                 cur.append(d)
@@ -169,7 +174,9 @@ def main():
         a, b = run[0][0], run[-1][0]
         dt = float(np.median([d[1] for d in run])); dr = float(np.median([d[2] for d in run]))
         name = f"CACO05_{cam}_{a}_to_{b}_EO.yaml"
-        print(f"  {cam}  {a} to {b}  ({len(run)} day(s))  tilt {dt:+.2f} deg, roll {dr:+.2f} deg  -> {name}")
+        note = ("   <-- ONE day only: look at its photos before trusting it (fog or a "
+                "wet lens can fake a horizon)") if len(run) == 1 and max(abs(dt), abs(dr)) > 2 else ""
+        print(f"  {cam}  {a} to {b}  ({len(run)} day(s))  tilt {dt:+.2f} deg, roll {dr:+.2f} deg  -> {name}{note}")
         rows.append((cam, a, b, name, dt, dr))
     print("  The horizon fixes tilt and roll; the azimuth (left-right pan) is kept from the "
           f"{args.eo_date} calibration. A pan error moves points mostly ALONG the beach for these "
