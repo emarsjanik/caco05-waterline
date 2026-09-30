@@ -621,7 +621,9 @@ def main():
             im0 = axes[0].imshow(dem, origin="lower", extent=extent,
                                  cmap="terrain", aspect="equal")
             axes[0].set_title(f"Intertidal DEM  ({min(dates)} to {max(dates)})\n"
-                              f"{filled} cells at {args.cell} m", fontsize=10)
+                              + (f"{filled} measured + {int((source == 2).sum())} interpolated "
+                                 f"cells at {args.cell} m" if source is not None
+                                 else f"{filled} cells at {args.cell} m"), fontsize=10)
             plt.colorbar(im0, ax=axes[0], label="elevation (m NAVD88)", shrink=0.8)
 
             im1 = axes[1].imshow(spread, origin="lower", extent=extent,
