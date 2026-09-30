@@ -287,6 +287,45 @@ def day_offsets(pair_cell, pair_vals, pair_key, min_frames, min_pairs=30):
     return out
 
 
+def interpolate_between_contours(E, N, Z, frames, cell, max_spread, dem, max_edge):
+    """
+    Fill cells between waterlines by linear interpolation.
+
+    The upper beach is crossed by few frames (fewer high tides are caught),
+    so its cells rarely reach --min-points although the waterlines there
+    are clean, nested contours. Every cell crossed by at least one frame
+    (and not too noisy) becomes a node; the nodes are triangulated and each
+    empty cell inside a triangle is interpolated from its corners -- the
+    usual way an intertidal DEM is built from waterlines. Triangles with
+    an edge longer than max_edge (m) are dropped, so nothing is bridged
+    across a gap in the data or between separate stretches of beach.
+    Cells already measured keep their value. Uses matplotlib.tri (no scipy).
+    Returns (dem, source) with source 1 = measured, 2 = interpolated.
+    """
+    import matplotlib.tri as mtri
+    node, _, _, e0, n0, ncols, nrows = build_grid(E, N, Z, cell, 1, max_spread, frames)
+    source = np.where(np.isfinite(dem), 1, 0)
+    ok = np.isfinite(node)
+    if ok.sum() < 3:
+        return dem, source
+    rr, cc = np.nonzero(ok)
+    x = e0 + (cc + 0.5) * cell
+    y = n0 + (rr + 0.5) * cell
+    tri = mtri.Triangulation(x, y)
+    t = tri.triangles
+    edge = np.max(np.stack([np.hypot(x[t[:, a]] - x[t[:, b]], y[t[:, a]] - y[t[:, b]])
+                            for a, b in ((0, 1), (1, 2), (2, 0))]), axis=0)
+    tri.set_mask(edge > max_edge)
+    interp = mtri.LinearTriInterpolator(tri, node[ok])
+    gr, gc = np.nonzero(~np.isfinite(dem))
+    vals = np.ma.filled(interp(e0 + (gc + 0.5) * cell, n0 + (gr + 0.5) * cell), np.nan)
+    out = dem.copy()
+    good = np.isfinite(vals)
+    out[gr[good], gc[good]] = vals[good]
+    source[gr[good], gc[good]] = 2
+    return out, source
+
+
 def fill_small_gaps(dem, max_iterations=3):
     """
     Fills isolated nodata cells from their immediate neighbours.
@@ -380,6 +419,11 @@ def main():
                     help="Also save this DEM as <dir>/dem_<end date>_<N>d_{dem,spread,count}.asc "
                          "(with --last-days), building a dated series that dem_change.py "
                          "differences week to week.")
+    ap.add_argument("--interpolate-edge", type=float, default=None,
+                    help="Fill cells between waterlines by linear interpolation over a "
+                         "triangulation of every crossed cell, using triangles with edges up to "
+                         "this many metres (e.g. 6). Measured cells keep their value; "
+                         "<stem>_source.asc marks 1 = measured, 2 = interpolated.")
     ap.add_argument("--fill-gaps", action="store_true",
                     help="Close isolated single-cell holes from neighbours. Off by default: an "
                          "interpolated cell looks identical to a measured one in the output.")
@@ -527,6 +571,13 @@ def main():
         print("                    (repeat crossings of the same cell; this is the DEM's")
         print("                     own repeatability, not its accuracy)")
 
+    source = None
+    if args.interpolate_edge:
+        dem, source = interpolate_between_contours(E, N, Z, frames, args.cell, args.max_spread,
+                                                   dem, args.interpolate_edge)
+        print(f"interpolated      : +{int((source == 2).sum())} cell(s) between waterlines "
+              f"(triangle edges <= {args.interpolate_edge:g} m); {int((source == 1).sum())} measured")
+
     if args.fill_gaps:
         before = filled
         dem = fill_small_gaps(dem)
@@ -538,6 +589,9 @@ def main():
     write_ascii_grid(str(stem) + "_spread.asc", spread, e0, n0, args.cell)
     write_ascii_grid(str(stem) + "_count.asc",
                      count.astype(float), e0, n0, args.cell, nodata=0.0)
+    if source is not None:
+        write_ascii_grid(str(stem) + "_source.asc", source.astype(float), e0, n0, args.cell,
+                         nodata=0.0)
     print()
     print(f"wrote {stem}_dem.asc     (elevation, m NAVD88)")
     print(f"wrote {stem}_spread.asc  (16-84 percentile range, m)")

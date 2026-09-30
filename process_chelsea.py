@@ -345,6 +345,11 @@ def main():
                     help="Leave out whole days whose elevations differ from the other days' "
                          "DEM by more than this (m, default 0.15, as the station cron): catches "
                          "days where the detector followed snow or shadow. 0 disables.")
+    ap.add_argument("--interpolate-edge", type=float, default=6.0,
+                    help="Fill DEM cells between waterlines by interpolation, bridging at most "
+                         "this many metres (default 6). The upper beach is crossed by too few "
+                         "frames for the 3-frame rule, though its waterlines are clean nested "
+                         "contours. 0 disables.")
     ap.add_argument("--max-frame-offset", type=float, default=0.2,
                     help="Leave out single frames whose waterline sits more than this (m, "
                          "default 0.2) from the DEM of all the other frames, before the day "
@@ -635,6 +640,10 @@ def main():
         dem_filters += ["--max-day-offset", args.max_day_offset]
     if dem_filters:
         say(f"  filters: {' '.join(str(x) for x in dem_filters)}")
+    if args.interpolate_edge:
+        dem_filters += ["--interpolate-edge", args.interpolate_edge]
+        say(f"  cells between waterlines interpolated (triangle edges up to "
+            f"{args.interpolate_edge:g} m; <dem>_source.asc: 1 measured, 2 interpolated)")
     periods = sorted({f["period"] for n, f in frames.items() if n in levels})
     made = []
     for p in periods:
