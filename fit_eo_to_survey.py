@@ -76,7 +76,11 @@ def cost_fn(io, eo0, u0, v0, z, survey):
     return cost
 
 
-def search(cost, span=(4.0, 3.0, 3.0)):
+SPAN = (4.0, 3.0, 3.0)
+MAX_PLAUSIBLE_DEG = 1.5      # beyond this the sea horizon would have shown it (tilt, roll)
+
+
+def search(cost, span=SPAN):
     """Coarse-to-fine grid search over (d_azimuth, d_tilt, d_roll) in degrees."""
     best = np.zeros(3)
     for step, half in ((0.5, np.array(span)), (0.1, np.full(3, 0.5)), (0.02, np.full(3, 0.1))):
@@ -161,6 +165,34 @@ def main():
             sharp.append(min(cost(best + d), cost(best - d)) - c)
             flag = "  <-- FLAT: not determined by these data" if sharp[-1] < 0.01 else ""
             print(f"    {nm:8s}: cost +{sharp[-1]:.3f} m for 0.25 deg{flag}")
+        # Is the answer believable? A pointing error moves lines by a few metres
+        # here (camera ~45-70 m from the beach, ~20 m up: 1 deg = 1-5 m), and
+        # tilt and roll are fixed to a few tenths of a degree by the sea horizon.
+        E0, N0 = pixel_to_ground(u0, v0, Z, io, eo0)
+        e1 = eo0.copy(); e1[3:6] += np.deg2rad(best)
+        E1, N1 = pixel_to_ground(u0, v0, Z, io, e1)
+        moved = np.hypot(E1 - E0, N1 - N0)
+        print(f"  the fit moves the lines by median {np.nanmedian(moved):.1f} m "
+              f"(p90 {np.nanpercentile(moved, 90):.1f} m)")
+        problems = []
+        lim = np.array(SPAN) + 0.6
+        for k, nm in enumerate(("azimuth", "tilt", "roll")):
+            if abs(best[k]) >= lim[k] - 0.05:
+                problems.append(f"{nm} hit the search limit ({best[k]:+.2f} deg): no real optimum")
+        if abs(best[1]) > MAX_PLAUSIBLE_DEG or abs(best[2]) > MAX_PLAUSIBLE_DEG:
+            problems.append("tilt or roll changed by more than "
+                            f"{MAX_PLAUSIBLE_DEG} deg -- the sea horizon (horizon_check.py) would "
+                            "have shown that")
+        if on1.mean() < on0.mean() - 0.10:
+            problems.append(f"the fit pushed lines off the survey ({100 * on0.mean():.0f}% -> "
+                            f"{100 * on1.mean():.0f}% on it): it improves by escaping, not matching")
+        if problems:
+            print("  NOT TRUSTWORTHY:")
+            for pr in problems:
+                print(f"    - {pr}")
+            print("    The waterlines themselves are probably not on the water (snow, wrack, a "
+                  "wet/dry or berm edge): no pointing can put them on the right contour. Check "
+                  "the overlays before anything else.")
         per = []
         for k in range(len(frames)):
             m = (F == k) & on1
@@ -178,7 +210,10 @@ def main():
                  f"tilt {best[1]:+.3f}, roll {best[2]:+.3f} deg fitted to {Path(args.survey).name} "
                  f"using {len(frames)} waterline frames {days[0]} to {days[-1]}; position kept.")
         print(f"  wrote {out}")
-        new_setups[(cam, eo_path.name)] = out.name
+        if problems:
+            print("  (not offered to --write-setups)")
+        else:
+            new_setups[(cam, eo_path.name)] = out.name
 
     if args.write_setups:
         sc = CAL / "chelsea_setups.csv"
