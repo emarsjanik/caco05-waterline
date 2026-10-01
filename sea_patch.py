@@ -168,10 +168,12 @@ def choose_patch(views, origin=DEFAULT_ORIGIN, search=((-250.0, 250.0), (-60.0, 
         if not seen.any():
             continue
         r0, r1, c0, c1 = largest_rectangle_aspect(seen, max_aspect)
-        area = (r1 - r0) * (c1 - c0) * step * step
+        area = max(r1 - r0 - 2, 0) * max(c1 - c0 - 2, 0) * step * step
         if best is None or area > best[0]:
-            v_hi, v_lo = search[1][1] - r0 * step, search[1][1] - r1 * step
-            u_lo, u_hi = search[0][0] + c0 * step, search[0][0] + c1 * step
+            # visibility was tested at cell centres; pull every edge in by one cell so
+            # no part of the patch lies outside what a camera saw
+            v_hi, v_lo = search[1][1] - (r0 + 1) * step, search[1][1] - (r1 - 1) * step
+            u_lo, u_hi = search[0][0] + (c0 + 1) * step, search[0][0] + (c1 - 1) * step
             best = (area, Patch(origin, brg, (u_lo, u_hi), (v_lo, v_hi), res))
     if best is None:
         raise ValueError("no part of the search area is seen by every pointing")

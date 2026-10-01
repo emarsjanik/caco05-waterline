@@ -68,6 +68,9 @@ def main():
     ap.add_argument("--live-levels", nargs=2, type=float, default=[-1.5, 2.0],
                     help="water levels (m NAVD88) today's camera must see the patch at")
     ap.add_argument("--res", type=float, default=0.25, help="patch resolution, m (default 0.25)")
+    ap.add_argument("--min-coverage", type=float, default=0.99,
+                    help="Skip frames whose photo shows less than this share of the patch "
+                         "(default 0.99): black margins would teach the network something false")
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()
 
@@ -146,15 +149,19 @@ def main():
         if img is None:
             continue
         out, cov = rectify(img, io, eos[eo_name], z, patch)
-        if cov < 0.99:
+        if cov < args.min_coverage:
             low += 1
+            if dst.exists():
+                dst.unlink()
+            continue
         cv2.imwrite(str(dst), out, [cv2.IMWRITE_JPEG_QUALITY, 95])
         sample.setdefault(eo_name, (src, z))
         done += 1
         if i % 200 == 0:
             print(f"  {i}/{len(todo)} ...", flush=True)
     print(f"projected         : {done} frame(s) -> {out_dir} ({patch.shape[1]} x {patch.shape[0]} px)"
-          + (f"; {low} with part of the patch outside the photo" if low else ""))
+          + (f"; {low} SKIPPED, the photo shows less than {args.min_coverage:.0%} of the patch"
+             if low else ""))
 
     # check picture: the patch outline on one photo per pointing
     from view_reproject import ground_to_pixel
