@@ -28,3 +28,8 @@ result_*.txt
 exp_timex_gt/
 owg_models/*.weights.h5
 owg_models/*.weights.h5
+
+# Exported wave gauge models: large, copied in from Colab, not versioned.
+owg_models/*.onnx
+owg_models/*.h5
+owg_models/*.npy

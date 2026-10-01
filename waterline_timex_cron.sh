@@ -230,6 +230,15 @@ python3 "$BASE/fetch_buoy_waves.py" --station "$WAVE_BUOY" --output "$WAVES_CSV"
 waves_arg=""
 [ -f "$WAVES_CSV" ] && waves_arg="--waves $WAVES_CSV"
 
+# 5a'. Optical wave gauge (owg_live.py): wave height from each new c2 bright
+#      image, archived in archive/owg_c2_H.csv, 7-day plot against the buoy.
+#      Skipped until the exported model (export_owg_onnx.py) is in owg_models/.
+OWG_MODEL="$BASE/owg_models/owg_c2_H_current_C"
+if [ -f "$OWG_MODEL.onnx" ]; then
+    python3 "$BASE/owg_live.py" --model "$OWG_MODEL" --waves-csv "$WAVES_CSV" >> "$LOG" 2>&1 \
+        || log "WARNING: optical wave gauge failed"
+fi
+
 # 5b. Tide gauge for GNSS-R QC. First run backfills 120 days.
 gauge_days=7
 [ -f "$GAUGE_CSV" ] || gauge_days=120
