@@ -124,6 +124,8 @@ DESCRIPTIONS = {
     "_diff": "elevation change, m",
     "_sig": "significant elevation change, m",
     "_slope": "slope",
+    "_resid": "RMS residual of the local plane fit, m",
+    "_frames": "waterline frames in the fit neighbourhood",
 }
 
 
