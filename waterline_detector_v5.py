@@ -2117,6 +2117,12 @@ def apply_cli_overrides():
                              f"{CONFIDENCE_DISCARD_THRESHOLD}). Tuned on 2026 imagery; frames from "
                              f"other seasons can be accurate yet score lower, so check any lower "
                              f"value against ground truth (tune_chelsea.py score).")
+    parser.add_argument("--profile-json", default=None,
+                        help='Replace parts of a camera profile for this run, e.g. for photos in a '
+                             'different view than the tuned one: {"c2": {"crop": [t, b, l, r], '
+                             '"envelope": [[x, lo, hi], ...], "no_bias": true, "step": [near, far], '
+                             '"profile_scale": [near, far]}} (fractions as in the profiles). '
+                             'Written by detect_original_view.py.')
     parser.add_argument("--column-limits", default=None,
                         help='Keep only columns in this range of the image width, per camera, '
                              'e.g. "c2=0:0.7" or "c1=0:0.9,c2=0.1:0.7". Columns outside are '
@@ -2172,6 +2178,28 @@ def apply_cli_overrides():
                 parser.error(f"--column-limits: unknown camera {cam!r}")
             COLUMN_LIMITS[key] = (lo, hi)
             print(f"COLUMN LIMITS for {key}: {lo:.2f}-{hi:.2f} of the width (--column-limits).")
+
+    if args.profile_json:
+        import json
+        for cam, ov in json.loads(Path(args.profile_json).read_text()).items():
+            key = f"CACO05_{cam.upper()}"
+            if key not in CAMERAS:
+                parser.error(f"--profile-json: unknown camera {cam!r}")
+            kw = {}
+            if "crop" in ov:
+                kw.update(zip(("crop_top", "crop_bottom", "crop_left", "crop_right"),
+                              (float(v) for v in ov["crop"])))
+            if "envelope" in ov:
+                kw["envelope_points"] = tuple(tuple(float(v) for v in p) for p in ov["envelope"])
+            if ov.get("no_bias"):
+                kw["bias_correction_points"] = ()
+                kw["bias_correction_points_timex"] = ()
+            if "step" in ov:
+                kw["step_near"], kw["step_far"] = (int(v) for v in ov["step"])
+            if "profile_scale" in ov:
+                kw["profile_scale_near"], kw["profile_scale_far"] = (float(v) for v in ov["profile_scale"])
+            CAMERAS[key] = replace(CAMERAS[key], **kw)
+            print(f"PROFILE OVERRIDE for {key} from {args.profile_json}: {', '.join(sorted(kw))}.")
 
     if args.envelope_pad > 0:
         pad = args.envelope_pad
