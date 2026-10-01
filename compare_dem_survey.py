@@ -100,7 +100,13 @@ def waves_vs_datum(off, hs, tp, tide):
     phi = np.sqrt(hs * 9.81 * tp ** 2 / (2 * np.pi))         # sqrt(Hs L0), m
     w = np.isfinite(phi)
     a = b = np.nan
-    if w.sum() >= 5:
+    spread_phi = float(np.ptp(phi[w])) if w.any() else 0.0
+    if w.sum() >= 5 and spread_phi < 2:
+        print(f"WAVES vs DATUM    : not fitted -- the frames' wave forcing is nearly the same "
+              f"(sqrt(Hs*L0) spans {spread_phi:.1f} m; Hs {np.nanmin(hs):.2f}-{np.nanmax(hs):.2f} m), "
+              f"so a datum shift and a wave effect cannot be told apart. Frames from days with "
+              f"different seas are needed.")
+    elif w.sum() >= 5:
         X = np.column_stack([np.ones(w.sum()), phi[w]])
         (a, b), *_ = np.linalg.lstsq(X, off[w], rcond=None)
         res = off[w] - X @ np.array([a, b])
@@ -117,9 +123,6 @@ def waves_vs_datum(off, hs, tp, tide):
             if m.any():
                 print(f"   Hs {lo:.2f}-{hi:.2f} m: {m.sum():3d} frames, offset median "
                       f"{np.median(off[m]):+.3f} m")
-        if np.ptp(phi[w]) < 2:
-            print("   NOTE: wave conditions barely vary across these frames, so the split "
-                  "between intercept and slope is poorly determined.")
     else:
         print("WAVES vs DATUM    : fewer than 5 frames with Hs and Tp -- cannot separate "
               "(run extract_elevation_contours.py with --waves)")

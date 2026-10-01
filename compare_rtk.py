@@ -165,6 +165,10 @@ def main():
             o = [r["offset_m"] for r in rows if r["camera"] == cam]
             print(f"   {cam}: {len(o)} frames, median {np.median(o):+.3f} m")
         print()
+        print("   NOTE: a frame counts only if its line reaches the surveyed stretch, so at low "
+              "water only lines sitting high get in; that alone gives a trend of about -1 "
+              "against water level below. Trust the trend only when the survey reaches the "
+              "low-tide line.")
         a, b, phi, w = waves_vs_datum(off, np.array([r["hs_m"] for r in rows]),
                                       np.array([r["tp_s"] for r in rows]),
                                       np.array([r["tide_navd88"] for r in rows]))
