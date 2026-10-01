@@ -14,22 +14,22 @@ pan (fit_eo_to_survey.py, against the Jan 2025 lidar). With the corrected
 pointing the 2025 c2 camera saw only ~32% of today's view, so those
 redraws put sea from the wrong place in most of the frame. A patch on the
 ground has no such problem -- it is the same patch whatever the pointing,
-provided every pointing saw it. For c2 the common patch is small (about
-76 x 38 m at 170-250 m from the camera), which is the price of matching
-the geometry exactly.
+provided every pointing saw it. For c2 the common patch of SEA is small
+(about 50 x 35 m at 195-250 m from the camera, Jan 24 - Mar 2025 plus
+today), which is the price of matching the geometry exactly.
 
-The patch is chosen here as the largest near-square rectangle that every
-pointing used -- each training period's AND today's -- sees at every water
-level involved, and written to <output-dir>/patch.json. Copy that file next
-to the trained model as <model>.patch.json; owg_live.py then projects live
-frames onto it.
+The patch is chosen here as the largest near-square rectangle of sea
+(--min-seaward past the 0 m contour) that every pointing used -- each
+training period's AND today's -- sees at every water level involved, and
+written to <output-dir>/patch.json. Copy that file next to the trained model
+as <model>.patch.json; owg_live.py then projects live frames onto it.
 
 Usage (on the station, after apply_pointing_correction.py):
     python3 rectify_owg_images.py \\
         --manifest ~/owg_marconi/marconi-c2-bright2-train.csv \\
         --manifest ~/owg_marconi/marconi-c2-bright2-val.csv \\
         --image-dir ~/owg_marconi/images_bright --output-dir ~/owg_marconi/images_patch \\
-        --skip-days 2025-02-16
+        --skip-days 2025-02-16 --first-date 2025-01-24
 """
 
 import sys
@@ -71,6 +71,11 @@ def main():
     ap.add_argument("--patch", default=None, help="use this patch.json instead of choosing one")
     ap.add_argument("--live-levels", nargs=2, type=float, default=[-1.5, 2.0],
                     help="water levels (m NAVD88) today's camera must see the patch at")
+    ap.add_argument("--min-seaward", type=float, default=10.0,
+                    help="patch must lie this far (m) seaward of the 0 m contour (default 10): "
+                         "without it the common view is mostly beach and bluff")
+    ap.add_argument("--max-range", type=float, default=250.0,
+                    help="farthest patch point from a camera, m (default 250)")
     ap.add_argument("--res", type=float, default=0.25, help="patch resolution, m (default 0.25)")
     ap.add_argument("--min-coverage", type=float, default=0.99,
                     help="Skip frames whose photo shows less than this share of the patch "
@@ -135,12 +140,17 @@ def main():
     else:
         views = [(io, eos[e], [min(zs), max(zs)]) for e, zs in used.items()]
         views.append((io, eo_now, list(args.live_levels)))
-        patch, area = choose_patch(views, res=args.res)
+        patch, area = choose_patch(views, res=args.res, min_seaward=args.min_seaward,
+                                   max_range=args.max_range)
         print(f"patch             : {patch.along[1] - patch.along[0]:.0f} x "
               f"{patch.cross[1] - patch.cross[0]:.0f} m ({area:.0f} m2) seen by all "
               f"{len(views)} pointings incl. today's; {patch.shape[1]} x {patch.shape[0]} px")
     c = patch.corners()
     rng = np.hypot(c[:, 0] - eo_now[0], c[:, 1] - eo_now[1])
+    from sea_patch import DEFAULT_ORIGIN, DEFAULT_SHORE_BEARING
+    sb = np.radians(DEFAULT_SHORE_BEARING + 90.0)
+    sea = (c[:, 0] - DEFAULT_ORIGIN[0]) * np.sin(sb) + (c[:, 1] - DEFAULT_ORIGIN[1]) * np.cos(sb)
+    print(f"                    {sea.min():.0f}-{sea.max():.0f} m seaward of the Jan 2025 0 m contour")
     print(f"                    corners (UTM 19N): " +
           "; ".join(f"{e:.0f},{n:.0f}" for e, n in c) + f"  -- {rng.min():.0f}-{rng.max():.0f} m from the camera")
     (out_dir / "patch.json").write_text(json.dumps(patch.to_json(), indent=1) + "\n")

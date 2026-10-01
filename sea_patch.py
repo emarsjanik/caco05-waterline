@@ -143,21 +143,28 @@ def largest_rectangle_aspect(mask, max_aspect=2.0):
 
 
 def choose_patch(views, origin=DEFAULT_ORIGIN, search=((-250.0, 250.0), (-60.0, 300.0)),
-                 res=0.25, step=2.0, max_range=250.0, min_side=30.0, bearings=range(0, 180, 5),
-                 max_aspect=2.0):
+                 res=0.25, step=2.0, max_range=250.0, min_side=20.0, bearings=range(0, 180, 5),
+                 max_aspect=2.0, min_seaward=10.0, shore_bearing=DEFAULT_SHORE_BEARING):
     """
     views: [(io, eo, [z, ...]), ...] -- every pointing and the water levels it is
     used at. Returns the largest rectangle (sides within max_aspect of each other,
     any orientation in `bearings`) that all of them see at every listed level,
     within max_range of each camera -- beyond that the pixel footprint is too
     coarse for wave texture -- at output resolution `res`.
+
+    Visibility alone would happily choose dry beach and bluff (the cameras look
+    alongshore and see more land than sea in common), so the patch must also
+    lie at least min_seaward metres seaward of the 0 m contour: the line
+    through `origin` along `shore_bearing`. 10 m keeps it wet down to about
+    -1 m NAVD88 on the Jan 2025 beach.
     """
     from view_reproject import ground_to_pixel
+    sb = np.radians(shore_bearing + 90.0)
     best = None
     for brg in bearings:
         probe = Patch(origin, brg, search[0], search[1], step)
         E, N = probe.grid()
-        seen = np.ones(E.shape, bool)
+        seen = ((E - origin[0]) * np.sin(sb) + (N - origin[1]) * np.cos(sb)) >= min_seaward
         for io, eo, zs in views:
             rng = np.hypot(E - eo[0], N - eo[1])
             for z in zs:
@@ -176,9 +183,9 @@ def choose_patch(views, origin=DEFAULT_ORIGIN, search=((-250.0, 250.0), (-60.0, 
             u_lo, u_hi = search[0][0] + (c0 + 1) * step, search[0][0] + (c1 - 1) * step
             best = (area, Patch(origin, brg, (u_lo, u_hi), (v_lo, v_hi), res))
     if best is None:
-        raise ValueError("no part of the search area is seen by every pointing")
+        raise ValueError(f"no sea {min_seaward:g} m or more past the 0 m contour is seen by every pointing")
     p = best[1]
     if min(p.along[1] - p.along[0], p.cross[1] - p.cross[0]) < min_side:
-        raise ValueError(f"common area only {p.along[1] - p.along[0]:.0f} x "
+        raise ValueError(f"common sea area only {p.along[1] - p.along[0]:.0f} x "
                          f"{p.cross[1] - p.cross[0]:.0f} m")
     return p, best[0]
