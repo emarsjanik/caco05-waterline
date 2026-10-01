@@ -49,8 +49,12 @@ from pathlib import Path
 import numpy as np
 
 
-def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None):
-    """Reads georectified contour points. Rows without ground coordinates are skipped."""
+def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, exclude=None):
+    """Reads georectified contour points. Rows without ground coordinates are skipped.
+    `exclude`: regular expressions; frames whose source_file matches any are left out."""
+    import re
+    exclude = [re.compile(x) for x in (exclude or [])]
+    excluded = set()
     E, N, Z, cams, dates, frames = [], [], [], [], [], []
     missing_ground = 0
     rough_frames, unknown_hs_frames = set(), set()
@@ -73,6 +77,9 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None):
                 continue
             if camera and camera != "both" and r["camera"] != camera:
                 continue
+            if exclude and any(x.search(r.get("source_file", "")) for x in exclude):
+                excluded.add(r.get("source_file", ""))
+                continue
             day = r.get("capture_time_utc", "")[:10]
             if start_date and day < start_date:
                 continue
@@ -93,6 +100,8 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None):
             cams.append(r["camera"])
             dates.append(day)
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
+    if exclude:
+        print(f"Excluded by name  : {len(excluded)} frame(s) (--exclude)")
     if max_hs is not None:
         print(f"Wave filter       : {len(rough_frames)} frame(s) left out, offshore Hs > "
               f"{max_hs} m; {len(unknown_hs_frames)} frame(s) with no wave record kept")
@@ -556,6 +565,10 @@ def main():
     ap.add_argument("--fill-gaps", action="store_true",
                     help="Close isolated single-cell holes from neighbours. Off by default: an "
                          "interpolated cell looks identical to a measured one in the output.")
+    ap.add_argument("--exclude", action="append", default=[],
+                    help="Leave out frames whose file name matches this regular expression "
+                         "(repeatable), e.g. 'Jan.22.*[.]c2[.]' -- for frames shown by their "
+                         "overlays to have followed something other than the water's edge.")
     ap.add_argument("--no-plot", action="store_true")
     args = ap.parse_args()
 
@@ -569,7 +582,7 @@ def main():
         print(f"Window            : last {args.last_days} day(s), {args.start_date} to {args.end_date}")
 
     E, N, Z, cams, dates, frames, missing = load_points(
-        args.contour_csv, args.camera, args.start_date, args.end_date, args.max_hs)
+        args.contour_csv, args.camera, args.start_date, args.end_date, args.max_hs, args.exclude)
 
     if len(E) == 0:
         print("No georectified points matched. Check --camera and the date range.")
