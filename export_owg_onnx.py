@@ -20,6 +20,7 @@ Usage (Colab):
     !python export_owg_onnx.py --model "/content/drive/MyDrive/Optical Waves/owg_c2_H_current_C"
 """
 
+import os
 import sys
 import json
 import argparse
@@ -33,7 +34,13 @@ def main():
     ap.add_argument("--model", required=True,
                     help="Model stem: reads <stem>.report.json and <stem>.weights.h5")
     ap.add_argument("--opset", type=int, default=13)
+    ap.add_argument("--optimise", action="store_true",
+                    help="Run tf2onnx's ONNX optimiser (needs ~10 GB of memory, more than "
+                         "free Colab has; it only makes inference ~30%% faster)")
     args = ap.parse_args()
+    # CPU only: the conversion gains nothing from the GPU, and TensorFlow's GPU
+    # and XLA set-up costs memory Colab cannot spare.
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
     stem = args.model
     rep = json.loads(Path(stem + ".report.json").read_text())
@@ -63,6 +70,13 @@ def main():
     @tf.function(input_signature=spec)
     def predict(image):
         return model(image, training=False)
+
+    # tf2onnx's ONNX optimiser copies the whole graph, weights included, for
+    # each of its passes: ~10 GB for Inception-ResNetV2, which crashed free
+    # Colab (12.7 GB). Without it the file is equivalent (checked below and
+    # by owg_live.py --check), just less fused.
+    if not args.optimise:
+        tf2onnx.convert.optimizer.optimize_graph = lambda graph, *a, **k: graph
 
     onnx_path = stem + ".onnx"
     tf2onnx.convert.from_function(predict, input_signature=spec, opset=args.opset,
