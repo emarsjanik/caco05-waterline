@@ -54,11 +54,11 @@ import cv2
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from train_marconi_owg import load_image, normalise          # noqa: E402
+from train_marconi_owg import load_image, normalise, prepare_image   # noqa: E402
 from score_image_quality import score                        # noqa: E402
 
 FIELDS = ["filename", "epoch", "time_utc", "brightness", "sharpness", "saturation",
-          "status", "hs_m"]
+          "status", "hs_m", "water_level_m"]
 EXPECTED_SIZE = (2448, 2048)
 
 
@@ -102,7 +102,23 @@ def find_images(dirs, camera):
     return seen
 
 
-def plot(df, waves_csv, out, days, window, max_gap_min, model_name):
+def averaged(ok, window, max_gap_min):
+    """Centred `window`-frame averages, never across a gap; -> (times, values) split at gaps."""
+    ep = ok["epoch"].to_numpy(); h = ok["hs_m"].to_numpy(float)
+    half = window // 2
+    avg_t, avg_v = [], []
+    for i in range(half, len(ok) - half):
+        if np.diff(ep[i - half:i + half + 1]).max(initial=0) / 60 > max_gap_min:
+            continue
+        avg_t.append(ok["t"].iloc[i]); avg_v.append(h[i - half:i + half + 1].mean())
+    if not avg_v:
+        return []
+    at = pd.DatetimeIndex(avg_t).tz_convert(None).to_numpy(); av = np.array(avg_v)
+    gaps = np.where(np.diff(at).astype("timedelta64[m]").astype(float) > max_gap_min)[0] + 1
+    return list(zip(np.split(at, gaps), np.split(av, gaps)))
+
+
+def plot(df, waves_csv, out, days, window, max_gap_min, model_name, rmse=None, others=()):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -137,20 +153,23 @@ def plot(df, waves_csv, out, days, window, max_gap_min, model_name):
         ax.scatter(ok["t"], ok["hs_m"], s=14, color=BLUE, alpha=0.35, lw=0,
                    label="Camera, single frames")
         # centred average of `window` frames, never across a gap (night, rejected frames)
-        ep = ok["epoch"].to_numpy(); h = ok["hs_m"].to_numpy(float)
-        half = window // 2
-        avg_t, avg_v = [], []
-        for i in range(half, len(ok) - half):
-            if np.diff(ep[i - half:i + half + 1]).max(initial=0) / 60 > max_gap_min:
-                continue
-            avg_t.append(ok["t"].iloc[i]); avg_v.append(h[i - half:i + half + 1].mean())
-        n_avg = len(avg_v)
-        if avg_v:
-            at = pd.DatetimeIndex(avg_t).tz_convert(None).to_numpy(); av = np.array(avg_v)
-            gaps = np.where(np.diff(at).astype("timedelta64[m]").astype(float) > max_gap_min)[0] + 1
-            for i, (ts, vs) in enumerate(zip(np.split(at, gaps), np.split(av, gaps))):
-                ax.plot(ts, vs, color=BLUE, lw=2,
-                        label=f"Camera, {window}-frame average" if i == 0 else None)
+        pieces = averaged(ok, window, max_gap_min)
+        n_avg = sum(len(v) for _, v in pieces)
+        for i, (ts, vs) in enumerate(pieces):
+            ax.plot(ts, vs, color=BLUE, lw=2,
+                    label=f"Camera ({model_name}), {window}-frame average" if i == 0 else None)
+
+    # other models run alongside, for comparison (owg_live.py --also)
+    for label, path in others:
+        if not Path(path).exists():
+            continue
+        o = pd.read_csv(path)
+        o = o[o["status"] == "ok"].copy()
+        o["t"] = pd.to_datetime(o["epoch"], unit="s", utc=True)
+        o = o[o["t"] >= start].sort_values("t")
+        for i, (ts, vs) in enumerate(averaged(o, window, max_gap_min)):
+            ax.plot(ts, vs, color="#1baf7a", lw=2,
+                    label=f"Camera ({label}), {window}-frame average" if i == 0 else None)
 
     ax.set_xlim(start, end)
     if not len(ok) or ok["hs_m"].min() >= 0:
@@ -159,7 +178,7 @@ def plot(df, waves_csv, out, days, window, max_gap_min, model_name):
     n_rej = int(((df["status"] != "ok") & (df["epoch"] >= start.timestamp())).sum())
     ax.set_title(f"Optical wave gauge, CACO05 c2 -- last {days} days (UTC)\n"
                  f"{len(ok)} frames measured, {n_rej} screened out (night, fog, glare); "
-                 f"model {model_name}, about +/-0.27 m per frame, +/-0.20 m averaged",
+                 f"model {model_name}" + (f", validation RMSE {rmse:.2f} m per frame" if rmse else ""),
                  loc="left", fontsize=10, color=INK)
     ax.xaxis.set_major_locator(mdates.DayLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
@@ -199,6 +218,17 @@ def main():
                     help="Compare the exported model with TensorFlow's answers, then stop")
     ap.add_argument("--reprocess", action="store_true",
                     help="Recompute images already in the CSV (after a model change)")
+    ap.add_argument("--also", action="append", default=[],
+                    help="LABEL=CSV of another model's archive to draw in the plot, e.g. "
+                         "'patch=archive/owg_c2_H_patch.csv' (repeatable)")
+    ap.add_argument("--gauge-csv", default=str(HERE / "archive" / "gauge_8447435.csv"),
+                    help="Chatham gauge archive (fetch_tide_gauge.py), for the water level a "
+                         "patch model projects at")
+    ap.add_argument("--gauge-fit", default="1.24,-48,-0.10",
+                    help="Marconi = a * Chatham(t - lag) + b: 'a,lag_minutes,b' (gnssr_qc.py fit)")
+    ap.add_argument("--screen-crop", default="0.078,0.50,0.30,1.0",
+                    help="Region of the live frame the quality screen scores when the model "
+                         "uses a sea patch (default: the surf zone in today's c2 view)")
     ap.add_argument("--no-plot", action="store_true")
     args = ap.parse_args()
 
@@ -209,11 +239,44 @@ def main():
     if args.check:
         return check(args.model, net)
 
+    # A model trained on a fixed patch of sea (rectify_owg_images.py) comes with
+    # <model>.patch.json: live frames are projected onto that patch with today's
+    # calibration, at the water level from the Chatham gauge.
+    patch = None
+    if Path(args.model + ".patch.json").exists():
+        from sea_patch import Patch, rectify
+        from georectify import load_extrinsics, load_intrinsics
+        patch = Patch.from_json(args.model + ".patch.json")
+        p_io = load_intrinsics(HERE / "calibration" / f"CACO05_{args.camera}_20240801_IO.yaml")
+        p_eo = load_extrinsics(HERE / "calibration" / f"CACO05_{args.camera}_20251113_EO-CV.yaml")
+        ga, glag, gb = (float(v) for v in args.gauge_fit.split(","))
+        gauge = pd.read_csv(args.gauge_csv) if Path(args.gauge_csv).exists() else None
+        if gauge is not None:
+            gauge = gauge.dropna(subset=["level_navd88"]).sort_values("epoch")
+        screen = tuple(float(v) for v in args.screen_crop.split(","))
+        print(f"sea patch         : {patch.shape[1]} x {patch.shape[0]} px at {patch.res} m; water "
+              f"level from {Path(args.gauge_csv).name}" if gauge is not None else
+              f"sea patch         : NO gauge archive at {args.gauge_csv} -- frames cannot be projected")
+
+        def water_level(epoch):
+            if gauge is None:
+                return None
+            t = epoch - glag * 60.0
+            ep = gauge["epoch"].to_numpy(float)
+            i = np.searchsorted(ep, t)
+            if i == 0 or i == len(ep) or ep[i] - ep[i - 1] > 3 * 3600:
+                return None
+            lv = gauge["level_navd88"].to_numpy(float)
+            g = lv[i - 1] + (t - ep[i - 1]) / (ep[i] - ep[i - 1]) * (lv[i] - lv[i - 1])
+            return ga * g + gb
+
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     df = pd.read_csv(out) if out.exists() else pd.DataFrame(columns=FIELDS)
     images = find_images(args.image_dir, args.camera)
-    todo = sorted(n for n in images if args.reprocess or n not in set(df["filename"]))
+    # frames that waited for a water level are retried: the gauge record catches up
+    retry = set(df.loc[df["status"] == "no water level", "filename"]) if len(df) else set()
+    todo = sorted(n for n in images if args.reprocess or n in retry or n not in set(df["filename"]))
     print(f"images on disk    : {len(images)} {args.camera} bright, {len(todo)} new")
 
     rows, warned = [], False
@@ -226,7 +289,7 @@ def main():
         row = {"filename": name, "epoch": epoch,
                "time_utc": datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(),
                "hs_m": np.nan}
-        b, sh, sa = score(path, crop=crop)
+        b, sh, sa = score(path, crop=screen if patch is not None else crop)
         row.update(brightness=round(b, 2), sharpness=round(sh, 2), saturation=round(sa, 4))
         if not np.isfinite(b):
             row["status"] = "unreadable"
@@ -243,8 +306,26 @@ def main():
                     print(f"WARNING: frames are about {hw[1] * 8}x{hw[0] * 8}, the model "
                           f"trained on {EXPECTED_SIZE[0]}x{EXPECTED_SIZE[1]}")
                 warned = True
-            img = load_image(path, width, height, crop)
-            if img is None:
+            if patch is None:
+                img = load_image(path, width, height, crop)
+            else:
+                img = None
+                z = water_level(epoch)
+                full = cv2.imread(str(path))
+                if z is None:
+                    row["status"] = "no water level"
+                elif full is not None:
+                    rect, cov = rectify(full, p_io, p_eo, z, patch)
+                    row["water_level_m"] = round(z, 3)
+                    if cov < 0.98:
+                        row["status"] = "patch not in view"
+                    else:
+                        # through JPEG, as the training images were
+                        ok_, enc = cv2.imencode(".jpg", rect, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        img = prepare_image(cv2.imdecode(enc, cv2.IMREAD_COLOR), width, height, None)
+            if row.get("status"):
+                pass
+            elif img is None:
                 row["status"] = "unreadable"
             else:
                 row["hs_m"] = round(run(net, normalise(img)), 3)
@@ -266,8 +347,9 @@ def main():
         print(f"archive           : {out} ({len(df)} rows)")
     if not args.no_plot and len(df):
         df["epoch"] = df["epoch"].astype(int)
+        others = [tuple(a.split("=", 1)) for a in args.also if "=" in a]
         plot(df, args.waves_csv, args.plot, args.days, args.window, args.max_gap,
-             Path(args.model).name)
+             Path(args.model).name, rep.get("val_rmse"), others)
     return 0
 
 

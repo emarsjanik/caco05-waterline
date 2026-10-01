@@ -80,6 +80,11 @@ def load_image(path, width, height=None, crop=None):
     img = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if img is None:
         return None
+    return prepare_image(img, width, height, crop)
+
+
+def prepare_image(img, width, height=None, crop=None):
+    """load_image's work on an image already in memory (BGR): crop, grey, resize."""
     if crop is not None:
         r0, r1, c0, c1 = crop_box(img.shape, crop)
         img = img[r0:r1, c0:c1]
