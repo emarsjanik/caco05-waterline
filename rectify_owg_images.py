@@ -21,7 +21,8 @@ today), which is the price of matching the geometry exactly.
 The patch is chosen here as the largest near-square rectangle of sea
 (--min-seaward past the 0 m contour) that every pointing used -- each
 training period's AND today's -- sees at every water level involved, and
-written to <output-dir>/patch.json. Copy that file next as <model>.patch.json; owg_live.py then projects live frames onto it.
+written to <output-dir>/patch.json. Copy that file next to the trained model
+as <model>.patch.json; owg_live.py then projects live frames onto it.
 
 Usage (on the station, after apply_pointing_correction.py):
     python3 rectify_owg_images.py \\
