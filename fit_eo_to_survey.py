@@ -120,6 +120,9 @@ def main():
                          "chelsea_setups.csv per frame)")
     ap.add_argument("--per-frame", type=int, default=200,
                     help="Points used per frame, spread along the line (default 200)")
+    ap.add_argument("--force", action="store_true",
+                    help="Offer flagged fits to --write-setups too -- only after checking them on "
+                         "the photo (project_survey.py)")
     ap.add_argument("--write-setups", action="store_true",
                     help="Point the group's rows in calibration/chelsea_setups.csv at the new EO")
     args = ap.parse_args()
@@ -218,8 +221,8 @@ def main():
                  f"tilt {best[1]:+.3f}, roll {best[2]:+.3f} deg fitted to {Path(args.survey).name} "
                  f"using {len(frames)} waterline frames {days[0]} to {days[-1]}; position kept.")
         print(f"  wrote {out}")
-        if problems:
-            print("  (not offered to --write-setups)")
+        if problems and not args.force:
+            print("  (not offered to --write-setups; --force after checking with project_survey.py)")
         else:
             new_setups[(cam, eo_path.name)] = out.name
 

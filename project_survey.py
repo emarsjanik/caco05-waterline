@@ -31,7 +31,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from georectify import load_extrinsics, load_intrinsics          # noqa: E402
+from georectify import load_extrinsics, load_intrinsics, build_P  # noqa: E402
 from view_reproject import ground_to_pixel                       # noqa: E402
 from compare_dem_survey import read_survey                       # noqa: E402
 
@@ -86,6 +86,14 @@ def main():
         for lv, pieces in segs.items():
             for s in pieces:
                 U, V, ok = ground_to_pixel(s[:, 0], s[:, 1], np.full(len(s), lv), io, eo)
+                # Points far outside the field of view can be folded back INTO the
+                # frame by the distortion polynomial; keep only those whose ideal
+                # (undistorted) position is near the frame too.
+                P = build_P(io, eo)
+                h = P @ np.vstack([s[:, 0], s[:, 1], np.full(len(s), lv), np.ones(len(s))])
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    ui, vi = h[0] / h[2], h[1] / h[2]
+                ok &= (ui > -0.1 * io[0]) & (ui < 1.1 * io[0]) & (vi > -0.1 * io[1]) & (vi < 1.1 * io[1])
                 # draw only runs of consecutive in-frame points
                 idx = np.where(ok)[0]
                 if len(idx) < 2:
