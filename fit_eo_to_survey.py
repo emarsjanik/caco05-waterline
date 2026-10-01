@@ -8,11 +8,13 @@ exactly at each line's water level.
 
 WHY. compare_dem_survey.py against the 23 Jan 2025 lidar (Oct 2026) found
 the Jan 18-23 waterlines displaced horizontally -- c1 by ~15-18 m
-landward, c2 onto the berm -- not a vertical datum shift. Those frames
-were redrawn into today's view with pointings from the sea horizon
-(horizon_check.py), which fixes tilt and roll only roughly and pan not at
-all. A survey made during the period constrains all three: every
-waterline point at water level z must lie on the survey's z contour.
+landward, c2 onto the berm -- not a vertical datum shift, although the
+overlays show the lines on the water's edge. Those frames were redrawn
+into today's view with pointings from the sea horizon (horizon_check.py),
+which fixes tilt and roll but says nothing about pan; c2's lines sit
+rotated ~15-20 deg about the camera. A survey made during the period
+constrains pan too: every waterline point at water level z must lie on
+the survey's z contour.
 
 HOW. process_chelsea.py detected the lines in frames resampled into the
 2025-11-13 view, assuming the period's pointing (calibration/
@@ -23,7 +25,8 @@ pixel's ray meets the plane z at a ground position, and the survey
 elevation there should equal z. The cost is the mean |survey - z| over
 all points, capped at 1 m (and 1 m off the survey) so lines that end up
 on water or outside the survey neither help nor hurt. Pan, tilt and roll
-changes are found by a coarse-to-fine grid search; position and lens are
+changes are found by a coarse-to-fine grid search, pan over +/-25 deg and
+tilt and roll within +/-1.5 deg of the horizon fit; position and lens are
 kept.
 
 Each (camera, pointing) group is solved separately. The result is
@@ -76,15 +79,24 @@ def cost_fn(io, eo0, u0, v0, z, survey):
     return cost
 
 
-SPAN = (4.0, 3.0, 3.0)
-MAX_PLAUSIBLE_DEG = 1.5      # beyond this the sea horizon would have shown it (tilt, roll)
+# Search ranges (deg): pan is wide because nothing else constrains it -- the
+# sea horizon fixes tilt and roll to a few tenths of a degree but says nothing
+# about pan, and a re-aimed camera can be turned 10-20 deg. Tilt and roll stay
+# within MAX_PLAUSIBLE_DEG of the horizon fit.
+SPAN = (25.0, 1.5, 1.5)
+MAX_PLAUSIBLE_DEG = 1.5
 
 
 def search(cost, span=SPAN):
     """Coarse-to-fine grid search over (d_azimuth, d_tilt, d_roll) in degrees."""
     best = np.zeros(3)
-    for step, half in ((0.5, np.array(span)), (0.1, np.full(3, 0.5)), (0.02, np.full(3, 0.1))):
-        axes = [np.arange(best[k] - half[k], best[k] + half[k] + step / 2, step) for k in range(3)]
+    lo, hi = -np.array(span), np.array(span)
+    stages = ((np.array([1.0, 0.25, 0.25]), np.array(span)),
+              (np.array([0.2, 0.05, 0.1]), np.array([1.0, 0.25, 0.25])),
+              (np.array([0.04, 0.01, 0.02]), np.array([0.2, 0.05, 0.1])))
+    for step, half in stages:
+        axes = [np.arange(max(lo[k], best[k] - half[k]), min(hi[k], best[k] + half[k]) + step[k] / 2,
+                          step[k]) for k in range(3)]
         best_c = np.inf
         for a in axes[0]:
             for t in axes[1]:
@@ -165,9 +177,9 @@ def main():
             sharp.append(min(cost(best + d), cost(best - d)) - c)
             flag = "  <-- FLAT: not determined by these data" if sharp[-1] < 0.01 else ""
             print(f"    {nm:8s}: cost +{sharp[-1]:.3f} m for 0.25 deg{flag}")
-        # Is the answer believable? A pointing error moves lines by a few metres
-        # here (camera ~45-70 m from the beach, ~20 m up: 1 deg = 1-5 m), and
-        # tilt and roll are fixed to a few tenths of a degree by the sea horizon.
+        # Is the answer believable? Tilt and roll are fixed to a few tenths of a
+        # degree by the sea horizon (1 deg moves the beach 1-5 m here); pan is
+        # free, and moves lines by about range x angle (1 deg = ~1-2.5 m at 60-150 m).
         E0, N0 = pixel_to_ground(u0, v0, Z, io, eo0)
         e1 = eo0.copy(); e1[3:6] += np.deg2rad(best)
         E1, N1 = pixel_to_ground(u0, v0, Z, io, e1)
@@ -175,14 +187,11 @@ def main():
         print(f"  the fit moves the lines by median {np.nanmedian(moved):.1f} m "
               f"(p90 {np.nanpercentile(moved, 90):.1f} m)")
         problems = []
-        lim = np.array(SPAN) + 0.6
         for k, nm in enumerate(("azimuth", "tilt", "roll")):
-            if abs(best[k]) >= lim[k] - 0.05:
-                problems.append(f"{nm} hit the search limit ({best[k]:+.2f} deg): no real optimum")
-        if abs(best[1]) > MAX_PLAUSIBLE_DEG or abs(best[2]) > MAX_PLAUSIBLE_DEG:
-            problems.append("tilt or roll changed by more than "
-                            f"{MAX_PLAUSIBLE_DEG} deg -- the sea horizon (horizon_check.py) would "
-                            "have shown that")
+            if abs(best[k]) >= SPAN[k] - 0.02:
+                problems.append(f"{nm} hit the search limit ({best[k]:+.2f} deg): no real optimum"
+                                + (" -- tilt and roll cannot move further without contradicting "
+                                   "the sea horizon" if k else ""))
         if on1.mean() < on0.mean() - 0.10:
             problems.append(f"the fit pushed lines off the survey ({100 * on0.mean():.0f}% -> "
                             f"{100 * on1.mean():.0f}% on it): it improves by escaping, not matching")
@@ -190,9 +199,8 @@ def main():
             print("  NOT TRUSTWORTHY:")
             for pr in problems:
                 print(f"    - {pr}")
-            print("    The waterlines themselves are probably not on the water (snow, wrack, a "
-                  "wet/dry or berm edge): no pointing can put them on the right contour. Check "
-                  "the overlays before anything else.")
+            print("    Check the overlays: if the lines are on the water, the camera position or "
+                  "lens may be off too (this fit keeps both); if not, the detections are wrong.")
         per = []
         for k in range(len(frames)):
             m = (F == k) & on1
