@@ -64,6 +64,10 @@ def main():
                     default="/mnt/I2Rgus_Data/Chelsea_calibration/adcp_water_level_navd88.csv")
     ap.add_argument("--max-gap-minutes", type=float, default=60.0)
     ap.add_argument("--skip-days", nargs="*", default=[])
+    ap.add_argument("--first-date", default=None,
+                    help="only frames from this UTC date on, e.g. 2025-01-24: periods pointed far "
+                         "from today's camera shrink the patch every pointing sees")
+    ap.add_argument("--last-date", default=None)
     ap.add_argument("--patch", default=None, help="use this patch.json instead of choosing one")
     ap.add_argument("--live-levels", nargs=2, type=float, default=[-1.5, 2.0],
                     help="water levels (m NAVD88) today's camera must see the patch at")
@@ -106,6 +110,9 @@ def main():
         day = datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d")
         if day in args.skip_days:
             skipped["--skip-days"] += 1
+            continue
+        if (args.first_date and day < args.first_date) or (args.last_date and day > args.last_date):
+            skipped["outside --first-date/--last-date"] += 1
             continue
         z = level_at(ep_wl, lv_wl, epoch, args.max_gap_minutes * 60)
         if z is None:
@@ -176,6 +183,22 @@ def main():
         cv2.imwrite(str(prev), cv2.resize(img, (img.shape[1] // 2, img.shape[0] // 2)),
                     [cv2.IMWRITE_JPEG_QUALITY, 85])
     print(f"check pictures    : {out_dir}/patch_on_*.jpg (yellow = the patch on each pointing's photo)")
+
+    # training lists with only the frames that were projected
+    import csv
+    kept = {f for f, *_ in todo if (out_dir / f).exists()}
+    for m in args.manifest:
+        rows = list(csv.DictReader(open(Path(m).expanduser(), newline="")))
+        if not rows:
+            continue
+        col = "filename" if "filename" in rows[0] else "id"
+        keep = [r for r in rows if (r[col] if r[col].lower().endswith(".jpg") else r[col] + ".jpg") in kept]
+        dst = out_dir / (Path(m).stem + "_patch.csv")
+        with open(dst, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            w.writerows(keep)
+        print(f"training list     : {dst} ({len(keep)} of {len(rows)} rows)")
     print(f"\nNext: train on {out_dir} with --img-size {patch.shape[1]} --img-height {patch.shape[0]} "
           f"and no --crop; copy patch.json next to the model as <model>.patch.json.")
     return 0
