@@ -91,6 +91,46 @@ def sample(grid, x0, y0, cell, E, N):
     return out
 
 
+def waves_vs_datum(off, hs, tp, tide):
+    """
+    Fits per-frame offsets as a + b*sqrt(Hs*L0) and prints the split:
+    a = the part waves do not explain (datum, common bias), b = setup/swash.
+    Also the trend against water level. Returns (a, b, phi, has_waves).
+    """
+    phi = np.sqrt(hs * 9.81 * tp ** 2 / (2 * np.pi))         # sqrt(Hs L0), m
+    w = np.isfinite(phi)
+    a = b = np.nan
+    if w.sum() >= 5:
+        X = np.column_stack([np.ones(w.sum()), phi[w]])
+        (a, b), *_ = np.linalg.lstsq(X, off[w], rcond=None)
+        res = off[w] - X @ np.array([a, b])
+        r2 = 1 - (res ** 2).sum() / max(((off[w] - off[w].mean()) ** 2).sum(), 1e-12)
+        print(f"WAVES vs DATUM    : offset = {a:+.3f} + {b:.4f} * sqrt(Hs*L0)   "
+              f"(R2 {r2:.2f}, {w.sum()} frames with Hs and Tp)")
+        print(f"   Hs {np.nanmin(hs):.2f}-{np.nanmax(hs):.2f} m, Tp {np.nanmin(tp):.1f}-"
+              f"{np.nanmax(tp):.1f} s -> wave part {b * phi[w].min():+.2f} to {b * phi[w].max():+.2f} m")
+        print(f"   intercept {a:+.3f} m = the part waves do not explain (datum, or a common bias)")
+        print(f"   slope {b:.4f}: Stockdon mean setup alone would be ~0.35 x beach slope, "
+              f"i.e. {0.35 * 0.1:.3f} for a 0.1 slope; swash adds to it")
+        for lo, hi in ((0, 0.75), (0.75, 1.25), (1.25, 2), (2, 9)):
+            m = (hs >= lo) & (hs < hi)
+            if m.any():
+                print(f"   Hs {lo:.2f}-{hi:.2f} m: {m.sum():3d} frames, offset median "
+                      f"{np.median(off[m]):+.3f} m")
+        if np.ptp(phi[w]) < 2:
+            print("   NOTE: wave conditions barely vary across these frames, so the split "
+                  "between intercept and slope is poorly determined.")
+    else:
+        print("WAVES vs DATUM    : fewer than 5 frames with Hs and Tp -- cannot separate "
+              "(run extract_elevation_contours.py with --waves)")
+    if len(off) >= 3:
+        X = np.column_stack([np.ones(len(off)), tide])
+        (a2, b2), *_ = np.linalg.lstsq(X, off, rcond=None)
+        print(f"vs WATER LEVEL    : offset = {a2:+.3f} + {b2:+.3f} * level   "
+              f"(a trend here means a slope or cross-shore position error, not a datum shift)")
+    return a, b, phi, w
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("contours", help="contour_points_ground.csv (georectified waterline points)")
@@ -155,33 +195,8 @@ def main():
     tide = np.array([r["tide_navd88"] for r in rows])
     hs = np.array([r["hs_m"] for r in rows])
     tp = np.array([r["tp_s"] for r in rows])
-    phi = np.sqrt(hs * 9.81 * tp ** 2 / (2 * np.pi))         # sqrt(Hs L0), m
-    w = np.isfinite(phi)
     print()
-    if w.sum() >= 5:
-        X = np.column_stack([np.ones(w.sum()), phi[w]])
-        (a, b), *_ = np.linalg.lstsq(X, off[w], rcond=None)
-        res = off[w] - X @ np.array([a, b])
-        r2 = 1 - (res ** 2).sum() / ((off[w] - off[w].mean()) ** 2).sum()
-        print(f"WAVES vs DATUM    : offset = {a:+.3f} + {b:.4f} * sqrt(Hs*L0)   "
-              f"(R2 {r2:.2f}, {w.sum()} frames with Hs and Tp)")
-        print(f"   Hs {np.nanmin(hs):.2f}-{np.nanmax(hs):.2f} m, Tp {np.nanmin(tp):.1f}-"
-              f"{np.nanmax(tp):.1f} s -> wave part {b * phi[w].min():+.2f} to {b * phi[w].max():+.2f} m")
-        print(f"   intercept {a:+.3f} m = the part waves do not explain (datum, or a common bias)")
-        print(f"   slope {b:.4f}: Stockdon mean setup alone would be ~0.35 x beach slope, "
-              f"i.e. {0.35 * 0.1:.3f} for a 0.1 slope; swash adds to it")
-        for lo, hi in ((0, 0.75), (0.75, 1.25), (1.25, 2), (2, 9)):
-            m = (hs >= lo) & (hs < hi)
-            if m.any():
-                print(f"   Hs {lo:.2f}-{hi:.2f} m: {m.sum():3d} frames, offset median "
-                      f"{np.median(off[m]):+.3f} m")
-    else:
-        print("WAVES vs DATUM    : no Hs/Tp in the contour file (run extract_elevation_contours.py "
-              "with --waves); cannot separate")
-    X = np.column_stack([np.ones(len(off)), tide])
-    (a2, b2), *_ = np.linalg.lstsq(X, off, rcond=None)
-    print(f"vs WATER LEVEL    : offset = {a2:+.3f} + {b2:+.3f} * level   "
-          f"(a trend here means a slope or cross-shore position error, not a datum shift)")
+    a, b, phi, w = waves_vs_datum(off, hs, tp, tide)
 
     out = args.output or str(Path(args.survey).with_suffix("")) + "_frames.csv"
     with open(out, "w", newline="") as f:
