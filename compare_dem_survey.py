@@ -55,22 +55,103 @@ from asc_to_geotiff import read_asc, write_geotiff          # noqa: E402
 from dem_from_contours import write_ascii_grid               # noqa: E402
 
 
+def read_tiff(path):
+    """
+    Minimal GeoTIFF / BigTIFF reader, numpy + zlib only: one band, 32-bit float, strips or
+    tiles, no compression or Deflate, predictor 1 (none) or 3 (floating point).
+    The station's Pillow cannot open the 2025 YSMP lidar (tiled, Deflate,
+    predictor 3). Returns (array rows north to south, {tag: values}).
+    """
+    import struct
+    import zlib
+    raw = Path(path).read_bytes()
+    bo = {b"II": "<", b"MM": ">"}.get(raw[:2])
+    version = struct.unpack(bo + "H", raw[2:4])[0] if bo else 0
+    if version == 42:                                  # classic TIFF
+        off = struct.unpack(bo + "I", raw[4:8])[0]
+        n = struct.unpack(bo + "H", raw[off:off + 2])[0]
+        head, esize, cfmt, ofmt, inline = 2, 12, "I", "I", 4
+    elif version == 43:                                # BigTIFF (the 2025 YSMP lidar)
+        off = struct.unpack(bo + "Q", raw[8:16])[0]
+        n = struct.unpack(bo + "Q", raw[off:off + 8])[0]
+        head, esize, cfmt, ofmt, inline = 8, 20, "Q", "Q", 8
+    else:
+        raise ValueError("not a TIFF")
+    size = {1: 1, 2: 1, 3: 2, 4: 4, 11: 4, 12: 8, 16: 8}
+    fmt = {1: "B", 3: "H", 4: "I", 11: "f", 12: "d", 16: "Q"}
+    tags = {}
+    for i in range(n):
+        e = raw[off + head + esize * i: off + head + esize * (i + 1)]
+        tag, typ = struct.unpack(bo + "HH", e[:4])
+        cnt = struct.unpack(bo + cfmt, e[4:4 + struct.calcsize(cfmt)])[0]
+        vo = 4 + struct.calcsize(cfmt)
+        nb = size.get(typ, 1) * cnt
+        data = e[vo:vo + nb] if nb <= inline else \
+            raw[struct.unpack(bo + ofmt, e[vo:vo + struct.calcsize(ofmt)])[0]:][:nb]
+        if typ == 2:
+            tags[tag] = data.rstrip(b"\0").decode("latin-1")
+        elif typ in fmt:
+            tags[tag] = struct.unpack(bo + fmt[typ] * cnt, data)
+    w, h = tags[256][0], tags[257][0]
+    if tags.get(258, (32,))[0] != 32 or tags.get(339, (3,))[0] != 3 or tags.get(277, (1,))[0] != 1:
+        raise ValueError("only single-band 32-bit float supported")
+    comp, pred = tags.get(259, (1,))[0], tags.get(317, (1,))[0]
+    if comp not in (1, 8, 32946) or pred not in (1, 3):
+        raise ValueError(f"compression {comp} / predictor {pred} not supported")
+    if 322 in tags:
+        tw, th = tags[322][0], tags[323][0]
+        offs, cnts = tags[324], tags[325]
+        across = -(-w // tw)
+        blocks = [((k // across) * th, (k % across) * tw) for k in range(len(offs))]
+    else:
+        tw, th = w, tags.get(278, (h,))[0]
+        offs, cnts = tags[273], tags[279]
+        blocks = [(k * th, 0) for k in range(len(offs))]
+    out = np.full((h, w), np.nan, dtype=np.float32)
+    for (r0, c0), o, c in zip(blocks, offs, cnts):
+        buf = raw[o:o + c]
+        if comp != 1:
+            buf = zlib.decompress(buf)
+        rows = len(buf) // (tw * 4)
+        b = np.frombuffer(buf[:rows * tw * 4], dtype=np.uint8).reshape(rows, tw * 4)
+        if pred == 3:
+            # floating-point predictor: bytes differenced along the row, then
+            # stored as byte planes, most significant first
+            b = np.cumsum(b, axis=1, dtype=np.uint8)
+            vals = b.reshape(rows, 4, tw).transpose(0, 2, 1).copy().view(">f4")[..., 0]
+        else:
+            vals = b.copy().view(bo + "f4")
+        rr, cc = min(rows, h - r0), min(tw, w - c0)
+        out[r0:r0 + rr, c0:c0 + cc] = vals[:rr, :cc]
+    return out, tags
+
+
 def read_survey(path):
     """-> (grid rows north to south, x_left, y_top, cell). NaN = nodata."""
     p = Path(path)
     if p.suffix.lower() == ".asc":
         d, h = read_asc(p)
         return d, h["xllcorner"], h["yllcorner"] + d.shape[0] * h["cellsize"], h["cellsize"]
-    from PIL import Image
-    im = Image.open(p)
-    tags = im.tag_v2
+    try:
+        d, tags = read_tiff(p)
+        d = d.astype(np.float64)
+    except (ValueError, KeyError) as err:
+        from PIL import Image                          # anything the reader above cannot do
+        try:
+            im = Image.open(p)
+        except Exception:
+            sys.exit(f"{p}: cannot read ({err}); export it as an Arc ASCII grid (.asc)")
+        tags = dict(im.tag_v2)
+        d = np.array(im, dtype=np.float64)
     scale, tie = tags.get(33550), tags.get(33922)
     if not scale or not tie:
         sys.exit(f"{p}: no GeoTIFF georeferencing tags; export it as an Arc ASCII grid (.asc)")
-    d = np.array(im, dtype=np.float64)
     nd = tags.get(42113)
     if nd is not None:
-        d[d == float(str(nd).strip("\0"))] = np.nan
+        try:
+            d[d == float(str(nd).strip("\0 "))] = np.nan
+        except ValueError:
+            pass
     d[d < -1e30] = np.nan
     if abs(scale[0] - scale[1]) > 1e-9:
         sys.exit(f"{p}: non-square pixels; export as .asc")
