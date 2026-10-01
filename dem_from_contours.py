@@ -326,6 +326,129 @@ def interpolate_between_contours(E, N, Z, frames, cell, max_spread, dem, max_edg
     return out, source
 
 
+def fine_dem(E, N, Z, frames, cell, along, across, min_frames, max_resid):
+    """
+    A DEM on a fine grid (e.g. 0.25 m) straight from the waterline points.
+
+    WHY. Binning into 2 m cells and interpolating between cell centres
+    gives a surface made of 2 m facets: the profile shows steps and kinks
+    that are the grid, not the beach (C. Sherwood, Oct 2026, against the
+    23 Jan 2025 lidar). Finer bins do not help -- most 0.25 m cells hold
+    no waterline at all.
+
+    HOW. At each node a plane z = a + b*du + c*dv is fitted to the nearby
+    points by weighted least squares (local linear regression, as in
+    Plant et al.'s argus bathymetry). The neighbourhood is an ellipse in
+    beach coordinates: `along` metres alongshore, `across` metres
+    cross-shore, tricube weights. Long alongshore because the beach varies
+    slowly that way and each waterline is an alongshore curve; short
+    cross-shore so the profile shape is kept. The beach orientation is the
+    principal axis of the points. A plane, not a weighted mean, so the
+    slope does not flatten the surface between contours.
+
+    A node is filled only if its neighbourhood holds >= min_frames
+    different frames AND points on both its landward and seaward side
+    (no extrapolation beyond the highest or lowest waterline), and the
+    fit's weighted RMS residual is <= max_resid. Points are first thinned
+    to one per frame per half-cell, so a far-field waterline with many
+    points per metre does not outweigh a near-field one.
+
+    Returns (dem, resid_rms, n_frames, e0, n0) on a north-up grid.
+    """
+    # thin: one point (mean position) per frame per half-cell bin
+    _, fid = np.unique(frames, return_inverse=True)
+    h = cell / 2
+    key = np.stack([fid, np.floor(E / h).astype(np.int64), np.floor(N / h).astype(np.int64)], 1)
+    _, inv = np.unique(key, axis=0, return_inverse=True)
+    inv = inv.ravel()
+    cnt = np.bincount(inv)
+    E = np.bincount(inv, E) / cnt
+    N = np.bincount(inv, N) / cnt
+    Z = np.bincount(inv, Z) / cnt
+    fid = np.bincount(inv, fid) / cnt
+    fid = np.rint(fid).astype(np.int64)
+
+    # beach axes: u alongshore (largest spread), v cross-shore
+    ec, nc = E.mean(), N.mean()
+    w_, vecs = np.linalg.eigh(np.cov(np.stack([E - ec, N - nc])))
+    ua, va = vecs[:, 1], vecs[:, 0]
+    u = (E - ec) * ua[0] + (N - nc) * ua[1]
+    v = (E - ec) * va[0] + (N - nc) * va[1]
+
+    e0 = np.floor(E.min() / cell) * cell
+    n0 = np.floor(N.min() / cell) * cell
+    ncols = int(np.ceil((E.max() - e0) / cell)) + 1
+    nrows = int(np.ceil((N.max() - n0) / cell)) + 1
+    gx = e0 + (np.arange(ncols) + 0.5) * cell
+    gy = n0 + (np.arange(nrows) + 0.5) * cell
+    GX, GY = np.meshgrid(gx, gy)
+    gu = (GX - ec) * ua[0] + (GY - nc) * ua[1]
+    gv = (GX - ec) * va[0] + (GY - nc) * va[1]
+
+    # buckets of one window size: a node's points are all in its 3x3 buckets
+    bu, bv = np.floor(u / along).astype(np.int64), np.floor(v / across).astype(np.int64)
+    pts = {}
+    order = np.lexsort((bv, bu))
+    keys = np.stack([bu[order], bv[order]], 1)
+    edges = np.flatnonzero(np.any(np.diff(keys, axis=0) != 0, axis=1)) + 1
+    for a, b in zip(np.r_[0, edges], np.r_[edges, len(order)]):
+        pts[(int(keys[a, 0]), int(keys[a, 1]))] = order[a:b]
+
+    nbu = np.floor(gu / along).astype(np.int64).ravel()
+    nbv = np.floor(gv / across).astype(np.int64).ravel()
+    dem = np.full(gu.size, np.nan)
+    resid = np.full(gu.size, np.nan)
+    nfr = np.zeros(gu.size)
+    nkeys = np.stack([nbu, nbv], 1)
+    norder = np.lexsort((nbv, nbu))
+    nk = nkeys[norder]
+    nedges = np.flatnonzero(np.any(np.diff(nk, axis=0) != 0, axis=1)) + 1
+    guf, gvf = gu.ravel(), gv.ravel()
+    for a, b in zip(np.r_[0, nedges], np.r_[nedges, len(norder)]):
+        ku, kv = int(nk[a, 0]), int(nk[a, 1])
+        cand = [pts[(ku + i, kv + j)] for i in (-1, 0, 1) for j in (-1, 0, 1)
+                if (ku + i, kv + j) in pts]
+        if not cand:
+            continue
+        p = np.concatenate(cand)
+        nodes = norder[a:b]
+        du = u[p][None, :] - guf[nodes][:, None]
+        dv = v[p][None, :] - gvf[nodes][:, None]
+        r = np.sqrt((du / along) ** 2 + (dv / across) ** 2)
+        w = np.where(r < 1, (1 - r ** 3) ** 3, 0.0)
+        inside = w > 0
+        # distinct frames in each neighbourhood
+        lf, lfid = np.unique(fid[p], return_inverse=True)
+        onehot = np.zeros((len(p), len(lf)))
+        onehot[np.arange(len(p)), lfid] = 1
+        nf = ((inside.astype(float) @ onehot) > 0).sum(1)
+        both_sides = (np.where(inside, dv, np.inf).min(1) < 0) & \
+                     (np.where(inside, dv, -np.inf).max(1) > 0)
+        ok = (nf >= min_frames) & both_sides
+        if not ok.any():
+            continue
+        w, du, dv = w[ok], du[ok], dv[ok]
+        # weighted normal equations for z = a + b*du + c*dv, batched 3x3 solves
+        X = np.stack([np.ones_like(du), du, dv], -1)                 # nodes x pts x 3
+        XtW = X * w[..., None]
+        A = np.einsum("npi,npj->nij", XtW, X) + np.eye(3) * 1e-9
+        rhs = np.einsum("npi,p->ni", XtW, Z[p])
+        try:
+            coef = np.linalg.solve(A, rhs[..., None])[..., 0]
+        except np.linalg.LinAlgError:
+            continue
+        fit = np.einsum("npi,ni->np", X, coef)
+        rms = np.sqrt((w * (Z[p][None, :] - fit) ** 2).sum(1) / w.sum(1))
+        sel = nodes[ok]
+        dem[sel] = coef[:, 0]
+        resid[sel] = rms
+        nfr[sel] = nf[ok]
+    if max_resid:
+        dem[resid > max_resid] = np.nan
+    shape = (nrows, ncols)
+    return dem.reshape(shape), resid.reshape(shape), nfr.reshape(shape), e0, n0
+
+
 def fill_small_gaps(dem, max_iterations=3):
     """
     Fills isolated nodata cells from their immediate neighbours.
@@ -424,6 +547,12 @@ def main():
                          "triangulation of every crossed cell, using triangles with edges up to "
                          "this many metres (e.g. 6). Measured cells keep their value; "
                          "<stem>_source.asc marks 1 = measured, 2 = interpolated.")
+    ap.add_argument("--fine-cell", type=float, default=None,
+                    help="Also write <stem>_fine_{dem,resid,frames}.asc on this grid (e.g. 0.25 m), "
+                         "fitted directly to the waterline points by local planes -- no 2 m "
+                         "facets. See fine_dem().")
+    ap.add_argument("--fine-window", default="4,1",
+                    help="Fine DEM neighbourhood, metres 'alongshore,cross-shore' (default 4,1)")
     ap.add_argument("--fill-gaps", action="store_true",
                     help="Close isolated single-cell holes from neighbours. Off by default: an "
                          "interpolated cell looks identical to a measured one in the output.")
@@ -585,6 +714,23 @@ def main():
         print(f"gap fill          : +{after-before} cell(s) interpolated from neighbours")
 
     stem = Path(args.output_stem)
+    if args.fine_cell:
+        along, across = (float(x) for x in args.fine_window.split(","))
+        fdem, fres, fnf, fe0, fn0 = fine_dem(E, N, Z, frames, args.fine_cell, along, across,
+                                             args.min_points, args.max_spread / 2)
+        ok = np.isfinite(fdem)
+        print(f"fine DEM          : {fdem.shape[0]} x {fdem.shape[1]} at {args.fine_cell:g} m, "
+              f"{int(ok.sum())} nodes filled ({ok.sum() * args.fine_cell ** 2:.0f} m2); "
+              f"window {along:g} m alongshore x {across:g} m cross-shore")
+        if ok.any():
+            print(f"                    fit residual median {np.nanmedian(fres[ok]):.3f} m, "
+                  f"frames per node median {int(np.median(fnf[ok]))}")
+        write_ascii_grid(str(stem) + "_fine_dem.asc", fdem, fe0, fn0, args.fine_cell)
+        write_ascii_grid(str(stem) + "_fine_resid.asc", np.where(ok, fres, np.nan), fe0, fn0,
+                         args.fine_cell)
+        write_ascii_grid(str(stem) + "_fine_frames.asc", np.where(ok, fnf, 0.0), fe0, fn0,
+                         args.fine_cell, nodata=0.0)
+        print(f"wrote {stem}_fine_dem.asc (and _fine_resid, _fine_frames)")
     write_ascii_grid(str(stem) + "_dem.asc", dem, e0, n0, args.cell)
     write_ascii_grid(str(stem) + "_spread.asc", spread, e0, n0, args.cell)
     write_ascii_grid(str(stem) + "_count.asc",

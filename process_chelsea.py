@@ -337,6 +337,12 @@ def main():
     ap.add_argument("--max-gap-minutes", type=float, default=60.0,
                     help="Largest distance to the ADCP reading on either side (ADCP is hourly).")
     ap.add_argument("--cell", type=float, default=2.0, help="DEM cell size, m.")
+    ap.add_argument("--fine-cell", type=float, default=0.25,
+                    help="Also build each DEM on this fine grid (m, default 0.25) by local plane "
+                         "fits to the waterline points (dem_from_contours.py --fine-cell): no 2 m "
+                         "facets. 0 skips it.")
+    ap.add_argument("--fine-window", default="4,1",
+                    help="Fine DEM neighbourhood, m 'alongshore,cross-shore' (default 4,1)")
     ap.add_argument("--max-hs", type=float, default=1.5,
                     help="Leave frames with ADCP Hs above this out of the DEMs (default 1.5, as "
                          "the station cron). Waves push the timex waterline up the beach; "
@@ -647,6 +653,10 @@ def main():
         dem_filters += ["--interpolate-edge", args.interpolate_edge]
         say(f"  cells between waterlines interpolated (triangle edges up to "
             f"{args.interpolate_edge:g} m; <dem>_source.asc: 1 measured, 2 interpolated)")
+    if args.fine_cell:
+        dem_filters += ["--fine-cell", args.fine_cell, "--fine-window", args.fine_window]
+        say(f"  also a fine DEM at {args.fine_cell:g} m from local plane fits "
+            f"(<dem>_fine_dem.asc; window {args.fine_window} m alongshore,cross-shore)")
     periods = sorted({f["period"] for n, f in frames.items() if n in levels})
     made = []
     for p in periods:
