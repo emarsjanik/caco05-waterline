@@ -21,6 +21,10 @@ others. Any period with a survey of its own should be checked -- e.g.
 Feb 17-Mar 10 against the 6 Mar 2025 lidar with detect_original_view.py
 and compare_dem_survey.py.
 
+A correction can be limited to some periods with --dates, e.g. when another
+survey gave a better fit for them: each run starts again from the periods'
+original horizon-fitted pointings, so corrections never stack.
+
 Usage:
     python3 apply_pointing_correction.py --camera c2 \\
         --fitted CACO05_c2_2025-01-18_to_2025-01-23_lidar_EO.yaml \\
@@ -50,6 +54,9 @@ def main():
     ap.add_argument("--fitted-from", required=True,
                     help="the EO that fit started from (the period's horizon-fitted pointing)")
     ap.add_argument("--base", default=None, help="default pointing (default CACO05_<cam>_20250219_EO.yaml)")
+    ap.add_argument("--dates", nargs=2, default=None, metavar=("FIRST", "LAST"),
+                    help="only correct periods overlapping these dates (e.g. a fit from the Mar "
+                         "lidar for 2025-01-24 2025-03-31); periods outside keep what they have")
     ap.add_argument("--span", nargs=2, default=["2024-10-01", "2025-03-31"],
                     help="dates the historical imagery covers; gaps between listed periods in "
                          "this span get rows with the corrected default pointing")
@@ -72,22 +79,38 @@ def main():
                  f"{delta[2]:+.3f}) deg from {fitted_name}; {note}")
         return out_name
 
+    lo, hi = args.dates if args.dates else ("0000", "9999")
+
+    def original(name):
+        """The horizon-fitted pointing a corrected file was made from."""
+        return name.replace("_corr_EO", "_EO")
+
     out = []
     for r in rows:
-        if r["camera"] != args.camera or r["eo_file"] == fitted_name or "_corr_EO" in r["eo_file"] \
+        overlaps = r["first_date"] <= hi and r["last_date"] >= lo
+        if r["camera"] != args.camera or not overlaps or r["eo_file"] == fitted_name \
                 or "_lidar_EO" in r["eo_file"]:
             out.append(r)
             continue
+        src = original(r["eo_file"])
+        if src.startswith(f"CACO05_{args.camera}_20250219"):
+            out.append(r)              # a gap row: refilled below
+            continue
         name = f"CACO05_{args.camera}_{r['first_date']}_to_{r['last_date']}_corr_EO.yaml"
-        corrected(r["eo_file"], name, f"{r['first_date']} to {r['last_date']}")
-        print(f"  {r['first_date']} .. {r['last_date']}: {r['eo_file']} -> {name}")
+        corrected(src, name, f"{r['first_date']} to {r['last_date']}")
+        print(f"  {r['first_date']} .. {r['last_date']}: {src} -> {name}")
         out.append(dict(r, eo_file=name))
 
     # gaps: dates in the span not covered by any row for this camera use the default pointing
     base = args.base or f"CACO05_{args.camera}_20250219_EO.yaml"
-    base_corr = corrected(base, f"CACO05_{args.camera}_20250219_corr_EO.yaml", "default pointing")
+    tag = f"_{lo}_to_{hi}" if args.dates else ""
+    base_corr = corrected(base, f"CACO05_{args.camera}_20250219{tag}_corr_EO.yaml", "default pointing")
+    is_gap = lambda r: (r["camera"] == args.camera and original(r["eo_file"]).startswith(
+        f"CACO05_{args.camera}_20250219") and r["first_date"] <= hi and r["last_date"] >= lo)
+    out = [r for r in out if not is_gap(r)]
     cover = sorted((r["first_date"], r["last_date"]) for r in out if r["camera"] == args.camera)
-    d, end = date.fromisoformat(args.span[0]), date.fromisoformat(args.span[1])
+    d = max(date.fromisoformat(args.span[0]), date.fromisoformat(lo) if args.dates else date.min)
+    end = min(date.fromisoformat(args.span[1]), date.fromisoformat(hi) if args.dates else date.max)
     gaps, g0 = [], None
     while d <= end:
         iso = d.isoformat()

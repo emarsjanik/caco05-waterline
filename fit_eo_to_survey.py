@@ -115,6 +115,10 @@ def main():
     ap.add_argument("--survey", required=True, help="lidar DSM (.tif or .asc), NAVD88")
     ap.add_argument("--start-date"); ap.add_argument("--end-date")
     ap.add_argument("--camera", default="both")
+    ap.add_argument("--original-view", action="store_true",
+                    help="The waterline pixels are in the ORIGINAL photos (detect_original_view.py), "
+                         "not in frames redrawn into today's view: no resampling to undo. Use with "
+                         "--eo = the pointing they were georectified with.")
     ap.add_argument("--eo", default=None,
                     help="Pointing the frames were resampled with (default: from "
                          "chelsea_setups.csv per frame)")
@@ -158,7 +162,10 @@ def main():
                 F.append(k)
         U, V, Z, F = map(np.array, (U, V, Z, F))
         # undo the resampling: current-view pixel -> original pixel under the assumed pointing
-        u0, v0, ok = dst_to_src_points(U, V, Z, io, eo0, eo_new)
+        if args.original_view:
+            u0, v0, ok = U, V, np.ones(len(U), bool)
+        else:
+            u0, v0, ok = dst_to_src_points(U, V, Z, io, eo0, eo_new)
         u0, v0, Z, F = u0[ok], v0[ok], Z[ok], F[ok]
         print(f"\n{cam}, resampled with {eo_path.name}: {len(frames)} frames, {len(Z)} points")
         cost = cost_fn(io, eo0, u0, v0, Z, survey)
