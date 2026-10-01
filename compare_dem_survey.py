@@ -74,7 +74,14 @@ def read_survey(path):
     d[d < -1e30] = np.nan
     if abs(scale[0] - scale[1]) > 1e-9:
         sys.exit(f"{p}: non-square pixels; export as .asc")
-    return d, tie[3] - tie[0] * scale[0], tie[4] + tie[1] * scale[1], scale[0]
+    x0, y0 = tie[3] - tie[0] * scale[0], tie[4] + tie[1] * scale[1]
+    # GTRasterType (GeoKey 1025) 2 = PixelIsPoint: the tie point is the CENTRE of
+    # the first pixel, not its outer corner (the 2025 YSMP lidar is written so).
+    keys = tags.get(34735) or ()
+    for i in range(4, len(keys) - 3, 4):
+        if keys[i] == 1025 and keys[i + 3] == 2:
+            x0, y0 = x0 - scale[0] / 2, y0 + scale[1] / 2
+    return d, x0, y0, scale[0]
 
 
 def sample(grid, x0, y0, cell, E, N):
@@ -134,6 +141,69 @@ def waves_vs_datum(off, hs, tp, tide):
     return a, b, phi, w
 
 
+def horizontal_shift(grid, x0, y0, cell, E, N, Z, max_shift=60.0, step=0.25):
+    """
+    Cross-shore distance (m) a frame's line must move so the survey elevation
+    under it equals the elevation the line was given; + = seaward. The beach
+    normal is perpendicular to the line's own principal axis, pointing downhill
+    in the survey. NaN if no shift within +/-max_shift fits better than 0.15 m.
+    """
+    if len(E) < 5:
+        return np.nan
+    c = np.array([E.mean(), N.mean()])
+    _, vecs = np.linalg.eigh(np.cov(np.stack([E - c[0], N - c[1]])))
+    nrm = vecs[:, 0]
+    up = sample(grid, x0, y0, cell, np.array([c[0] + 5 * nrm[0]]), np.array([c[1] + 5 * nrm[1]]))[0]
+    dn = sample(grid, x0, y0, cell, np.array([c[0] - 5 * nrm[0]]), np.array([c[1] - 5 * nrm[1]]))[0]
+    if np.isfinite(up) and np.isfinite(dn) and up > dn:
+        nrm = -nrm                                      # point seaward (downhill)
+    best, best_err = np.nan, 0.15
+    for dlt in np.arange(-max_shift, max_shift + step, step):
+        z = sample(grid, x0, y0, cell, E + dlt * nrm[0], N + dlt * nrm[1])
+        ok = np.isfinite(z)
+        if ok.sum() < max(5, 0.5 * len(E)):
+            continue
+        err = float(np.median(np.abs(z[ok] - Z[ok])))
+        if err < best_err:
+            best, best_err = float(dlt), err
+    return best
+
+
+def draw_map(path, grid, x0, y0, cell, mapped):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    cams = sorted({m[0] for m in mapped})
+    allE = np.concatenate([m[1] for m in mapped]); allN = np.concatenate([m[2] for m in mapped])
+    pad = 40
+    xa, xb, ya, yb = allE.min() - pad, allE.max() + pad, allN.min() - pad, allN.max() + pad
+    c0, c1 = max(int((xa - x0) / cell), 0), min(int((xb - x0) / cell), grid.shape[1])
+    r0, r1 = max(int((y0 - yb) / cell), 0), min(int((y0 - ya) / cell), grid.shape[0])
+    sub = grid[r0:r1, c0:c1]
+    ext = [x0 + c0 * cell, x0 + c1 * cell, y0 - r1 * cell, y0 - r0 * cell]
+    xs = x0 + (np.arange(c0, c1) + 0.5) * cell
+    ys = y0 - (np.arange(r0, r1) + 0.5) * cell
+    fig, axes = plt.subplots(1, len(cams), figsize=(6.5 * len(cams), 9), dpi=100, squeeze=False)
+    for ax, cam in zip(axes[0], cams):
+        ax.imshow(sub, extent=ext, cmap="gray", vmin=-1.5, vmax=6, origin="upper")
+        cs = ax.contour(xs, ys, sub, levels=np.arange(-1, 4.01, 0.5), colors="#6b6a64",
+                        linewidths=0.6)
+        ax.clabel(cs, fontsize=7, fmt="%.1f")
+        pts = [m for m in mapped if m[0] == cam]
+        E = np.concatenate([m[1] for m in pts]); N = np.concatenate([m[2] for m in pts])
+        D = np.concatenate([m[3] for m in pts])
+        k = slice(None, None, max(1, len(E) // 20000))
+        sc = ax.scatter(E[k], N[k], c=D[k], cmap="RdBu_r", vmin=-2, vmax=2, s=3, lw=0)
+        ax.set_title(f"{cam}: survey - waterline elevation (m)\nred = waterline too LOW "
+                     f"(line sits too far landward), blue = too high", loc="left", fontsize=9)
+        ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3]); ax.set_aspect("equal")
+        ax.set_xlabel("Easting (m)"); ax.set_ylabel("Northing (m)")
+        fig.colorbar(sc, ax=ax, shrink=0.6)
+    fig.tight_layout()
+    fig.savefig(path)
+    print(f"wrote {path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("contours", help="contour_points_ground.csv (georectified waterline points)")
@@ -146,6 +216,9 @@ def main():
     ap.add_argument("--output", default=None,
                     help="Per-frame table CSV (default <survey stem>_frames.csv)")
     ap.add_argument("--plot", default=None, help="PNG of offset vs wave forcing")
+    ap.add_argument("--map", default=None,
+                    help="PNG map: the survey with every compared waterline point coloured by "
+                         "its offset, one panel per camera")
     args = ap.parse_args()
 
     grid, x0, y0, cell = read_survey(args.survey)
@@ -163,7 +236,8 @@ def main():
             if args.camera != "both" and r.get("camera") != args.camera:
                 continue
             fr = frames.setdefault(r["source_file"], {
-                "time": r.get("capture_time_utc", ""), "E": [], "N": [], "Z": [],
+                "time": r.get("capture_time_utc", ""), "cam": r.get("camera", ""),
+                "E": [], "N": [], "Z": [],
                 "tide": float(r["tide_elevation_navd88"]),
                 "hs": float(r["offshore_hs_m"]) if r.get("offshore_hs_m") else np.nan,
                 "tp": float(r["offshore_tp_s"]) if r.get("offshore_tp_s") else np.nan})
@@ -173,18 +247,23 @@ def main():
     if not frames:
         sys.exit("no georectified waterline points in that date range")
 
-    rows, all_d = [], []
+    rows, all_d, mapped = [], [], []
     for name, fr in sorted(frames.items(), key=lambda kv: kv[1]["time"]):
-        s = sample(grid, x0, y0, cell, np.array(fr["E"]), np.array(fr["N"]))
-        d = s - np.array(fr["Z"])
-        d = d[np.isfinite(d)]
+        E, N, Z = np.array(fr["E"]), np.array(fr["N"]), np.array(fr["Z"])
+        s = sample(grid, x0, y0, cell, E, N)
+        ok = np.isfinite(s)
+        d = (s - Z)[ok]
         if len(d) < args.min_points:
             continue
+        shift = horizontal_shift(grid, x0, y0, cell, E[ok], N[ok], Z[ok])
         all_d.append(d)
-        rows.append({"frame": name, "time_utc": fr["time"], "tide_navd88": fr["tide"],
+        mapped.append((fr["cam"], E[ok], N[ok], d))
+        rows.append({"frame": name, "time_utc": fr["time"], "camera": fr["cam"],
+                     "tide_navd88": fr["tide"],
                      "hs_m": fr["hs"], "tp_s": fr["tp"], "n_points": len(d),
                      "offset_m": float(np.median(d)),
-                     "spread_m": float(np.percentile(d, 84) - np.percentile(d, 16))})
+                     "spread_m": float(np.percentile(d, 84) - np.percentile(d, 16)),
+                     "shift_m": shift})
     if not rows:
         sys.exit("no frame has enough points on the survey -- do the extents overlap? "
                  "(check the survey's coordinate system: UTM 19N metres)")
@@ -194,12 +273,29 @@ def main():
     print(f"OFFSET survey - waterline elevation: median {np.median(all_d):+.3f} m, "
           f"frame medians {np.percentile(off, 10):+.2f} to {np.percentile(off, 90):+.2f} m (p10-p90)")
     print("   positive = our waterline elevations are LOW")
+    print("   per camera (shift = how far the line would have to move seaward(+) across the "
+          "beach to sit on its own elevation in the survey):")
+    for cam in sorted({r["camera"] for r in rows}):
+        rc = [r for r in rows if r["camera"] == cam]
+        o = np.array([r["offset_m"] for r in rc])
+        sh = np.array([r["shift_m"] for r in rc], float)
+        sh = sh[np.isfinite(sh)]
+        print(f"   {cam or '?':3s}: {len(rc):3d} frames, offset median {np.median(o):+.3f} m "
+              f"(p10-p90 {np.percentile(o, 10):+.2f} to {np.percentile(o, 90):+.2f}), shift median "
+              + (f"{np.median(sh):+.1f} m (p10-p90 {np.percentile(sh, 10):+.1f} to "
+                 f"{np.percentile(sh, 90):+.1f})" if len(sh) else "--"))
+    print("   A DATUM error gives a roughly constant vertical offset (the shift then varies with "
+          "the beach slope);\n   a GEOMETRY (camera pointing) error gives a roughly constant "
+          "shift, and huge vertical offsets where the beach is flat (berm).")
 
     tide = np.array([r["tide_navd88"] for r in rows])
     hs = np.array([r["hs_m"] for r in rows])
     tp = np.array([r["tp_s"] for r in rows])
     print()
     a, b, phi, w = waves_vs_datum(off, hs, tp, tide)
+
+    if args.map:
+        draw_map(args.map, grid, x0, y0, cell, mapped)
 
     out = args.output or str(Path(args.survey).with_suffix("")) + "_frames.csv"
     with open(out, "w", newline="") as f:
