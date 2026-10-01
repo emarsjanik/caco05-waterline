@@ -117,12 +117,16 @@ def main():
     pred = v["predicted"].to_numpy(float)
     obs = v["observed"].to_numpy(float)
     rows = []
-    print(f"  {'window':>7}{'n':>7}{'RMSE':>9}{'change':>9}   (centre-frame truth)")
+    # The windows that fit are mostly on long, unbroken runs of frames, i.e.
+    # clear days, which are easier anyway. So each window is compared with
+    # single frames on THE SAME centre frames ("1 frame, same"), not with
+    # all 344: otherwise part of the gain is just which frames were kept.
+    print(f"  {'window':>7}{'n':>7}{'RMSE':>9}{'1 frame, same':>15}{'change':>9}   (centre-frame truth)")
     for w in args.windows:
-        half = w // 2
-        keep_p, keep_o, used = [], [], 0
+        keep_p, keep_o, keep_1, used = [], [], [], 0
         for i in range(len(v)):
-            lo, hi = i - half, i + half
+            lo = i - (w - 1) // 2          # even windows lean one frame later
+            hi = lo + w - 1
             if lo < 0 or hi >= len(v):
                 continue
             # Every step inside the window must be close in time, or the
@@ -133,21 +137,23 @@ def main():
                 continue
             keep_p.append(pred[lo:hi + 1].mean())
             keep_o.append(obs[i])          # truth AT THE CENTRE, not averaged
+            keep_1.append(pred[i])
             used += 1
         if used < 20:
             print(f"  {w:>7}{used:>7}      too few complete windows")
             continue
-        r = rmse(keep_p, keep_o)
-        rows.append((w, used, r))
-        print(f"  {w:>7}{used:>7}{r:>9.3f}{100*(r-base)/base:>8.1f}%")
+        r, r1 = rmse(keep_p, keep_o), rmse(keep_1, keep_o)
+        rows.append((w, used, r, r1))
+        print(f"  {w:>7}{used:>7}{r:>9.3f}{r1:>15.3f}{100*(r-r1)/r1:>8.1f}%")
 
     if rows:
-        best = min(rows, key=lambda t: t[2])
+        best = min(rows, key=lambda t: (t[2] - t[3]) / t[3])
         print()
-        if best[2] < base - 0.005:
+        if best[2] < best[3] - 0.005:
             mins = (best[0] - 1) * 30
-            print(f"Best: a {best[0]}-frame average, RMSE {best[2]:.3f} "
-                  f"({100*(best[2]-base)/base:+.1f}%).")
+            print(f"Best: a {best[0]}-frame average, RMSE {best[2]:.3f} against {best[3]:.3f} "
+                  f"for single frames on the same {best[1]} frames "
+                  f"({100*(best[2]-best[3])/best[3]:+.1f}%).")
             print(f"  That spans about {mins} minutes, so the estimate is no longer")
             print(f"  instantaneous -- a fair trade for a slowly varying quantity, but it")
             print(f"  should be stated alongside the accuracy rather than left implicit.")
@@ -158,7 +164,7 @@ def main():
             print("  independent per-frame noise. More averaging will not fix that.")
 
     if args.output and rows:
-        pd.DataFrame(rows, columns=["window", "n", "rmse"]).to_csv(args.output, index=False)
+        pd.DataFrame(rows, columns=["window", "n", "rmse", "rmse_single_same_frames"]).to_csv(args.output, index=False)
         print(f"\nwrote {args.output}")
     return 0
 
