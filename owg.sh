@@ -129,6 +129,16 @@ if $FETCH; then
         || { log "WARNING: tide gauge download failed; using the archive"; errors="$errors gauge"; }
 fi
 
+# Camera pointing (pointing_check.py): one timex per hour per camera against
+# its reference bank. Skipped for a camera until its bank exists
+# (calibration/pointing/<cam>/); the report flags any movement.
+for cam in c1 c2; do
+    if ls "$BASE/calibration/pointing/$cam/"*.jpg >/dev/null 2>&1; then
+        run python3 "$BASE/pointing_check.py" --camera "$cam" \
+            || { log "WARNING: pointing check $cam failed"; errors="$errors pointing_$cam"; }
+    fi
+done
+
 log "--- 2. wave models ---"
 if [ -f "$MODEL_C.onnx" ]; then
     run python3 "$BASE/owg_live.py" --model "$MODEL_C" --waves-csv "$WAVES_CSV" $REPROCESS \

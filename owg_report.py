@@ -510,6 +510,26 @@ def main():
         check(len(recent) > 0 and n_ok > 0,
               f"camera {label}: {n_ok} of {len(recent)} frames measured in 24 h"
               + (f" (screened: {detail})" if detail else ""))
+    # camera pointing (pointing_check.py), when a reference bank is set up
+    for cam in ("c1", "c2"):
+        pl = arch / f"pointing_{cam}.csv"
+        if not pl.exists():
+            continue
+        p = pd.read_csv(pl)
+        p = p[p["epoch"] >= now.timestamp() - 86400]
+        m = p[p["status"] != "unmatched"]
+        if not len(p):
+            check(False, f"pointing {cam}: no frame checked in 24 h")
+        elif not len(m):
+            check(False, f"pointing {cam}: no frame could be matched in 24 h (fog/rain, or the view changed?)")
+        else:
+            last = m.iloc[-1]
+            worst = m[["d_azimuth", "d_tilt", "d_roll"]].abs().max()
+            moved = (m["status"].str.lower() == "moved").sum()
+            check(moved == 0, f"pointing {cam}: latest change az {last['d_azimuth']:+.2f}, tilt "
+                              f"{last['d_tilt']:+.2f}, roll {last['d_roll']:+.2f} deg; largest 24 h "
+                              f"{worst.max():.2f} deg ({len(m)} frames"
+                              + (f", {moved} beyond the limit" if moved else "") + ")")
     stuck = [lbl for lbl, d in models if d is not None and len(d) and
              (d[d["epoch"] >= day_ago]["status"] == "no water level").sum() > 3]
     for lbl in stuck:
