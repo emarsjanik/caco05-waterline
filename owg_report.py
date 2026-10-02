@@ -56,6 +56,7 @@ HERE = Path(__file__).resolve().parent
 
 INK, MUTED, GRID = "#1f1f1e", "#6b6a64", "#e4e3dc"
 ORANGE, BLUE, GREEN, GREY = "#eb6834", "#2a78d6", "#1baf7a", "#b9b8b0"
+PALETTE = (BLUE, GREEN, "#8a5cd1", "#c8417a", "#3b3a36")
 # r and Willmott d are only reported when the buoy spans at least this much (m)
 MIN_SPREAD = 1.0
 COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
@@ -193,7 +194,7 @@ def plot_7day(models, waves, gauge, fit, start, end, out):
         w = waves[(waves["epoch"] >= s0) & waves["wvht_m"].notna()]
         for i, (t, v) in enumerate(split_gaps(w["epoch"], w["wvht_m"], 3 * 3600)):
             a.plot(to_dt(t), v, color=ORANGE, lw=2, label="Buoy 44008 (offshore)" if i == 0 else None)
-    for (label, d), colour in zip(models, (BLUE, GREEN)):
+    for (label, d), colour in zip(models, PALETTE):
         if d is None:
             continue
         ok = d[(d["status"] == "ok") & (d["epoch"] >= s0)]
@@ -287,7 +288,7 @@ def plot_residuals(matched, out):
         return False
     fig, axs = plt.subplots(1, 3, figsize=(15, 4.6), dpi=110, sharey=True)
     fig.patch.set_facecolor("white")
-    for (label, m), colour in zip(have, (BLUE, GREEN)):
+    for (label, m), colour in zip(have, PALETTE):
         r = m["hs_m"] - m["buoy"]
         for a, col in zip(axs, ("level", "mwd", "dpd")):
             a.scatter(m[col], r, s=10, color=colour, alpha=0.5, lw=0, label=f"Camera {label}")
@@ -416,10 +417,17 @@ def plot_view(model_c, model_patch, image_dirs, out):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--archive", default=str(HERE / "archive"))
-    ap.add_argument("--models", nargs="+", default=["Run C=owg_c2_H.csv", "patch=owg_c2_H_patch.csv"],
-                    help="LABEL=CSV in --archive, in plotting order (default Run C, then patch)")
-    ap.add_argument("--model-c", default=str(HERE / "owg_models" / "owg_c2_H_current_C"))
-    ap.add_argument("--model-patch", default=str(HERE / "owg_models" / "owg_c2_H_patch"))
+    ap.add_argument("--models", nargs="+",
+                    default=["Run C=owg_c2_H.csv=owg_c2_H_current_C", "patch=owg_c2_H_patch.csv=owg_c2_H_patch",
+                             "v2=owg_c2_H_v2.csv=owg_c2_H_v2"],
+                    help="LABEL=CSV[=MODEL]: archive CSV in --archive and model stem in owg_models/, "
+                         "in plotting order. A model with neither an archive nor a model file is "
+                         "left out, so a model not installed yet is not a failure.")
+    ap.add_argument("--ensemble", default="Run C,v2",
+                    help="labels averaged, frame by frame, into an 'ensemble' reading when at least "
+                         "two of them measured the frame (default 'Run C,v2'; '' for none)")
+    ap.add_argument("--model-c", default=None, help="model stem for 'Run C' (overrides --models)")
+    ap.add_argument("--model-patch", default=None, help="model stem for 'patch' (overrides --models)")
     ap.add_argument("--waves-csv", default=None, help="default <archive>/waves_44008.csv")
     ap.add_argument("--gauge-csv", default=None, help="default <archive>/gauge_8447435.csv")
     ap.add_argument("--gauge-fit", default="1.24,-48,-0.10")
@@ -443,10 +451,38 @@ def main():
     waves = load_waves(args.waves_csv or arch / "waves_44008.csv")
     gauge = load_gauge(args.gauge_csv or arch / "gauge_8447435.csv")
     fit = tuple(float(v) for v in args.gauge_fit.split(","))
-    models = []
+    models, stems = [], []
     for spec in args.models:
-        label, name = spec.split("=", 1)
-        models.append((label, load_archive(arch / name)))
+        label, name, *stem = spec.split("=")
+        stem = stem[0] if stem else None
+        if stem and not Path(stem).is_absolute():
+            stem = str(HERE / "owg_models" / stem)
+        if label == "Run C" and args.model_c:
+            stem = args.model_c
+        if label == "patch" and args.model_patch:
+            stem = args.model_patch
+        d = load_archive(arch / name)
+        if d is None and not (stem and Path(stem + ".onnx").exists()):
+            continue
+        models.append((label, d)); stems.append(stem)
+    # ensemble: the mean of several models' readings of the same frame. Models
+    # trained differently err differently, so their average errs less.
+    ens = [l.strip() for l in args.ensemble.split(",") if l.strip()]
+    parts = [d[d["status"] == "ok"][["filename", "epoch", "t", "hs_m"]].rename(columns={"hs_m": lbl})
+             for lbl, d in models if lbl in ens and d is not None and len(d)]
+    if len(parts) >= 2:
+        e = parts[0]
+        for p in parts[1:]:
+            e = e.merge(p[["filename", p.columns[-1]]], on="filename", how="outer")
+        e["epoch"] = e["filename"].str.split(".").str[0].astype(int)
+        e["t"] = pd.to_datetime(e["epoch"], unit="s", utc=True)
+        cols = [c for c in e.columns if c in ens]
+        n = e[cols].notna().sum(axis=1)
+        e = e[n >= 2].copy()
+        e["hs_m"] = e[cols].mean(axis=1)
+        e["status"] = "ok"
+        if len(e):
+            models.append(("ensemble", e.sort_values("epoch").reset_index(drop=True))); stems.append(None)
 
     now = datetime.now(timezone.utc)
     end = now
@@ -494,7 +530,9 @@ def main():
               f"owg.sh: last run {ago(age)} ago" + (f" ({msg})" if msg else ""))
     else:
         check(False, "owg.sh: has never run (no logs/owg_last_run)")
-    for (label, d), stem in zip(models, (args.model_c, args.model_patch)):
+    for (label, d), stem in zip(models, stems):
+        if stem is None:
+            continue
         need = [stem + ".onnx", stem + ".report.json"] + ([stem + ".patch.json"] if "patch" in label else [])
         missing = [Path(p).name for p in need if not Path(p).exists()]
         if missing:
@@ -546,11 +584,14 @@ def main():
     if plot_residuals(matched, p):
         plots.append(p)
     p = out_dir / "owg_report_frames.png"
-    if plot_frames(models, start, end, p):
+    if plot_frames([(l, d) for l, d in models if l != "ensemble"], start, end, p):
         plots.append(p)
     p = out_dir / "owg_report_view.png"
     try:
-        view_time = plot_view(args.model_c, args.model_patch, args.image_dir, p)
+        stem_of = dict(zip([l for l, _ in models], stems))
+        view_time = plot_view(stem_of.get("Run C") or str(HERE / "owg_models" / "owg_c2_H_current_C"),
+                              stem_of.get("patch") or str(HERE / "owg_models" / "owg_c2_H_patch"),
+                              args.image_dir, p)
     except Exception as exc:
         view_time = None
         print(f"view: not drawn ({exc})", file=sys.stderr)
@@ -645,13 +686,13 @@ def main():
     L.append("  A bias that grows with the waves is breaking; one that changes with")
     L.append("  direction is sheltering (see owg_report_residuals.png). The camera's")
     L.append("  own accuracy, against the ADCP: Run C 0.27 m per frame, patch 0.38 m.")
-    if len([1 for _, m in matched if m is not None and len(m)]) == 2:
-        a, b = [m for _, m in matched]
-        both = a.merge(b, on="filename", suffixes=("_a", "_b"))
+    have = [(l, m) for l, m in matched if m is not None and len(m)]
+    for lbl, m in have[1:]:
+        both = have[0][1].merge(m, on="filename", suffixes=("_a", "_b"))
         if len(both) >= 3:
             dd = both["hs_m_b"] - both["hs_m_a"]
-            L.append(f"  The two models on the same {len(both)} frames: {matched[1][0]} minus "
-                     f"{matched[0][0]} {dd.mean():+.2f} m (sd {dd.std():.2f} m)")
+            L.append(f"  {lbl} minus {have[0][0]} on the same {len(both)} frames: "
+                     f"{dd.mean():+.2f} m (sd {dd.std():.2f} m)")
     L.append("")
     n_fail = sum(1 for ok, _ in checks if not ok)
     L.append("CHECKS")
