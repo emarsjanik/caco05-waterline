@@ -181,7 +181,7 @@ def to_dt(ep):
     return pd.to_datetime(np.asarray(ep, float), unit="s").to_numpy()
 
 
-def plot_7day(models, waves, gauge, fit, start, end, out):
+def plot_7day(models, waves, gauge, fit, start, end, out, mw=None):
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
     fig, ax = plt.subplots(3, 1, figsize=(12, 9), dpi=110, sharex=True,
@@ -194,6 +194,16 @@ def plot_7day(models, waves, gauge, fit, start, end, out):
         w = waves[(waves["epoch"] >= s0) & waves["wvht_m"].notna()]
         for i, (t, v) in enumerate(split_gaps(w["epoch"], w["wvht_m"], 3 * 3600)):
             a.plot(to_dt(t), v, color=ORANGE, lw=2, label="Buoy 44008 (offshore)" if i == 0 else None)
+    if mw is not None:
+        m = mw[mw["epoch"] >= s0]
+        c = m[m["hs_buoy_marconi"].notna()]
+        for i, (t, v) in enumerate(split_gaps(c["epoch"], c["hs_buoy_marconi"], 3 * 3600)):
+            a.plot(to_dt(t), v, color=ORANGE, lw=1.5, ls="--",
+                   label="Buoy converted to Marconi" if i == 0 else None)
+        bst = m[m["hs_best"].notna()]
+        for i, (t, v) in enumerate(split_gaps(bst["epoch"], bst["hs_best"], 3 * 3600)):
+            a.plot(to_dt(t), v, color=INK, lw=2.4,
+                   label="Best estimate (camera + converted buoy)" if i == 0 else None)
     for (label, d), colour in zip(models, PALETTE):
         if d is None:
             continue
@@ -204,12 +214,13 @@ def plot_7day(models, waves, gauge, fit, start, end, out):
         t, v = averaged(ok)
         for i, (tt, vv) in enumerate(split_gaps(t, v, 45 * 60)):
             a.plot(to_dt(tt), vv, color=colour, lw=2,
-                   label=f"Camera {label}, 5-frame average (dots: single frames)" if i == 0 else None)
+                   label=f"Camera {label} (2-h mean; dots: frames)" if i == 0 else None)
     a.set_ylim(bottom=0)
     a.set_ylabel("Significant wave\nheight (m)", color=INK)
-    a.set_title(f"Optical wave gauge, CACO05 c2 -- last {round((end - start).total_seconds() / 86400)} "
-                f"days (UTC)", loc="left", fontsize=11, color=INK, pad=24)
-    a.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=3, frameon=False, fontsize=8.5)
+    fig.suptitle(f"Optical wave gauge, CACO05 c2 -- last {round((end - start).total_seconds() / 86400)} "
+                 f"days (UTC)", x=0.01, ha="left", fontsize=11, color=INK)
+    h, lab = a.get_legend_handles_labels()
+    fig.legend(h, lab, loc="upper left", bbox_to_anchor=(0.01, 0.965), ncol=3, frameon=False, fontsize=8.5)
 
     a = ax[1]
     if waves is not None:
@@ -239,7 +250,7 @@ def plot_7day(models, waves, gauge, fit, start, end, out):
     ax[-1].set_xlim(to_dt([s0])[0], to_dt([s1])[0])
     ax[-1].xaxis.set_major_locator(mdates.DayLocator())
     ax[-1].xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
     fig.savefig(out)
     plt.close(fig)
 
@@ -430,6 +441,7 @@ def main():
     ap.add_argument("--model-patch", default=None, help="model stem for 'patch' (overrides --models)")
     ap.add_argument("--waves-csv", default=None, help="default <archive>/waves_44008.csv")
     ap.add_argument("--gauge-csv", default=None, help="default <archive>/gauge_8447435.csv")
+    ap.add_argument("--marconi-waves", default=None, help="default <archive>/waves_marconi.csv")
     ap.add_argument("--gauge-fit", default="1.24,-48,-0.10")
     ap.add_argument("--image-dir", nargs="+",
                     default=["/mnt/I2Rgus_Data/ImageProducts/products", "/mnt/I2Rgus_Data/ImageProducts"])
@@ -491,6 +503,12 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # hourly best estimate and the buoy converted to Marconi (marconi_waves.py)
+    mwp = Path(args.marconi_waves or arch / "waves_marconi.csv")
+    mw = pd.read_csv(mwp) if mwp.exists() else None
+    conv = mw[mw["hs_buoy_marconi"].notna()] if mw is not None else None
+    converted = conv is not None and len(conv) >= 2
+
     # every OK frame matched to the buoy hour, the tide and the wave climate
     matched = []
     for label, d in models:
@@ -503,6 +521,8 @@ def main():
                 ok[name] = interp_at(waves["epoch"], waves[col], ok["epoch"], 90 * 60)
         else:
             ok["buoy"] = ok["dpd"] = ok["mwd"] = np.nan
+        if converted:   # score against the buoy as it would be at Marconi, when fitted
+            ok["buoy"] = interp_at(conv["epoch"], conv["hs_buoy_marconi"], ok["epoch"], 90 * 60)
         ok["level"] = marconi_level(gauge, ok["epoch"], fit)
         matched.append((label, ok[ok["buoy"].notna()]))
 
@@ -576,7 +596,7 @@ def main():
     # ---- plots
     plots = []
     p = out_dir / "owg_report_7day.png"
-    plot_7day(models, waves, gauge, fit, start, end, p); plots.append(p)
+    plot_7day(models, waves, gauge, fit, start, end, p, mw); plots.append(p)
     p = out_dir / "owg_report_scatter.png"
     if plot_scatter(matched, start, p):
         plots.append(p)
@@ -654,7 +674,22 @@ def main():
             L.append(f"  {'':<7}  last 24 h {x['hs_m'].min():.2f}-{x['hs_m'].max():.2f} m, "
                      f"mean {x['hs_m'].mean():.2f} m ({len(x)} frames)")
     L.append("")
-    L.append("AGREEMENT WITH THE BUOY (single frames, buoy interpolated to each frame)")
+    if mw is not None and mw["hs_best"].notna().any():
+        b = mw[mw["hs_best"].notna()]
+        r = b.iloc[-1]
+        L.append("BEST ESTIMATE AT MARCONI (camera blended with the converted buoy, hourly)")
+        L.append(f"  Latest      : Hs {r['hs_best']:.2f} m at {r['time_utc'][5:16].replace('T', ' ')}Z "
+                 f"({r['best_from']}: camera {r['hs_camera'] if pd.notna(r['hs_camera']) else '--'}, "
+                 f"converted buoy {r['hs_buoy_marconi'] if pd.notna(r['hs_buoy_marconi']) else '--'} m)")
+        x = b[b["epoch"] >= day_ago]
+        if len(x):
+            L.append(f"  Last 24 h   : {x['hs_best'].min():.2f}-{x['hs_best'].max():.2f} m, mean "
+                     f"{x['hs_best'].mean():.2f} m  (archive/waves_marconi.csv, used by the other systems)")
+        if not converted:
+            L.append("  (buoy not converted yet -- run: python3 buoy_transfer.py fit --station 44008)")
+        L.append("")
+    L.append("AGREEMENT WITH THE BUOY " + ("CONVERTED TO MARCONI (by wave direction, period and height)"
+                                         if converted else "(single frames, raw offshore buoy)"))
     L.append(f"  {'':<20}{'n':>5}{'bias':>9}{'RMSE':>8}{'r':>7}{'d':>7}")
     flat = False
     for label, m in matched:
@@ -681,11 +716,16 @@ def main():
     if flat:
         L.append(f"  -- : r and d not given: the buoy varied less than {MIN_SPREAD:.1f} m (or under")
         L.append("       10 frames), too little for them to mean anything.")
-    L.append("  The buoy is offshore and the camera nearshore, so they are not")
-    L.append("  expected to match: watch r and d (do they rise and fall together?).")
-    L.append("  A bias that grows with the waves is breaking; one that changes with")
-    L.append("  direction is sheltering (see owg_report_residuals.png). The camera's")
-    L.append("  own accuracy, against the ADCP: Run C 0.27 m per frame, patch 0.38 m.")
+    if converted:
+        L.append("  The converted buoy is itself uncertain (about +/-0.26-0.29 m against the")
+        L.append("  ADCP), so camera and buoy differing by less than ~0.3 m is agreement.")
+        L.append("  A trend left in owg_report_residuals.png is something neither explains.")
+    else:
+        L.append("  The buoy is offshore and the camera nearshore, so they are not")
+        L.append("  expected to match: watch r and d (do they rise and fall together?).")
+        L.append("  A bias that grows with the waves is breaking; one that changes with")
+        L.append("  direction is sheltering (see owg_report_residuals.png).")
+    L.append("  The camera's own accuracy, against the ADCP: Run C 0.27 m per frame, patch 0.38 m.")
     have = [(l, m) for l, m in matched if m is not None and len(m)]
     for lbl, m in have[1:]:
         both = have[0][1].merge(m, on="filename", suffixes=("_a", "_b"))

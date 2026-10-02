@@ -169,6 +169,12 @@ if [ -f "$MODEL_V2.onnx" ]; then
         || { log "WARNING: v2 model failed"; errors="$errors v2"; }
 fi
 
+# Best estimate of the waves off Marconi, hourly (camera models blended with
+# the buoy converted to Marconi by buoy_transfer.py, once that is fitted):
+# archive/waves_marconi.csv, read by the report, GNSS-IR QC and the DEM.
+run python3 "$BASE/marconi_waves.py" --waves-csv "$WAVES_CSV" \
+    || { log "WARNING: marconi_waves.py failed"; errors="$errors marconi_waves"; }
+
 if [ -n "$errors" ]; then
     echo "error in:$errors ($(date -u '+%Y-%m-%d %H:%M')Z)" > "$STAMP"
 else
