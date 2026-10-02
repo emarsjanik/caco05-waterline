@@ -56,6 +56,8 @@ HERE = Path(__file__).resolve().parent
 
 INK, MUTED, GRID = "#1f1f1e", "#6b6a64", "#e4e3dc"
 ORANGE, BLUE, GREEN, GREY = "#eb6834", "#2a78d6", "#1baf7a", "#b9b8b0"
+# r and Willmott d are only reported when the buoy spans at least this much (m)
+MIN_SPREAD = 1.0
 COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
            "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
 
@@ -545,8 +547,18 @@ def main():
     if waves is not None and waves["wvht_m"].notna().any():
         w = waves[waves["wvht_m"].notna()]
         r = w.iloc[-1]
-        L.append(f"  Latest      : Hs {r['wvht_m']:.1f} m, period {r['dpd_s']:.0f} s, from "
-                 f"{r['mwd_deg']:.0f} deg {compass(r['mwd_deg'])}   ({r['t']:%m-%d %H:%M}Z)")
+        # NDBC often leaves period and direction blank ("MM") in the newest
+        # row; give the latest that were reported, and their time if older
+        bits = [f"Hs {r['wvht_m']:.1f} m"]
+        for col, fmt in (("dpd_s", "period {:.0f} s"), ("mwd_deg", "from {:.0f} deg")):
+            x = w[w[col].notna()]
+            if len(x):
+                v = x.iloc[-1]
+                txt = fmt.format(v[col]) + (f" {compass(v[col])}" if col == "mwd_deg" else "")
+                if v["epoch"] < r["epoch"]:
+                    txt += f" (at {v['t']:%H:%M}Z)"
+                bits.append(txt)
+        L.append(f"  Latest      : {', '.join(bits)}   ({r['t']:%m-%d %H:%M}Z)")
         for hrs, name in ((24, "Last 24 h"), (24 * args.days, f"Last {args.days} days")):
             x = w[w["epoch"] >= now.timestamp() - hrs * 3600]
             if len(x):
@@ -583,6 +595,7 @@ def main():
     L.append("")
     L.append("AGREEMENT WITH THE BUOY (single frames, buoy interpolated to each frame)")
     L.append(f"  {'':<20}{'n':>5}{'bias':>9}{'RMSE':>8}{'r':>7}{'d':>7}")
+    flat = False
     for label, m in matched:
         if m is None or not len(m):
             L.append(f"  {label:<20}  no frames matched to the buoy")
@@ -593,8 +606,20 @@ def main():
             s = metrics(m.loc[sel, "hs_m"].to_numpy(float), m.loc[sel, "buoy"].to_numpy(float))
             row = f"  {label + ', ' + name:<20}{s['n']:>5}"
             if s["n"] >= 3:
-                row += f"{s['bias']:>+8.2f}m{s['rmse']:>7.2f}m{s['corr']:>7.2f}{s['d']:>7.2f}"
+                row += f"{s['bias']:>+8.2f}m{s['rmse']:>7.2f}m"
+                # r and d measure whether the two rise and fall together; with
+                # the buoy nearly steady there is nothing to follow, and they
+                # come out at random -- even negative
+                spread = np.ptp(m.loc[sel, "buoy"].to_numpy(float))
+                if spread >= MIN_SPREAD and s["n"] >= 10:
+                    row += f"{s['corr']:>7.2f}{s['d']:>7.2f}"
+                else:
+                    row += f"{'--':>7}{'--':>7}"
+                    flat = True
             L.append(row)
+    if flat:
+        L.append(f"  -- : r and d not given: the buoy varied less than {MIN_SPREAD:.1f} m (or under")
+        L.append("       10 frames), too little for them to mean anything.")
     L.append("  The buoy is offshore and the camera nearshore, so they are not")
     L.append("  expected to match: watch r and d (do they rise and fall together?).")
     L.append("  A bias that grows with the waves is breaking; one that changes with")
