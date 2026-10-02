@@ -226,6 +226,9 @@ def main():
                          "patch model projects at")
     ap.add_argument("--gauge-fit", default="1.24,-48,-0.10",
                     help="Marconi = a * Chatham(t - lag) + b: 'a,lag_minutes,b' (gnssr_qc.py fit)")
+    ap.add_argument("--gauge-ahead", type=float, default=2.0,
+                    help="hours past the last gauge reading to carry a tide fit forward "
+                         "(default 2; 0 = wait for the gauge)")
     ap.add_argument("--screen-crop", default="0.078,0.50,0.30,1.0",
                     help="Region of the live frame the quality screen scores when the model "
                          "uses a sea patch (default: the surf zone in today's c2 view)")
@@ -258,15 +261,40 @@ def main():
               f"level from {Path(args.gauge_csv).name}" if gauge is not None else
               f"sea patch         : NO gauge archive at {args.gauge_csv} -- frames cannot be projected")
 
+        def gauge_ahead(ep, lv, t):
+            """
+            Chatham level up to --gauge-ahead hours past its last reading. The
+            fit's 48-min lead means the newest frames always need a reading the
+            gauge has not made yet, and cleanup.sh moves frames to S3 within
+            the hour, so they could never be retried. A tide fit (M2 and M4,
+            last 25 h) carried forward, pinned to the last reading, was within
+            3 cm at 1 h and 6 cm at 2 h of what the gauge then read (Aug-Sep
+            2026) -- well inside the 0.13 m of the Marconi fit itself.
+            """
+            if not args.gauge_ahead or t - ep[-1] > args.gauge_ahead * 3600:
+                return None
+            m = ep > ep[-1] - 25 * 3600
+            if m.sum() < 150:                      # ~15 h of 6-min readings
+                return None
+            w = 2 * np.pi / (12.4206 * 3600)
+            basis = lambda x: np.column_stack([np.ones_like(x), np.cos(w * x), np.sin(w * x),
+                                               np.cos(2 * w * x), np.sin(2 * w * x)])
+            c, *_ = np.linalg.lstsq(basis(ep[m] - ep[-1]), lv[m], rcond=None)
+            f = basis(np.array([0.0, t - ep[-1]])) @ c
+            return f[1] + lv[-1] - f[0]
+
         def water_level(epoch):
             if gauge is None:
                 return None
             t = epoch - glag * 60.0
             ep = gauge["epoch"].to_numpy(float)
-            i = np.searchsorted(ep, t)
-            if i == 0 or i == len(ep) or ep[i] - ep[i - 1] > 3 * 3600:
-                return None
             lv = gauge["level_navd88"].to_numpy(float)
+            i = np.searchsorted(ep, t)
+            if i == len(ep) and len(ep):
+                g = gauge_ahead(ep, lv, t)
+                return None if g is None else ga * g + gb
+            if i == 0 or ep[i] - ep[i - 1] > 3 * 3600:
+                return None
             g = lv[i - 1] + (t - ep[i - 1]) / (ep[i] - ep[i - 1]) * (lv[i] - lv[i - 1])
             return ga * g + gb
 
