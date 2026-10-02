@@ -169,6 +169,13 @@ if [ -f "$MODEL_V2.onnx" ]; then
         || { log "WARNING: v2 model failed"; errors="$errors v2"; }
 fi
 
+# Wave period from the c2 timestacks (2 Hz, 10 min): needs the archived
+# ras.tiff stacks and the camera's .pix file.
+if ls "$BASE/archive/ras_c2/"*.ras.tiff >/dev/null 2>&1 && [ -f /home/argus_user/arguseyes/build/c2_timestack.pix ]; then
+    run python3 "$BASE/timestack_wave_period.py" \
+        || { log "WARNING: timestack wave period failed"; errors="$errors period"; }
+fi
+
 # Best estimate of the waves off Marconi, hourly (camera models blended with
 # the buoy converted to Marconi by buoy_transfer.py, once that is fitted):
 # archive/waves_marconi.csv, read by the report, GNSS-IR QC and the DEM.
