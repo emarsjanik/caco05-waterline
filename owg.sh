@@ -60,6 +60,7 @@ WAVES_CSV="$BASE/archive/waves_${WAVE_BUOY}.csv"
 GAUGE_CSV="$BASE/archive/gauge_${TIDE_GAUGE}.csv"
 MODEL_C="$BASE/owg_models/owg_c2_H_current_C"
 MODEL_PATCH="$BASE/owg_models/owg_c2_H_patch"
+MODEL_V2="$BASE/owg_models/owg_c2_H_v2"
 OUT_DIR="$BASE/reports/owg"
 
 # Plots from other systems attached to the email (missing ones are noted,
@@ -156,6 +157,16 @@ if [ -f "$MODEL_PATCH.onnx" ] && [ -f "$MODEL_PATCH.patch.json" ]; then
         || { log "WARNING: patch model failed"; errors="$errors patch"; }
 else
     log "patch model not installed ($MODEL_PATCH.onnx + .patch.json)"
+fi
+
+# Version 2 (train_owg_torch.py: pretrained ConvNeXt, colour, original frames).
+# Runs alongside the others once owg_models/owg_c2_H_v2.onnx is installed;
+# the report averages it with Run C into an "ensemble" reading.
+if [ -f "$MODEL_V2.onnx" ]; then
+    run python3 "$BASE/owg_live.py" --model "$MODEL_V2" --waves-csv "$WAVES_CSV" $REPROCESS \
+        --output "$BASE/archive/owg_c2_H_v2.csv" --plot "$BASE/owg_c2_H_v2_7day.png" --days "$DAYS" \
+        --also "C=$BASE/archive/owg_c2_H.csv" \
+        || { log "WARNING: v2 model failed"; errors="$errors v2"; }
 fi
 
 if [ -n "$errors" ]; then

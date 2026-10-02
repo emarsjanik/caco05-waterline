@@ -54,7 +54,7 @@ import cv2
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from train_marconi_owg import load_image, normalise, prepare_image   # noqa: E402
+from train_marconi_owg import normalise, prepare_image   # noqa: E402
 from score_image_quality import score                        # noqa: E402
 
 FIELDS = ["filename", "epoch", "time_utc", "brightness", "sharpness", "saturation",
@@ -71,19 +71,44 @@ def load_net(stem):
     return net, rep, width, height, crop
 
 
+RGB_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
+RGB_STD = np.array([0.229, 0.224, 0.225], np.float32)
+
+
+def is_rgb(rep):
+    """train_owg_torch.py models take colour, ImageNet-normalised, channels first."""
+    return rep.get("input") == "rgb_imagenet"
+
+
+def model_input(img_bgr, rep, width, height, crop):
+    """Image (BGR, full frame or sea patch) -> the array the model expects."""
+    if not is_rgb(rep):
+        g = prepare_image(img_bgr, width, height, crop)
+        return None if g is None else normalise(g)
+    if crop:
+        h, w = img_bgr.shape[:2]
+        t, b, l, r = crop
+        img_bgr = img_bgr[int(t * h):int(b * h), int(l * w):int(r * w)]
+    rgb = cv2.cvtColor(cv2.resize(img_bgr, (width, height), interpolation=cv2.INTER_AREA),
+                       cv2.COLOR_BGR2RGB)
+    return ((rgb.astype(np.float32) / 255.0 - RGB_MEAN) / RGB_STD).transpose(2, 0, 1)
+
+
 def run(net, x):
-    """x: (height, width) normalised image -> wave height (m)."""
-    net.setInput(x[None, :, :, None].astype(np.float32))
+    """x: model input from model_input() (H, W grey or 3, H, W colour) -> wave height (m)."""
+    x = x[None, :, :, None] if x.ndim == 2 else x[None]
+    net.setInput(np.ascontiguousarray(x, dtype=np.float32))
     return float(net.forward().ravel()[0])
 
 
 def check(stem, net):
     chk = json.loads(Path(stem + ".check.json").read_text())
     X = np.load(Path(stem).parent / chk["inputs"])
-    got = np.array([run(net, X[i, :, :, 0]) for i in range(len(X))])
+    got = np.array([run(net, X[i] if X.ndim == 4 and X.shape[1] == 3 else X[i, :, :, 0])
+                    for i in range(len(X))])
     exp = np.array(chk["expected"])
     diff = float(np.abs(got - exp).max())
-    print(f"exported model vs TensorFlow: largest difference {diff * 1000:.3f} mm "
+    print(f"exported model vs {chk.get('framework', 'TensorFlow')}: largest difference {diff * 1000:.3f} mm "
           f"over {len(X)} test inputs")
     for g, e in zip(got, exp):
         print(f"    {g:+.4f}  expected {e:+.4f}")
@@ -335,7 +360,8 @@ def main():
                           f"trained on {EXPECTED_SIZE[0]}x{EXPECTED_SIZE[1]}")
                 warned = True
             if patch is None:
-                img = load_image(path, width, height, crop)
+                full = cv2.imread(str(path))
+                img = None if full is None else model_input(full, rep, width, height, crop)
             else:
                 img = None
                 z = water_level(epoch)
@@ -350,13 +376,13 @@ def main():
                     else:
                         # through JPEG, as the training images were
                         ok_, enc = cv2.imencode(".jpg", rect, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                        img = prepare_image(cv2.imdecode(enc, cv2.IMREAD_COLOR), width, height, None)
+                        img = model_input(cv2.imdecode(enc, cv2.IMREAD_COLOR), rep, width, height, None)
             if row.get("status"):
                 pass
             elif img is None:
                 row["status"] = "unreadable"
             else:
-                row["hs_m"] = round(run(net, normalise(img)), 3)
+                row["hs_m"] = round(run(net, img), 3)
                 row["status"] = "ok"
         rows.append(row)
 
