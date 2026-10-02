@@ -399,6 +399,34 @@ def main():
         print(f"DEM vs survey     : {int(ok.sum())} cells, survey - DEM median "
               f"{np.nanmedian(diff):+.3f} m, p16-p84 {np.nanpercentile(diff, 16):+.2f} to "
               f"{np.nanpercentile(diff, 84):+.2f} m")
+        # accuracy by distance from the camera tower: errors that cancel in one
+        # median are visible here (far cells have coarse pixels and grazing views)
+        from georectify import load_extrinsics
+        cam = load_extrinsics(Path(__file__).resolve().parent / "calibration" / "CACO05_c2_20251113_EO-CV.yaml")
+        rng_m = np.hypot(E - cam[0], N - cam[1])
+        dv = diff[rr, cc]
+        print(f"  {'distance':>12} {'cells':>7} {'median':>8} {'NMAD':>6} {'RMSE':>6} {'p95 |e|':>8}")
+        bins = [0, 100, 150, 200, 250, 300, 400, 600, 1e9]
+        acc = []
+        for lo, hi in zip(bins, bins[1:]):
+            m = np.isfinite(dv) & (rng_m >= lo) & (rng_m < hi)
+            if m.sum() < 20:
+                continue
+            e = dv[m]
+            med = float(np.median(e)); nmad = float(1.4826 * np.median(np.abs(e - med)))
+            rmse = float(np.sqrt(np.mean(e ** 2))); p95 = float(np.percentile(np.abs(e), 95))
+            label = f"{lo:.0f}-{hi:.0f} m" if hi < 1e8 else f">{lo:.0f} m"
+            acc.append({"distance": label, "cells": int(m.sum()), "median": med, "nmad": nmad,
+                        "rmse": rmse, "p95_abs": p95})
+            print(f"  {label:>12} {int(m.sum()):>7} {med:>+8.3f} {nmad:>6.3f} {rmse:>6.3f} {p95:>8.3f}")
+        e = dv[np.isfinite(dv)]
+        print(f"  {'all':>12} {len(e):>7} {np.median(e):>+8.3f} "
+              f"{1.4826 * np.median(np.abs(e - np.median(e))):>6.3f} {np.sqrt(np.mean(e ** 2)):>6.3f} "
+              f"{np.percentile(np.abs(e), 95):>8.3f}   (survey - DEM, m; NMAD = robust sd)")
+        if acc:
+            with open(str(Path(args.dem).with_suffix("")) + "_accuracy_by_distance.csv", "w", newline="") as f:
+                wr = csv.DictWriter(f, fieldnames=list(acc[0]))
+                wr.writeheader(); wr.writerows(acc)
         stem = str(Path(args.dem).with_suffix("")) + "_minus_survey"
         write_ascii_grid(stem + ".asc", np.flipud(-diff), h["xllcorner"], h["yllcorner"], c)
         print(f"wrote {stem}.asc (DEM - survey, m; negative = DEM low)")
