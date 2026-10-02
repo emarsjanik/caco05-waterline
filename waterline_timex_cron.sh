@@ -229,6 +229,16 @@ python3 "$BASE/fetch_buoy_waves.py" --station "$WAVE_BUOY" --output "$WAVES_CSV"
     || log "WARNING: buoy $WAVE_BUOY download failed; using the existing wave archive"
 waves_arg=""
 [ -f "$WAVES_CSV" ] && waves_arg="--waves $WAVES_CSV"
+# USE_MARCONI_WAVES=1: frame tagging, the DEM wave filter and the GNSS-R wave
+# allowances use the waves AT MARCONI (archive/waves_marconi.csv: camera +
+# direction-converted buoy, written hourly by owg.sh) instead of the raw
+# offshore buoy, which overstates sheltered south-west seas. 0 = raw buoy.
+USE_MARCONI_WAVES=1
+MARCONI_WAVES="$BASE/archive/waves_marconi.csv"
+if [ "$USE_MARCONI_WAVES" = 1 ] && [ -f "$MARCONI_WAVES" ]; then
+    waves_arg="--waves $MARCONI_WAVES"
+    export CACO_LOCAL_WAVES=1
+fi
 
 # 5b. Tide gauge for GNSS-R QC. First run backfills 120 days.
 gauge_days=7
