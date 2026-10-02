@@ -206,15 +206,18 @@ def looks_like_gnssr_spline(path):
 
 def load_wave_archive(path):
     """
-    Reads the offshore wave archive written by fetch_buoy_waves.py.
+    Reads the offshore wave archive written by fetch_buoy_waves.py, or the
+    hourly Marconi best estimate written by marconi_waves.py.
     Returns (epochs_hs, hs, epochs_tp, tp), each sorted by time, with
     rows lacking a value dropped separately for height and period.
     """
     df = pd.read_csv(path)
-    hs = df.dropna(subset=["wvht_m"]).sort_values("epoch")
-    tp = df.dropna(subset=["dpd_s"]).sort_values("epoch")
-    return (hs["epoch"].to_numpy(float), hs["wvht_m"].to_numpy(float),
-            tp["epoch"].to_numpy(float), tp["dpd_s"].to_numpy(float))
+    # marconi_waves.py's local best estimate (hs_best, tp_s) or the raw buoy
+    hcol, tcol = ("hs_best", "tp_s") if "hs_best" in df else ("wvht_m", "dpd_s")
+    hs = df.dropna(subset=[hcol]).sort_values("epoch")
+    tp = df.dropna(subset=[tcol]).sort_values("epoch")
+    return (hs["epoch"].to_numpy(float), hs[hcol].to_numpy(float),
+            tp["epoch"].to_numpy(float), tp[tcol].to_numpy(float))
 
 
 def nearest_within(epochs, values, epoch, max_gap_s):

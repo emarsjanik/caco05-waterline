@@ -83,6 +83,11 @@ def build(args):
     src = np.where(out["hs_camera"].notna() & out["hs_marconi"].notna(), "blend",
                    np.where(out["hs_camera"].notna(), "camera",
                             np.where(out["hs_marconi"].notna(), "buoy", "")))
+    # no camera and no conversion (night, before buoy_transfer.py fit): the raw
+    # buoy, labelled as such, so downstream users never see a gap
+    raw = (src == "") & out["hs"].notna().to_numpy()
+    best = np.where(raw, out["hs"], best)
+    src = np.where(raw, "buoy (raw)", src)
     res = pd.DataFrame({
         "time_utc": out.index.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "epoch": ((out.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1s")).astype(int),

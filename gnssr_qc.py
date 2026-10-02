@@ -98,11 +98,14 @@ def load_reference(path):
 
 
 def load_waves(path):
-    """Buoy archive from fetch_buoy_waves.py -> (epochs, hs, tp), or None."""
+    """Buoy archive (fetch_buoy_waves.py) or Marconi waves (marconi_waves.py) -> (epochs, hs, tp), or None."""
     try:
         with open(path, newline="") as f:
-            rows = [(float(r["epoch"]), float(r["wvht_m"]), float(r["dpd_s"]))
-                    for r in csv.DictReader(f) if r.get("wvht_m") and r.get("dpd_s")]
+            rd = csv.DictReader(f)
+            # marconi_waves.py's local best estimate, or the raw buoy archive
+            h, t = ("hs_best", "tp_s") if "hs_best" in (rd.fieldnames or []) else ("wvht_m", "dpd_s")
+            rows = [(float(r["epoch"]), float(r[h]), float(r[t]))
+                    for r in rd if r.get(h) and r.get(t)]
     except (OSError, KeyError, ValueError):
         return None
     if not rows:
@@ -116,6 +119,13 @@ def default_waves_path(reference_path):
     if not reference_path:
         return None
     from pathlib import Path
+    # CACO_LOCAL_WAVES=1 (set by waterline_timex_cron.sh): the waves at Marconi
+    # (camera + direction-converted buoy, marconi_waves.py) rather than the raw
+    # offshore buoy, which overstates sheltered south-west seas ~1.5-2x.
+    import os
+    local = Path(reference_path).parent / "waves_marconi.csv"
+    if os.environ.get("CACO_LOCAL_WAVES") == "1" and local.exists():
+        return local
     p = Path(reference_path).parent / "waves_44008.csv"
     return p if p.exists() else None
 
