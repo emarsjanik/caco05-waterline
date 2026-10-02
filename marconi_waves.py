@@ -19,7 +19,8 @@ measure period -- Chris Sherwood's model scored R2 -0.19 at it).
 
 OUTPUT archive/waves_marconi.csv, one row per hour of buoy record:
   time_utc, epoch, hs_buoy, hs_buoy_marconi, hs_camera, n_frames,
-  hs_best, best_from (blend / camera / buoy), tp_s, dir_deg
+  hs_best, best_from (blend / camera / buoy / buoy (raw)), tp_s (buoy, else
+  camera), tp_camera_s (camera timestacks, timestack_wave_period.py), dir_deg
 
 Usage:
     python3 marconi_waves.py                 (owg.sh runs it every hour)
@@ -73,6 +74,17 @@ def build(args):
     b["hs_marconi"] = buoy_transfer.apply(tr, b["hs"], b["tp"], b["dir"]) if tr else np.nan
     cam = camera_hourly(args.archive, args.models)
     out = b.join(cam, how="outer").sort_index()
+    # wave period measured by the camera's timestacks (timestack_wave_period.py)
+    tpc = Path(args.archive) / "wave_period_c2.csv"
+    out["tp_camera"] = np.nan
+    if tpc.exists():
+        p = pd.read_csv(tpc)
+        p = p[p["status"] == "ok"]
+        if len(p):
+            p["hour"] = pd.to_datetime((p["epoch"] / 3600).round() * 3600, unit="s", utc=True)
+            out = out.join(p.groupby("hour")["tp_s"].median().rename("tp_cam"), how="outer")
+            out["tp_camera"] = out.pop("tp_cam")
+    out["tp"] = out["tp"].fillna(out["tp_camera"])          # buoy period, else the camera's
 
     sc = args.camera_rmse / np.sqrt(np.clip(out["n_frames"].fillna(1), 1, 2))   # 2 frames/h, partly correlated
     sb = tr["cv_rmse"] if tr else np.nan
@@ -94,7 +106,8 @@ def build(args):
         "hs_buoy": out["hs"].round(2), "hs_buoy_marconi": out["hs_marconi"].round(2),
         "hs_camera": out["hs_camera"].round(2), "n_frames": out["n_frames"].fillna(0).astype(int),
         "hs_best": np.round(best.astype(float), 2), "best_from": src,
-        "tp_s": out["tp"].round(1), "dir_deg": out["dir"].round(0)})
+        "tp_s": out["tp"].round(1), "tp_camera_s": out["tp_camera"].round(1),
+        "dir_deg": out["dir"].round(0)})
     res = res[res["best_from"] != ""]
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     res.to_csv(args.output, index=False)
