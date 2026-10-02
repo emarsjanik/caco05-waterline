@@ -155,8 +155,14 @@ def main():
     df.columns = [c.strip() for c in df.columns]
     df = df.drop_duplicates("id").dropna(subset=[args.target]).reset_index(drop=True)
     df["epoch"] = df["id"].astype(str).str.split(".").str[0].astype(int)
-    df["path"] = [os.path.join(args.image_dir, f"{i}{args.ext}") for i in df["id"]]
-    df = df[[os.path.exists(p) for p in df["path"]]].sort_values("epoch").reset_index(drop=True)
+    df["path"] = [os.path.join(args.image_dir, i if str(i).lower().endswith(args.ext) else f"{i}{args.ext}")
+                  for i in df["id"]]
+    have = np.array([os.path.exists(p) for p in df["path"]])
+    if not have.any():
+        sys.exit(f"none of the {len(df)} images found in {args.image_dir} (first expected: {df['path'].iloc[0]})")
+    if not have.all():
+        print(f"WARNING: {int((~have).sum())} of {len(df)} labelled images not found -- left out")
+    df = df[have].sort_values("epoch").reset_index(drop=True)
     if args.max_images:
         df = df.iloc[np.linspace(0, len(df) - 1, args.max_images).astype(int)].reset_index(drop=True)
     tr, va, ho = split_by_time(df, args.hold_start, args.hold_end, args.val_frac, args.seed)
