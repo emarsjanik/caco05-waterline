@@ -125,6 +125,10 @@ if $FETCH; then
     log "--- 1. downloads: buoy $WAVE_BUOY, tide gauge $TIDE_GAUGE ---"
     run python3 "$BASE/fetch_buoy_waves.py" --station "$WAVE_BUOY" --output "$WAVES_CSV" \
         || { log "WARNING: buoy download failed; using the archive"; errors="$errors buoy"; }
+    # 44013 (Boston) too: 44008 was out of service through the ADCP winter, so the
+    # conversion to Marconi (buoy_transfer.py) is fitted on 44013.
+    run python3 "$BASE/fetch_buoy_waves.py" --station 44013 --output "$BASE/archive/waves_44013.csv" \
+        || log "WARNING: buoy 44013 download failed; using the archive"
     days=7; [ -f "$GAUGE_CSV" ] || days=120
     run python3 "$BASE/fetch_tide_gauge.py" --station "$TIDE_GAUGE" --days "$days" --output "$GAUGE_CSV" \
         || { log "WARNING: tide gauge download failed; using the archive"; errors="$errors gauge"; }
@@ -179,7 +183,7 @@ fi
 # Best estimate of the waves off Marconi, hourly (camera models blended with
 # the buoy converted to Marconi by buoy_transfer.py, once that is fitted):
 # archive/waves_marconi.csv, read by the report, GNSS-IR QC and the DEM.
-run python3 "$BASE/marconi_waves.py" --waves-csv "$WAVES_CSV" \
+run python3 "$BASE/marconi_waves.py" \
     || { log "WARNING: marconi_waves.py failed"; errors="$errors marconi_waves"; }
 
 if [ -n "$errors" ]; then

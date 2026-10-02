@@ -21,8 +21,11 @@ per-frame error on the camera's validation frames fell 0.288 -> 0.229 m;
 for waves above 1.5 m the corrected buoy (0.38 m) beats the camera (0.65 m).
 
 FIT (on the station: it downloads the buoy's NDBC history for the ADCP months)
-    python3 buoy_transfer.py fit --station 44008
-    python3 buoy_transfer.py fit --station 44008 --input 44008h2024.txt.gz --input 44008h2025.txt.gz
+    python3 buoy_transfer.py fit --station 44013
+    python3 buoy_transfer.py fit --station 44013 --input 44013h2024.txt.gz --input 44013h2025.txt.gz
+(44008, the buoy shown in the report, had no data Dec 2024 - Mar 2025, so the
+conversion is fitted on 44013 (Boston); marconi_waves.py uses every buoy
+that has a fit.)
 writes calibration/buoy_transfer_44008.json (coefficients, weekly
 cross-validated RMSE). owg_report.py then plots the corrected buoy, scores
 the camera against it, and blends the two into a best estimate.
@@ -166,8 +169,9 @@ def fit(args):
         print(f"WARNING: only {len(full.dropna())} hours have a wave DIRECTION -- fitting height and "
               f"period only ({len(j)} hours). Sheltering by direction will not be corrected.")
     if len(j) < 200:
-        sys.exit(f"only {len(j)} hours where buoy and ADCP overlap -- check the buoy files cover "
-                 f"{a.index.min():%Y-%m-%d} .. {a.index.max():%Y-%m-%d}")
+        sys.exit(f"only {len(j)} hours where buoy and ADCP overlap -- the buoy has no data in "
+                 f"{a.index.min():%Y-%m-%d} .. {a.index.max():%Y-%m-%d}. (44008 was out of service "
+                 f"that winter: fit 44013 instead, --station 44013.)")
 
     X, y = features(j["hs"], j["tp"], j["dir"], use_dir), np.log(j["A"].to_numpy())
     week = j.index.to_period("W")

@@ -61,17 +61,47 @@ def camera_hourly(archive, specs):
     return pd.DataFrame({"hs_camera": g.mean(), "n_frames": g.size()})
 
 
-def build(args):
-    w = pd.read_csv(args.waves_csv)
+def load_buoy(path):
+    w = pd.read_csv(path)
     t = pd.to_datetime(w["epoch"], unit="s", utc=True)
     b = pd.DataFrame({"hs": pd.to_numeric(w["wvht_m"], errors="coerce").to_numpy(),
                       "tp": pd.to_numeric(w["dpd_s"], errors="coerce").to_numpy(),
                       "dir": pd.to_numeric(w["mwd_deg"], errors="coerce").to_numpy()}, index=t)
     b = buoy_transfer.hourly(b).dropna(subset=["hs"])
     b[["tp", "dir"]] = b[["tp", "dir"]].ffill(limit=3)      # NDBC often blanks them for an hour
+    return b
 
-    tr = buoy_transfer.load(args.transfer)
-    b["hs_marconi"] = buoy_transfer.apply(tr, b["hs"], b["tp"], b["dir"]) if tr else np.nan
+
+def build(args):
+    # every buoy with an archive; those with a fitted transfer are converted to
+    # Marconi and averaged, weighted by their cross-validated error
+    raw, conv, w_sum = None, 0.0, 0.0
+    converted = []
+    for spec in args.buoys:
+        st, name = spec.split("=")
+        p = Path(args.archive) / name
+        if not p.exists():
+            continue
+        b = load_buoy(p)
+        if raw is None:
+            raw = b.copy()                                   # first buoy listed: the raw reference shown
+        tr = buoy_transfer.load(Path(args.calibration) / f"buoy_transfer_{st}.json")
+        if not tr:
+            continue
+        h = pd.Series(buoy_transfer.apply(tr, b["hs"], b["tp"], b["dir"]), index=b.index).dropna()
+        wt = 1.0 / tr["cv_rmse"] ** 2
+        converted.append((st, tr["cv_rmse"]))
+        conv = h.mul(wt).add(conv if isinstance(conv, pd.Series) else 0.0, fill_value=0.0)
+        w_sum = pd.Series(wt, index=h.index).add(w_sum if isinstance(w_sum, pd.Series) else 0.0, fill_value=0.0)
+        for col in ("tp", "dir"):                            # fill gaps in the reference's period/direction
+            raw[col] = raw[col].fillna(b[col])
+    if raw is None:
+        sys.exit("no buoy archive found")
+    b = raw
+    b["hs_marconi"] = (conv / w_sum).reindex(b.index) if converted else np.nan
+    # combined error of the converted buoys (independent errors assumed)
+    sb = float(1.0 / np.sqrt(sum(1.0 / e ** 2 for _, e in converted))) if converted else np.nan
+    tr = bool(converted)
     cam = camera_hourly(args.archive, args.models)
     out = b.join(cam, how="outer").sort_index()
     # wave period measured by the camera's timestacks (timestack_wave_period.py)
@@ -87,7 +117,6 @@ def build(args):
     out["tp"] = out["tp"].fillna(out["tp_camera"])          # buoy period, else the camera's
 
     sc = args.camera_rmse / np.sqrt(np.clip(out["n_frames"].fillna(1), 1, 2))   # 2 frames/h, partly correlated
-    sb = tr["cv_rmse"] if tr else np.nan
     wc = sb ** 2 / (sc ** 2 + sb ** 2)
     best = np.where(out["hs_camera"].notna() & out["hs_marconi"].notna(),
                     wc * out["hs_camera"] + (1 - wc) * out["hs_marconi"],
@@ -113,7 +142,8 @@ def build(args):
     res.to_csv(args.output, index=False)
     last = res.iloc[-1] if len(res) else None
     print(f"Marconi waves      : {len(res)} hours -> {args.output}"
-          + ("" if tr else "  (no buoy transfer fitted yet: run buoy_transfer.py fit)")
+          + (f"  (converted buoys: {', '.join(st for st, _ in converted)})" if tr
+             else "  (no buoy transfer fitted yet: run buoy_transfer.py fit --station 44013)")
           + (f"; latest {last['time_utc']} Hs {last['hs_best']:.2f} m ({last['best_from']})"
              if last is not None else ""))
     return 0
@@ -122,8 +152,11 @@ def build(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--archive", default=str(HERE / "archive"))
-    ap.add_argument("--waves-csv", default=str(HERE / "archive" / "waves_44008.csv"))
-    ap.add_argument("--transfer", default=str(HERE / "calibration" / "buoy_transfer_44008.json"))
+    ap.add_argument("--buoys", nargs="+", default=["44008=waves_44008.csv", "44013=waves_44013.csv"],
+                    help="STATION=ARCHIVE in --archive. The first is the raw reference shown; every one "
+                         "with calibration/buoy_transfer_<station>.json is converted to Marconi and "
+                         "averaged (44008 had no data in the ADCP winter, so 44013 is fitted)")
+    ap.add_argument("--calibration", default=str(HERE / "calibration"))
     ap.add_argument("--models", nargs="+", default=["Run C=owg_c2_H.csv", "v2=owg_c2_H_v2.csv"],
                     help="LABEL=CSV camera archives averaged frame by frame (default Run C and v2)")
     ap.add_argument("--camera-rmse", type=float, default=0.27,
