@@ -44,16 +44,26 @@ HERE = Path(__file__).resolve().parent
 HIST = "https://www.ndbc.noaa.gov/data/historical/stdmet/{st}h{yr}.txt.gz"
 
 
-def features(hs, tp, d):
+def features(hs, tp, d, direction=True):
+    hs, tp = np.asarray(hs, float), np.asarray(tp, float)
+    if not direction:                      # buoy without wave directions: height and period only
+        return np.column_stack([np.ones(len(hs)), np.log(tp), np.log(hs)])
     th = np.radians(np.asarray(d, float))
     return np.column_stack([np.ones(len(th)), np.cos(th), np.sin(th), np.cos(2 * th), np.sin(2 * th),
-                            np.log(np.asarray(tp, float)), np.log(np.asarray(hs, float))])
+                            np.log(tp), np.log(hs)])
 
 
 def apply(transfer, hs, tp, d):
     """Buoy (Hs m, peak period s, mean direction deg from) -> Hs at Marconi (m); NaN where unknown."""
     hs, tp, d = (np.asarray(v, float) for v in (hs, tp, d))
     out = np.full(len(hs), np.nan)
+    use_dir = len(transfer["coef"]) == 7
+    if not use_dir:
+        ok = np.isfinite(hs) & np.isfinite(tp) & (hs > 0.05) & (tp > 1)
+        if ok.any():
+            out[ok] = np.clip(np.exp(features(hs[ok], tp[ok], None, False) @ np.array(transfer["coef"])),
+                              0.1 * hs[ok], 2.0 * hs[ok])
+        return out
     ok = np.isfinite(hs) & np.isfinite(tp) & np.isfinite(d) & (hs > 0.05) & (tp > 1)
     # only directions the fit saw (>= 10 h in their 45 deg sector): the harmonics
     # are meaningless outside them
@@ -121,6 +131,7 @@ def fit(args):
     a = pd.read_csv(args.adcp, parse_dates=["time"])
     a["t"] = pd.to_datetime(a["time"], utc=True)
     a = a.set_index("t")["wh_4061"].rename("A")
+    a.index = a.index.tz_convert(None)            # plain UTC on both sides
     parts = []
     for src in args.input or []:
         raw = Path(src).read_bytes()
@@ -139,15 +150,27 @@ def fit(args):
             print(f"downloaded {url} ({len(raw) / 1e6:.1f} MB)")
             parts.append(parse_ndbc(gzip.decompress(raw).decode()))
     b = pd.concat(parts).sort_index()
+    if b.index.tz is not None:
+        b.index = b.index.tz_convert(None)
     b = b[~b.index.duplicated()]
-    j = pd.concat([b, a], axis=1, sort=True).dropna()
-    j = j[(j["hs"] > 0.05) & (j["A"] > 0.05) & (j["tp"] > 1)]
+    inwin = b[(b.index >= a.index.min()) & (b.index <= a.index.max())]
+    print(f"buoy record       : {len(b)} hours, {b.index.min()} .. {b.index.max()}; in the ADCP "
+          f"window: {len(inwin)} hours with height {int(inwin['hs'].notna().sum())}, period "
+          f"{int(inwin['tp'].notna().sum())}, direction {int(inwin['dir'].notna().sum())}")
+    full = pd.concat([b, a], axis=1, sort=True)
+    full = full[(full["hs"] > 0.05) & (full["A"] > 0.05) & (full["tp"] > 1)]
+    j = full.dropna()
+    use_dir = len(j) >= 200
+    if not use_dir:
+        j = full.dropna(subset=["hs", "tp", "A"])
+        print(f"WARNING: only {len(full.dropna())} hours have a wave DIRECTION -- fitting height and "
+              f"period only ({len(j)} hours). Sheltering by direction will not be corrected.")
     if len(j) < 200:
         sys.exit(f"only {len(j)} hours where buoy and ADCP overlap -- check the buoy files cover "
                  f"{a.index.min():%Y-%m-%d} .. {a.index.max():%Y-%m-%d}")
 
-    X, y = features(j["hs"], j["tp"], j["dir"]), np.log(j["A"].to_numpy())
-    week = j.index.tz_convert(None).to_period("W")
+    X, y = features(j["hs"], j["tp"], j["dir"], use_dir), np.log(j["A"].to_numpy())
+    week = j.index.to_period("W")
     pred = np.full(len(j), np.nan)
     for g in week.unique():                                   # leave whole weeks out
         te = np.asarray(week == g)
@@ -162,7 +185,8 @@ def fit(args):
         if m.sum() >= 10:
             sectors[f"{lo}-{lo + 45}"] = round(float((j["A"][m] / j["hs"][m]).median()), 2)
     out = {"station": args.station, "coef": coef.tolist(),
-           "terms": ["1", "cos D", "sin D", "cos 2D", "sin 2D", "log Tp", "log Hs"],
+           "terms": (["1", "cos D", "sin D", "cos 2D", "sin 2D", "log Tp", "log Hs"] if use_dir
+                     else ["1", "log Tp", "log Hs"]),
            "n_hours": int(len(j)), "period": [str(j.index.min()), str(j.index.max())],
            "raw_rmse": round(raw_rmse, 3), "cv_rmse": round(cv_rmse, 3),
            "cv_bias": round(float(np.mean(pred - j["A"])), 3),
