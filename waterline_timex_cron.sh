@@ -238,28 +238,13 @@ python3 "$BASE/fetch_tide_gauge.py" --station "$TIDE_GAUGE" --days "$gauge_days"
 qc_arg=""
 [ -f "$GAUGE_CSV" ] && qc_arg="--gnssr-qc-reference $GAUGE_CSV"
 
-# 5c. Optical wave gauge (owg_live.py): wave height from each new c2 bright
-#     image, 7-day plot against the buoy. After 5b: a sea-patch model needs
-#     the Chatham water level. Two models run side by side until one proves
-#     better against the buoy:
-#       C     -- frames redrawn into today's view (archive/owg_c2_H.csv)
-#       patch -- frames projected onto a fixed patch of sea, geometry-correct
-#                (archive/owg_c2_H_patch.csv; needs <model>.patch.json)
-#     Each is skipped until its exported model (export_owg_onnx.py) is in owg_models/.
-OWG_MODEL="$BASE/owg_models/owg_c2_H_current_C"
-OWG_PATCH_MODEL="$BASE/owg_models/owg_c2_H_patch"
-if [ -f "$OWG_MODEL.onnx" ]; then
-    python3 "$BASE/owg_live.py" --model "$OWG_MODEL" --waves-csv "$WAVES_CSV" \
-        --also "patch=$BASE/archive/owg_c2_H_patch.csv" >> "$LOG" 2>&1 \
-        || log "WARNING: optical wave gauge (C) failed"
-fi
-if [ -f "$OWG_PATCH_MODEL.onnx" ] && [ -f "$OWG_PATCH_MODEL.patch.json" ]; then
-    python3 "$BASE/owg_live.py" --model "$OWG_PATCH_MODEL" --waves-csv "$WAVES_CSV" \
-        --gauge-csv "$GAUGE_CSV" --output "$BASE/archive/owg_c2_H_patch.csv" \
-        --plot "$BASE/owg_c2_H_patch_7day.png" \
-        --also "C=$BASE/archive/owg_c2_H.csv" >> "$LOG" 2>&1 \
-        || log "WARNING: optical wave gauge (patch) failed"
-fi
+# 5c. Optical wave gauge: owg.sh runs both wave models on the new c2
+#     bright images (it also runs hourly from its own cron entry, and
+#     emails the daily report; see owg.sh). After 5b, which has just
+#     downloaded the buoy and gauge, so no second download here; its
+#     lock keeps this from colliding with the hourly run.
+"$BASE/owg.sh" --no-fetch --no-report >> "$LOG" 2>&1 \
+    || log "WARNING: optical wave gauge (owg.sh) reported a problem; see logs/owg.log"
 
 # 5. Match detections to measured water level, then draw the maps.
 #    Both read from the ARCHIVE, not the working folders, so they see
