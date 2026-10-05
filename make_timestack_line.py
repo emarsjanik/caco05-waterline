@@ -39,7 +39,8 @@ Usage (on the station):
         --combined c2_timestack_surf.pix --preview c2_surf_lines.jpg \\
         --image auto
 
---image auto picks, among the camera's recent timex images, the one with
+--image auto picks, among the camera's last --search timex images (the
+archive kept by waterline_timex_cron.sh, plus ImageProducts), the one with
 the most detail where the lines are (fog and glare have little), so the
 preview shows the surf. The preview also draws the Jan 2025 0 m contour
 (red) and the line 20 m up the beach from it (orange) for reference.
@@ -55,14 +56,18 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 SHORE_ORIGIN = np.array([420150.0, 4638400.0])     # 0 m NAVD88 contour, Jan 2025 lidar (sea_patch.py)
 ALONG_DEG, SEAWARD_DEG = 351.0, 81.0
-IMAGE_DIRS = ["/mnt/I2Rgus_Data/ImageProducts/products", "/mnt/I2Rgus_Data/ImageProducts"]
+IMAGE_DIRS = [str(HERE / "archive" / "images_timex"),          # every timex, kept by waterline_timex_cron.sh
+              "/mnt/I2Rgus_Data/ImageProducts/products", "/mnt/I2Rgus_Data/ImageProducts"]
 
 
-def clearest_image(camera, lines, n_recent=72):
+def clearest_image(camera, lines, n_recent=500):
     """The recent timex with the most detail (Laplacian variance) in the box around the lines."""
     import cv2
-    files = sorted({f for d in IMAGE_DIRS for f in Path(d).glob(f"*.{camera}.timex.jpg")},
-                   key=lambda f: f.name)[-n_recent:]
+    by_name = {}
+    for d in IMAGE_DIRS:                              # the same image can be in several folders
+        for f in Path(d).glob(f"*.{camera}.timex.jpg"):
+            by_name.setdefault(f.name, f)
+    files = [by_name[k] for k in sorted(by_name)][-n_recent:]
     if not files:
         print(f"no {camera} timex images found in {', '.join(IMAGE_DIRS)}")
         return None
@@ -111,6 +116,8 @@ def main():
     ap.add_argument("--combined", default=None, help="existing lines + new lines, for the camera")
     ap.add_argument("--csv", default=None, help="per-point table (default <cam>_surf_lines.csv)")
     ap.add_argument("--image", default=None, help="a frame from this camera for --preview, or auto: the clearest recent timex")
+    ap.add_argument("--search", type=int, default=500,
+                    help="--image auto: how many of the newest timex images to look through (default 500)")
     ap.add_argument("--preview", default=None, help="JPEG with the lines drawn on --image")
     args = ap.parse_args()
 
@@ -169,7 +176,7 @@ def main():
 
     if args.preview:
         import cv2
-        image = clearest_image(args.camera, lines) if args.image == "auto" else args.image
+        image = clearest_image(args.camera, lines, args.search) if args.image == "auto" else args.image
         img = cv2.imread(image) if image else None
         if img is None:
             img = np.full((nv, nu, 3), 40, np.uint8)
