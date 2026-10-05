@@ -27,7 +27,9 @@ STEPS
   1. list    what products S3 holds for one collection time (names vary by station)
   2. fetch   download the products for every labelled frame of a manifest
   3. build   write <id>.composite.jpg images + a labels CSV (id,H) for train_owg_torch.py
-  4. preview one frame: each product and the composite side by side
+  4. stats   how bright each channel gets, and the gain that uses the range without
+             saturating the stormiest frames (suggests a --recipe)
+  5. preview one frame: each product and the composite side by side
 
 Usage (on the station, where aws has the S3 credentials):
     python3 composite_owg.py list
@@ -178,6 +180,38 @@ def cmd_build(args):
     return 0
 
 
+def cmd_stats(args):
+    """How bright each recipe channel gets (before any gain), and the largest gain that keeps the
+    stormiest frames below saturation: 99.5th percentile of each frame, worst frame -> 240."""
+    recipe = [c.split(":")[0] for c in args.recipe.split(",")]
+    need = sorted({q for c in recipe for q in products_in(c)})
+    m = load_manifest(args.manifest, 1)
+    m = m[[all((args.out / q / product_name(f, q)).exists() for q in need) for f in m["filename"]]]
+    if not len(m):
+        sys.exit("no frame has all the products yet -- run fetch first")
+    p995 = {c: [] for c in recipe}
+    for f in m["filename"]:
+        rgb, _ = make_composite(f, recipe, args.out, 612, 512)
+        for i, c in enumerate(recipe):
+            p995[c].append(float(np.percentile(rgb[:, :, i], 99.5)))
+    hs = m["H"].to_numpy()
+    storm = hs >= np.percentile(hs, 90)
+    print(f"{len(m)} frames (Hs {hs.min():.2f}-{hs.max():.2f} m); 99.5th percentile brightness of each frame, 0-255:")
+    print(f"  {'channel':<16} {'median':>7} {'storms':>7} {'max':>5}  gain")
+    best = []
+    for c in recipe:
+        v = np.array(p995[c])
+        gain = 240.0 / max(v.max(), 1.0)
+        signal = "-" in c or c == "var"          # photos (snap, timex) keep their own exposure
+        g = round(gain, 1) if signal and gain >= 1.3 else None
+        best.append(f"{c}:{g}" if g else c)
+        print(f"  {c:<16} {np.median(v):>7.0f} {np.median(v[storm]):>7.0f} {v.max():>5.0f}  "
+              + (f"x{g}" if g else ("none needed" if "-" in c or c == "var" else "photo: kept as is")))
+    print("suggested recipe  : " + ",".join(best))
+    print("  (the stormiest fetched frame then reaches ~240 of 255; fetch more frames first for a safer number)")
+    return 0
+
+
 def cmd_preview(args):
     recipe = args.recipe.split(",")
     m = load_manifest(args.manifest, 1)
@@ -212,7 +246,7 @@ def cmd_preview(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("list", "fetch", "build", "preview"):
+    for name in ("list", "fetch", "build", "stats", "preview"):
         p = sub.add_parser(name)
         p.add_argument("--manifest", default=str(HERE / "manifest_c2_bright_clean2.csv"),
                        help="labelled frames (default: the QC-passed c2 bright frames of the ADCP winter)")
@@ -234,7 +268,8 @@ def main():
         if name == "preview":
             p.add_argument("--hs", type=float, default=1.5, help="show a frame near this wave height")
     args = ap.parse_args()
-    return {"list": cmd_list, "fetch": cmd_fetch, "build": cmd_build, "preview": cmd_preview}[args.cmd](args)
+    return {"list": cmd_list, "fetch": cmd_fetch, "build": cmd_build, "stats": cmd_stats,
+            "preview": cmd_preview}[args.cmd](args)
 
 
 if __name__ == "__main__":
