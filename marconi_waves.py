@@ -20,7 +20,8 @@ measure period -- Chris Sherwood's model scored R2 -0.19 at it).
 OUTPUT archive/waves_marconi.csv, one row per hour of buoy record:
   time_utc, epoch, hs_buoy, hs_buoy_marconi, hs_camera, n_frames,
   hs_best, best_from (blend / camera / buoy / buoy (raw)), tp_s (buoy, else
-  camera), tp_camera_s (camera timestacks, timestack_wave_period.py), dir_deg
+  camera), tp_camera_s (camera mean period Tm01 from the timestacks,
+  timestack_wave_period.py), dir_deg
 
 Usage:
     python3 marconi_waves.py                 (owg.sh runs it every hour)
@@ -112,7 +113,9 @@ def build(args):
         p = p[p["status"] == "ok"]
         if len(p):
             p["hour"] = pd.to_datetime((p["epoch"] / 3600).round() * 3600, unit="s", utc=True)
-            out = out.join(p.groupby("hour")["tp_s"].median().rename("tp_cam"), how="outer")
+            # the MEAN period Tm01: it tracks the buoys (r 0.74 with 44008's APD); the
+            # spectral peak from few surf-zone pixels does not
+            out = out.join(p.groupby("hour")["tm01_s"].median().rename("tp_cam"), how="outer")
             out["tp_camera"] = out.pop("tp_cam")
     out["tp"] = out["tp"].fillna(out["tp_camera"])          # buoy period, else the camera's
 

@@ -101,8 +101,8 @@ def period_from_stack(gray, cols=None, fs=SAMPLE_HZ, band=(1 / 25, 1 / 3), ig_cu
     if 0 < k < len(f) - 1:                                       # parabolic refinement
         a, b, c = np.log(S[k - 1:k + 2] + 1e-20)
         den = a - 2 * b + c
-        if den < 0:
-            fp = f[k] + 0.5 * (a - c) / den * (f[1] - f[0])
+        if den < 0:                                              # stay between the neighbours
+            fp = f[k] + float(np.clip(0.5 * (a - c) / den, -0.5, 0.5)) * (f[1] - f[0])
     tm01 = (S[inc].sum() / (f[inc] * S[inc]).sum())
     ig = S[(f > 0) & (f < ig_cut)].sum() / max(S[f > 0].sum(), 1e-12)
     ratio = S[k] / max(np.median(S[inc]), 1e-12)
@@ -206,7 +206,7 @@ def main():
     nos = sum(r.get("status") == "no surf pixels" for r in rows)
     print(f"wave period {args.camera}: {len(rows)} new line-stack(s), {len(ok)} with a clear peak"
           + (f", {nos} with no surf-zone pixels on the line" if nos else "") + f" -> {out}"
-          + (f"; latest Tp {ok[-1]['tp_s']:.1f} s" if ok else ""))
+          + (f"; latest mean period Tm01 {ok[-1]['tm01_s']:.1f} s" if ok else ""))
     return 0
 
 
@@ -237,11 +237,15 @@ def compare(args):
             print(f"  {st:<7} {len(j):>5}  (too few hours in common)")
             continue
         d = j["tp_s"] - j["dpd_s"]
+        dm = j["tm01_s"] - j["apd_s"]
         print(f"  {st:<7} {len(j):>5} {j['tp_s'].median():>10.1f} {j['dpd_s'].median():>9.1f} {d.mean():>+7.1f} "
               f"{np.sqrt(np.mean(d ** 2)):>6.1f} {j['tp_s'].corr(j['dpd_s']):>6.2f}"
-              f"   {j['tm01_s'].median():>11.1f} {j['apd_s'].median():>9.1f} {j['tm01_s'].corr(j['apd_s']):>6.2f}")
-    print("  The buoys are offshore; the surf zone can favour the longer swell over local wind")
-    print("  sea, so a modest positive bias is expected. Tens of seconds is not.")
+              f"   {j['tm01_s'].median():>11.1f} {j['apd_s'].median():>9.1f} {j['tm01_s'].corr(j['apd_s']):>6.2f}"
+              f"  (Tm01 bias {dm.mean():+.1f} s, RMS {np.sqrt(np.mean(dm ** 2)):.1f} s)")
+    print("  Tm01 (mean period, from the whole spectrum) is the camera's reported period: with")
+    print("  few surf-zone pixels and 10-min stacks the single spectral peak (Tp) is unstable.")
+    print("  The buoys are offshore; the surf zone favours the longer swell, so a modest positive")
+    print("  bias is expected.")
     return 0
 
 
