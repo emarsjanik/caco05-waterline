@@ -17,8 +17,9 @@ three channels a pretrained network takes, so the same trainer
 combination measures waves better. Brightness is NOT normalised per
 image: how bright the foam is is part of the signal.
 
-Default recipe (--recipe): R = snap, G = bright - dark (the range each
-pixel swept: breaking intensity), B = timex. With var available,
+Default recipe (--recipe): R = snap, G = 3 x (bright - dark) (the range each
+pixel swept: breaking intensity; x3 because on its own it reaches only ~85
+of 255), B = timex. With var available,
 "snap,var,timex" is the other natural choice (CACO05 writes var). Any product name or a
 difference "a-b" can be a channel.
 
@@ -40,9 +41,9 @@ Then copy composite/ (images/, bright/ and the two label files) to Google
 Drive and train twice with identical settings -- the composite, and the
 bright product alone on exactly the same frames -- so the difference is
 the inputs and nothing else:
-    !python train_owg_torch.py --labels composite/labels_snap_bright-dark_timex.csv \\
-        --image-dir composite/images_snap_bright-dark_timex --output owg_c2_H_composite --img-size 384 --img-height 320 --lr 3e-5 --patience 15
-    !python train_owg_torch.py --labels composite/labels_bright_same_frames_as_snap_bright-dark_timex.csv --image-dir composite/bright \\
+    !python train_owg_torch.py --labels composite/labels_snap_bright-darkx3_timex.csv \\
+        --image-dir composite/images_snap_bright-darkx3_timex --output owg_c2_H_composite --img-size 384 --img-height 320 --lr 3e-5 --patience 15
+    !python train_owg_torch.py --labels composite/labels_bright_same_frames_as_snap_bright-darkx3_timex.csv --image-dir composite/bright \\
         --output owg_c2_H_bright_ref --img-size 384 --img-height 320 --lr 3e-5 --patience 15
 """
 
@@ -113,17 +114,26 @@ def cmd_fetch(args):
     return 0
 
 
+def products_in(spec):
+    """'bright-dark:3' -> ['bright', 'dark']."""
+    return spec.split(":")[0].split("-")
+
+
 def channel(spec, imgs):
-    """'snap' -> that product in grey; 'bright-dark' -> the difference, clipped to 0..255."""
-    if "-" in spec:
-        a, b = spec.split("-")
-        return np.clip(imgs[a].astype(np.int16) - imgs[b].astype(np.int16), 0, 255).astype(np.uint8)
-    return imgs[spec]
+    """'snap' -> that product in grey; 'bright-dark' -> the difference; ':k' multiplies by a FIXED
+    gain k (the same for every image, so brightness still means something), clipped to 0..255."""
+    body, _, gain = spec.partition(":")
+    if "-" in body:
+        a, b = body.split("-")
+        x = imgs[a].astype(np.float32) - imgs[b].astype(np.float32)
+    else:
+        x = imgs[body].astype(np.float32)
+    return np.clip(x * (float(gain) if gain else 1.0), 0, 255).astype(np.uint8)
 
 
 def make_composite(filename, recipe, src, width, height):
     """-> (H x W x 3 uint8 in RGB order, None) or (None, missing product)."""
-    need = sorted({p for c in recipe for p in c.split("-")})
+    need = sorted({p for c in recipe for p in products_in(c)})
     imgs = {}
     for p in need:
         g = cv2.imread(str(src / p / product_name(filename, p)), cv2.IMREAD_GRAYSCALE)
@@ -138,7 +148,7 @@ def cmd_build(args):
     if len(recipe) != 3:
         sys.exit("--recipe needs three channels (the network takes RGB), e.g. snap,bright-dark,timex")
     m = load_manifest(args.manifest, args.every)
-    tag = "_".join(recipe)                       # each recipe its own folder and labels
+    tag = "_".join(recipe).replace(":", "x")     # each recipe its own folder and labels
     img_dir = args.out / f"images_{tag}"
     img_dir.mkdir(parents=True, exist_ok=True)
     rows, missing = [], {}
@@ -168,7 +178,7 @@ def cmd_build(args):
 def cmd_preview(args):
     recipe = args.recipe.split(",")
     m = load_manifest(args.manifest, 1)
-    first = recipe[0].split("-")[0]
+    first = products_in(recipe[0])[0]
     m = m[[(args.out / first / product_name(f, first)).exists() for f in m["filename"]]]
     m = m.iloc[(m["H"] - args.hs).abs().argsort()]          # a fetched frame near --hs metres
     for f, h in zip(m["filename"], m["H"]):
@@ -178,7 +188,7 @@ def cmd_preview(args):
     else:
         sys.exit("no frame has all the products yet -- run fetch first")
     tiles = []
-    for p in sorted({q for c in recipe for q in c.split("-")}):
+    for p in sorted({q for c in recipe for q in products_in(c)}):
         g = cv2.resize(cv2.imread(str(args.out / p / product_name(f, p)), cv2.IMREAD_GRAYSCALE), (612, 512))
         tiles.append((p, cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)))
     for i, c in enumerate(recipe):
@@ -190,7 +200,7 @@ def cmd_preview(args):
         cv2.rectangle(im, (0, 0), (612, 30), (0, 0, 0), -1)
         cv2.putText(im, t, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
     rows = [np.hstack([im for _, im in tiles[i:i + 4]]) for i in range(0, len(tiles), 4)]
-    out = args.out / f"preview_{'_'.join(recipe)}.jpg"
+    out = args.out / f"preview_{'_'.join(recipe).replace(':', 'x')}.jpg"
     cv2.imwrite(str(out), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 88])
     print(f"preview           : {out}  ({f.split('.')[0]}, Hs {h:.2f} m)")
     return 0
@@ -206,8 +216,10 @@ def main():
         p.add_argument("--out", type=Path, default=OUT, help="default composite/")
         p.add_argument("--s3", default=S3)
         p.add_argument("--every", type=int, default=1, help="use every N-th frame (quick tests)")
-        p.add_argument("--recipe", default="snap,bright-dark,timex",
-                       help="three channels R,G,B: product names or differences a-b")
+        p.add_argument("--recipe", default="snap,bright-dark:3,timex",
+                       help="three channels R,G,B: product names or differences a-b, optionally "
+                            ":k for a fixed gain (default snap,bright-dark:3,timex: bright-dark "
+                            "spans only ~0-85 on its own)")
         if name == "list":
             p.add_argument("--epoch", default=None, help="collection time to list (default: mid-manifest)")
         if name == "fetch":
