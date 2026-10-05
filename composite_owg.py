@@ -17,9 +17,10 @@ three channels a pretrained network takes, so the same trainer
 combination measures waves better. Brightness is NOT normalised per
 image: how bright the foam is is part of the signal.
 
-Default recipe (--recipe): R = snap, G = 3 x (bright - dark) (the range each
-pixel swept: breaking intensity; x3 because on its own it reaches only ~85
-of 255), B = timex. With var available,
+Default recipe (--recipe): R = snap, G = bright - dark (the range each pixel
+swept: breaking intensity), B = timex. Gains measured with `stats` on all
+1343 ADCP-winter frames (99.5th percentile, brightest frame): bright-dark
+reaches 240 of 255 unaided (no gain); var only 68, so snap,var:3.5,timex. With var available,
 "snap,var,timex" is the other natural choice (CACO05 writes var). Any product name or a
 difference "a-b" can be a channel.
 
@@ -43,9 +44,9 @@ Then copy composite/ (images/, bright/ and the two label files) to Google
 Drive and train twice with identical settings -- the composite, and the
 bright product alone on exactly the same frames -- so the difference is
 the inputs and nothing else:
-    !python train_owg_torch.py --labels composite/labels_snap_bright-darkx3_timex.csv \\
-        --image-dir composite/images_snap_bright-darkx3_timex --output owg_c2_H_composite --img-size 384 --img-height 320 --lr 3e-5 --patience 15
-    !python train_owg_torch.py --labels composite/labels_bright_same_frames_as_snap_bright-darkx3_timex.csv --image-dir composite/bright \\
+    !python train_owg_torch.py --labels composite/labels_snap_bright-dark_timex.csv \\
+        --image-dir composite/images_snap_bright-dark_timex --output owg_c2_H_composite --img-size 384 --img-height 320 --lr 3e-5 --patience 15
+    !python train_owg_torch.py --labels composite/labels_bright_same_frames_as_snap_bright-dark_timex.csv --image-dir composite/bright \\
         --output owg_c2_H_bright_ref --img-size 384 --img-height 320 --lr 3e-5 --patience 15
 """
 
@@ -262,10 +263,10 @@ def main():
         p.add_argument("--out", type=Path, default=OUT, help="default composite/")
         p.add_argument("--s3", default=S3)
         p.add_argument("--every", type=int, default=1, help="use every N-th frame (quick tests)")
-        p.add_argument("--recipe", default="snap,bright-dark:3,timex",
+        p.add_argument("--recipe", default="snap,bright-dark,timex",
                        help="three channels R,G,B: product names or differences a-b, optionally "
-                            ":k for a fixed gain (default snap,bright-dark:3,timex: bright-dark "
-                            "spans only ~0-85 on its own)")
+                            ":k for a fixed gain (default snap,bright-dark,timex; for var use "
+                            "snap,var:3.5,timex -- run stats to choose gains)")
         if name == "list":
             p.add_argument("--epoch", default=None, help="collection time to list (default: mid-manifest)")
         if name == "fetch":
