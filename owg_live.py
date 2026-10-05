@@ -58,7 +58,8 @@ from train_marconi_owg import normalise, prepare_image   # noqa: E402
 from score_image_quality import score                        # noqa: E402
 
 FIELDS = ["filename", "epoch", "time_utc", "brightness", "sharpness", "saturation",
-          "status", "hs_m", "water_level_m", "water_level_source"]
+          "status", "hs_m", "water_level_m", "water_level_source", "model_id"]
+HS_VALID = (0.0, 6.0)      # outputs outside this are not wave heights at Marconi: status "bad output"
 EXPECTED_SIZE = (2448, 2048)
 
 
@@ -226,7 +227,8 @@ def main():
                     help="Model stem: <stem>.onnx and <stem>.report.json (export_owg_onnx.py)")
     ap.add_argument("--image-dir", nargs="+",
                     default=["/mnt/I2Rgus_Data/ImageProducts/products",
-                             "/mnt/I2Rgus_Data/ImageProducts"])
+                             "/mnt/I2Rgus_Data/ImageProducts",
+                             str(HERE / "archive" / "images_bright")])     # kept by waterline_timex_cron.sh
     ap.add_argument("--camera", default="c2")
     ap.add_argument("--output", default=str(HERE / "archive" / "owg_c2_H.csv"))
     ap.add_argument("--plot", default=str(HERE / "owg_c2_H_7day.png"))
@@ -261,6 +263,8 @@ def main():
                     help="Region of the live frame the quality screen scores when the model "
                          "uses a sea patch (default: the surf zone in today's c2 view)")
     ap.add_argument("--no-plot", action="store_true")
+    ap.add_argument("--allow-product-mismatch", action="store_true",
+                    help="run a model trained on another Argus product than bright")
     args = ap.parse_args()
 
     for ext in (".onnx", ".report.json"):
@@ -269,6 +273,14 @@ def main():
     net, rep, width, height, crop = load_net(args.model)
     if args.check:
         return check(args.model, net)
+    import hashlib
+    model_id = Path(args.model).name + ":" + hashlib.sha256(Path(args.model + ".onnx").read_bytes()).hexdigest()[:12]
+    # a model only knows the product it was trained on (timex and bright differ in brightness
+    # and foam extent); train_owg_torch.py records it
+    trained_on = rep.get("product")
+    if trained_on and trained_on != "bright" and not args.allow_product_mismatch:
+        sys.exit(f"{args.model} was trained on '{trained_on}' images but the station feeds it 'bright' "
+                 "-- retrain on bright, or --allow-product-mismatch to run it anyway")
 
     # A model trained on a fixed patch of sea (rectify_owg_images.py) comes with
     # <model>.patch.json: live frames are projected onto that patch with today's
@@ -354,8 +366,12 @@ def main():
             elif img is None:
                 row["status"] = "unreadable"
             else:
-                row["hs_m"] = round(run(net, img), 3)
-                row["status"] = "ok"
+                h = float(run(net, img))
+                if np.isfinite(h) and HS_VALID[0] <= h <= HS_VALID[1]:
+                    row["hs_m"], row["status"] = round(h, 3), "ok"
+                else:
+                    row["status"] = "bad output"
+                row["model_id"] = model_id
         rows.append(row)
 
     if rows:
