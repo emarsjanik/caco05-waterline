@@ -47,6 +47,13 @@ LOG="$BASE/logs/timex_cron.log"
 # "*12_00_00*.timex.jpg" to keep only a daily backdrop instead.
 BACKDROP_PATTERN="all"
 
+# The other Argus products, kept the same way, each in archive/images_<product>.
+# The wave models read the BRIGHT image, so without it the live wave record
+# can never be recomputed when a model improves; dark/snap/var are what a
+# multi-product model would train on. About 4.5 GB/year per product per camera.
+# Set to "" to stop (what is already archived stays).
+ARCHIVE_PRODUCTS="bright dark snap var"
+
 # Water level source. GNSS-R is preferred over the tide model: it is a
 # MEASUREMENT at this station, already referenced to NAVD88 (so it
 # needs no datum offset), and it includes surge and setup that an
@@ -204,6 +211,13 @@ else
 fi
 img_count=$(find "$ARCHIVE_IMG" -name '*.jpg' 2>/dev/null | wc -l)
 log "images in archive: $img_count"
+for prod in $ARCHIVE_PRODUCTS; do
+    mkdir -p "$BASE/archive/images_$prod"
+    for src in /mnt/I2Rgus_Data/ImageProducts /mnt/I2Rgus_Data/ImageProducts/products; do
+        cp -pn "$src"/*."$prod".jpg "$BASE/archive/images_$prod"/ 2>/dev/null
+    done
+    log "$prod images in archive: $(find "$BASE/archive/images_$prod" -name '*.jpg' 2>/dev/null | wc -l)"
+done
 
 cp -pn "$RAS_SOURCE"/*.c2.ras.tiff "$ARCHIVE_RAS"/ 2>/dev/null
 ras_count=$(find "$ARCHIVE_RAS" -name '*.ras.tiff' 2>/dev/null | wc -l)

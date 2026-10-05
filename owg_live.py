@@ -226,7 +226,8 @@ def main():
                     help="Model stem: <stem>.onnx and <stem>.report.json (export_owg_onnx.py)")
     ap.add_argument("--image-dir", nargs="+",
                     default=["/mnt/I2Rgus_Data/ImageProducts/products",
-                             "/mnt/I2Rgus_Data/ImageProducts"])
+                             "/mnt/I2Rgus_Data/ImageProducts",
+                             str(HERE / "archive" / "images_bright")])     # kept by waterline_timex_cron.sh
     ap.add_argument("--camera", default="c2")
     ap.add_argument("--output", default=str(HERE / "archive" / "owg_c2_H.csv"))
     ap.add_argument("--plot", default=str(HERE / "owg_c2_H_7day.png"))
