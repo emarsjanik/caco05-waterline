@@ -89,23 +89,82 @@ def augment(rgb, rng, shift=0.15, rot=5.0, shear=0.03, light=0.15):
     return np.clip(out.astype(np.float32) * gain + bias, 0, 255).astype(np.uint8)
 
 
-def split_by_time(df, hold_start, hold_end, val_frac, seed):
+def split_by_time(df, hold_start, hold_end, val_frac, seed, target="H", buffer_days=1):
+    """-> train, validation, holdback.
+
+    Holdback: the contiguous block, never seen until the end. The buffer_days
+    either side of it are used for nothing (waves on Feb 14 are the same storm
+    as Feb 15). Validation: whole days, chosen across the range of daily peak
+    wave height (every k-th day ranked by peak, the stormiest always in), so
+    early stopping is not judged on calm days only."""
     t = pd.to_datetime(df["epoch"], unit="s", utc=True)
-    hold = (t >= pd.Timestamp(hold_start, tz="UTC")) & (t < pd.Timestamp(hold_end, tz="UTC") + pd.Timedelta(days=1))
-    rest = df[~hold]
-    days = np.array(sorted(pd.to_datetime(rest["epoch"], unit="s", utc=True).dt.strftime("%Y-%m-%d").unique()))
-    rng = np.random.default_rng(seed)
-    val_days = set(rng.choice(days, max(1, int(round(val_frac * len(days)))), replace=False))
-    is_val = pd.to_datetime(rest["epoch"], unit="s", utc=True).dt.strftime("%Y-%m-%d").isin(val_days)
-    return rest[~is_val], rest[is_val], df[hold]
+    h0 = pd.Timestamp(hold_start, tz="UTC")
+    h1 = pd.Timestamp(hold_end, tz="UTC") + pd.Timedelta(days=1)
+    hold = (t >= h0) & (t < h1)
+    buf = pd.Timedelta(days=buffer_days)
+    near = ~hold & (t >= h0 - buf) & (t < h1 + buf)
+    rest = df[~hold & ~near]
+    day = pd.to_datetime(rest["epoch"], unit="s", utc=True).dt.strftime("%Y-%m-%d")
+    peak = rest.groupby(day)[target].max().sort_values(ascending=False)
+    n_val = max(1, int(round(val_frac * len(peak))))
+    k = len(peak) / n_val
+    offset = np.random.default_rng(seed).uniform(0, k) if n_val > 1 else 0.0
+    picks = sorted({0} | {int(offset + i * k) for i in range(n_val)})[:n_val]
+    val_days = set(peak.index[picks])
+    is_val = day.isin(val_days)
+    return rest[~is_val], rest[is_val], df[hold], int(near.sum())
 
 
-def balance(df, target, n_bins, seed):
-    """Oversample each target bin to the same size (training split only)."""
+def balance(df, target, n_bins, seed, max_repeat=8):
+    """Oversample the rarer wave-height bins (training split only), each image at most max_repeat times.
+
+    Bringing every bin up to the largest repeated each storm frame 25-30x, which
+    teaches the network those few frames rather than storms."""
     bins = pd.cut(df[target], n_bins)
     n = max(len(g) for _, g in df.groupby(bins, observed=True))
-    parts = [g.sample(n, replace=True, random_state=seed) for _, g in df.groupby(bins, observed=True)]
+    parts = [g.sample(min(n, len(g) * max_repeat), replace=len(g) < n, random_state=seed)
+             for _, g in df.groupby(bins, observed=True)]
     return pd.concat(parts, ignore_index=True)
+
+
+def product_of(i):
+    """Argus product from an image id: '...CACO04.c2.timex' -> 'timex'."""
+    parts = str(i).replace(".jpg", "").split(".")
+    return parts[-1] if len(parts) > 1 else "unknown"
+
+
+def contact_sheet(frame, pred, cache, target, path, n=8):
+    """The n worst and n best holdback frames with observed / predicted (as Chris's notebook)."""
+    err = np.abs(pred - frame[target].to_numpy())
+    order = np.argsort(err)
+    tiles = []
+    for label, idx in (("worst", order[::-1][:n]), ("best", order[:n])):
+        row = []
+        for j in idx:
+            im = cv2.cvtColor(cache[frame["path"].iloc[j]], cv2.COLOR_RGB2BGR).copy()
+            im = cv2.resize(im, (320, 256))
+            txt = f"{label} {frame['id'].iloc[j].split('.')[0]} obs {frame[target].iloc[j]:.2f} pred {pred[j]:.2f}"
+            cv2.rectangle(im, (0, 0), (320, 20), (0, 0, 0), -1)
+            cv2.putText(im, txt, (3, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (255, 255, 255), 1, cv2.LINE_AA)
+            row.append(im)
+        while len(row) < n:
+            row.append(np.zeros((256, 320, 3), np.uint8))
+        tiles.append(np.hstack([np.vstack(row[:n // 2]), np.vstack(row[n // 2:])]))
+    cv2.imwrite(path, np.hstack(tiles), [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+
+def error_by_reading(obs, pred, edges=(0.6, 1.0, 1.4)):
+    """RMSE and bias binned by the MODEL's reading (what is known live) -> list for report.json."""
+    out, lo = [], -np.inf
+    for hi in list(edges) + [np.inf]:
+        m = (pred >= lo) & (pred < hi)
+        if m.sum() >= 5:
+            e = pred[m] - obs[m]
+            out.append({"from": None if lo == -np.inf else lo, "to": None if hi == np.inf else hi,
+                        "n": int(m.sum()), "pred_median": round(float(np.median(pred[m])), 3),
+                        "rmse": round(float(np.sqrt(np.mean(e ** 2))), 3), "bias": round(float(e.mean()), 3)})
+        lo = hi
+    return out
 
 
 def metrics(obs, pred):
@@ -131,8 +190,13 @@ def main():
     ap.add_argument("--crop", default=None, help="'top,bottom,left,right' fractions (default none)")
     ap.add_argument("--hold-start", default="2025-02-15")
     ap.add_argument("--hold-end", default="2025-03-01")
+    ap.add_argument("--hold-buffer-days", type=int, default=1,
+                    help="days either side of the holdback used for nothing (default 1)")
     ap.add_argument("--val-frac", type=float, default=0.15, help="fraction of the remaining DAYS")
     ap.add_argument("--bins", type=int, default=10)
+    ap.add_argument("--max-repeat", type=int, default=8, help="most copies of one image when balancing")
+    ap.add_argument("--allow-mixed-products", action="store_true",
+                    help="train on ids of different Argus products (timex + bright); normally refused")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--patience", type=int, default=10)
     ap.add_argument("--batch", type=int, default=32)
@@ -155,6 +219,10 @@ def main():
     df.columns = [c.strip() for c in df.columns]
     df = df.drop_duplicates("id").dropna(subset=[args.target]).reset_index(drop=True)
     df["epoch"] = df["id"].astype(str).str.split(".").str[0].astype(int)
+    products = sorted(set(df["id"].map(product_of)))
+    print(f"image product     : {', '.join(products)}  (the station must run the model on the same product)")
+    if len(products) > 1 and not args.allow_mixed_products:
+        sys.exit("labels mix Argus products -- one product per model (or --allow-mixed-products)")
     df["path"] = [os.path.join(args.image_dir, i if str(i).lower().endswith(args.ext) else f"{i}{args.ext}")
                   for i in df["id"]]
     have = np.array([os.path.exists(p) for p in df["path"]])
@@ -165,18 +233,23 @@ def main():
     df = df[have].sort_values("epoch").reset_index(drop=True)
     if args.max_images:
         df = df.iloc[np.linspace(0, len(df) - 1, args.max_images).astype(int)].reset_index(drop=True)
-    tr, va, ho = split_by_time(df, args.hold_start, args.hold_end, args.val_frac, args.seed)
+    tr, va, ho, n_buf = split_by_time(df, args.hold_start, args.hold_end, args.val_frac, args.seed,
+                                      args.target, args.hold_buffer_days)
     print(f"images            : {len(df)} ({pd.to_datetime(df.epoch.min(), unit='s'):%Y-%m-%d} to "
           f"{pd.to_datetime(df.epoch.max(), unit='s'):%Y-%m-%d})")
     print(f"split by time     : train {len(tr)}, validation {len(va)} (whole days), holdback {len(ho)} "
-          f"({args.hold_start} .. {args.hold_end}, never used until the end)")
+          f"({args.hold_start} .. {args.hold_end}, never used until the end), "
+          f"{n_buf} left out as a {args.hold_buffer_days}-day buffer")
+    summ = pd.DataFrame({k: f[args.target].describe() for k, f in (("train", tr), ("validation", va),
+                                                                    ("holdback", ho)) if len(f)})
+    print(f"{args.target} by split (m):\n" + summ.round(2).to_string())
     if not len(tr) or not len(va):
         sys.exit("need training and validation images outside the holdback")
 
     print("loading images ...", flush=True)
     cache = {p: load_rgb(p, W, H, crop) for p in df["path"]}
     y_mean, y_std = float(tr[args.target].mean()), float(tr[args.target].std())
-    tr_bal = balance(tr, args.target, args.bins, args.seed)
+    tr_bal = balance(tr, args.target, args.bins, args.seed, args.max_repeat)
     print(f"training rows     : {len(tr_bal)} after balancing {args.bins} wave-height bins "
           f"(target mean {y_mean:.2f}, sd {y_std:.2f} m)")
 
@@ -247,6 +320,9 @@ def main():
         pd.DataFrame({"id": frame["id"], "observed": frame[args.target], "predicted": p.round(4)}).to_csv(
             f"{args.output}.{name}.csv", index=False)
         out[name] = metrics(frame[args.target].to_numpy(float), p)
+        if name == "holdback":
+            by_reading = error_by_reading(frame[args.target].to_numpy(float), p)
+            contact_sheet(frame, p, cache, args.target, f"{args.output}.holdback_worst_best.jpg")
 
     # export: CPU, fixed input size, returns metres
     model.eval().cpu()
@@ -264,6 +340,9 @@ def main():
     report = {"target": args.target, "arch": args.arch, "framework": "pytorch", "input": "rgb_imagenet",
               "layout": "NCHW", "img_size": W, "img_height": H, "crop": list(crop) if crop else None,
               "init": args.init or "imagenet", "holdback": [args.hold_start, args.hold_end],
+              "product": products[0] if len(products) == 1 else products,
+              "hold_buffer_days": args.hold_buffer_days, "max_repeat": args.max_repeat,
+              "holdback_error_by_reading": by_reading if len(ho) else None,
               "n_train_unique": int(tr["id"].nunique()), "n_val": int(len(va)),
               "val_rmse": out.get("validation", {}).get("rmse"),
               **{f"{k}_{m}": v for k, d in out.items() for m, v in d.items()}}

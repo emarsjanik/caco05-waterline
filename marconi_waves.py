@@ -31,7 +31,9 @@ measure period -- Chris Sherwood's model scored R2 -0.19 at it).
 OUTPUT archive/waves_marconi.csv, one row per hour of buoy record:
   time_utc, epoch, hs_buoy, hs_buoy_marconi, hs_camera, n_frames,
   hs_best, hs_sigma, best_from (blend / camera / buoy / buoy (raw)),
-  n_models, tp_s (buoy PEAK period only), tp_camera_s (camera MEAN period
+  n_models, qc_flag (1 pass, 3 suspect, 4 fail: IOOS QARTOD convention), qc_note
+  (which tests: gross range, camera above training range, camera-buoy disagree,
+  spike, flat line), tp_s (buoy PEAK period only), tp_camera_s (camera MEAN period
   Tm01 from the timestacks, timestack_wave_period.py -- a different
   statistic, ~0.7-0.85 x Tp, so never mixed into tp_s), dir_deg
 
@@ -55,6 +57,44 @@ def camera_sigma(hs, table):
     """Per-frame camera error (m) at the camera's reading, from 'HS:SIGMA,...' (linear between)."""
     pts = np.array([[float(x) for x in t.split(":")] for t in table.split(",")])
     return np.interp(np.asarray(hs, float), pts[:, 0], pts[:, 1])
+
+
+TRAINING_MAX_HS = 3.2     # largest wave height in the camera models' training labels (ADCP, 3.16 m)
+
+
+def qc_flags(res, sc, sb):
+    """IOOS QARTOD-style flags for each hour: 1 pass, 3 suspect, 4 fail (9 missing rows are not written).
+
+    gross range   hs_best < 0 or > 8 m                                  -> 4
+    extrapolation camera reading above the training range               -> 3
+    agreement     camera and converted buoy differ by > 3 sigma         -> 3
+    spike         hs_best differs from the mean of the hours either side by > 0.6 m -> 3
+    flat line     camera reading unchanged (to the cm) for 4 hours or more          -> 3"""
+    hs, cam, buo = res["hs_best"].to_numpy(float), res["hs_camera"].to_numpy(float), res["hs_buoy_marconi"].to_numpy(float)
+    flag = np.ones(len(res), int)
+    note = np.full(len(res), "", object)
+
+    def mark(m, f, why):
+        m = np.asarray(m, bool)
+        flag[m] = np.maximum(flag[m], f)
+        note[m] = [f"{n};{why}" if n else why for n in note[m]]
+    mark((hs < 0) | (hs > 8), 4, "gross range")
+    mark(cam > TRAINING_MAX_HS, 3, "camera above training range")
+    with np.errstate(invalid="ignore"):
+        mark(np.abs(cam - buo) > 3 * np.sqrt(sc ** 2 + sb ** 2), 3, "camera-buoy disagree")
+    t = res["epoch"].to_numpy()
+    prev_ok = np.r_[False, np.diff(t) == 3600]
+    next_ok = np.r_[np.diff(t) == 3600, False]
+    both = prev_ok & next_ok
+    nb = np.full(len(res), np.nan)
+    nb[both] = (np.r_[np.nan, hs[:-1]][both] + np.r_[hs[1:], np.nan][both]) / 2
+    with np.errstate(invalid="ignore"):
+        mark(np.abs(hs - nb) > 0.6, 3, "spike")
+    run = (pd.Series(cam).round(2).diff() == 0) & pd.Series(prev_ok)
+    grp = (~run).cumsum()
+    length = run.groupby(grp).transform("sum").to_numpy()
+    mark(run.to_numpy() & (length >= 3), 3, "flat line")
+    return flag, note
 
 
 def camera_hourly(archive, specs):
@@ -176,7 +216,10 @@ def build(args):
         "best_from": src, "n_models": out["n_models"].fillna(0).astype(int),
         "tp_s": out["tp"].round(1), "tp_camera_s": out["tp_camera"].round(1),
         "dir_deg": out["dir"].round(0)})
-    res = res[res["best_from"] != ""]
+    keep = (res["best_from"] != "").to_numpy()
+    res = res[keep].reset_index(drop=True)
+    flag, note = qc_flags(res, np.asarray(sc, float)[keep], sb)
+    res["qc_flag"], res["qc_note"] = flag, note
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     res.to_csv(args.output, index=False)
     last = res.iloc[-1] if len(res) else None
