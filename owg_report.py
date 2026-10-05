@@ -655,7 +655,7 @@ def main():
         L.append("  no buoy data")
     if mw is not None and "tp_camera_s" in mw and mw["tp_camera_s"].notna().any():
         c = mw[mw["tp_camera_s"].notna()].iloc[-1]
-        L.append(f"  Camera Tp   : {c['tp_camera_s']:.1f} s from the c2 timestacks at "
+        L.append(f"  Camera Tm01 : {c['tp_camera_s']:.1f} s mean wave period, c2 timestacks, "
                  f"{c['time_utc'][5:16].replace('T', ' ')}Z")
     if gauge is not None and len(gauge):
         t = np.arange(now.timestamp() - 86400, now.timestamp(), 600.0)
