@@ -19,7 +19,7 @@ image: how bright the foam is is part of the signal.
 
 Default recipe (--recipe): R = snap, G = bright - dark (the range each
 pixel swept: breaking intensity), B = timex. With var available,
-"snap,var,timex" is the other natural choice. Any product name or a
+"snap,var,timex" is the other natural choice (CACO05 writes var). Any product name or a
 difference "a-b" can be a channel.
 
 STEPS
@@ -40,9 +40,9 @@ Then copy composite/ (images/, bright/ and the two label files) to Google
 Drive and train twice with identical settings -- the composite, and the
 bright product alone on exactly the same frames -- so the difference is
 the inputs and nothing else:
-    !python train_owg_torch.py --labels composite/labels_composite.csv --image-dir composite/images \\
-        --output owg_c2_H_composite --img-size 384 --img-height 320 --lr 3e-5 --patience 15
-    !python train_owg_torch.py --labels composite/labels_bright_same_frames.csv --image-dir composite/bright \\
+    !python train_owg_torch.py --labels composite/labels_snap_bright-dark_timex.csv \\
+        --image-dir composite/images_snap_bright-dark_timex --output owg_c2_H_composite --img-size 384 --img-height 320 --lr 3e-5 --patience 15
+    !python train_owg_torch.py --labels composite/labels_bright_same_frames_as_snap_bright-dark_timex.csv --image-dir composite/bright \\
         --output owg_c2_H_bright_ref --img-size 384 --img-height 320 --lr 3e-5 --patience 15
 """
 
@@ -138,7 +138,8 @@ def cmd_build(args):
     if len(recipe) != 3:
         sys.exit("--recipe needs three channels (the network takes RGB), e.g. snap,bright-dark,timex")
     m = load_manifest(args.manifest, args.every)
-    img_dir = args.out / "images"
+    tag = "_".join(recipe)                       # each recipe its own folder and labels
+    img_dir = args.out / f"images_{tag}"
     img_dir.mkdir(parents=True, exist_ok=True)
     rows, missing = [], {}
     for f, h in zip(m["filename"], m["H"]):
@@ -151,12 +152,12 @@ def cmd_build(args):
                 continue
             cv2.imwrite(str(dst), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
         rows.append((cid, h))
-    lab = args.out / "labels_composite.csv"
+    lab = args.out / f"labels_{tag}.csv"
     pd.DataFrame(rows, columns=["id", "H"]).to_csv(lab, index=False)
     # the same frames with the bright product alone: the like-for-like comparison
-    base = args.out / "labels_bright_same_frames.csv"
+    base = args.out / f"labels_bright_same_frames_as_{tag}.csv"
     pd.DataFrame([(c.replace(".composite", ".bright"), h) for c, h in rows], columns=["id", "H"]).to_csv(base, index=False)
-    (args.out / "recipe.txt").write_text(f"R,G,B = {recipe}  size {args.width}x{args.height}\n")
+    (img_dir / "recipe.txt").write_text(f"R,G,B = {recipe}  size {args.width}x{args.height}\n")
     print(f"composites        : {len(rows)} in {img_dir} (R,G,B = {', '.join(recipe)})")
     if missing:
         print("skipped, product missing: " + ", ".join(f"{k} {v}" for k, v in missing.items()))
@@ -189,7 +190,7 @@ def cmd_preview(args):
         cv2.rectangle(im, (0, 0), (612, 30), (0, 0, 0), -1)
         cv2.putText(im, t, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
     rows = [np.hstack([im for _, im in tiles[i:i + 4]]) for i in range(0, len(tiles), 4)]
-    out = args.out / "composite_preview.jpg"
+    out = args.out / f"preview_{'_'.join(recipe)}.jpg"
     cv2.imwrite(str(out), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 88])
     print(f"preview           : {out}  ({f.split('.')[0]}, Hs {h:.2f} m)")
     return 0
@@ -210,7 +211,7 @@ def main():
         if name == "list":
             p.add_argument("--epoch", default=None, help="collection time to list (default: mid-manifest)")
         if name == "fetch":
-            p.add_argument("--products", nargs="+", default=["bright", "dark", "snap", "timex"])
+            p.add_argument("--products", nargs="+", default=["bright", "dark", "snap", "timex", "var"])
             p.add_argument("--dry-run", action="store_true")
         if name == "build":
             p.add_argument("--width", type=int, default=768)
