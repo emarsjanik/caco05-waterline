@@ -58,7 +58,7 @@ from train_marconi_owg import normalise, prepare_image   # noqa: E402
 from score_image_quality import score                        # noqa: E402
 
 FIELDS = ["filename", "epoch", "time_utc", "brightness", "sharpness", "saturation",
-          "status", "hs_m", "water_level_m"]
+          "status", "hs_m", "water_level_m", "water_level_source"]
 EXPECTED_SIZE = (2448, 2048)
 
 
@@ -249,8 +249,11 @@ def main():
     ap.add_argument("--gauge-csv", default=str(HERE / "archive" / "gauge_8447435.csv"),
                     help="Chatham gauge archive (fetch_tide_gauge.py), for the water level a "
                          "patch model projects at")
-    ap.add_argument("--gauge-fit", default="1.24,-48,-0.10",
-                    help="Marconi = a * Chatham(t - lag) + b: 'a,lag_minutes,b' (gnssr_qc.py fit)")
+    ap.add_argument("--gnssr-spline",
+                    default="/home/argus_user/GNSS/v4.1/products/refl_code/Files/usgs/usgs_spline_out.txt",
+                    help="the station's GNSS-R water level (gnssrefl spline): used first")
+    ap.add_argument("--no-gps", action="store_true",
+                    help="Chatham gauge only (the behaviour before the GPS was used)")
     ap.add_argument("--gauge-ahead", type=float, default=2.0,
                     help="hours past the last gauge reading to carry a tide fit forward "
                          "(default 2; 0 = wait for the gauge)")
@@ -277,51 +280,19 @@ def main():
         patch = Patch.from_json(args.model + ".patch.json")
         p_io = load_intrinsics(HERE / "calibration" / f"CACO05_{args.camera}_20240801_IO.yaml")
         p_eo = load_extrinsics(HERE / "calibration" / f"CACO05_{args.camera}_20251113_EO-CV.yaml")
-        ga, glag, gb = (float(v) for v in args.gauge_fit.split(","))
-        gauge = pd.read_csv(args.gauge_csv) if Path(args.gauge_csv).exists() else None
-        if gauge is not None:
-            gauge = gauge.dropna(subset=["level_navd88"]).sort_values("epoch")
+        # water level: the station's own GPS (GNSS-R, on the camera tower) where it
+        # covers the frame, else Chatham converted with a fit to the GPS, else a
+        # tide fit up to --gauge-ahead hours past the gauge (marconi_water_level.py)
+        from marconi_water_level import WaterLevel
+        wl = WaterLevel(None if args.no_gps else args.gnssr_spline, args.gauge_csv,
+                        ahead_hours=args.gauge_ahead)
         screen = tuple(float(v) for v in args.screen_crop.split(","))
-        print(f"sea patch         : {patch.shape[1]} x {patch.shape[0]} px at {patch.res} m; water "
-              f"level from {Path(args.gauge_csv).name}" if gauge is not None else
-              f"sea patch         : NO gauge archive at {args.gauge_csv} -- frames cannot be projected")
-
-        def gauge_ahead(ep, lv, t):
-            """
-            Chatham level up to --gauge-ahead hours past its last reading. The
-            fit's 48-min lead means the newest frames always need a reading the
-            gauge has not made yet, and cleanup.sh moves frames to S3 within
-            the hour, so they could never be retried. A tide fit (M2 and M4,
-            last 25 h) carried forward, pinned to the last reading, was within
-            3 cm at 1 h and 6 cm at 2 h of what the gauge then read (Aug-Sep
-            2026) -- well inside the 0.13 m of the Marconi fit itself.
-            """
-            if not args.gauge_ahead or t - ep[-1] > args.gauge_ahead * 3600:
-                return None
-            m = ep > ep[-1] - 25 * 3600
-            if m.sum() < 150:                      # ~15 h of 6-min readings
-                return None
-            w = 2 * np.pi / (12.4206 * 3600)
-            basis = lambda x: np.column_stack([np.ones_like(x), np.cos(w * x), np.sin(w * x),
-                                               np.cos(2 * w * x), np.sin(2 * w * x)])
-            c, *_ = np.linalg.lstsq(basis(ep[m] - ep[-1]), lv[m], rcond=None)
-            f = basis(np.array([0.0, t - ep[-1]])) @ c
-            return f[1] + lv[-1] - f[0]
+        print(f"sea patch         : {patch.shape[1]} x {patch.shape[0]} px at {patch.res} m")
+        print(f"                    {wl.describe()}")
 
         def water_level(epoch):
-            if gauge is None:
-                return None
-            t = epoch - glag * 60.0
-            ep = gauge["epoch"].to_numpy(float)
-            lv = gauge["level_navd88"].to_numpy(float)
-            i = np.searchsorted(ep, t)
-            if i == len(ep) and len(ep):
-                g = gauge_ahead(ep, lv, t)
-                return None if g is None else ga * g + gb
-            if i == 0 or ep[i] - ep[i - 1] > 3 * 3600:
-                return None
-            g = lv[i - 1] + (t - ep[i - 1]) / (ep[i] - ep[i - 1]) * (lv[i] - lv[i - 1])
-            return ga * g + gb
+            lv, src = wl.at([epoch])
+            return (None, "") if not np.isfinite(lv[0]) else (float(lv[0]), str(src[0]))
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -364,13 +335,14 @@ def main():
                 img = None if full is None else model_input(full, rep, width, height, crop)
             else:
                 img = None
-                z = water_level(epoch)
+                z, z_src = water_level(epoch)
                 full = cv2.imread(str(path))
                 if z is None:
                     row["status"] = "no water level"
                 elif full is not None:
                     rect, cov = rectify(full, p_io, p_eo, z, patch)
                     row["water_level_m"] = round(z, 3)
+                    row["water_level_source"] = z_src
                     if cov < 0.98:
                         row["status"] = "patch not in view"
                     else:
