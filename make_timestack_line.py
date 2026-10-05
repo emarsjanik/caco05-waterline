@@ -37,7 +37,12 @@ Usage (on the station):
     python3 make_timestack_line.py --camera c2 --along 150 220 \\
         --existing /home/argus_user/arguseyes/build/c2_timestack.pix \\
         --combined c2_timestack_surf.pix --preview c2_surf_lines.jpg \\
-        --image $(ls /mnt/I2Rgus_Data/ImageProducts/*.c2.timex.jpg | tail -1)
+        --image auto
+
+--image auto picks, among the camera's recent timex images, the one with
+the most detail where the lines are (fog and glare have little), so the
+preview shows the surf. The preview also draws the Jan 2025 0 m contour
+(red) and the line 20 m up the beach from it (orange) for reference.
 """
 
 import sys
@@ -50,6 +55,31 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 SHORE_ORIGIN = np.array([420150.0, 4638400.0])     # 0 m NAVD88 contour, Jan 2025 lidar (sea_patch.py)
 ALONG_DEG, SEAWARD_DEG = 351.0, 81.0
+IMAGE_DIRS = ["/mnt/I2Rgus_Data/ImageProducts/products", "/mnt/I2Rgus_Data/ImageProducts"]
+
+
+def clearest_image(camera, lines, n_recent=72):
+    """The recent timex with the most detail (Laplacian variance) in the box around the lines."""
+    import cv2
+    files = sorted({f for d in IMAGE_DIRS for f in Path(d).glob(f"*.{camera}.timex.jpg")},
+                   key=lambda f: f.name)[-n_recent:]
+    if not files:
+        print(f"no {camera} timex images found in {', '.join(IMAGE_DIRS)}")
+        return None
+    u = np.concatenate([l[1] for l in lines]); v = np.concatenate([l[2] for l in lines])
+    u0, u1, v0, v1 = u.min(), u.max(), max(v.min() - 100, 0), v.max() + 200
+    best, score = None, -1.0
+    for f in files:
+        g = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
+        if g is None:
+            continue
+        sc = float(cv2.Laplacian(g[v0:v1, u0:u1], cv2.CV_64F).var())
+        if sc > score:
+            best, score = f, sc
+    if best is None:
+        return None
+    print(f"clearest image    : {best} (of the last {len(files)} timex; detail score {score:.0f})")
+    return str(best)
 
 
 def line_pixels(io, eo, along, d_from, d_to, step, z):
@@ -80,7 +110,7 @@ def main():
     ap.add_argument("--existing", default=None, help="the camera's current .pix file")
     ap.add_argument("--combined", default=None, help="existing lines + new lines, for the camera")
     ap.add_argument("--csv", default=None, help="per-point table (default <cam>_surf_lines.csv)")
-    ap.add_argument("--image", default=None, help="a frame from this camera, for --preview")
+    ap.add_argument("--image", default=None, help="a frame from this camera for --preview, or auto: the clearest recent timex")
     ap.add_argument("--preview", default=None, help="JPEG with the lines drawn on --image")
     args = ap.parse_args()
 
@@ -139,9 +169,19 @@ def main():
 
     if args.preview:
         import cv2
-        img = cv2.imread(args.image) if args.image else None
+        image = clearest_image(args.camera, lines) if args.image == "auto" else args.image
+        img = cv2.imread(image) if image else None
         if img is None:
             img = np.full((nv, nu, 3), 40, np.uint8)
+        from view_reproject import ground_to_pixel
+        al = np.arange(-100.0, 500.0, 2.0)
+        for d, col in ((-20.0, (0, 140, 255)), (0.0, (0, 0, 255))):     # orange, red
+            E = SHORE_ORIGIN[0] + al * np.sin(np.radians(ALONG_DEG)) + d * np.sin(np.radians(SEAWARD_DEG))
+            N = SHORE_ORIGIN[1] + al * np.cos(np.radians(ALONG_DEG)) + d * np.cos(np.radians(SEAWARD_DEG))
+            U, V, ok = ground_to_pixel(E, N, args.z, io, eo)
+            if ok.sum() > 1:
+                cv2.polylines(img, [np.c_[U[ok], V[ok]].reshape(-1, 1, 2).astype(np.int32)], False, col, 3,
+                              cv2.LINE_AA)
         for k, (along, u, v) in enumerate(lines):
             pts = np.c_[u, v].reshape(-1, 1, 2).astype(np.int32)
             cv2.polylines(img, [pts], False, (0, 0, 0), 9, cv2.LINE_AA)
@@ -150,7 +190,8 @@ def main():
                         1.6, (0, 255, 255), 4, cv2.LINE_AA)
         cv2.imwrite(args.preview, cv2.resize(img, (img.shape[1] // 2, img.shape[0] // 2)),
                     [cv2.IMWRITE_JPEG_QUALITY, 88])
-        print(f"preview           : {args.preview} (yellow: the new lines; the seaward end is labelled)")
+        print(f"preview           : {args.preview} (yellow: the new lines, labelled at the seaward end; "
+              "red: 0 m contour Jan 2025; orange: 20 m up the beach from it)")
     return 0
 
 
