@@ -112,15 +112,6 @@ def interp_at(src_ep, src_v, ep, max_gap_s):
     return out
 
 
-def marconi_level(gauge, ep, fit):
-    """Marconi still-water level from Chatham: a * Chatham(t - lag) + b (owg_live.py --gauge-fit)."""
-    a, lag, b = fit
-    if gauge is None:
-        return np.full(len(ep), np.nan)
-    return a * interp_at(gauge["epoch"], gauge["level_navd88"], np.asarray(ep, float) - lag * 60,
-                         3 * 3600) + b
-
-
 def averaged(ok, window=5, max_gap_min=45.0):
     """Centred `window`-frame averages, never across a gap (as owg_live.py plots them)."""
     ep = ok["epoch"].to_numpy(float); h = ok["hs_m"].to_numpy(float)
@@ -240,8 +231,12 @@ def plot_7day(models, waves, gauge, fit, start, end, out, mw=None):
 
     a = ax[2]
     t = np.arange(s0, s1, 600.0)
-    lv = marconi_level(gauge, t, fit)
-    a.plot(to_dt(t), lv, color=BLUE, lw=1.5, label="Marconi still-water level (from Chatham gauge)")
+    lv, src = fit.at(t)                     # fit: a marconi_water_level.WaterLevel
+    gps = np.where(src == "gps", lv, np.nan)
+    other = np.where(src != "gps", lv, np.nan)
+    a.plot(to_dt(t), gps, color=BLUE, lw=1.8, label="Marconi still-water level, GPS (GNSS-R on the camera tower)")
+    a.plot(to_dt(t), other, color=BLUE, lw=1.2, ls="--",
+           label="newest hours: Chatham gauge, converted with a fit to the GPS")
     a.set_ylabel("Water level\n(m NAVD88)", color=INK)
     a.legend(loc="upper left", frameon=False, fontsize=8)
 
@@ -442,7 +437,9 @@ def main():
     ap.add_argument("--waves-csv", default=None, help="default <archive>/waves_44008.csv")
     ap.add_argument("--gauge-csv", default=None, help="default <archive>/gauge_8447435.csv")
     ap.add_argument("--marconi-waves", default=None, help="default <archive>/waves_marconi.csv")
-    ap.add_argument("--gauge-fit", default="1.24,-48,-0.10")
+    ap.add_argument("--gnssr-spline",
+                    default="/home/argus_user/GNSS/v4.1/products/refl_code/Files/usgs/usgs_spline_out.txt",
+                    help="the station's GNSS-R water level, used first (Chatham fills the newest hours)")
     ap.add_argument("--image-dir", nargs="+",
                     default=["/mnt/I2Rgus_Data/ImageProducts/products", "/mnt/I2Rgus_Data/ImageProducts"])
     ap.add_argument("--last-run", default=str(HERE / "logs" / "owg_last_run"),
@@ -462,7 +459,8 @@ def main():
     arch = Path(args.archive)
     waves = load_waves(args.waves_csv or arch / "waves_44008.csv")
     gauge = load_gauge(args.gauge_csv or arch / "gauge_8447435.csv")
-    fit = tuple(float(v) for v in args.gauge_fit.split(","))
+    from marconi_water_level import WaterLevel
+    fit = WaterLevel(args.gnssr_spline, args.gauge_csv or arch / "gauge_8447435.csv")
     models, stems = [], []
     for spec in args.models:
         label, name, *stem = spec.split("=")
@@ -523,7 +521,7 @@ def main():
             ok["buoy"] = ok["dpd"] = ok["mwd"] = np.nan
         if converted:   # score against the buoy as it would be at Marconi, when fitted
             ok["buoy"] = interp_at(conv["epoch"], conv["hs_buoy_marconi"], ok["epoch"], 90 * 60)
-        ok["level"] = marconi_level(gauge, ok["epoch"], fit)
+        ok["level"] = fit.at(ok["epoch"].to_numpy(float))[0]
         matched.append((label, ok[ok["buoy"].notna()]))
 
     # ---- checks: every link of the chain, newest first
@@ -568,6 +566,12 @@ def main():
         check(len(recent) > 0 and n_ok > 0,
               f"camera {label}: {n_ok} of {len(recent)} frames measured in 24 h"
               + (f" (screened: {detail})" if detail else ""))
+    # the station's GPS water level (GNSS-R): a day or two behind is normal (orbits)
+    if fit.s_ep is not None and len(fit.s_ep):
+        age = now.timestamp() - fit.s_ep[-1]
+        check(age < 4 * 86400, f"GPS water level: latest reading {ago(age)} old (1-2 days is normal)")
+    else:
+        check(False, f"GPS water level: not available ({fit.gps_note}); using the Chatham gauge")
     # camera pointing (pointing_check.py), when a reference bank is set up
     for cam in ("c1", "c2"):
         pl = arch / f"pointing_{cam}.csv"
@@ -655,10 +659,12 @@ def main():
                  f"{c['time_utc'][5:16].replace('T', ' ')}Z")
     if gauge is not None and len(gauge):
         t = np.arange(now.timestamp() - 86400, now.timestamp(), 600.0)
-        lv = marconi_level(gauge, t, fit)
+        lv, lsrc = fit.at(t)
         if np.isfinite(lv).any():
+            gps_share = float(np.mean(lsrc[np.isfinite(lv)] == "gps"))
             L.append(f"  Tide (24 h) : Marconi {np.nanmin(lv):+.2f} to {np.nanmax(lv):+.2f} m NAVD88 "
-                     f"(from the Chatham gauge)")
+                     f"({gps_share:.0%} from the station's GPS, the rest Chatham fitted to the GPS)")
+            L.append(f"  {fit.describe()}")
     L.append("")
     L.append("CAMERA (c2): significant wave height in the surf zone")
     for label, d in models:
@@ -690,7 +696,7 @@ def main():
             L.append(f"  Last 24 h   : {x['hs_best'].min():.2f}-{x['hs_best'].max():.2f} m, mean "
                      f"{x['hs_best'].mean():.2f} m  (archive/waves_marconi.csv, used by the other systems)")
         if not converted:
-            L.append("  (buoy not converted yet -- run: python3 buoy_transfer.py fit --station 44008)")
+            L.append("  (buoy not converted yet -- run: python3 buoy_transfer.py fit --station 44013)")
         L.append("")
     L.append("AGREEMENT WITH THE BUOY " + ("CONVERTED TO MARCONI (by wave direction, period and height)"
                                          if converted else "(single frames, raw offshore buoy)"))
