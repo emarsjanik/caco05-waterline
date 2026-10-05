@@ -90,29 +90,38 @@ def cmd_list(args):
 
 
 def cmd_fetch(args):
+    from concurrent.futures import ThreadPoolExecutor
     m = load_manifest(args.manifest, args.every)
     todo = []
-    for prod in args.products:
-        d = args.out / prod
-        d.mkdir(parents=True, exist_ok=True)
-        todo += [(product_name(f, prod), d) for f in m["filename"] if not (d / product_name(f, prod)).exists()]
+    for f in m["filename"]:                  # frame by frame: a stopped run leaves whole frames
+        for prod in args.products:
+            d = args.out / prod
+            d.mkdir(parents=True, exist_ok=True)
+            if not (d / product_name(f, prod)).exists():
+                todo.append((product_name(f, prod), d))
     print(f"{len(m)} labelled frames x {len(args.products)} products: {len(todo)} to download "
-          f"(~{len(todo) * 1.3 / 1024:.1f} GB)")
+          f"(~{len(todo) * 0.8 / 1024:.1f} GB), {args.jobs} at a time", flush=True)
     if args.dry_run:
         for name, d in todo[:5]:
             print(f"  aws s3 cp {args.s3}{name} {d}/")
         return 0
-    failed = 0
-    for i, (name, d) in enumerate(todo, 1):
+
+    def get(item):
+        name, d = item
         r = subprocess.run(["aws", "s3", "cp", "--only-show-errors", args.s3 + name, str(d / name)],
                            capture_output=True, text=True)
-        if r.returncode:
-            failed += 1
-            if failed <= 5:
-                print(f"  not fetched: {name} ({(r.stderr or '').strip()[:120]})")
-        if i % 200 == 0:
-            print(f"  {i}/{len(todo)}", flush=True)
-    print(f"done: {len(todo) - failed} fetched, {failed} missing on S3")
+        return name, r.returncode, (r.stderr or "").strip()[:120]
+
+    failed = 0
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        for i, (name, code, err) in enumerate(pool.map(get, todo), 1):
+            if code:
+                failed += 1
+                if failed <= 5:
+                    print(f"  not fetched: {name} ({err})", flush=True)
+            if i % 200 == 0:
+                print(f"  {i}/{len(todo)}", flush=True)
+    print(f"done: {len(todo) - failed} fetched, {failed} missing on S3", flush=True)
     return 0
 
 
@@ -262,6 +271,7 @@ def main():
         if name == "fetch":
             p.add_argument("--products", nargs="+", default=["bright", "dark", "snap", "timex", "var"])
             p.add_argument("--dry-run", action="store_true")
+            p.add_argument("--jobs", type=int, default=8, help="downloads at a time (default 8)")
         if name == "build":
             p.add_argument("--width", type=int, default=768)
             p.add_argument("--height", type=int, default=640)
