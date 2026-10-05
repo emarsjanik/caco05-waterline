@@ -136,7 +136,8 @@ def make_composite(filename, recipe, src, width, height):
     need = sorted({p for c in recipe for p in products_in(c)})
     imgs = {}
     for p in need:
-        g = cv2.imread(str(src / p / product_name(filename, p)), cv2.IMREAD_GRAYSCALE)
+        f = src / p / product_name(filename, p)
+        g = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE) if f.exists() else None
         if g is None:
             return None, p
         imgs[p] = cv2.resize(g, (width, height), interpolation=cv2.INTER_AREA)
@@ -170,7 +171,9 @@ def cmd_build(args):
     (img_dir / "recipe.txt").write_text(f"R,G,B = {recipe}  size {args.width}x{args.height}\n")
     print(f"composites        : {len(rows)} in {img_dir} (R,G,B = {', '.join(recipe)})")
     if missing:
-        print("skipped, product missing: " + ", ".join(f"{k} {v}" for k, v in missing.items()))
+        print("skipped, product missing: " + ", ".join(f"{k} {v}" for k, v in missing.items())
+              + f"\n  -> fetch them: python3 composite_owg.py fetch --products {' '.join(missing)}"
+              + (f" --every {args.every}" if args.every > 1 else ""))
     print(f"labels            : {lab}\n                    {base} (bright, same frames, for the comparison)")
     return 0
 
@@ -178,8 +181,8 @@ def cmd_build(args):
 def cmd_preview(args):
     recipe = args.recipe.split(",")
     m = load_manifest(args.manifest, 1)
-    first = products_in(recipe[0])[0]
-    m = m[[(args.out / first / product_name(f, first)).exists() for f in m["filename"]]]
+    need = sorted({q for c in recipe for q in products_in(c)})
+    m = m[[all((args.out / q / product_name(f, q)).exists() for q in need) for f in m["filename"]]]
     m = m.iloc[(m["H"] - args.hs).abs().argsort()]          # a fetched frame near --hs metres
     for f, h in zip(m["filename"], m["H"]):
         rgb, miss = make_composite(f, recipe, args.out, 612, 512)
