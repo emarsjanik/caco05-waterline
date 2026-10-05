@@ -9,20 +9,30 @@ of pixel intensity peaks at the wave period (Stockdon & Holman 2000;
 Lippmann & Holman 1991). A single image cannot do this: Chris Sherwood's
 period model scored R2 -0.19 on held-back Marconi frames.
 
-HOW. On each timestack line, the most variable pixels (the surf zone:
-top half by temporal variance, seaward half of the line) are detrended and
-their spectra (Welch, 128 s Hann windows, 50% overlap) normalised and
-averaged. In the incident band (3-25 s) the peak gives Tp (parabolic
-refinement) and the first moment Tm01. The share of variance below 0.04 Hz
-(periods over 25 s) is reported as infragravity fraction -- high on a
-dissipative surf zone in storms, a useful descriptor in its own right.
+HOW. Each timestack pixel is put on the map at that moment's water level
+(camera calibration; water level from marconi_water_level.py, GPS first)
+and only the SURF ZONE is used: from --margin (15 m) seaward of the
+waterline out to --max-seaward. The swash at the waterline moves at the
+slower uprush/backwash rhythm, so the first version, which took the most
+variable pixels anywhere on the line, read 13-16 s while the buoys said
+6-8 s; on a synthetic stack with 40 s swash and 8 s breakers it read 20 s
+where this reads 8.0 s. Of the surf-zone pixels the more variable half is
+detrended, and their spectra (Welch, 128 s Hann windows, 50% overlap)
+normalised and averaged. In the incident band (3-25 s) the peak gives Tp
+(parabolic refinement) and the first moment Tm01. The share of variance
+below 0.04 Hz (periods over 25 s) is reported as infragravity fraction.
+A line with fewer than --min-pixels surf-zone pixels is logged as
+"no surf pixels" (the line does not reach past the swash at that tide).
 
 OUTPUT archive/wave_period_<cam>.csv, one row per timestack and line:
   epoch (burst middle), time_utc, filename, line, tp_s, tm01_s,
-  ig_fraction, peak_ratio, status (ok / weak peak / dark)
+  ig_fraction, peak_ratio, status (ok / weak peak / dark / no surf pixels),
+  n_pixels, surf_from_m, surf_to_m (metres past the waterline), water_level_m
 
 Usage:
     python3 timestack_wave_period.py                       new stacks in archive/ras_c2
+    python3 timestack_wave_period.py --reprocess           every archived stack again
+    python3 timestack_wave_period.py --compare             camera periods vs buoys 44008/44013
     python3 timestack_wave_period.py --self-test
 """
 
@@ -38,7 +48,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 SAMPLE_HZ = 2.0
 BURST_MID_OFFSET_S = 300.0
-FIELDS = ["epoch", "time_utc", "filename", "line", "tp_s", "tm01_s", "ig_fraction", "peak_ratio", "status"]
+FIELDS = ["epoch", "time_utc", "filename", "line", "tp_s", "tm01_s", "ig_fraction", "peak_ratio", "status",
+          "n_pixels", "surf_from_m", "surf_to_m", "water_level_m"]
+# beach geometry from the Jan 2025 lidar: the 0 m NAVD88 contour (sea_patch.py)
+SHORE_ORIGIN = (420150.0, 4638400.0)
+SEAWARD_DEG = 81.0
+FORESHORE_SLOPE = 0.08
 
 
 def welch(x, fs, nseg=256):
@@ -56,15 +71,21 @@ def welch(x, fs, nseg=256):
     return np.fft.rfftfreq(nseg, 1 / fs), P
 
 
-def period_from_stack(gray, fs=SAMPLE_HZ, band=(1 / 25, 1 / 3), ig_cut=0.04, min_mean=25.0):
-    """gray: (time, pixels) along one line -> dict of tp_s, tm01_s, ig_fraction, peak_ratio, status."""
+def period_from_stack(gray, cols=None, fs=SAMPLE_HZ, band=(1 / 25, 1 / 3), ig_cut=0.04, min_mean=25.0):
+    """
+    gray: (time, pixels) along one line -> dict of tp_s, tm01_s, ig_fraction, peak_ratio, status.
+    cols: the pixels to use -- the surf zone seaward of the swash (main() picks them on
+    the map). Without it, the seaward half by variance (synthetic tests only).
+    """
     gray = gray.astype(np.float32)
     if gray.mean() < min_mean:
         return {"status": "dark"}
     std = gray.std(axis=0)
-    half = gray.shape[1] // 2
-    sea = slice(0, half) if std[:half].mean() >= std[half:].mean() else slice(half, None)
-    cols = np.arange(gray.shape[1])[sea]
+    if cols is None:
+        half = gray.shape[1] // 2
+        sea = slice(0, half) if std[:half].mean() >= std[half:].mean() else slice(half, None)
+        cols = np.arange(gray.shape[1])[sea]
+    cols = np.asarray(cols)
     s = std[cols]
     cols = cols[s >= np.median(s)]
     x = gray[:, cols]
@@ -116,17 +137,32 @@ def main():
     ap.add_argument("--pix", default=None, help="default /home/argus_user/arguseyes/build/<cam>_timestack.pix")
     ap.add_argument("--lines", nargs="+", type=int, default=[1, 2], help="timestack lines (default 1 2)")
     ap.add_argument("--output", default=None, help="default archive/wave_period_<cam>.csv")
+    ap.add_argument("--margin", type=float, default=15.0,
+                    help="m seaward of the waterline where the surf zone starts (skips the swash; default 15)")
+    ap.add_argument("--max-seaward", type=float, default=300.0, help="m past the waterline to stop (default 300)")
+    ap.add_argument("--min-pixels", type=int, default=10, help="surf-zone pixels needed on a line (default 10)")
+    ap.add_argument("--reprocess", action="store_true", help="recompute every archived stack")
+    ap.add_argument("--compare", action="store_true", help="camera periods vs the buoys' periods")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:
         return self_test()
 
     import pandas as pd
+    if args.compare:
+        return compare(args)
     from runup_from_timestack import split_lines, epoch_from_name, DEFAULT_PIX_DIR
+    import georectify
+    from marconi_water_level import WaterLevel
     pix = np.loadtxt(args.pix or f"{DEFAULT_PIX_DIR}/{args.camera}_timestack.pix")[:, :2]
     lines = split_lines(pix)
+    io = georectify.load_intrinsics(HERE / "calibration" / f"CACO05_{args.camera}_20240801_IO.yaml")
+    eo = georectify.load_extrinsics(HERE / "calibration" / f"CACO05_{args.camera}_20251113_EO-CV.yaml")
+    wl = WaterLevel()
+    sea = np.radians(SEAWARD_DEG)
     out = Path(args.output or HERE / "archive" / f"wave_period_{args.camera}.csv")
-    done = pd.read_csv(out) if out.exists() else pd.DataFrame(columns=FIELDS)
+    done = (pd.read_csv(out) if out.exists() and not args.reprocess
+            else pd.DataFrame(columns=FIELDS))
     seen = set(done["filename"])
     rows = []
     for p in sorted(Path(args.ras_dir).glob(f"*.{args.camera}.ras.tiff")):
@@ -137,22 +173,75 @@ def main():
         if e is None or ras is None or ras.shape[1] != len(pix):
             continue
         gray = cv2.cvtColor(ras, cv2.COLOR_BGR2GRAY) if ras.ndim == 3 else ras
+        mid = e + BURST_MID_OFFSET_S
+        z = float(wl.at([mid])[0][0])
+        if not np.isfinite(z):
+            z = 0.0
+        waterline = -z / FORESHORE_SLOPE           # 0 m contour moves seaward as the tide falls
         for ln in args.lines:
             if not 1 <= ln <= len(lines):
                 continue
             a, b = lines[ln - 1]
+            # each pixel on the map at this moment's water level; keep the surf zone:
+            # seaward of the swash (waterline + margin), not out to the horizon
+            E, N = georectify.pixel_to_ground(pix[a:b, 0], pix[a:b, 1], z, io, eo)
+            sw = (np.asarray(E) - SHORE_ORIGIN[0]) * np.sin(sea) + (np.asarray(N) - SHORE_ORIGIN[1]) * np.cos(sea)
+            past = sw - waterline
+            cols = np.flatnonzero(np.isfinite(past) & (past > args.margin) & (past < args.max_seaward))
+            base = {"epoch": int(mid), "time_utc": datetime.fromtimestamp(mid, tz=timezone.utc).isoformat(),
+                    "filename": p.name, "line": ln, "n_pixels": len(cols), "water_level_m": round(z, 2),
+                    "surf_from_m": round(float(past[cols].min()), 1) if len(cols) else np.nan,
+                    "surf_to_m": round(float(past[cols].max()), 1) if len(cols) else np.nan}
+            if len(cols) < args.min_pixels:
+                rows.append({**base, "status": "no surf pixels"})
+                continue
             try:
-                r = period_from_stack(gray[:, a:b])
+                r = period_from_stack(gray[:, a:b], cols=cols)
             except ValueError:
                 continue
-            mid = e + BURST_MID_OFFSET_S
-            rows.append({"epoch": int(mid), "time_utc": datetime.fromtimestamp(mid, tz=timezone.utc).isoformat(),
-                         "filename": p.name, "line": ln, **r})
+            rows.append({**base, **r})
     if rows:
         pd.concat([done, pd.DataFrame(rows, columns=FIELDS)], ignore_index=True).to_csv(out, index=False)
     ok = [r for r in rows if r.get("status") == "ok"]
-    print(f"wave period {args.camera}: {len(rows)} new line-stack(s), {len(ok)} with a clear peak -> {out}"
+    nos = sum(r.get("status") == "no surf pixels" for r in rows)
+    print(f"wave period {args.camera}: {len(rows)} new line-stack(s), {len(ok)} with a clear peak"
+          + (f", {nos} with no surf-zone pixels on the line" if nos else "") + f" -> {out}"
           + (f"; latest Tp {ok[-1]['tp_s']:.1f} s" if ok else ""))
+    return 0
+
+
+def compare(args):
+    """Camera Tp / Tm01 against the buoys' dominant / average period, hour by hour."""
+    import pandas as pd
+    out = Path(args.output or HERE / "archive" / f"wave_period_{args.camera}.csv")
+    if not out.exists():
+        sys.exit(f"no {out} yet")
+    c = pd.read_csv(out)
+    c = c[c["status"] == "ok"].copy()
+    if "n_pixels" not in c or c["n_pixels"].isna().all():
+        print("NOTE: these rows predate the surf-zone selection -- rerun with --reprocess first")
+    c["hour"] = (c["epoch"] / 3600).round() * 3600
+    c = c.groupby("hour")[["tp_s", "tm01_s"]].median()
+    print(f"camera periods: {len(c)} hours with a clear peak")
+    print(f"  {'buoy':<7} {'hours':>5} {'camera Tp':>10} {'buoy DPD':>9} {'bias':>7} {'RMS':>6} {'r':>6}"
+          f"   {'camera Tm01':>11} {'buoy APD':>9} {'r':>6}")
+    for st in ("44008", "44013"):
+        w = HERE / "archive" / f"waves_{st}.csv"
+        if not w.exists():
+            continue
+        b = pd.read_csv(w)
+        b["hour"] = (b["epoch"] / 3600).round() * 3600
+        b = b.groupby("hour")[["dpd_s", "apd_s"]].median()
+        j = c.join(b, how="inner").dropna()
+        if len(j) < 5:
+            print(f"  {st:<7} {len(j):>5}  (too few hours in common)")
+            continue
+        d = j["tp_s"] - j["dpd_s"]
+        print(f"  {st:<7} {len(j):>5} {j['tp_s'].median():>10.1f} {j['dpd_s'].median():>9.1f} {d.mean():>+7.1f} "
+              f"{np.sqrt(np.mean(d ** 2)):>6.1f} {j['tp_s'].corr(j['dpd_s']):>6.2f}"
+              f"   {j['tm01_s'].median():>11.1f} {j['apd_s'].median():>9.1f} {j['tm01_s'].corr(j['apd_s']):>6.2f}")
+    print("  The buoys are offshore; the surf zone can favour the longer swell over local wind")
+    print("  sea, so a modest positive bias is expected. Tens of seconds is not.")
     return 0
 
 
