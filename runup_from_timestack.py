@@ -127,6 +127,28 @@ def split_lines(pix):
     return list(zip(starts, ends))
 
 
+_PIX_FILES = {}
+
+
+def pix_for_width(cam, width, explicit=None):
+    """The .pix (u, v) array whose pixel count matches a stack's width, or None.
+
+    The pixel list changes when lines are added (make_timestack_line.py). Stacks
+    recorded before keep the old width, so besides <cam>_timestack.pix every
+    saved copy next to it (<cam>_timestack.pix.*, e.g. the .runup_only backup)
+    is tried. With an explicit --pix only that file is used."""
+    if cam not in _PIX_FILES:
+        files = [Path(explicit)] if explicit else sorted(Path(DEFAULT_PIX_DIR).glob(f"{cam}_timestack.pix*"))
+        _PIX_FILES[cam] = {}
+        for f in files:
+            try:
+                pix = np.loadtxt(f, ndmin=2)[:, :2]
+            except (OSError, ValueError, IndexError):
+                continue
+            _PIX_FILES[cam].setdefault(len(pix), pix)       # sorted: the live file wins ties
+    return _PIX_FILES[cam].get(width)
+
+
 def light_steps(g, threshold, half=60, min_gap=60):
     """
     Rows where the brightness of the seaward half of the line jumps
@@ -312,23 +334,24 @@ def process(ras_path, args, pix_cache, gnssr):
         return None
 
     if cam not in pix_cache:
-        pix = np.loadtxt(args.pix or f"{DEFAULT_PIX_DIR}/{cam}_timestack.pix")[:, :2]
         io = georectify.load_intrinsics(args.io or SCRIPT_DIR / f"calibration/CACO05_{cam}_20240801_IO.yaml")
         eo = georectify.load_extrinsics(args.eo or SCRIPT_DIR / f"calibration/CACO05_{cam}_20251113_EO-CV.yaml")
-        pix_cache[cam] = (pix, split_lines(pix), io, eo)
-    pix, lines, io, eo = pix_cache[cam]
-
-    if not 1 <= args.line <= len(lines):
-        sys.exit(f"{cam} has {len(lines)} line(s); --line {args.line} does not exist")
-    a, b = lines[args.line - 1]
+        pix_cache[cam] = (io, eo)
+    io, eo = pix_cache[cam]
 
     ras = cv2.imread(str(ras_path), cv2.IMREAD_UNCHANGED)
     if ras is None:
         print(f"  {name}: unreadable -- skipped")
         return None
-    if ras.shape[1] != len(pix):
-        print(f"  {name}: {ras.shape[1]} columns but .pix has {len(pix)} -- skipped")
+    pix = pix_for_width(cam, ras.shape[1], args.pix)
+    if pix is None:
+        print(f"  {name}: {ras.shape[1]} columns and no .pix file with that many pixels -- skipped")
         return None
+    lines = split_lines(pix)
+
+    if not 1 <= args.line <= len(lines):
+        sys.exit(f"{cam} has {len(lines)} line(s); --line {args.line} does not exist")
+    a, b = lines[args.line - 1]
 
     seg = ras[:, a:b]
     gray = (cv2.cvtColor(seg, cv2.COLOR_BGR2GRAY) if seg.ndim == 3 else seg).astype(np.float32)
