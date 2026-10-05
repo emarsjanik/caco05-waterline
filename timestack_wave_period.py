@@ -134,7 +134,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--ras-dir", default=str(HERE / "archive" / "ras_c2"))
     ap.add_argument("--camera", default="c2")
-    ap.add_argument("--pix", default=None, help="default /home/argus_user/arguseyes/build/<cam>_timestack.pix")
+    ap.add_argument("--pix", default=None, help="default: <cam>_timestack.pix in arguseyes/build, or a saved copy (<cam>_timestack.pix.*) matching each stack's width")
     ap.add_argument("--lines", nargs="+", type=int, default=None,
                     help="timestack lines (default: all lines in the .pix file; lines without surf pixels are skipped)")
     ap.add_argument("--output", default=None, help="default archive/wave_period_<cam>.csv")
@@ -152,11 +152,9 @@ def main():
     import pandas as pd
     if args.compare:
         return compare(args)
-    from runup_from_timestack import split_lines, epoch_from_name, DEFAULT_PIX_DIR
+    from runup_from_timestack import split_lines, epoch_from_name, pix_for_width
     import georectify
     from marconi_water_level import WaterLevel
-    pix = np.loadtxt(args.pix or f"{DEFAULT_PIX_DIR}/{args.camera}_timestack.pix")[:, :2]
-    lines = split_lines(pix)
     io = georectify.load_intrinsics(HERE / "calibration" / f"CACO05_{args.camera}_20240801_IO.yaml")
     eo = georectify.load_extrinsics(HERE / "calibration" / f"CACO05_{args.camera}_20251113_EO-CV.yaml")
     wl = WaterLevel()
@@ -171,8 +169,12 @@ def main():
             continue
         e = epoch_from_name(p.name)
         ras = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
-        if e is None or ras is None or ras.shape[1] != len(pix):
+        if e is None or ras is None:
             continue
+        pix = pix_for_width(args.camera, ras.shape[1], args.pix)      # old stacks: the old .pix
+        if pix is None:
+            continue
+        lines = split_lines(pix)
         gray = cv2.cvtColor(ras, cv2.COLOR_BGR2GRAY) if ras.ndim == 3 else ras
         mid = e + BURST_MID_OFFSET_S
         z = float(wl.at([mid])[0][0])
