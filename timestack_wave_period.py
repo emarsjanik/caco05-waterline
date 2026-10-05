@@ -135,7 +135,8 @@ def main():
     ap.add_argument("--ras-dir", default=str(HERE / "archive" / "ras_c2"))
     ap.add_argument("--camera", default="c2")
     ap.add_argument("--pix", default=None, help="default /home/argus_user/arguseyes/build/<cam>_timestack.pix")
-    ap.add_argument("--lines", nargs="+", type=int, default=[1, 2], help="timestack lines (default 1 2)")
+    ap.add_argument("--lines", nargs="+", type=int, default=None,
+                    help="timestack lines (default: all lines in the .pix file; lines without surf pixels are skipped)")
     ap.add_argument("--output", default=None, help="default archive/wave_period_<cam>.csv")
     ap.add_argument("--margin", type=float, default=15.0,
                     help="m seaward of the waterline where the surf zone starts (skips the swash; default 15)")
@@ -178,7 +179,7 @@ def main():
         if not np.isfinite(z):
             z = 0.0
         waterline = -z / FORESHORE_SLOPE           # 0 m contour moves seaward as the tide falls
-        for ln in args.lines:
+        for ln in (args.lines or range(1, len(lines) + 1)):
             if not 1 <= ln <= len(lines):
                 continue
             a, b = lines[ln - 1]
