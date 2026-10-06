@@ -45,6 +45,8 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+from extract_elevation_contours import GNSSR_ANTENNA_NAVD88_M
+
 HERE = Path(__file__).resolve().parent
 # beach geometry from the Jan 2025 lidar (sea_patch.py): the 0 m NAVD88 contour
 SHORE_ORIGIN = (420150.0, 4638400.0)
@@ -119,7 +121,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--subdaily", required=True, help="gnssrefl subdaily file (per-arc reflector heights)")
     ap.add_argument("--station-json", default="/home/argus_user/GNSS/v4.1/station/resources/station.json")
-    ap.add_argument("--hortho", type=float, default=None, help="antenna height, m NAVD88 (default from station.json)")
+    ap.add_argument("--hortho", type=float, default=None,
+                    help=f"antenna height, m NAVD88 (default {GNSSR_ANTENNA_NAVD88_M}, the OPUS value)")
     ap.add_argument("--antenna-en", nargs=2, type=float, default=None, metavar=("E", "N"),
                     help="antenna UTM 19N (default from station.json latitude/longitude)")
     ap.add_argument("--gauge-csv", default=str(HERE / "archive" / "gauge_8447435.csv"))
@@ -132,9 +135,13 @@ def main():
     args = ap.parse_args()
 
     cfg = json.loads(Path(args.station_json).read_text()) if Path(args.station_json).exists() else {}
-    hortho = args.hortho if args.hortho is not None else cfg.get("gnssrefl_orthometric_height")
-    if hortho is None:
-        sys.exit("need --hortho (antenna m NAVD88) or a station.json with gnssrefl_orthometric_height")
+    # NAVD88 always. station.json held the CGVD2013 height (18.665 m,
+    # 0.349 m low) until it was migrated, so it is reported, not used.
+    hortho = args.hortho if args.hortho is not None else GNSSR_ANTENNA_NAVD88_M
+    cfg_h = cfg.get("gnssrefl_orthometric_height")
+    if cfg_h is not None and abs(float(cfg_h) - hortho) >= 0.001:
+        print(f"  note: station.json Hortho {float(cfg_h):.3f} m is not the NAVD88 "
+              f"{hortho:.3f} m used here (see extract_elevation_contours.py)")
     if args.antenna_en:
         E0, N0 = args.antenna_en
     elif cfg.get("latitude") is not None:

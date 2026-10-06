@@ -13,6 +13,8 @@ upper-left corner, and the GDAL nodata tag.
 
 Values: _dem and _spread in metres (elevation NAVD88 for _dem), _count in
 frames per cell, _source 1 = measured, 2 = interpolated. Nodata = -9999.
+The _dem GeoTIFF also carries the vertical GeoKeys (EPSG:5703, NAVD88
+height, metres), so GIS software reads it as NAVD88 without being told.
 
 COORDINATE SYSTEM. Default EPSG:32619 (WGS 84 / UTM zone 19N), as the
 project's existing .prj file. If the camera survey was in NAD83(2011) use
@@ -31,6 +33,8 @@ from pathlib import Path
 import numpy as np
 
 NODATA = -9999.0
+NAVD88_EPSG = 5703                     # NAVD88 height (m)
+ELEVATION_LAYERS = ("_dem",)           # grids whose values are NAVD88 elevations
 
 
 def read_asc(path):
@@ -45,8 +49,11 @@ def read_asc(path):
     return data, head
 
 
-def write_geotiff(path, data, xll, yll, cell, epsg, description=""):
-    """data: rows north to south (as in the ASCII grid). NaN -> nodata."""
+def write_geotiff(path, data, xll, yll, cell, epsg, description="", vertical_epsg=None):
+    """data: rows north to south (as in the ASCII grid). NaN -> nodata.
+
+    vertical_epsg (5703 = NAVD88 height) adds the vertical GeoKeys, so
+    GIS software knows an elevation grid is NAVD88 metres."""
     arr = np.where(np.isfinite(data), data, NODATA).astype("<f4")
     h, w = arr.shape
     top = yll + h * cell
@@ -78,11 +85,14 @@ def write_geotiff(path, data, xll, yll, cell, epsg, description=""):
     add(339, SHORT, [3])                           # IEEE float
     add(33550, DOUBLE, [cell, cell, 0.0])          # ModelPixelScale
     add(33922, DOUBLE, [0.0, 0.0, 0.0, xll, top, 0.0])   # ModelTiepoint: UL corner
-    add(34735, SHORT, [1, 1, 0, 4,
-                       1024, 0, 1, 1,              # GTModelType = projected
-                       1025, 0, 1, 1,              # GTRasterType = PixelIsArea
-                       3072, 0, 1, int(epsg),      # ProjectedCSType
-                       3076, 0, 1, 9001])          # ProjLinearUnits = metre
+    keys = [1024, 0, 1, 1,                         # GTModelType = projected
+            1025, 0, 1, 1,                         # GTRasterType = PixelIsArea
+            3072, 0, 1, int(epsg),                 # ProjectedCSType
+            3076, 0, 1, 9001]                      # ProjLinearUnits = metre
+    if vertical_epsg:
+        keys += [4096, 0, 1, int(vertical_epsg),   # VerticalCSType (5703 = NAVD88)
+                 4099, 0, 1, 9001]                 # VerticalUnits = metre
+    add(34735, SHORT, [1, 1, 0, len(keys) // 4] + keys)
     add(42113, ASCII, f"{NODATA:g}")               # GDAL_NODATA
     entries.sort(key=lambda e: e[0])
 
@@ -145,8 +155,10 @@ def main():
         data, h = read_asc(asc)
         desc = next((d for k, d in DESCRIPTIONS.items() if asc.stem.endswith(k)), asc.stem)
         tif = asc.with_suffix(".tif")
+        vert = NAVD88_EPSG if asc.stem.endswith(ELEVATION_LAYERS) else None
         write_geotiff(tif, data, h["xllcorner"], h["yllcorner"], h["cellsize"], args.epsg,
-                      f"{asc.stem}: {desc}; EPSG:{args.epsg}")
+                      f"{asc.stem}: {desc}; EPSG:{args.epsg}" + ("+5703 (NAVD88 height)" if vert else ""),
+                      vertical_epsg=vert)
         print(f"wrote {tif}  ({data.shape[1]} x {data.shape[0]} cells at {h['cellsize']:g} m, "
               f"{int(np.isfinite(data).sum())} with data)")
 
