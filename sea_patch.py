@@ -6,9 +6,9 @@ The optical wave gauge reads wave texture in the surf zone. To train on
 2024-25 frames and run on today's camera, both must show the SAME patch of
 sea at the SAME scale. Redrawing old frames into today's camera view only
 does that if the two views overlap: with the lidar-corrected 2025
-pointing, the Jan 2025 c2 camera saw just ~32% of today's view (47% of the
-gauge's crop), so the earlier redraws put sea from the wrong place in most
-of the frame.
+pointing, the c2 camera before its 24 Jan 2025 re-aim saw just ~32% of
+today's view (47% of the gauge's crop), so the earlier redraws put sea from
+the wrong place in most of the frame.
 
 A map view does not depend on the camera: every frame, old or live, is
 projected onto one rectangle of sea surface -- a grid in metres aligned

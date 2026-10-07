@@ -12,8 +12,9 @@ WHY. resample_owg_images.py redrew the photos into today's camera view
 with the horizon-fitted pointings, which before 24 Jan 2025 were ~22 deg
 off in pan: the cameras were re-aimed that day, after the Jan 2025 lidar
 and before the 2025-02-19 calibration (fit_eo_to_survey.py). With the corrected
-pointing the 2025 c2 camera saw only ~32% of today's view, so those
-redraws put sea from the wrong place in most of the frame. A patch on the
+pointing, c2 before 24 Jan 2025 saw only ~32% of today's view, so those
+redraws put sea from the wrong place in most of the frame; from 24 Jan the
+pointing kept the calibration's pan, a few degrees from today's. A patch on the
 ground has no such problem -- it is the same patch whatever the pointing,
 provided every pointing saw it. For c2 the common patch of SEA is small
 (about 50 x 35 m at 195-250 m from the camera, Jan 24 - Mar 2025 plus
