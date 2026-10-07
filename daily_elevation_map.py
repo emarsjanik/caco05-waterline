@@ -7,23 +7,46 @@ them all onto a single background image (by default the ~12:15
 capture), shaded by water elevation.
 
 WHAT THE FILLED BANDS MEAN -- read this before interpreting the figure:
-  Over a day the tide crosses each elevation TWICE, once rising and
-  once falling. Where two or more detected waterlines fall in the same
-  elevation bin, the area between them is filled with that elevation's
-  colour. On a stable beach those lines should coincide, so:
+  Lines are grouped into elevation bins (--elevation-bin, 0.10 m). In
+  each image column covered by at least 3 lines of a bin that AGREE,
+  the band spans the 16th to 84th percentile of their rows (about
+  +/-1 sigma). A line does not agree in a column when it is alone
+  there: no other line of the bin within 12 px, or 4x the usual
+  spacing of that bin's lines in that column if larger. On a stable
+  beach the lines of one bin should coincide, so:
 
       band width  ~=  REPEATABILITY of the measurement at that
                       elevation, NOT a morphological feature.
 
-  A wide band means the two crossings disagreed. That can come from
-  detection error, from wave runup differing between rising and
-  falling tide, or from genuine morphological change during the day --
-  and this figure alone cannot separate those. Treat a wide band as
-  "uncertain here", not as "the beach is this shape here".
+  Over several days the band also takes in real movement of the
+  shoreline at that elevation: lines that moved together are not
+  alone, so they stay in, and the band spans both positions.
+
+  A stray line -- a detection error, a line out on the water -- is
+  still drawn, but cannot widen the band. Until Oct 2026 the band ran
+  from the lowest to the highest line in the bin (nanmin/nanmax), so
+  one stray line turned it into a large translucent rectangle reaching
+  that line, with vertical edges where the stray line started and
+  stopped, and the picture looked far worse than the data. Where fewer
+  than 3 lines agree there is no band: two lines cannot tell which of
+  them is off. The band's edges are smoothed over 15 columns, runs
+  shorter than 20 columns are not drawn, and each run narrows to a
+  point at its ends instead of stopping in a vertical edge.
+
+  A wide band means the lines that agree still disagree by that much:
+  detection error, wave runup differing between rising and falling
+  tide, or genuine change -- this figure alone cannot separate those.
+  Treat a wide band as "uncertain here", not as "the beach is this
+  shape here".
 
   Bands are drawn semi-transparent so the underlying image stays
   visible, which lets you judge by eye whether a line sits on the real
   water's edge.
+
+  The cron draws these maps from the consistency-filtered contours
+  (waterline_consistency.py, contour_points_timex_qc.csv), so lines out
+  of order with the rest are already removed; the file used is named
+  at the foot of the figure.
 
 Usage:
     python3 daily_elevation_map.py <contour_points.csv> <image_dir> <camera> <output.png>
@@ -93,6 +116,74 @@ def load_contours(path, camera, date_filter=None, only=None):
         data["rows"] = np.array(data["rows"])[order]
 
     return dict(frames), elev_col
+
+
+def agreeing_band(stack, min_lines=3, alone_px=12.0, alone_factor=4.0,
+                  smooth_columns=15, taper_columns=15, min_run=20):
+    """
+    Band of the lines that agree, per column of `stack` (lines x columns,
+    NaN where a line has no data). Returns (lo, hi, valid).
+
+    A line is left out of the band in a column when it is ALONE there: no
+    other line of the bin within max(`alone_px`, `alone_factor` x the
+    column's median nearest-neighbour distance). A stray line -- out on the
+    water, or on the wrong feature -- is alone, so it can never stretch the
+    band, however few lines the bin holds. Lines that move together, as
+    after real beach change over a multi-day window, are not alone and stay
+    in: the band then shows that movement, as the map's title says. (A
+    median/MAD rule was tried first: with two groups of lines it switched
+    between showing both and only the larger one from column to column as
+    lines started and stopped, which drew a blotchy band.)
+
+    The band is the 16th-84th percentile of the remaining rows -- about
+    +/-1 sigma -- drawn only where at least `min_lines` remain. The 12 px
+    floor is a few times the detector's ~2 px repeatability and below the
+    spread of one 0.1 m bin in the near field (10-25 px), so honest lines at
+    the edge of a bin are not mistaken for strays.
+
+    Edges are smoothed over `smooth_columns`, runs shorter than `min_run`
+    columns are dropped, and each run narrows to a point over its last
+    `taper_columns`, so the band never ends in a vertical edge.
+    """
+    import warnings
+    n_lines, width = stack.shape
+    srt = np.sort(stack, axis=0)                     # NaN sort to the end
+    d_prev = np.full_like(srt, np.inf); d_next = np.full_like(srt, np.inf)
+    if n_lines > 1:
+        gaps = np.diff(srt, axis=0)
+        d_prev[1:] = gaps; d_next[:-1] = gaps
+    nn = np.fmin(np.where(np.isnan(d_prev), np.inf, d_prev),
+                 np.where(np.isnan(d_next), np.inf, d_next))
+    nn[np.isnan(srt)] = np.nan
+    with warnings.catch_warnings():
+        # all-NaN columns are expected (no line of the bin there)
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        typical = np.nanmedian(np.where(np.isfinite(nn), nn, np.nan), axis=0)
+        limit = np.maximum(alone_px, alone_factor * np.nan_to_num(typical, nan=alone_px))
+        kept = np.where(nn <= limit, srt, np.nan)
+        n = np.isfinite(kept).sum(axis=0)
+        lo = np.nanpercentile(kept, 16, axis=0)
+        hi = np.nanpercentile(kept, 84, axis=0)
+    valid = n >= min_lines
+    if smooth_columns > 1 and valid.any():
+        kernel = np.ones(int(smooth_columns))
+        weight = np.convolve(valid.astype(float), kernel, mode="same")
+        with np.errstate(invalid="ignore", divide="ignore"):
+            lo = np.convolve(np.where(valid, lo, 0.0), kernel, mode="same") / weight
+            hi = np.convolve(np.where(valid, hi, 0.0), kernel, mode="same") / weight
+    if valid.any():
+        edges = np.flatnonzero(np.diff(np.r_[0, valid.astype(int), 0]))
+        mid = 0.5 * (lo + hi)
+        half = 0.5 * (hi - lo)
+        for a, b in zip(edges[::2], edges[1::2]):
+            if b - a < min_run:
+                valid[a:b] = False
+                continue
+            k = np.arange(b - a)
+            taper = np.clip(np.minimum(k + 1, b - a - k) / float(taper_columns), 0.0, 1.0)
+            half[a:b] *= taper
+        lo, hi = mid - half, mid + half
+    return lo, hi, valid
 
 
 def crop_bounds_for(camera, image_height):
@@ -404,17 +495,9 @@ def main():
         bin_elev = float(np.mean([frames[k]["elevation"] for k in keys]))
         colour = colormap(norm(bin_elev))
 
-        if len(keys) >= 2:
+        if len(keys) >= 3:
             stack = np.vstack([resampled[k] for k in keys])
-            # Columns covered by no line in this bin are all-NaN; that
-            # is expected, so silence the warning rather than let it
-            # clutter every run.
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=RuntimeWarning)
-                lo = np.nanmin(stack, axis=0)
-                hi = np.nanmax(stack, axis=0)
-            valid = ~np.isnan(lo) & ~np.isnan(hi)
+            lo, hi, valid = agreeing_band(stack)
             if valid.any():
                 # where= (not indexing) so a gap stays a gap instead of being
                 # bridged by a straight edge across columns with no data.
@@ -437,11 +520,11 @@ def main():
         f"{args.camera.upper()}  {date_label}   {len(frames)} waterlines, "
         f"{elevations.min():+.2f} to {elevations.max():+.2f} m NAVD88\n"
         f"background: {bg_day} {bg_capture[11:16]} UTC   |   "
-        + ("shaded bands = spread between same-elevation crossings "
+        + ("shaded bands = 16-84% spread of the 3+ same-elevation lines that agree "
            "(repeatability, not morphology)"
            if len(dates_used) == 1 else
-           f"shaded bands = spread across {len(dates_used)} days at each elevation "
-           "(repeatability + real shoreline movement)"),
+           f"shaded bands = 16-84% spread of the 3+ lines that agree, per elevation, over "
+           f"{len(dates_used)} days (repeatability + real shoreline movement)"),
         fontsize=9)
 
     scalar_map = matplotlib.cm.ScalarMappable(cmap=colormap, norm=norm)
@@ -449,6 +532,8 @@ def main():
     cbar = fig.colorbar(scalar_map, ax=ax, fraction=0.030, pad=0.015)
     cbar.set_label("water elevation (m, NAVD88)")
 
+    fig.text(0.01, 0.005, f"lines: {Path(args.contour_csv).name}", fontsize=7, color="0.35",
+             ha="left", va="bottom")
     fig.tight_layout()
     fig.savefig(args.output_png, dpi=args.dpi, bbox_inches="tight")
     plt.close(fig)
@@ -457,7 +542,8 @@ def main():
     print(f"Camera            : {args.camera}")
     print(f"Waterlines drawn  : {len(resampled)}")
     print(f"Elevation range   : {elevations.min():+.3f} to {elevations.max():+.3f} m NAVD88")
-    print(f"Elevation bins    : {len(bins)}  ({filled_bins} had 2+ crossings and were filled)")
+    print(f"Elevation bins    : {len(bins)}  ({filled_bins} had 3+ agreeing lines somewhere and "
+          f"were filled)")
     if bg_score is not None:
         print(f"Background image  : {bg_path.name}")
         print(f"                    {bg_capture} UTC, in-crop contrast {bg_score:.1f} "
@@ -476,9 +562,10 @@ def main():
     print(f"Lines per bin     : {occupancy}")
     print()
     if len(dates_used) == 1:
-        print("Reminder: filled band width = spread between repeat crossings of the same")
-        print("elevation within ONE day. It measures repeatability (detection error, runup")
-        print("differences, or change during the day) -- not a morphology feature.")
+        print("Reminder: filled band = 16-84% spread of the same-elevation lines that agree,")
+        print("within ONE day. It measures repeatability (detection error, runup differences,")
+        print("or change during the day) -- not a morphology feature. Stray lines are drawn")
+        print("but do not widen it.")
     else:
         print(f"Reminder: this spans {len(dates_used)} days, so a filled band now mixes TWO")
         print("things: measurement repeatability, AND genuine movement of the shoreline at")
@@ -488,7 +575,7 @@ def main():
 
     if filled_bins == 0:
         print()
-        print("NOTE: no elevation bin contained two or more waterlines, so nothing was")
+        print("NOTE: no elevation bin had three or more agreeing waterlines, so nothing was")
         print("filled. That happens when the day's captures never revisit the same level")
         print(f"within +/-{args.elevation_bin} m -- try a wider --elevation-bin, or a day")
         print("whose captures span both a rising and a falling tide.")
