@@ -9,8 +9,9 @@ same rectangle with today's calibration, so the network sees the same sea
 at the same scale in training and in use.
 
 WHY. resample_owg_images.py redrew the photos into today's camera view
-with the horizon-fitted pointings, which turned out to be ~22 deg off in
-pan (fit_eo_to_survey.py, against the Jan 2025 lidar). With the corrected
+with the horizon-fitted pointings, which before 24 Jan 2025 were ~22 deg
+off in pan: the cameras were re-aimed that day, after the Jan 2025 lidar
+and before the 2025-02-19 calibration (fit_eo_to_survey.py). With the corrected
 pointing the 2025 c2 camera saw only ~32% of today's view, so those
 redraws put sea from the wrong place in most of the frame. A patch on the
 ground has no such problem -- it is the same patch whatever the pointing,
