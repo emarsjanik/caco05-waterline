@@ -203,7 +203,7 @@ def averaged(ok, window, max_gap_min):
     return list(zip(np.split(at, gaps), np.split(av, gaps)))
 
 
-def plot(df, waves_csv, out, days, window, max_gap_min, model_name, rmse=None, others=()):
+def plot(df, waves_csv, out, days, window, max_gap_min, model_name, score="", others=()):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -270,8 +270,8 @@ def plot(df, waves_csv, out, days, window, max_gap_min, model_name, rmse=None, o
     n_rej = int(((~df["status"].isin(["ok", LOW_SHARPNESS])) & (df["epoch"] >= start.timestamp())).sum())
     ax.set_title(f"Optical wave gauge, CACO05 c2 -- last {days} days (UTC)\n"
                  f"{len(ok)} frames measured, {len(low)} with the view degraded, "
-                 f"{n_rej} screened out (night, fog, glare); "
-                 f"model {model_name}" + (f", validation RMSE {rmse:.2f} m per frame" if rmse else ""),
+                 f"{n_rej} screened out (night, fog, glare)\n"
+                 f"model {model_name}" + (f"; {score}" if score else ""),
                  loc="left", fontsize=10, color=INK)
     ax.xaxis.set_major_locator(mdates.DayLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
@@ -499,8 +499,16 @@ def main():
         df["epoch"] = df["epoch"].astype(int)
         others = [tuple(a.split("=", 1)) for a in args.also if "=" in a]
         name = Path(stems[0]).name + (f" + {len(stems) - 1} more, averaged" if len(stems) > 1 else "")
+        # the score a model was chosen on: its holdback (never seen in training), not the
+        # validation set that picked its epoch; older reports have only the latter
+        hold = [n[1].get("holdback_rmse") for n in nets]
+        if all(h is not None for h in hold):
+            score_txt = "holdback RMSE " + " / ".join(f"{h:.2f}" for h in hold) + " m per frame" + \
+                    (" (each model alone)" if len(hold) > 1 else "")
+        else:
+            score_txt = f"validation RMSE {rep['val_rmse']:.2f} m per frame" if rep.get("val_rmse") else ""
         plot(df, args.waves_csv, args.plot, args.days, args.window, args.max_gap,
-             name, rep.get("val_rmse"), others)
+             name, score_txt, others)
     return 0
 
 

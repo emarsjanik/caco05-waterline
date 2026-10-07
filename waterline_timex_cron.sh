@@ -165,6 +165,16 @@ SETUP_COEF=""
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
+# The date the GNSS-R record starts and how many days it covers,
+# remembered from the runs that saw it ("YYYY-MM-DD N"). Contours, ground
+# points, DEM and runup are all rebuilt from the WHOLE archive and drop
+# every frame the spline does not cover, so a spline that suddenly starts
+# later (gnssrefl refitted only part of the record -- what a calendar-year
+# fit did on 2 January) or has lost days in the middle would silently remove
+# those frames. Such a spline is refused and the previous products kept.
+# Delete this file if the record was shortened on purpose.
+GNSSR_START_FILE="$BASE/archive/gnssr_record_start.txt"
+GNSSR_MAX_LOST_DAYS=3
 
 mkdir -p "$SCRATCH" "$SCRATCH_INPUT" "$ARCHIVE_CSV" "$ARCHIVE_IMG" "$ARCHIVE_RAS" "$(dirname "$LOG")"
 
@@ -273,10 +283,39 @@ qc_arg=""
 # 5. Match detections to measured water level, then draw the maps.
 #    Both read from the ARCHIVE, not the working folders, so they see
 #    the full accumulated record rather than just this run.
+# Days with readings, columns 3/4/5 = YYYY MM DD: the first, and how many.
+gnssr_first=""; gnssr_ndays=0
+if [ -f "$GNSSR_SPLINE" ]; then
+    gnssr_days=$(grep -v -e '^%' -e '^[[:space:]]*$' "$GNSSR_SPLINE" \
+        | awk '{printf "%04d-%02d-%02d\n", $3, $4, $5}' | uniq)
+    gnssr_first=$(echo "$gnssr_days" | head -1)
+    gnssr_ndays=$(echo "$gnssr_days" | grep -c .)
+fi
+gnssr_known_first=""; gnssr_known_ndays=""
+{ read -r gnssr_known_first gnssr_known_ndays < "$GNSSR_START_FILE"; } 2>/dev/null
 if [ ! -f "$GNSSR_SPLINE" ]; then
     log "ERROR: GNSS-R file not found: $GNSSR_SPLINE"
     log "       Skipping contour extraction and maps. Check daily_gnss.sh."
+elif [ -z "$gnssr_first" ]; then
+    log "ERROR: GNSS-R file has no readings: $GNSSR_SPLINE"
+    log "       Skipping contour extraction and maps. Check daily_gnss.sh."
+elif [ -n "$gnssr_known_first" ] \
+     && [[ "$gnssr_first" > "$(date -u -d "$gnssr_known_first +1 day" +%F)" ]]; then
+    log "ERROR: GNSS-R now starts $gnssr_first, but the record starts $gnssr_known_first:"
+    log "       rebuilding from it would drop every frame in between. Contours, maps, DEM"
+    log "       and runup NOT rebuilt; the previous ones are kept. Check daily_gnss.sh on"
+    log "       the GNSS side, or delete $GNSSR_START_FILE if this is intended."
+elif [[ "${gnssr_known_ndays:-}" =~ ^[0-9]+$ ]] \
+     && [ "$gnssr_ndays" -lt $(( gnssr_known_ndays - GNSSR_MAX_LOST_DAYS )) ]; then
+    log "ERROR: GNSS-R now has readings on $gnssr_ndays days, but the record had $gnssr_known_ndays:"
+    log "       rebuilding from it would drop the frames of the missing days. Contours,"
+    log "       maps, DEM and runup NOT rebuilt; the previous ones are kept. Check"
+    log "       daily_gnss.sh on the GNSS side, or delete $GNSSR_START_FILE if intended."
 else
+    # remember the earliest start, and the days covered now
+    keep_first="$gnssr_first"
+    [ -n "$gnssr_known_first" ] && [[ "$gnssr_known_first" < "$gnssr_first" ]] && keep_first="$gnssr_known_first"
+    echo "$keep_first $gnssr_ndays" > "$GNSSR_START_FILE"
     # How far behind is GNSS-R? Last data row, columns 3/4/5 = YYYY MM DD.
     last_row=$(grep -v '^%' "$GNSSR_SPLINE" | tail -1)
     gnssr_last=$(echo "$last_row" | awk '{printf "%04d-%02d-%02d", $3, $4, $5}')

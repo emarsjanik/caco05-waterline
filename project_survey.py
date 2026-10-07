@@ -11,9 +11,11 @@ an amount anyone can see.
 
 WHY. Waterline comparisons against the 23 Jan 2025 lidar put the Jan
 2025 lines 15-30 m off, and a pointing fit to the lidar wanted the same
-~22 deg pan change for both cameras -- yet a Jan 21 / Feb 19 blend shows
-no such turn. This checks the pointing on the photo itself, with no
-waterline detection or water level involved.
+~22 deg pan change for both cameras. This checks a pointing on the photo
+itself, with no waterline detection or water level involved. Drawn on
+photos either side of 24 Jan 2025 it showed the cameras were re-aimed
+that day: the 23 Jan lidar fits the lidar-fitted pointing on 22 Jan and
+the 2025-02-19 calibration on 25 Jan (reaim_figure.py makes the figure).
 
 Usage:
     python3 project_survey.py --image <original photo> --camera c2 \\
@@ -57,6 +59,29 @@ def contour_segments(grid, x0, y0, cell, levels, bbox):
     return out
 
 
+def project_pieces(segs, io, eo):
+    """[(level, U, V), ...]: each contour drawn into the (distorted) image with one
+    pointing, split into runs of consecutive in-frame points."""
+    P = build_P(io, eo)
+    out = []
+    for lv, pieces in segs.items():
+        for s in pieces:
+            z = np.full(len(s), lv)
+            U, V, ok = ground_to_pixel(s[:, 0], s[:, 1], z, io, eo)
+            # Points far outside the field of view can be folded back INTO the
+            # frame by the distortion polynomial; keep only those whose ideal
+            # (undistorted) position is near the frame too.
+            h = P @ np.vstack([s[:, 0], s[:, 1], z, np.ones(len(s))])
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ui, vi = h[0] / h[2], h[1] / h[2]
+            ok &= (ui > -0.1 * io[0]) & (ui < 1.1 * io[0]) & (vi > -0.1 * io[1]) & (vi < 1.1 * io[1])
+            idx = np.where(ok)[0]
+            for r in np.split(idx, np.where(np.diff(idx) > 1)[0] + 1):
+                if len(r) >= 2:
+                    out.append((lv, U[r], V[r]))
+    return out
+
+
 def main():
     import cv2
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
@@ -83,32 +108,14 @@ def main():
     for k, (name, eo) in enumerate(eos):
         col = COLOURS[k % len(COLOURS)]
         drawn = 0
-        for lv, pieces in segs.items():
-            for s in pieces:
-                U, V, ok = ground_to_pixel(s[:, 0], s[:, 1], np.full(len(s), lv), io, eo)
-                # Points far outside the field of view can be folded back INTO the
-                # frame by the distortion polynomial; keep only those whose ideal
-                # (undistorted) position is near the frame too.
-                P = build_P(io, eo)
-                h = P @ np.vstack([s[:, 0], s[:, 1], np.full(len(s), lv), np.ones(len(s))])
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    ui, vi = h[0] / h[2], h[1] / h[2]
-                ok &= (ui > -0.1 * io[0]) & (ui < 1.1 * io[0]) & (vi > -0.1 * io[1]) & (vi < 1.1 * io[1])
-                # draw only runs of consecutive in-frame points
-                idx = np.where(ok)[0]
-                if len(idx) < 2:
-                    continue
-                runs = np.split(idx, np.where(np.diff(idx) > 1)[0] + 1)
-                for r in runs:
-                    if len(r) < 2:
-                        continue
-                    pts = np.c_[U[r], V[r]].astype(np.int32).reshape(-1, 1, 2)
-                    cv2.polylines(img, [pts], False, (0, 0, 0), 7, cv2.LINE_AA)
-                    cv2.polylines(img, [pts], False, col, 3, cv2.LINE_AA)
-                    mid = r[len(r) // 2]
-                    cv2.putText(img, f"{lv:+g}", (int(U[mid]) + 6, int(V[mid]) - 6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3, cv2.LINE_AA)
-                    drawn += 1
+        for lv, U, V in project_pieces(segs, io, eo):
+            pts = np.c_[U, V].astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(img, [pts], False, (0, 0, 0), 7, cv2.LINE_AA)
+            cv2.polylines(img, [pts], False, col, 3, cv2.LINE_AA)
+            mid = len(U) // 2
+            cv2.putText(img, f"{lv:+g}", (int(U[mid]) + 6, int(V[mid]) - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3, cv2.LINE_AA)
+            drawn += 1
         cv2.putText(img, name, (30, 60 + 55 * k), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 0), 8,
                     cv2.LINE_AA)
         cv2.putText(img, name, (30, 60 + 55 * k), cv2.FONT_HERSHEY_SIMPLEX, 1.4, col, 3, cv2.LINE_AA)

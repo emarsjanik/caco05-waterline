@@ -20,6 +20,12 @@ reference photo; the rays are undistorted with the lens model; a
 rotation is fitted with RANSAC (3 matches per trial, Kabsch), then
 refined on all inliers pooled over every pair.
 
+LIMITS. The two setups must share a view of FIXED features (dune,
+bluff, fences). A large turn on a narrow lens can leave only sand and
+sea in common, which change between dates: the 22 deg re-aim of c2 on
+24 Jan 2025 (37 deg wide lens) gave 1 consistent match of 375. Then
+draw a survey on the photos instead (project_survey.py).
+
 CHECKS (printed). Inlier count and ray residual in pixels; and the
 HORIZON, independent of the matches: where the new EO puts the sea
 horizon against where each new-setup photo shows it, across the frame.

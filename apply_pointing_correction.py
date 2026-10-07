@@ -1,34 +1,49 @@
 #!/usr/bin/env python3
 """
-Carry A Survey-Fitted Pointing Correction To Every Historical Period
-=======================================================================
+Carry A Survey-Fitted Pointing Correction To Other Periods Of The Same Aim
+=============================================================================
 fit_eo_to_survey.py solved one period's pointing against a lidar survey
-(Jan 18-23 2025 against the 23 Jan lidar). The error it found -- ~22 deg
-of pan on both cameras -- sits in the 2025-02-19 calibration that every
-historical period starts from: horizon_check.py only changes tilt and
-roll on top of it, period by period. So the same correction applies to
-all periods: each period's pointing = its horizon-fitted pointing + the
-(azimuth, tilt, roll) change the survey fit made to the period it fitted.
+(Jan 18-23 2025 against the 23 Jan lidar): ~22 deg of pan on both
+cameras. That is not an error in the 2025-02-19 calibration. The cameras
+were re-aimed on 24 Jan 2025, the day after the lidar flew (station ID
+CACO03 -> CACO04 that evening; horizon_check.py sees new tilt and roll
+from that day), and the calibration was made on 19 Feb with the NEW aim.
+Every period before 24 Jan inherited a calibration of a different aim,
+and horizon_check.py, which only changes tilt and roll, cannot see a pan.
+Evidence: the 23 Jan lidar drawn on 22 Jan and 25 Jan photos
+(project_survey.py) fits the fitted pointing before the re-aim and the
+calibration after it; c2's view gains the dune in its lower left from
+25 Jan; the Mar 2025 lidar matches the calibration's pan to a few
+degrees, and the Nov 2025 target calibration agrees with it to ~3 deg.
+
+So the January correction belongs to the old aim only: each period's
+pointing = its horizon-fitted pointing + the (azimuth, tilt, roll)
+change the survey fit made. Without --dates it is applied from the start
+of --span to 2025-01-23, the last day of the old aim; later periods are
+left as they are. Periods of the new aim get their own fit (the Mar 2025
+lidar) with --dates 2025-01-24 2025-03-31.
 
 Writes CACO05_<cam>_<first>_to_<last>_corr_EO.yaml for every row of
-calibration/chelsea_setups.csv for the camera (except the fitted period
-itself, already correct) and points the rows at them. The default
-pointing for dates not listed (2025-02-19) gets a corrected copy too,
-CACO05_<cam>_20250219_corr_EO.yaml, and a row for each gap is added.
+calibration/chelsea_setups.csv for the camera in the dates (except the
+fitted period itself, already correct) and points the rows at them.
+Dates in the window that no row lists get a corrected copy of the default
+pointing (2025-02-19) and a row of their own.
 
 CHECK IT. The correction is measured on one period and assumed for the
-others. Any period with a survey of its own should be checked -- e.g.
-Feb 17-Mar 10 against the 6 Mar 2025 lidar with detect_original_view.py
-and compare_dem_survey.py.
+others of the same aim. Check a period against a survey of its own, or
+draw a survey on its photos with project_survey.py.
 
-A correction can be limited to some periods with --dates, e.g. when another
-survey gave a better fit for them: each run starts again from the periods'
-original horizon-fitted pointings, so corrections never stack.
+Each run starts again from the periods' original horizon-fitted
+pointings, so corrections never stack.
 
 Usage:
     python3 apply_pointing_correction.py --camera c2 \\
         --fitted CACO05_c2_2025-01-18_to_2025-01-23_lidar_EO.yaml \\
         --fitted-from CACO05_c2_2025-01-08_to_2025-01-23_EO.yaml
+    python3 apply_pointing_correction.py --camera c2 \\
+        --fitted CACO05_c2_2025-03-01_to_2025-03-10_lidar_EO.yaml \\
+        --fitted-from CACO05_c2_2025-02-17_to_2025-03-10_EO.yaml \\
+        --dates 2025-01-24 2025-03-31
 """
 
 import sys
@@ -45,6 +60,9 @@ from georectify import load_extrinsics                  # noqa: E402
 from estimate_eo_rotation import write_eo               # noqa: E402
 
 CAL = HERE / "calibration"
+# Last day of the aim the Jan 2025 lidar fit measured: the cameras were re-aimed
+# on 24 Jan 2025 (CACO03 -> CACO04), so a correction without --dates stops here.
+OLD_AIM_LAST_DAY = "2025-01-23"
 
 
 def main():
@@ -56,7 +74,9 @@ def main():
     ap.add_argument("--base", default=None, help="default pointing (default CACO05_<cam>_20250219_EO.yaml)")
     ap.add_argument("--dates", nargs=2, default=None, metavar=("FIRST", "LAST"),
                     help="only correct periods overlapping these dates (e.g. a fit from the Mar "
-                         "lidar for 2025-01-24 2025-03-31); periods outside keep what they have")
+                         "lidar for 2025-01-24 2025-03-31); periods outside keep what they have. "
+                         f"Default: the start of --span to {OLD_AIM_LAST_DAY}, the last day of the "
+                         "aim the Jan 2025 lidar fit measured")
     ap.add_argument("--span", nargs=2, default=["2024-10-01", "2025-03-31"],
                     help="dates the historical imagery covers; gaps between listed periods in "
                          "this span get rows with the corrected default pointing")
@@ -79,7 +99,10 @@ def main():
                  f"{delta[2]:+.3f}) deg from {fitted_name}; {note}")
         return out_name
 
-    lo, hi = args.dates if args.dates else ("0000", "9999")
+    dates_given = args.dates is not None
+    lo, hi = args.dates if dates_given else (args.span[0], OLD_AIM_LAST_DAY)
+    if not dates_given:
+        print(f"no --dates: correcting {lo} .. {hi} only (the cameras were re-aimed on 24 Jan 2025)")
 
     def original(name):
         """The horizon-fitted pointing a corrected file was made from."""
@@ -96,6 +119,9 @@ def main():
         if src.startswith(f"CACO05_{args.camera}_20250219"):
             out.append(r)              # a gap row: refilled below
             continue
+        if r["first_date"] < lo or r["last_date"] > hi:
+            print(f"  WARNING: {r['first_date']} .. {r['last_date']} runs past {lo} .. {hi}; "
+                  f"the whole period is corrected")
         name = f"CACO05_{args.camera}_{r['first_date']}_to_{r['last_date']}_corr_EO.yaml"
         corrected(src, name, f"{r['first_date']} to {r['last_date']}")
         print(f"  {r['first_date']} .. {r['last_date']}: {src} -> {name}")
@@ -103,14 +129,14 @@ def main():
 
     # gaps: dates in the span not covered by any row for this camera use the default pointing
     base = args.base or f"CACO05_{args.camera}_20250219_EO.yaml"
-    tag = f"_{lo}_to_{hi}" if args.dates else ""
+    tag = f"_{lo}_to_{hi}" if dates_given else ""
     base_corr = corrected(base, f"CACO05_{args.camera}_20250219{tag}_corr_EO.yaml", "default pointing")
     is_gap = lambda r: (r["camera"] == args.camera and original(r["eo_file"]).startswith(
         f"CACO05_{args.camera}_20250219") and r["first_date"] <= hi and r["last_date"] >= lo)
     out = [r for r in out if not is_gap(r)]
     cover = sorted((r["first_date"], r["last_date"]) for r in out if r["camera"] == args.camera)
-    d = max(date.fromisoformat(args.span[0]), date.fromisoformat(lo) if args.dates else date.min)
-    end = min(date.fromisoformat(args.span[1]), date.fromisoformat(hi) if args.dates else date.max)
+    d = max(date.fromisoformat(args.span[0]), date.fromisoformat(lo))
+    end = min(date.fromisoformat(args.span[1]), date.fromisoformat(hi))
     gaps, g0 = [], None
     while d <= end:
         iso = d.isoformat()
@@ -131,8 +157,8 @@ def main():
         w = csv.DictWriter(f, fieldnames=["camera", "first_date", "last_date", "eo_file"])
         w.writeheader()
         w.writerows(out)
-    print(f"\nwrote {sc}: every {args.camera} date in {args.span[0]}..{args.span[1]} now has a "
-          f"corrected pointing. Check a period with its own survey before relying on it.")
+    print(f"\nwrote {sc}: every {args.camera} date in {max(lo, args.span[0])}..{min(hi, args.span[1])} "
+          f"now has a corrected pointing. Check a period with its own survey before relying on it.")
     return 0
 
 

@@ -4,8 +4,8 @@ Camera Pointing Monitor: Has The Camera Turned?
 =================================================
 Measures each camera's pointing (azimuth, tilt, roll) on every new image
 by matching it against reference frames whose pointing is known, and
-logs the change. A historical ~22 deg pan error went unnoticed for months
-and put the DEM 1.3 m off; at 300 m range on this beach a 0.1 deg pan
+logs the change. A ~22 deg re-aim (24 Jan 2025) went unnoticed for months
+and put the Jan 2025 DEM 1.3 m off; at 300 m range on this beach a 0.1 deg pan
 error is already ~4 cm of DEM elevation and 0.5 deg is ~21 cm. The
 horizon checks (horizon_check.py) see tilt and roll only -- this sees pan.
 
