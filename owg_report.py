@@ -323,6 +323,7 @@ def plot_frames(models, start, end, out):
         return False
     cats = [("ok", "measured", BLUE), ("dark", "dark", "#3b3a36"), ("glare", "glare", "#f2b134"),
             ("blurred (fog, rain or wet lens)", "fog / rain / wet lens", GREY),
+            ("low sharpness (may read low)", "view degraded (measured, not used)", "#a8a59a"),
             ("no water level", "no water level", "#c8417a"), ("patch not in view", "patch not in view", "#8a5cd1"),
             ("unreadable", "unreadable", "#d23b2a")]
     days = pd.date_range(start.date(), end.date(), freq="D", tz="UTC")
@@ -425,7 +426,8 @@ def main():
     ap.add_argument("--archive", default=str(HERE / "archive"))
     ap.add_argument("--models", nargs="+",
                     default=["Run C=owg_c2_H.csv=owg_c2_H_current_C", "patch=owg_c2_H_patch.csv=owg_c2_H_patch",
-                             "v2=owg_c2_H_v2.csv=owg_c2_H_v2"],
+                             "v2=owg_c2_H_v2.csv=owg_c2_H_v2",
+                             "composite=owg_c2_H_composite.csv=owg_c2_H_composite"],
                     help="LABEL=CSV[=MODEL]: archive CSV in --archive and model stem in owg_models/, "
                          "in plotting order. A model with neither an archive nor a model file is "
                          "left out, so a model not installed yet is not a failure.")
