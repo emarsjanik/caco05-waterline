@@ -200,14 +200,16 @@ SETUP_COEF="0.037"
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
-# The date the GNSS-R record starts and how many days it covers,
-# remembered from the runs that saw it ("YYYY-MM-DD N"). Contours, ground
-# points, DEM and runup are all rebuilt from the WHOLE archive and drop
-# every frame the spline does not cover, so a spline that suddenly starts
-# later (gnssrefl refitted only part of the record -- what a calendar-year
-# fit did on 2 January) or has lost days in the middle would silently remove
-# those frames. Such a spline is refused and the previous products kept.
-# Delete this file if the record was shortened on purpose.
+# The date the GNSS-R record starts and the MOST days with readings it has
+# had, remembered from the runs that accepted it ("YYYY-MM-DD N"). Contours,
+# ground points, DEM and runup are all rebuilt from the WHOLE archive and
+# drop every frame the spline does not cover, so a spline that suddenly
+# starts later (gnssrefl refitted only part of the record -- what a
+# calendar-year fit did on 2 January) or has lost days in the middle would
+# silently remove those frames. Such a spline is refused and the previous
+# products kept. N is a high-water mark, so a few days lost run after run
+# add up and are refused too. Delete this file if the record was shortened
+# on purpose (it is written again, from that spline, on the next run).
 GNSSR_START_FILE="$BASE/archive/gnssr_record_start.txt"
 GNSSR_MAX_LOST_DAYS=3
 
@@ -342,15 +344,19 @@ elif [ -n "$gnssr_known_first" ] \
     log "       the GNSS side, or delete $GNSSR_START_FILE if this is intended."
 elif [[ "${gnssr_known_ndays:-}" =~ ^[0-9]+$ ]] \
      && [ "$gnssr_ndays" -lt $(( gnssr_known_ndays - GNSSR_MAX_LOST_DAYS )) ]; then
-    log "ERROR: GNSS-R now has readings on $gnssr_ndays days, but the record had $gnssr_known_ndays:"
+    log "ERROR: GNSS-R now has readings on $gnssr_ndays days, but the record has had $gnssr_known_ndays:"
     log "       rebuilding from it would drop the frames of the missing days. Contours,"
     log "       maps, DEM and runup NOT rebuilt; the previous ones are kept. Check"
     log "       daily_gnss.sh on the GNSS side, or delete $GNSSR_START_FILE if intended."
 else
-    # remember the earliest start, and the days covered now
+    # remember the earliest start, and the most days covered (not just
+    # now's, so a slow loss is still measured from the best record)
     keep_first="$gnssr_first"
     [ -n "$gnssr_known_first" ] && [[ "$gnssr_known_first" < "$gnssr_first" ]] && keep_first="$gnssr_known_first"
-    echo "$keep_first $gnssr_ndays" > "$GNSSR_START_FILE"
+    keep_ndays="$gnssr_ndays"
+    [[ "${gnssr_known_ndays:-}" =~ ^[0-9]+$ ]] && [ "$gnssr_known_ndays" -gt "$gnssr_ndays" ] \
+        && keep_ndays="$gnssr_known_ndays"
+    echo "$keep_first $keep_ndays" > "$GNSSR_START_FILE"
     # How far behind is GNSS-R? Last data row, columns 3/4/5 = YYYY MM DD.
     last_row=$(grep -v '^%' "$GNSSR_SPLINE" | tail -1)
     gnssr_last=$(echo "$last_row" | awk '{printf "%04d-%02d-%02d", $3, $4, $5}')
