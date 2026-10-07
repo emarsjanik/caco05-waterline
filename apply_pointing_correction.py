@@ -131,12 +131,26 @@ def main():
     base = args.base or f"CACO05_{args.camera}_20250219_EO.yaml"
     tag = f"_{lo}_to_{hi}" if dates_given else ""
     base_corr = corrected(base, f"CACO05_{args.camera}_20250219{tag}_corr_EO.yaml", "default pointing")
+    # the refill window: the dates this run corrects that the span covers
+    w0 = max(date.fromisoformat(args.span[0]), date.fromisoformat(lo))
+    w1 = min(date.fromisoformat(args.span[1]), date.fromisoformat(hi))
+    ws, we = w0.isoformat(), w1.isoformat()
     is_gap = lambda r: (r["camera"] == args.camera and original(r["eo_file"]).startswith(
-        f"CACO05_{args.camera}_20250219") and r["first_date"] <= hi and r["last_date"] >= lo)
-    out = [r for r in out if not is_gap(r)]
+        f"CACO05_{args.camera}_20250219") and r["first_date"] <= we and r["last_date"] >= ws)
+    if w0 <= w1:
+        kept = []
+        for r in out:
+            if not is_gap(r):
+                kept.append(r)
+                continue
+            # only the part inside the window is refilled; the rest keeps its pointing
+            if r["first_date"] < ws:
+                kept.append(dict(r, last_date=(w0 - timedelta(days=1)).isoformat()))
+            if r["last_date"] > we:
+                kept.append(dict(r, first_date=(w1 + timedelta(days=1)).isoformat()))
+        out = kept
     cover = sorted((r["first_date"], r["last_date"]) for r in out if r["camera"] == args.camera)
-    d = max(date.fromisoformat(args.span[0]), date.fromisoformat(lo))
-    end = min(date.fromisoformat(args.span[1]), date.fromisoformat(hi))
+    d, end = w0, w1
     gaps, g0 = [], None
     while d <= end:
         iso = d.isoformat()
@@ -157,8 +171,12 @@ def main():
         w = csv.DictWriter(f, fieldnames=["camera", "first_date", "last_date", "eo_file"])
         w.writeheader()
         w.writerows(out)
-    print(f"\nwrote {sc}: every {args.camera} date in {max(lo, args.span[0])}..{min(hi, args.span[1])} "
-          f"now has a corrected pointing. Check a period with its own survey before relying on it.")
+    if w0 <= w1:
+        print(f"\nwrote {sc}: every {args.camera} date in {ws}..{we} now has a corrected pointing. "
+              f"Check a period with its own survey before relying on it.")
+    else:
+        print(f"\nwrote {sc}: listed {args.camera} periods overlapping {lo}..{hi} corrected; "
+              f"--span does not reach those dates, so no rows were added for unlisted days.")
     return 0
 
 

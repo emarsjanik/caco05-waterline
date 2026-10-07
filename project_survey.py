@@ -43,20 +43,19 @@ COLOURS = [(0, 255, 255), (255, 255, 0), (255, 0, 255), (0, 165, 255), (0, 255, 
 
 
 def contour_segments(grid, x0, y0, cell, levels, bbox):
-    """World-coordinate contour polylines {level: [array(n,2), ...]}, via matplotlib."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    """World-coordinate contour polylines {level: [array(n,2), ...]}, via matplotlib.
+    Uses a figure of its own, so it never draws on (or closes) the caller's."""
+    from matplotlib.figure import Figure
     xa, xb, ya, yb = bbox
     c0, c1 = max(int((xa - x0) / cell), 0), min(int((xb - x0) / cell), grid.shape[1])
     r0, r1 = max(int((y0 - yb) / cell), 0), min(int((y0 - ya) / cell), grid.shape[0])
     sub = grid[r0:r1, c0:c1]
+    if sub.shape[0] < 2 or sub.shape[1] < 2 or not np.isfinite(sub).any():
+        return {lv: [] for lv in sorted(levels)}     # survey does not reach here
     xs = x0 + (np.arange(c0, c1) + 0.5) * cell
     ys = y0 - (np.arange(r0, r1) + 0.5) * cell
-    cs = plt.contour(xs, ys, np.ma.masked_invalid(sub), levels=sorted(levels))
-    out = {lv: [s for s in segs if len(s) > 5] for lv, segs in zip(cs.levels, cs.allsegs)}
-    plt.close("all")
-    return out
+    cs = Figure().add_subplot(111).contour(xs, ys, np.ma.masked_invalid(sub), levels=sorted(levels))
+    return {lv: [s for s in segs if len(s) > 5] for lv, segs in zip(cs.levels, cs.allsegs)}
 
 
 def project_pieces(segs, io, eo):
