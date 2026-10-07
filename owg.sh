@@ -61,6 +61,11 @@ GAUGE_CSV="$BASE/archive/gauge_${TIDE_GAUGE}.csv"
 MODEL_C="$BASE/owg_models/owg_c2_H_current_C"
 MODEL_PATCH="$BASE/owg_models/owg_c2_H_patch"
 MODEL_V2="$BASE/owg_models/owg_c2_H_v2"
+# Composite models (composite_owg.py + train_owg_torch.py): snap, bright-dark and
+# timex stacked as R,G,B; two seeds averaged. 0.319 m on the 2025-02-15..03-01
+# holdback against 0.364 m for bright alone on the same frames and split.
+MODEL_COMPOSITE="$BASE/owg_models/owg_c2_H_composite"
+MODEL_COMPOSITE_2="$BASE/owg_models/owg_c2_H_composite_s2"
 OUT_DIR="$BASE/reports/owg"
 
 # Plots from other systems attached to the email (missing ones are noted,
@@ -173,6 +178,21 @@ if [ -f "$MODEL_V2.onnx" ]; then
         || { log "WARNING: v2 model failed"; errors="$errors v2"; }
 fi
 
+# Composite models: build each collection's snap/bright-dark/timex composite
+# and average the two seeds. Frames too blurred to see the waves (sharpness
+# below 25: spray, rain, a wet lens -- the storms) are measured but marked
+# "low sharpness (may read low)" and left out downstream. Runs once
+# owg_models/owg_c2_H_composite.onnx is installed; the second seed joins the
+# average when it is there too.
+if [ -f "$MODEL_COMPOSITE.onnx" ]; then
+    composite_models=(--model "$MODEL_COMPOSITE")
+    [ -f "$MODEL_COMPOSITE_2.onnx" ] && composite_models+=(--model "$MODEL_COMPOSITE_2")
+    run python3 "$BASE/owg_live.py" "${composite_models[@]}" --waves-csv "$WAVES_CSV" $REPROCESS \
+        --output "$BASE/archive/owg_c2_H_composite.csv" --plot "$BASE/owg_c2_H_composite_7day.png" \
+        --days "$DAYS" --also "C=$BASE/archive/owg_c2_H.csv" \
+        || { log "WARNING: composite model failed"; errors="$errors composite"; }
+fi
+
 # Wave period from the c2 timestacks (2 Hz, 10 min): needs the archived
 # ras.tiff stacks and the camera's .pix file.
 if ls "$BASE/archive/ras_c2/"*.ras.tiff >/dev/null 2>&1 && [ -f /home/argus_user/arguseyes/build/c2_timestack.pix ]; then
@@ -200,10 +220,13 @@ if $REPORT; then
         mail_args=(--email $RECIPIENTS)
         $DRY_RUN && mail_args+=(--dry-run)
     fi
+    extra_attach=()
+    [ -f "$BASE/owg_c2_H_composite_7day.png" ] && extra_attach=(--attach "$BASE/owg_c2_H_composite_7day.png")
     run python3 "$BASE/owg_report.py" --archive "$BASE/archive" --days "$DAYS" \
         --model-c "$MODEL_C" --model-patch "$MODEL_PATCH" --out-dir "$OUT_DIR" \
         --waves-csv "$WAVES_CSV" --gauge-csv "$GAUGE_CSV" --last-run "$STAMP" \
         --attach "$BASE/owg_c2_H_7day.png" --attach "$BASE/owg_c2_H_patch_7day.png" \
+        ${extra_attach[@]+"${extra_attach[@]}"} \
         --attach "$GPS_SETUP_PLOT" ${mail_args[@]+"${mail_args[@]}"}
     status=$?
     if [ "$status" -ge 100 ]; then
