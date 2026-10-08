@@ -10,7 +10,8 @@ at the same scale in training and in use.
 
 WHY. resample_owg_images.py redrew the photos into today's camera view
 with the horizon-fitted pointings, which before 24 Jan 2025 were ~22 deg
-off in pan: the cameras were re-aimed that day, after the Jan 2025 lidar
+off in pan (the cameras were ~5.7 m from the CACO04 position and turned
+~15 deg; calibration/calibration_history.csv): they were re-set that day, after the Jan 2025 lidar
 and before the 2025-02-19 calibration (fit_eo_to_survey.py). With the corrected
 pointing, c2 before 24 Jan 2025 saw only ~32% of today's view, so those
 redraws put sea from the wrong place in most of the frame; from 24 Jan the

@@ -22,9 +22,11 @@ refined on all inliers pooled over every pair.
 
 LIMITS. The two setups must share a view of FIXED features (dune,
 bluff, fences). A large turn on a narrow lens can leave only sand and
-sea in common, which change between dates: the 22 deg re-aim of c2 on
-24 Jan 2025 (37 deg wide lens) gave 1 consistent match of 375. Then
-draw a survey on the photos instead (project_survey.py).
+sea in common, which change between dates: the 24 Jan 2025 re-set of c2
+(turned ~15 deg on a 37 deg wide lens) gave 1 consistent match of 375.
+And the camera must not have MOVED: that re-set also moved it ~5.8 m
+(calibration/calibration_history.csv), which no rotation can describe.
+Then draw a survey on the photos instead (project_survey.py).
 
 CHECKS (printed). Inlier count and ray residual in pixels; and the
 HORIZON, independent of the matches: where the new EO puts the sea
