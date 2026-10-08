@@ -174,12 +174,25 @@ DEM_WINDOW_DAYS=7
 DEM_SERIES="$BASE/archive/dems"
 
 # Wave-setup correction (extract_elevation_contours.py --setup-coef): each
-# waterline's elevation becomes water level + C*sqrt(Hs*L0). Fit C with
-#   python3 dem_from_contours.py contour_points_ground.csv /tmp/fit --fit-setup --no-plot
-# on contours built WITHOUT the correction. It changes the DEM's absolute
-# level (typically by a few tenths of a metre), which the fit cannot check,
-# so it stays off ("") until confirmed against a survey or the runup data.
-SETUP_COEF=""
+# waterline's elevation becomes water level + C*sqrt(Hs*L0), Hs and Tp from
+# the wave record the contours carry (offshore_hs_m, offshore_tp_s). A timex
+# shows the water's edge where waves run up to, above still water, so
+# without it the DEM reads low in rough water.
+#
+# C = 0.037, confirmed two independent ways on 29 Sep - 5 Oct 2026:
+#  - against the 2026-09-29 RTK transects: the waterlines lying on them sat
+#    on beach 0.33 m higher than their still-water level; per frame
+#    C = -(line - RTK)/sqrt(Hs*L0) gives median 0.037, 90% 0.028-0.058
+#    (14 frames, 4 days, +0.8 to +1.3 m only: the RTK did not go lower);
+#  - internally, repeat crossings of a cell agree best at C = 0.03-0.04
+#    (dem_from_contours.py --fit-setup on uncorrected contours).
+# That is the Stockdon (2006) setup, 0.35*beta*sqrt(H0*L0), for a ~1:10
+# beach face. About +0.37 m at Hs 1 m, Tp 8 s. Refit (same command, on
+# contours built with SETUP_COEF="") after a low-tide survey, or if the
+# wave source (WAVE_BUOY / USE_MARCONI_WAVES) changes. Turning it on lifts
+# every DEM by that amount, so the first week's dem_change.py map shows a
+# uniform rise, which it flags as a likely calibration shift.
+SETUP_COEF="0.037"
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
