@@ -45,6 +45,15 @@ Writes dem_out_{dem,spread,count}.asc (and _source.asc with
 what the filters left out -- what the page needs and the grids do not
 hold) and the page dem_out_dem.png, drawn by dem_figure.py. To redraw
 the page from those files without rebuilding: python3 dem_figure.py dem_out
+
+THE PAGE IS ALWAYS THIS RUN'S. The old dem_out_dem.png is removed first
+(unless --no-plot); a window with too few cells, or no points at all,
+gets a short page saying so, with the dates and what the filters left
+out. Exit status: 0 built (page drawn; a short one if too few cells),
+4 no points in the window (short page drawn, no grids written), 3 grids
+written but the page could not be drawn (no PNG), 1 any other failure
+(no PNG). The email attaches the PNG by name, so a stale one would pass
+for current.
 """
 
 import sys
@@ -590,10 +599,43 @@ def main():
                          "still written; 'python3 dem_figure.py <stem>' draws the page later.")
     args = ap.parse_args()
 
+    # The page the daily email attaches. Removed before anything else, so
+    # no failure below -- no points, a crash, a page that cannot be drawn
+    # -- can leave last run's page beside this run's grids looking current.
+    # Every way through main() that is not --no-plot draws a new one.
+    page = Path(str(args.output_stem) + "_dem.png")
+    if not args.no_plot and page.exists():
+        page.unlink()
+
+    def no_points_page(message, stats=None):
+        """Nothing to grid: the short page says so, with the window and filters."""
+        if args.no_plot:
+            return
+        stats = stats or {}
+        info = {"last_days": args.last_days, "window_start": args.start_date,
+                "window_end": args.end_date, "camera": args.camera, "frames": {}, "days": 0,
+                "cell": args.cell, "min_points": args.min_points, "max_spread": args.max_spread,
+                "filters": {"max_hs": args.max_hs, "rough_frames": stats.get("rough_frames", 0),
+                            "excluded_frames": stats.get("excluded_frames", 0)}}
+        try:
+            import dem_figure
+            out = dem_figure.draw_message_page(
+                args.output_stem, None, info, dem_figure.STATION, message,
+                ["No DEM was built this run, so there is no map; the grids on disk, if any, "
+                 "are from an earlier run.",
+                 "Likely causes: the cameras, the detector or the water-level record were down "
+                 "for the window, or the build's filters left out every frame."],
+                cutoff=args.max_spread, min_points=args.min_points, cell=args.cell)
+            print(f"wrote {out}  (no points: short page)")
+        except Exception as exc:
+            print(f"ERROR: the short page was not drawn either: {exc!r}")
+
     if args.last_days:
         end = args.end_date or latest_date(args.contour_csv, args.camera)
         if end is None:
-            print("No georectified points in the file."); sys.exit(1)
+            print("No georectified points in the file.")
+            no_points_page("No waterline points in the file: nothing to map.")
+            sys.exit(4)
         from datetime import date, timedelta
         args.end_date = end
         args.start_date = (date.fromisoformat(end) - timedelta(days=args.last_days - 1)).isoformat()
@@ -607,7 +649,8 @@ def main():
 
     if len(E) == 0:
         print("No georectified points matched. Check --camera and the date range.")
-        sys.exit(1)
+        no_points_page("No waterline points in the window: nothing to map.", load_stats)
+        sys.exit(4)
 
     print("=" * 74)
     print("INTERTIDAL DEM")
@@ -823,13 +866,24 @@ def main():
         json.dump(page_info, f, indent=1)
     print(f"wrote {stem}_info.json   (dates, frames, filters: for the page)")
 
+    rc = 0
     if not args.no_plot:
+        # A page that cannot be drawn is a failure the cron must see (exit 3:
+        # grids written, page not), not a note: the email would otherwise
+        # attach whatever page was there before. dem_figure draws a short
+        # page itself when there are too few cells to map.
         try:
             import dem_figure
             out = dem_figure.draw_page(stem, info=page_info)
             print(f"wrote {out}")
         except Exception as exc:
-            print(f"(plot skipped: {exc})")
+            import traceback
+            traceback.print_exc()
+            print(f"ERROR: page NOT drawn ({exc!r}); the grids and {stem}_info.json are "
+                  f"written. No {page.name} this run. Redraw: python3 dem_figure.py {stem}")
+            if page.exists():
+                page.unlink()                    # a half-written page is not a page
+            rc = 3
 
     print()
     print("REMINDER: intertidal zone only, between the lowest and highest water")
@@ -837,6 +891,8 @@ def main():
     print("edge sits above still water by the wave setup, which grows with wave height,")
     print("but is given the still-water elevation -- so the DEM reads LOW where rough-")
     print("water frames land. Not corrected here; --max-hs leaves those frames out.")
+    if rc:
+        sys.exit(rc)
 
 
 if __name__ == "__main__":

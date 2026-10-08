@@ -67,12 +67,16 @@ GNSSR_SPLINE=/home/argus_user/GNSS/v4.1/products/refl_code/Files/usgs/usgs_splin
 CONTOURS="$BASE/contour_points_timex.csv"
 
 # Waterline consistency (waterline_consistency.py). In one image column
-# the waterline row must move monotonically with water elevation; lines,
-# or parts of lines, that the other lines from the same camera and nearby
-# days clearly contradict (by more than 0.75 m of elevation) are left out
-# of the maps, the ground points and the DEM. On 29 Sep - 5 Oct 2026 C1
-# drew +1 m lines seaward of -0.5 m lines on the right of its frame, and
-# the DEM's southern ~80 m (C1 only) came out blanked for spread.
+# the waterline row must move DOWN the photo as the water rises (nearer
+# the camera); lines, or parts of lines, that the other lines from the
+# same camera and nearby days clearly contradict (by more than 0.75 m of
+# elevation) are left out of the maps, the ground points and the DEM. On
+# 29 Sep - 5 Oct 2026 C1 drew +1 m lines seaward of -0.5 m lines on the
+# right of its frame, and the DEM's southern ~80 m (C1 only) came out
+# blanked for spread. Columns where the rows run AGAINST the water level
+# -- the detector wrong for most lines there, e.g. a search-envelope
+# floor above the high-tide waterline -- are named in a WARNING in this
+# log, and the lines there are judged against the lower-water lines.
 # The unfiltered file is kept as it is; the filtered copy is
 # CONTOURS_QC, the report of every line affected is CONSISTENCY_REPORT,
 # and waterline_consistency_<cam>.png shows the last week's rejections on
@@ -393,6 +397,9 @@ else
             if [ $qc_rc -eq 0 ] && [ -s "$CONTOURS_QC" ]; then
                 MAP_CONTOURS="$CONTOURS_QC"
                 log "waterline consistency: $(echo "$qc_out" | grep '^CONSISTENCY ' | tail -1 | cut -c13-)"
+                # e.g. rows running AGAINST the water level in a camera's columns
+                # (the detector wrong for most lines there): first line of each
+                echo "$qc_out" | grep '^WARNING' | while read -r l; do log "  $l"; done
             else
                 rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp"
                 log "WARNING: waterline consistency filter failed (exit $qc_rc) -- maps, ground points"
@@ -451,12 +458,21 @@ else
                 hs_arg=""
                 [ -n "$waves_arg" ] && [ -n "$DEM_MAX_HS" ] && hs_arg="--max-hs $DEM_MAX_HS"
                 [ -n "$DEM_MAX_DAY_OFFSET" ] && hs_arg="$hs_arg --max-day-offset $DEM_MAX_DAY_OFFSET"
+                # dem_from_contours.py exit: 0 built, 4 no points in the window (a
+                # short page says so), 3 grids written but NO page, 1 other
+                # failure. The old page is removed first, so the email never
+                # attaches a stale one.
                 python3 "$BASE/dem_from_contours.py" "$GROUND" "$DEM_STEM" $hs_arg \
                     --cell "$DEM_CELL" \
                     --min-points "$DEM_MIN_POINTS" \
                     --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1
-                if [ $? -eq 0 ]; then
+                dem_rc=$?
+                if [ $dem_rc -eq 0 ]; then
                     log "DEM written: $(basename "$DEM_STEM")_dem.asc (+ spread, count, png)"
+                elif [ $dem_rc -eq 3 ]; then
+                    log "WARNING: DEM grids written but its page was NOT drawn -- no $(basename "$DEM_STEM")_dem.png this run (see above)"
+                elif [ $dem_rc -eq 4 ]; then
+                    log "WARNING: DEM not built: no waterline points (its page says so; see above)"
                 else
                     log "WARNING: DEM build failed (see above)"
                 fi
@@ -468,10 +484,17 @@ else
                         --cell "$DEM_CELL" \
                         --min-points "$DEM_MIN_POINTS" \
                         --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1
-                    if [ $? -eq 0 ]; then
-                        log "window DEM written: $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_dem.asc (+ dated copy in $DEM_SERIES)"
+                    win_rc=$?
+                    if [ $win_rc -eq 0 ] || [ $win_rc -eq 3 ]; then
+                        if [ $win_rc -eq 0 ]; then
+                            log "window DEM written: $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_dem.asc (+ dated copy in $DEM_SERIES)"
+                        else
+                            log "WARNING: window DEM grids written but its page was NOT drawn -- no $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_dem.png this run (see above)"
+                        fi
                         python3 "$BASE/dem_change.py" --series "$DEM_SERIES" --days "$DEM_WINDOW_DAYS" >> "$LOG" 2>&1 \
                             || log "WARNING: beach-change map failed (see above)"
+                    elif [ $win_rc -eq 4 ]; then
+                        log "WARNING: window DEM not built: no waterline points in the last ${DEM_WINDOW_DAYS} days (its page says so; see above)"
                     else
                         log "WARNING: window DEM build failed (see above)"
                     fi

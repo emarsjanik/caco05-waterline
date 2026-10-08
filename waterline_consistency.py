@@ -22,12 +22,28 @@ the existing filters catches this: they judge each line on its own
 and a wrong line can be perfectly smooth and confident.
 
 THE PHYSICAL RULE: at a given moment the beach has one profile, and
-the waterline at a higher water level lies further LANDWARD. In one
-image column, the detected row is therefore a MONOTONE function of
-water elevation. Which way it runs (row rising or falling with the
-tide) depends on how that column cuts across the beach, so it is
-found from the data, per column. A line that breaks the order by a
-lot cannot be right, whatever the image looked like.
+the waterline at a higher water level lies further LANDWARD -- nearer
+the cameras on the bluff, so LOWER in the photo. In one image column the
+detected row therefore RISES with water elevation (ROW_SIGN; checked
+with the calibration for every column of c1 and c2). A line that breaks
+the order by a lot cannot be right, whatever the image looked like.
+
+The direction used to be read from the data in each column. That fails
+exactly where it matters most: where the detector is wrong for MOST of
+a column's lines in the same way, the wrong lines set the direction and
+become the reference. A review (Oct 2026) projected the 29 Sep 2026
+RTK checkshots into c1: on its right half +1.17 m lands ~33 px below
+the floor of the detector's search envelope, so high-water lines there
+may have no right row to go to and land seaward, in every high-tide
+frame. Synthetic test on the RTK-surveyed beach, every c1 line that
+leaves the search envelope redrawn seaward: the data-derived direction
+caught 41% of the wrong points (28 of 136 lines); the physical
+direction with the bottom-up pass below, 98% (132). In the station's
+own 29 Sep - 5 Oct contours it has not gone that far -- rows still rise
+with the water in every c1 column, with a quarter to a third of the
+high-tide lines seaward of the low-tide ones -- and the filter drops
+about what it did before (22 lines and 18 trimmed in c1, against 21
+and 17). Physics does not take a vote either way.
 
 HOW, per camera:
   1. Column bins. Each line is reduced to one row per 32-px column bin
@@ -42,7 +58,23 @@ HOW, per camera:
      single day misses; the weighting makes the lines nearest in time
      the reference, so after real beach change the new beach is
      compared with itself rather than with the old one.
-  3. Fit. Row as a monotone function of elevation, by weighted
+  2b. Bottom-up, where the order is not clear (rank correlation of row
+     and elevation below --sweep-corr 0.9): the lines are judged in
+     layers of rising water level (0.25 m), each layer only against
+     the lines at LOWER water already kept, with the fit and residual
+     of steps 3-4. A line can fail here only by sitting SEAWARD of
+     where lower water put the waterline -- so where the detector got
+     most HIGH-tide lines wrong, the low-tide lines still judge them,
+     however many they are. A beach that eroded moves the higher lines
+     landward, past the end of the lower lines' fit, where only a
+     bound is known: they pass. The lines this keeps seed step 3.
+     A bin whose rank correlation is at or below -0.2 (--reversed-corr)
+     is REVERSED: rows run AGAINST the water level, which no beach
+     does. It is counted, named in a WARNING with its camera and pixel
+     columns, and marked on the diagnostic plot; its lines are judged
+     as above (and, if even the kept lines show no clear order, by the
+     bottom-up pass alone) -- never kept silently.
+  3. Fit. Row as a monotone (rising) function of elevation, by weighted
      pool-adjacent-violators with the weighted MEDIAN as each block's
      value (isotonic L1 regression): a few wrong lines among many
      cannot drag the fit the way a mean would. Then the lines that
@@ -125,9 +157,21 @@ THRESHOLDS, and why:
       confirm itself) is not judged either.
   --min-z-range 0.5 m and --min-rank-corr 0.5. The relation must be
       clear in the data over a range of elevations: rank correlation of
-      row and elevation at least 0.5 among the lines the fit keeps (the
-      wrong lines would otherwise hide the relation in exactly the
-      columns they spoil); otherwise the column is not judged.
+      row and elevation (in the physical direction) at least 0.5 among
+      the lines the fit keeps -- the wrong lines would otherwise hide
+      the relation in exactly the columns they spoil; otherwise the
+      column is not judged ('unclear').
+  --sweep-corr 0.9, --reversed-corr 0.2, --layer-m 0.25. Honest lines
+      in a column are ordered: rank correlation 0.93-0.99 in c1 on the
+      synthetic RTK-surveyed beach with 1.6 px detection scatter, 0.85-
+      0.9 in a few of c2's far-field bins and in the week of a storm
+      cut. Below 0.9 the bottom-up pass runs first (~15 more fits a
+      bin). The station's real lines are far less tidy -- 0.4-0.6 per
+      column over 29 Sep - 5 Oct 2026 -- so there it runs in ~90% of the
+      bins, and the filter takes ~1.4x as long (9 s for that week's
+      390,000 points). At -0.2 the order is reversed, not noisy. 0.25 m
+      layers keep each line within a quarter metre of the lower lines
+      that judge it, well inside the 0.75 m threshold.
   Too little data, at any of these steps, means KEEP. The filter only
   removes what the other lines clearly contradict.
 
@@ -155,14 +199,20 @@ OUTPUTS:
              elevation, points in the line and dropped, bins judged and
              failed, columns dropped, median and largest residual (m),
              threshold (m), action (frame / segments / NOT APPLIED),
-             reason.
+             reason, and how many of its failing bins were REVERSED.
   --plot     <stem>_<camera>.png: the last --plot-days of lines on a
              photo, kept lines thin, dropped parts thick in their
              elevation colour (dashed = whole line dropped), numbered
-             to a table; plus row-vs-elevation for the column bin with
-             most rejections, showing the monotone fit they broke.
+             to a table, and a red bar over columns that were REVERSED;
+             plus row-vs-elevation for the column bin with most
+             rejections, showing the monotone fit they broke.
   The last stdout line starts "CONSISTENCY" and gives the counts per
-  camera, for the cron log.
+  camera, for the cron log: lines dropped and trimmed, points dropped,
+  and the COLUMN BINS (32 px x day) judged, not judged ('too few lines',
+  'unclear': everything in them kept) and REVERSED. Counting lines would
+  hide a column nobody could judge: a line counts as judged if any of
+  its ~70 bins was. A WARNING line before it names the camera and pixel
+  columns of any REVERSED bins.
 
 Usage:
     python3 waterline_consistency.py contour_points_timex.csv \\
@@ -184,6 +234,17 @@ import numpy as np
 csv.field_size_limit(10 ** 7)
 
 DAY = 86400.0
+
+# Which way the detected row moves as the water rises, in every column of
+# every camera here: DOWN the image (row increases). Higher water puts the
+# waterline further landward, nearer the cameras on the bluff, and nearer
+# ground is lower in a photo taken looking down at it. Checked with the
+# calibration (IO 20240801, EO 20251113-CV) on the beach surveyed on 29 Sep
+# 2026: row increases with water elevation in 100% of the column steps for
+# c1 and c2 alike (>= 34 px/m in c1, >= 4.7 px/m in c2's far field). It was
+# once taken from the data in each column, but where most lines are wrong
+# the data say the opposite, and the wrong lines became the reference.
+ROW_SIGN = 1.0
 
 
 # ---------------------------------------------------------------------
@@ -309,12 +370,13 @@ def rank_corr(a, b):
 
 def fit_column(z, y, w):
     """
-    Monotone fit of row (y) against elevation (z), weights w.
-    Returns (sign, knot_rows, knot_elevations) with knot rows strictly
-    increasing after multiplying by sign, or None if there is only one
-    block (no relation to invert).
+    Monotone fit of row (y) against elevation (z), weights w, in the
+    PHYSICAL direction: row rises with elevation (ROW_SIGN). Returns
+    (sign, knot_rows, knot_elevations) with knot rows strictly increasing
+    after multiplying by sign, or None if there is only one block (no
+    relation to invert).
     """
-    sgn = 1.0 if rank_corr(z, y) >= 0 else -1.0
+    sgn = ROW_SIGN
     order = np.lexsort((sgn * y, z))       # ties in z: no false violation
     zs, ys, ws = z[order], sgn * y[order], w[order]
     starts, ends, vals = isotonic_l1(ys, ws)
@@ -366,48 +428,124 @@ def residuals(fit, z, y, flatten):
     return r
 
 
+def n_eff(w):
+    """Effective number of lines, (sum w)^2 / sum w^2."""
+    return float(w.sum() ** 2 / (w * w).sum()) if w.size else 0.0
+
+
+def threshold(r, w, p):
+    """max(--max-residual, --noise-k x robust scatter (1.4826 x MAD) of r)."""
+    med = weighted_median(r, w)
+    sigma = 1.4826 * weighted_median(np.abs(r - med), w)
+    return max(p.max_residual, p.noise_k * sigma)
+
+
+def bottom_up(z, y, w, p):
+    """
+    Judge the lines in order of water level, each layer (--layer-m, 0.25 m)
+    only against the lines at LOWER water already kept: a line must not
+    sit seaward of where lower water put the waterline. Returns the keep
+    mask and each judged line's residual (m) and threshold (NaN where a
+    layer had too little below it to be judged: kept).
+
+    WHY: the two-sided fit takes the majority of the lines at each water
+    level as the reference. Where the detector is wrong for MOST of the
+    high-tide lines in a column -- the review's model of c1's right half,
+    where the search envelope's floor may sit above the high-tide
+    waterline, so every line above ~+0.8 m is put somewhere seaward of
+    it -- the majority is the error, and it became the reference
+    (reviewer's synthetic test, Oct 2026: 0 of ~90 wrong lines failed in
+    c1's column bins 64-72). The lines at
+    lower water are not affected, and physics says which way the order
+    must run, so they can judge the ones above them however many those
+    are. One-sided by construction: a line can only fail here by sitting
+    SEAWARD of lower water (residual > 0). A line landward of every lower
+    line is past the end of their fit, where only a bound is known, and
+    passes -- so a beach that eroded (higher lines moved landward) is
+    never rejected by this pass; one that accreted by less than the
+    threshold is not either.
+    """
+    n = z.size
+    keep = np.ones(n, bool)
+    r = np.full(n, np.nan)
+    thr = np.full(n, np.nan)
+    layer = np.floor((z - z.min()) / p.layer_m).astype(int)
+    for L in np.unique(layer)[1:]:
+        ref = keep & (layer < L)
+        cur = layer == L
+        if ref.sum() < 2 or n_eff(w[ref]) < p.min_frames \
+                or z[ref].max() - z[ref].min() < p.min_z_range:
+            continue                                 # too little below to judge: keep
+        fit = fit_column(z[ref], y[ref], w[ref])
+        if fit is None:
+            continue
+        rr = residuals(fit, z, y, p.extrapolate_flatten)
+        t = threshold(rr[ref], w[ref], p)
+        r[cur], thr[cur] = rr[cur], t
+        keep[cur] = rr[cur] <= t
+    return keep, r, thr
+
+
 def judge_bin(z, y, w, p):
     """
-    Fit, set aside the lines that fail, refit without them, and judge every
-    line against the refit (one robust iteration). Without the refit, wrong
-    lines at the very top or bottom of the elevation range -- where a block
-    has few members -- can carry the end of the fit with them and make the
-    right lines next to them look wrong.
+    Judge one column bin's lines (rows y, water elevations z, weights w).
 
-    The column is judged only if row clearly follows elevation: rank
-    correlation at least --min-rank-corr among the lines the refit keeps
-    (and at least 0.2 among all, for the direction). Measured on all
-    lines, the wrong lines themselves pull it down: on the synthetic test
-    the columns where 30% of high-tide lines were wrong fell to 0.47 and
-    went unjudged -- exactly the columns that needed it.
+    1. Order. Rank correlation of row and elevation, in the physical
+       direction. At or below -(--reversed-corr) the bin is REVERSED:
+       rows run AGAINST the water level, which no beach does -- most of
+       its lines are wrong. Below --sweep-corr the two-sided fit cannot be
+       trusted to pick the reference, so step 2 runs first.
+    2. Bottom-up (bottom_up()): each line against the lines at lower water
+       already kept. Its keep set seeds step 3.
+    3. Fit the kept lines, judge every line two-sided against the fit
+       (residuals()), set aside the ones that fail, refit without them and
+       judge every line against that (one robust iteration). Without the
+       refit, wrong lines at the very top or bottom of the elevation range
+       -- where a block has few members -- can carry the end of the fit
+       with them and make the right lines next to them look wrong.
+    4. The bin counts as judged if the kept lines show row rising with
+       elevation (rank correlation >= --min-rank-corr). A REVERSED bin
+       that does not get there is still judged by step 2 alone: the lines
+       that sit seaward of lower water are dropped, the rest kept -- never
+       all kept silently.
 
-    Returns (fit, residuals, threshold) or None when the column cannot be
-    judged.
+    Returns (fit, residuals, threshold, reversed, rank_corr), or None when
+    the bin cannot be judged (everything in it is kept). `threshold` is a
+    scalar or, for a REVERSED bin judged by step 2 alone, per line.
     """
-    if abs(rank_corr(z, y)) < 0.2:
-        return None
-    fit = fit_column(z, y, w)
-    if fit is None:
-        return None
-
-    def threshold(r, ww):
-        med = weighted_median(r, ww)
-        sigma = 1.4826 * weighted_median(np.abs(r - med), ww)
-        return max(p.max_residual, p.noise_k * sigma)
-
-    r = residuals(fit, z, y, p.extrapolate_flatten)
-    thr = threshold(r, w)
-    keep = np.abs(r) <= thr
-    if not keep.all() and keep.sum() >= p.min_frames \
-            and w[keep].sum() ** 2 / (w[keep] ** 2).sum() >= p.min_frames:
-        fit2 = fit_column(z[keep], y[keep], w[keep])
-        if fit2 is not None:
-            fit = fit2
+    rc = rank_corr(z, ROW_SIGN * y)
+    rev = rc <= -p.reversed_corr
+    seed = np.ones(z.size, bool)
+    bu = None
+    if rc < p.sweep_corr:
+        bu = bottom_up(z, y, w, p)
+        seed = bu[0]
+    out = None
+    if seed.sum() >= 2:
+        fit = fit_column(z[seed], y[seed], w[seed])
+        if fit is not None:
             r = residuals(fit, z, y, p.extrapolate_flatten)
-            thr = threshold(r[keep], w[keep])
-    if abs(rank_corr(z[keep], y[keep])) < p.min_rank_corr:
-        return None
-    return fit, r, thr
+            thr = threshold(r[seed], w[seed], p)
+            keep = np.abs(r) <= thr
+            if not keep.all() and keep.sum() >= p.min_frames and n_eff(w[keep]) >= p.min_frames:
+                fit2 = fit_column(z[keep], y[keep], w[keep])
+                if fit2 is not None:
+                    fit = fit2
+                    r = residuals(fit, z, y, p.extrapolate_flatten)
+                    thr = threshold(r[keep], w[keep], p)
+                    keep = np.abs(r) <= thr
+            if keep.sum() >= 2 and rank_corr(z[keep], ROW_SIGN * y[keep]) >= p.min_rank_corr:
+                out = (fit, r, thr, rev, rc)
+    if out is None and rev and bu is not None and np.isfinite(bu[1]).any():
+        keep_bu, r_bu, thr_bu = bu
+        judged = np.isfinite(r_bu)
+        # lines the bottom-up pass could not reach (the lowest layers) pass
+        r_out = np.where(judged, r_bu, 0.0)
+        t_out = np.where(judged, thr_bu, np.inf)
+        ref = keep_bu
+        fit = fit_column(z[ref], y[ref], w[ref]) if ref.sum() >= 2 else None
+        out = (fit, r_out, t_out, rev, rc)
+    return out
 
 
 # ---------------------------------------------------------------------
@@ -443,8 +581,13 @@ def bin_rows(frame_local, col, row, n_frames, bin_px):
 
 def judge_camera(epochs, elevs, frame_local, col, row, n_frames, p):
     """
-    Returns per frame x bin: residual (m), threshold (m), the bin rows, and
-    the window fits {(day, bin): (fit, frames, weights, threshold)}.
+    Returns per frame x bin: residual (m), threshold (m), the bin rows, the
+    window fits {(day, bin): (fit, frames, weights, threshold)}, and the
+    status of every (day, bin) the day's lines reach:
+    {(day, bin): (status, rank_corr)}, status one of 'judged',
+    'reversed' (judged, rows ran against the water level), 'few' (too few
+    lines or too little elevation range: kept), 'unclear' (no clear
+    relation even after setting the out-of-order lines aside: kept).
     """
     R, n_bins = bin_rows(frame_local, col, row, n_frames, p.column_bin)
     resid = np.full((n_frames, n_bins), np.nan)
@@ -452,6 +595,7 @@ def judge_camera(epochs, elevs, frame_local, col, row, n_frames, p):
     days = np.floor(epochs / DAY)
     good_frame = np.isfinite(epochs) & np.isfinite(elevs)
     fits = {}
+    status = {}
     for d in np.unique(days[good_frame]):
         judged = np.where(good_frame & (days == d))[0]
         window = np.where(good_frame & (np.abs(days - d) <= p.window_days))[0]
@@ -461,23 +605,25 @@ def judge_camera(epochs, elevs, frame_local, col, row, n_frames, p):
         for b in bins:
             have = np.isfinite(R[window, b])
             idx = window[have]
-            if idx.size < p.min_frames:
-                continue
             w = w_all[have]
-            if w.sum() ** 2 / (w * w).sum() < p.min_frames:
-                continue
             z, y = elevs[idx], R[idx, b]
-            if z.max() - z.min() < p.min_z_range:
+            if idx.size < p.min_frames or n_eff(w) < p.min_frames \
+                    or z.max() - z.min() < p.min_z_range:
+                status[(d, b)] = ("few", np.nan)
                 continue
             judged_bin = judge_bin(z, y, w, p)
             if judged_bin is None:
+                status[(d, b)] = ("unclear", rank_corr(z, ROW_SIGN * y))
                 continue
-            fit, r_all, thr = judged_bin
+            fit, r_all, thr, rev, rc = judged_bin
+            status[(d, b)] = ("reversed" if rev else "judged", rc)
             mine = np.isin(idx, judged)
             resid[idx[mine], b] = r_all[mine]
-            thresh[idx[mine], b] = thr
-            fits[(d, b)] = (fit, idx, w, thr)
-    return resid, thresh, R, fits
+            thresh[idx[mine], b] = thr[mine] if np.ndim(thr) else thr
+            if fit is not None:
+                t_pts = float(np.median(thr[np.isfinite(thr)])) if np.ndim(thr) else thr
+                fits[(d, b)] = (fit, idx, w, t_pts)
+    return resid, thresh, R, fits, status
 
 
 def decide(resid, thresh, p):
@@ -529,6 +675,60 @@ def point_drops(fl, col, row, fail, whole, days, elevs, fits, p):
     return drop
 
 
+def _col_ranges(bins, bin_px):
+    """Consecutive bins as 'a-b' pixel-column ranges."""
+    bins = sorted(set(int(b) for b in bins))
+    out, start = [], None
+    for i, b in enumerate(bins):
+        if start is None:
+            start = b
+        if i == len(bins) - 1 or bins[i + 1] != b + 1:
+            out.append((start * bin_px, (b + 1) * bin_px - 1))
+            start = None
+    return out
+
+
+def bin_summary(cam, status, p):
+    """
+    Counts of column bins x days by status, for the CONSISTENCY line, and
+    WARNING lines for REVERSED bins: rows running against the water level
+    there mean the detector is wrong for most lines, which is for a person
+    to look at (search envelope? camera moved?) even though the filter
+    drops what it can.
+    """
+    kinds = [v[0] for v in status.values()]
+    n = len(kinds)
+    n_j = sum(k in ("judged", "reversed") for k in kinds)
+    n_rev = kinds.count("reversed")
+    msg = (f"column bins judged {n_j:,} of {n:,} ({p.column_bin} px x day; "
+           f"{kinds.count('few'):,} too few lines, {kinds.count('unclear'):,} unclear: kept)")
+    if n_rev:
+        msg += f", {n_rev:,} REVERSED"
+    warn = []
+    rev = [(d, b, rc) for (d, b), (k, rc) in status.items() if k == "reversed"]
+    if rev:
+        days_all = sorted({d for (d, _) in status})
+        days_rev = sorted({d for d, _, _ in rev})
+        last = datetime.fromtimestamp(days_rev[-1] * DAY, tz=timezone.utc).date()
+        first = datetime.fromtimestamp(days_rev[0] * DAY, tz=timezone.utc).date()
+        rcs = np.array([rc for _, _, rc in rev])
+        ranges = ", ".join(f"{a}-{b}" for a, b in _col_ranges([b for _, b, _ in rev], p.column_bin))
+        recent = [b for d, b, _ in rev if d > days_all[-1] - p.plot_days]
+        warn.append(f"WARNING: camera {cam}: waterline rows run AGAINST the water level in pixel "
+                    f"columns {ranges}")
+        warn.append(f"         ({len(rev)} column bin-days on {len(days_rev)} of {len(days_all)} days, "
+                    f"{first} to {last}; rank correlation {rcs.min():+.2f} to {rcs.max():+.2f}).")
+        if recent:
+            warn.append("         In the last {} days: columns {}.".format(
+                p.plot_days, ", ".join(f"{a}-{b}" for a, b in _col_ranges(recent, p.column_bin))))
+        warn.append("         Higher water must put the line LOWER in the photo (nearer the camera);")
+        warn.append("         here the high-tide lines sit seaward of the low-tide ones, so most of")
+        warn.append("         them are wrong -- the detector cannot reach the real line (search")
+        warn.append("         envelope floor above the high-tide waterline?). Lines seaward of")
+        warn.append("         lower-water lines there are dropped; look at the diagnostic plot.")
+    return msg, warn
+
+
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
@@ -560,8 +760,11 @@ def run(args):
         fl = local[data["frame"][pts]]
         col, row = data["col"][pts], data["row"][pts]
         epochs, elevs = data["epochs"][frames], data["elevs"][frames]
-        resid, thresh, R, fits = judge_camera(epochs, elevs, fl, col, row, frames.size, args)
+        resid, thresh, R, fits, status = judge_camera(epochs, elevs, fl, col, row, frames.size, args)
         fail, whole, n_judged, n_fail = decide(resid, thresh, args)
+        bins_msg, warn = bin_summary(cam, status, args)
+        for line in warn:
+            print(line)
 
         drop = point_drops(fl, col, row, fail, whole, np.floor(epochs / DAY), elevs, fits, args)
         n_cam_pts = pts.size
@@ -577,7 +780,10 @@ def run(args):
         cmin = np.full(frames.size, np.inf); cmax = np.full(frames.size, -np.inf)
         dc = drop & np.isfinite(col)
         np.minimum.at(cmin, fl[dc], col[dc]); np.maximum.at(cmax, fl[dc], col[dc])
+        fday = np.floor(epochs / DAY)
         for f in affected:
+            n_rev = int(sum(status.get((fday[f], b), ("",))[0] == "reversed"
+                            for b in np.flatnonzero(fail[f])))
             rr = resid[f][fail[f]] if fail[f].any() else resid[f][np.isfinite(resid[f])]
             med = float(np.median(rr)) if rr.size else float("nan")
             worst = float(rr[np.argmax(np.abs(rr))]) if rr.size else float("nan")
@@ -594,6 +800,9 @@ def run(args):
                 reason = (f"out of order in {n_fail[f]} of {n_judged[f]} judged column bins: the line "
                           f"sits where the other lines put water {abs(med):.2f} m {side} "
                           f"({where} of its level; threshold {thr:.2f} m)")
+            if n_rev:
+                reason += (f"; {n_rev} of the failing bins REVERSED (rows run against the water "
+                           f"level there: judged against the lower-water lines only)")
             if not applied:
                 action = "NOT APPLIED"
             report.append(dict(
@@ -604,16 +813,15 @@ def run(args):
                                   else "tide_elevation_navd88"),
                 action=action, points_in_frame=int(pts_per_frame[f]),
                 points_dropped=int(drop_per_frame[f]),
-                bins_judged=int(n_judged[f]), bins_failed=int(n_fail[f]),
+                bins_judged=int(n_judged[f]), bins_failed=int(n_fail[f]), bins_reversed=n_rev,
                 pixel_column_from=round(float(cmin[f]), 1) if np.isfinite(cmin[f]) else "",
                 pixel_column_to=round(float(cmax[f]), 1) if np.isfinite(cmax[f]) else "",
                 median_residual_m=round(med, 3), max_residual_m=round(worst, 3),
                 threshold_m=round(thr, 3) if np.isfinite(thr) else "",
                 reason=reason))
-        judged_lines = int((n_judged > 0).sum())
         msg = (f"{cam}: {n_whole} line(s) dropped, {affected.size - n_whole} trimmed, "
                f"{n_drop:,} of {n_cam_pts:,} points ({100.0 * n_drop / max(n_cam_pts, 1):.1f}%); "
-               f"{judged_lines} of {frames.size} lines judged")
+               f"{bins_msg}")
         if not applied:
             msg = (f"{cam}: NOT APPLIED -- would drop {n_drop:,} of {n_cam_pts:,} points "
                    f"(> {args.max_drop_fraction:.0%}), passed through unfiltered")
@@ -625,7 +833,7 @@ def run(args):
         summary.append(msg)
         plot_info[cam] = dict(frames=frames, fl=fl, col=col, row=row, drop=drop, whole=whole,
                               resid=resid, thresh=thresh, fail=fail, R=R, fits=fits,
-                              epochs=epochs, elevs=elevs, applied=applied)
+                              status=status, epochs=epochs, elevs=elevs, applied=applied)
     return data, keep, report, summary, plot_info
 
 
@@ -649,7 +857,7 @@ def write_filtered(src, dst, keep):
 
 REPORT_FIELDS = ["source_file", "camera", "capture_time_utc", "elevation_navd88", "elevation_column",
                  "action", "points_in_frame", "points_dropped", "bins_judged", "bins_failed",
-                 "pixel_column_from", "pixel_column_to", "median_residual_m", "max_residual_m",
+                 "bins_reversed", "pixel_column_from", "pixel_column_to", "median_residual_m", "max_residual_m",
                  "threshold_m", "reason"]
 
 
@@ -768,11 +976,25 @@ def plot_camera(cam, info, data, report, args, out_png):
                 ax.plot([lx, x], [ly, y], color="white", lw=0.5, alpha=0.8)
                 ax.text(lx, ly, str(n + 1), fontsize=7.5, fontweight="bold", ha="center", va="center",
                         bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="0.3", lw=0.4, alpha=0.9))
+    # Column bins whose rows ran AGAINST the water level in the window: a
+    # red bar along the top of the photo, so where the detector was wrong
+    # for most lines is visible even where the dropped lines hide it.
+    rev = [(d, b) for (d, b), (k, _) in info.get("status", {}).items()
+           if k == "reversed" and last_day - args.plot_days < d <= last_day]
+    rev_note = ""
+    if rev:
+        n_days = len({d for d, _ in rev})
+        for a, b in _col_ranges([b for _, b in rev], args.column_bin):
+            ax.axvspan(a, b + 1, ymin=0.965, ymax=1.0, color="red", alpha=0.75, lw=0)
+            ax.text((a + b) / 2, 0.012 * height, "REVERSED", color="white", fontsize=7.5,
+                    fontweight="bold", ha="center", va="top")
+        rev_note = (f"\nred bar: columns where rows ran AGAINST the water level on {n_days} "
+                    f"day(s) -- most lines there wrong (search envelope?)")
     ax.set_xlim(0, width); ax.set_ylim(height, 0); ax.axis("off")
     status = "" if info["applied"] else "   [NOT APPLIED: would drop too much, see log]"
     ax.set_title(f"{cam.upper()}  {first} to {last}: {len(listed)} line(s) with parts dropped as out of "
-                 f"order (thick; dashed = whole line){status}\nthin white = kept lines, {bg_note}",
-                 fontsize=10)
+                 f"order (thick; dashed = whole line){status}\nthin white = kept lines, {bg_note}"
+                 f"{rev_note}", fontsize=10)
     sm = matplotlib.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
     cax = fig.add_axes([0.03, 0.035, 0.25, 0.015])
     cb = fig.colorbar(sm, cax=cax, orientation="horizontal")
@@ -797,8 +1019,11 @@ def plot_camera(cam, info, data, report, args, out_png):
             sgn, ky, kz = fit
             ax2.plot(kz, sgn * ky, "-", color="tab:blue", lw=1.5, label="monotone fit")
             dd = datetime.fromtimestamp(day * DAY, tz=timezone.utc).date()
+            kind, rc = info.get("status", {}).get((day, b), ("", np.nan))
             ax2.set_title(f"columns {b * args.column_bin}-{(b + 1) * args.column_bin - 1} px: the fit "
-                          f"that judged {dd} (window +/-{args.window_days:g} d)", fontsize=9)
+                          f"that judged {dd} (window +/-{args.window_days:g} d)"
+                          + (f"\nREVERSED: rank correlation {rc:+.2f}, judged against lower water"
+                             if kind == "reversed" else ""), fontsize=9)
             ax2.invert_yaxis()
             ax2.legend(fontsize=7, loc="best")
     else:
@@ -828,11 +1053,168 @@ def plot_camera(cam, info, data, report, args, out_png):
     plt.close(fig)
 
 
-def main():
+# ---------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------
+
+def self_test(cal_dir, keep_dir=None):
+    """
+    python3 waterline_consistency.py --self-test
+
+    Synthetic waterlines through the station's own calibration
+    (CACO05_<cam>_20240801_IO.yaml + _20251113_EO-CV.yaml), so it checks
+    this filter against the cameras it runs on:
+      1. PHYSICS: on a plane beach with a berm, alongshore undulation and
+         a 0.4 m erosion of the upper beach, the row rises with water
+         elevation in every column of c1 and c2 (ROW_SIGN).
+      2. SYSTEMATIC ERROR, the review's model of the 29 Sep - 5 Oct 2026
+         failure: 8 days of 30-min frames, M2 tide; on c1 EVERY line
+         above +0.8 m is redrawn from column 1400 on along the -0.4 m
+         contour (seaward of the low-tide lines, inside the search band),
+         as a search-envelope floor above the high-tide waterline would
+         force. At least 90% of those points must be dropped, and c1
+         columns >= 1400 reported REVERSED.
+      3. REAL CHANGE: the 0.4 m erosion of the upper beach on day 4 must
+         not be rejected -- the honest lines (all of c2, c1 below +0.8 m)
+         lose less than 0.5% of their points.
+    Returns 0 if all pass, 1 otherwise.
+    """
+    import tempfile
+    from georectify import load_intrinsics, load_extrinsics, pixel_to_ground
+    from view_reproject import ground_to_pixel
+
+    rng = np.random.default_rng(5)
+    W, H = 2448, 2048
+    crop = {"c1": (532, 1761), "c2": (61, 1024)}
+    io = {c: load_intrinsics(Path(cal_dir) / f"CACO05_{c}_20240801_IO.yaml") for c in ("c1", "c2")}
+    eo = {c: load_extrinsics(Path(cal_dir) / f"CACO05_{c}_20251113_EO-CV.yaml") for c in ("c1", "c2")}
+    # Shore frame of the surveyed beach: alongshore bearing 345.8 deg (N-NW),
+    # seaward 75.8 deg, origin on the wrack line in front of the cameras.
+    r0 = np.array([420107.0, 4638322.0])
+    t_al = np.array([np.sin(np.radians(345.8)), np.cos(np.radians(345.8))])
+    t_cs = np.array([np.sin(np.radians(75.8)), np.cos(np.radians(75.8))])
+    t0 = datetime(2026, 9, 28, tzinfo=timezone.utc).timestamp()
+    t_change = t0 + 3.6 * DAY
+
+    def contour_s(h, a, t):
+        """Cross-shore position (m seaward of the wrack line) of the h contour:
+        berm +3.8 m to s = 12, foreshore 1:8 to 0 m, terrace 1:30 below; the
+        upper beach (above ~+0.3 m) cut 0.4 m after t_change, which moves
+        those contours landward by 0.4 m / slope."""
+        if h >= 0:
+            s = 12 + (3.75 - h) / 0.125
+        else:
+            s = 12 + 3.75 / 0.125 - h * 30
+        cut = 0.4 * np.clip((h - 0.3) / 0.7, 0, 1) * (t >= t_change)
+        return s - cut / 0.125 + 5.0 * np.sin(2 * np.pi * a / 150.0)
+
+    a_grid = np.arange(-250.0, 350.0, 0.5)
+    cols = np.arange(0, W, 4)
+
+    def line(cam, h, t):
+        s = contour_s(h, a_grid, t)
+        E = r0[0] + a_grid * t_al[0] + s * t_cs[0]
+        N = r0[1] + a_grid * t_al[1] + s * t_cs[1]
+        u, v, ok = ground_to_pixel(E, N, np.full(E.size, h), io[cam], eo[cam])
+        ok &= (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        Eb, Nb = pixel_to_ground(np.where(ok, u, W / 2), np.where(ok, v, H / 2), h, io[cam], eo[cam])
+        ok &= np.hypot(Eb - E, Nb - N) < 0.5
+        if ok.sum() < 2:
+            return np.full(cols.size, np.nan)
+        o = np.argsort(u[ok])
+        return np.interp(cols, u[ok][o], v[ok][o], left=np.nan, right=np.nan)
+
+    failures = []
+    # 1. physics
+    for cam in ("c1", "c2"):
+        for t in (t0, t_change + DAY):
+            rows = np.array([line(cam, h, t) for h in np.arange(-1.4, 2.01, 0.2)])
+            d = np.diff(rows, axis=0)
+            d = d[np.isfinite(d)]
+            share = float(np.mean(d * ROW_SIGN > 0)) if d.size else 0.0
+            print(f"  physics {cam}: row rises with water level in {share:.2%} of {d.size} column steps")
+            if share < 0.999:
+                failures.append(f"physics {cam}: only {share:.1%} of column steps rise")
+
+    # 2-3. frames
+    header = ["source_file", "camera", "capture_time_utc", "capture_epoch", "pixel_column",
+              "pixel_row", "tide_elevation_navd88"]
+    truth = {}
+    tmp = Path(keep_dir) if keep_dir else Path(tempfile.mkdtemp(prefix="wc_selftest_"))
+    tmp.mkdir(parents=True, exist_ok=True)
+    src = tmp / "contour_points_timex.csv"
+    with open(src, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        for d in range(8):
+            for k in range(24):
+                ep = t0 + d * DAY + 11 * 3600 + k * 1800
+                h = 0.1 + 1.3 * np.sin(2 * np.pi * (ep - t0) / (12.42 * 3600))
+                for cam in ("c1", "c2"):
+                    h_line = h + rng.normal(0, 0.05)
+                    r = line(cam, h_line, ep) + rng.normal(0, 1.2, cols.size) + rng.normal(0, 1.5)
+                    wrong = np.zeros(cols.size, bool)
+                    if cam == "c1" and h > 0.8:
+                        rw = line(cam, -0.4 + rng.normal(0, 0.1), ep) + rng.normal(0, 1.5, cols.size)
+                        wrong = (cols >= 1400) & np.isfinite(rw)
+                        r = np.where(wrong, rw, r)
+                    keep = np.isfinite(r) & (r >= crop[cam][0]) & (r <= crop[cam][1])
+                    if keep.sum() < 20:
+                        continue
+                    name = f"{int(ep)}.{cam}.selftest"
+                    cap = datetime.fromtimestamp(ep, tz=timezone.utc).isoformat()
+                    for c, rr in zip(cols[keep], r[keep]):
+                        w.writerow([name, cam, cap, int(ep), int(c), f"{rr:.1f}", f"{h:.4f}"])
+                    truth[name] = (cam, h, cols[keep], wrong[keep])
+    args = argparse.Namespace(**{k: v for k, v in vars(build_parser().parse_args([str(src)])).items()})
+    import contextlib, io as _io
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        data, keep, report, summary, plot_info = run(args)
+    out = buf.getvalue()
+    frame_of = {n: i for i, n in enumerate(data["names"])}
+    wrong_n = wrong_drop = honest_n = honest_drop = 0
+    for name, (cam, h, c, wr) in truth.items():
+        sel = data["frame"] == frame_of[name]
+        dropped = ~keep[sel]
+        wrong_n += int(wr.sum()); wrong_drop += int((dropped & wr).sum())
+        if cam == "c2" or h <= 0.8:
+            honest_n += int(sel.sum()); honest_drop += int(dropped.sum())
+    catch = wrong_drop / max(wrong_n, 1)
+    false = honest_drop / max(honest_n, 1)
+    print(f"  systematic c1 error: {wrong_drop:,} of {wrong_n:,} wrong points dropped ({catch:.1%})")
+    print(f"  real change (0.4 m erosion): {honest_drop:,} of {honest_n:,} honest points dropped "
+          f"({false:.2%})")
+    rev_ok = any(l.startswith("WARNING: camera c1: waterline rows run AGAINST") for l in out.splitlines())
+    st = plot_info["c1"]["status"]
+    rev_cols = sorted({b * args.column_bin for (d, b), (k, _) in st.items() if k == "reversed"})
+    print(f"  REVERSED warning for c1: {'yes' if rev_ok else 'NO'}"
+          + (f", columns {rev_cols[0]}-{rev_cols[-1] + args.column_bin - 1}" if rev_cols else ""))
+    for line_ in summary:
+        print(f"  CONSISTENCY {line_}")
+    if catch < 0.90:
+        failures.append(f"only {catch:.1%} of the systematic wrong points dropped (need 90%)")
+    if false >= 0.005:
+        failures.append(f"{false:.2%} of honest points dropped (limit 0.5%)")
+    if not rev_ok or not rev_cols or rev_cols[0] < 1400 - 3 * args.column_bin:
+        failures.append("c1 columns >= 1400 not reported REVERSED (or reported far left of them)")
+    if not keep_dir:
+        for p_ in tmp.iterdir():
+            p_.unlink()
+        tmp.rmdir()
+    print("SELF-TEST " + ("PASSED" if not failures else "FAILED: " + "; ".join(failures)))
+    return 0 if not failures else 1
+
+
+def build_parser():
     ap = argparse.ArgumentParser(
         description="Drop waterlines (or parts) that are out of order with the other lines: "
-                    "row must be monotone in water elevation per image column.")
-    ap.add_argument("contour_csv")
+                    "row must rise with water elevation in every image column.")
+    ap.add_argument("contour_csv", nargs="?")
+    ap.add_argument("--self-test", action="store_true",
+                    help="Run the synthetic self-test through the calibration and exit.")
+    ap.add_argument("--calibration", default=str(Path(__file__).resolve().parent / "calibration"),
+                    help="Calibration folder for --self-test.")
     ap.add_argument("--output", default=None,
                     help="Filtered copy (default: <input>_qc.csv next to the input).")
     ap.add_argument("--report", default=None,
@@ -863,7 +1245,16 @@ def main():
     ap.add_argument("--min-z-range", type=float, default=0.5,
                     help="Elevation range (m) the lines must span to judge a bin (default 0.5).")
     ap.add_argument("--min-rank-corr", type=float, default=0.5,
-                    help="Rank correlation of row and elevation needed to judge a bin (default 0.5).")
+                    help="Rank correlation of row and elevation (physical direction) the kept "
+                         "lines need for a bin to be judged two-sided (default 0.5).")
+    ap.add_argument("--sweep-corr", type=float, default=0.9,
+                    help="Below this rank correlation the lines are first judged bottom-up, "
+                         "each against the lines at lower water (default 0.9).")
+    ap.add_argument("--reversed-corr", type=float, default=0.2,
+                    help="A bin whose rank correlation is at or below minus this is REVERSED: "
+                         "warned about, and judged bottom-up (default 0.2).")
+    ap.add_argument("--layer-m", type=float, default=0.25,
+                    help="Water-level layer (m) of the bottom-up pass (default 0.25).")
     ap.add_argument("--min-judged-bins", type=int, default=4,
                     help="Judged bins a line needs before it can be dropped whole (default 4).")
     ap.add_argument("--frame-fraction", type=float, default=0.5,
@@ -872,7 +1263,16 @@ def main():
     ap.add_argument("--max-drop-fraction", type=float, default=0.5,
                     help="If a camera would lose more than this share of its points, pass it "
                          "through unfiltered and warn (default 0.5).")
+    return ap
+
+
+def main():
+    ap = build_parser()
     args = ap.parse_args()
+    if args.self_test:
+        sys.exit(self_test(args.calibration))
+    if not args.contour_csv:
+        ap.error("contour_csv is required")
 
     src = Path(args.contour_csv)
     out = Path(args.output) if args.output else src.with_name(src.stem + "_qc.csv")

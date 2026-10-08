@@ -72,13 +72,22 @@ WHAT IT SHOWS, AND WHY EACH CHOICE
   * Profiles: 3 or 4 cross-shore profiles at lettered alongshore
     positions (lines on both maps), each the cells within one cell of
     that position, with the foreshore slope as the least-squares line
-    through them, given as tan(beta) and 1:N. Four at most: the lines
-    cross, so every pair of colours must stay distinct, and a fifth
-    categorical colour fails that check against the others. Positions
-    are picked automatically -- in the middle 60% of each stretch, at
-    least one in each camera's, the profile with the largest elevation
-    range along a clean seaward-falling line -- unless --profiles names
-    them.
+    through the MEASURED cells, given as tan(beta) and 1:N, and how many
+    of the cell lengths between the profile's ends were measured ('8 of
+    10 cells'). The line breaks where no cell was measured, and the cells
+    blanked for spread are open squares on a row below the lines, one
+    row per profile -- the panel never draws a clean beach where the map
+    above it hatches (it did: the station's 29 Sep - 5 Oct profile in
+    c1's stretch was one solid line across 9 blanked cells). Four at
+    most: the lines cross, so every pair of colours must stay distinct,
+    and a fifth categorical colour fails that check against the others.
+    Positions are picked automatically -- in the middle 60% of each
+    stretch, at least one in each camera's, the profile with the
+    largest elevation range along a clean seaward-falling line, scaled
+    by the share of its cells measured -- unless --profiles names them.
+  * Too few cells to map (fewer than 10 with --min-points frames), or
+    no points at all: a short page with the same heading and a sentence
+    saying so, never last run's page.
   * The title says what and when: the dates and number of days, the
     frames per camera, the cells filled, blanked and without a value,
     and the frames the build's filters left out. Facts are wrapped
@@ -143,6 +152,8 @@ NOTE_LINE, NOTE_GAP = 0.19, 0.13
 PAGE_RC = {"font.size": 10, "axes.edgecolor": AXIS, "axes.labelcolor": INK2,
            "xtick.color": INK2, "ytick.color": INK2, "text.color": INK,
            "hatch.linewidth": 0.9, "axes.linewidth": 0.8}
+# Fewer cells than this with enough frames: a short page with the facts, no maps.
+MIN_CORE_CELLS = 10
 # Contour pieces shorter than this (m along the page, cross-shore stretched) are not drawn.
 CONTOUR_MIN_M = 12.0
 NICE_EXAGGERATION = (1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 12, 15, 20)
@@ -378,10 +389,15 @@ def pick_profiles(uc, vc, z, cell, n, stretches=()):
     otherwise n equal stretches.
 
     'Most complete clean': the largest elevation range explained by a
-    seaward-falling line (its slope times its cross-shore length) less
+    seaward-falling line (its slope times its cross-shore length), times
+    the share of the cells between its ends that were measured, less
     three times the scatter about it. The plain elevation range would
     prefer a profile with a stray high cell at its seaward end -- the
-    kind of wrong waterline a profile should not be chosen to show.
+    kind of wrong waterline a profile should not be chosen to show -- and
+    without the measured share, one whose middle is blanked: on the
+    station's 7-day DEM of 29 Sep - 5 Oct 2026 the pick in c1's stretch
+    (39 m) had 9 blanked cells between its ends and 6 of its 10 cell
+    lengths measured; with the share it is 45 m, 8 of 10.
     """
     ok = np.isfinite(z)
     if ok.sum() < 10:
@@ -412,7 +428,9 @@ def pick_profiles(uc, vc, z, cell, n, stretches=()):
                 continue
             slope, icpt = np.polyfit(vc[sel], z[sel], 1)
             rms = np.sqrt(np.mean((z[sel] - (icpt + slope * vc[sel])) ** 2))
-            score = -slope * np.ptp(vc[sel]) - 3 * rms - 0.001 * abs(p - mid)
+            keys = np.unique(np.round(vc[sel] / cell).astype(int))
+            measured = keys.size / (keys.max() - keys.min() + 1)
+            score = -slope * np.ptp(vc[sel]) * measured - 3 * rms - 0.001 * abs(p - mid)
             if score > best_score:
                 best, best_score = p, score
         if best is not None:
@@ -420,9 +438,28 @@ def pick_profiles(uc, vc, z, cell, n, stretches=()):
     return picks
 
 
-def profile_at(uc, vc, z, p, cell):
-    """Cells within one cell of alongshore position p: binned profile and fitted slope."""
-    sel = np.isfinite(z) & (np.abs(uc - p) <= cell)
+def profile_at(uc, vc, z, p, cell, blanked=None):
+    """
+    Cells within one cell of alongshore position p: the measured cells,
+    binned one cell at a time along the profile, and the fitted slope.
+
+    The line is drawn only where cells were measured: `line_v`/`line_z`
+    have a NaN wherever a whole bin (one cell length along the profile)
+    between two measured ones has no measured cell, so a stretch with no
+    value -- too few frames, or blanked for spread -- is a break in the
+    line, as it is a hole in the map. (Judged on the bin numbers, not on
+    the distance between bin means: a bin's mean can sit anywhere in its
+    cell length, so two neighbouring bins can be up to two cells apart
+    with nothing missing between them.) A measured bin with no measured
+    neighbour is `lone_v`/`lone_z`: a line of one point would not show,
+    so the panel marks it with a dot. The slope is fitted to the
+    measured cells only, and `n_meas` of `n_span` says how many of the
+    bins between the profile's ends were measured. `blank_v`: where
+    along the profile the blanked cells are (`blanked`, a mask over the
+    same cells), for marking on the panel.
+    """
+    near = np.abs(uc - p) <= cell
+    sel = np.isfinite(z) & near
     if sel.sum() < 4 or np.ptp(z[sel]) < 0.2:
         return None
     v, zz = vc[sel], z[sel]
@@ -430,9 +467,19 @@ def profile_at(uc, vc, z, p, cell):
     keys = np.unique(k)
     bv = np.array([v[k == q].mean() for q in keys])
     bz = np.array([np.median(zz[k == q]) for q in keys])
+    cut = np.flatnonzero(np.diff(keys) > 1) + 1
+    line_v = np.insert(bv, cut, np.nan)
+    line_z = np.insert(bz, cut, np.nan)
+    gap_before = np.r_[True, np.diff(keys) > 1]
+    gap_after = np.r_[np.diff(keys) > 1, True]
+    lone = gap_before & gap_after
     slope, icpt = np.polyfit(v, zz, 1)
-    return {"v": v, "z": zz, "bv": bv, "bz": bz, "tanb": -slope, "icpt": icpt,
-            "n": int(sel.sum())}
+    blank_v = np.sort(vc[near & blanked]) if blanked is not None else np.zeros(0)
+    return {"v": v, "z": zz, "bv": bv, "bz": bz, "line_v": line_v, "line_z": line_z,
+            "lone_v": bv[lone], "lone_z": bz[lone],
+            "tanb": -slope, "icpt": icpt, "n": int(sel.sum()),
+            "n_meas": int(keys.size), "n_span": int(keys.max() - keys.min() + 1),
+            "gaps": int(cut.size), "blank_v": blank_v}
 
 
 def smooth_for_contours(dem, need=5):
@@ -540,8 +587,10 @@ def title_lines(info, cells, station, cutoff, min_points, cell):
     filters left out -- which draw_page joins with ' · ' and wraps to the
     page width, so a long list breaks between facts, not inside one.
     """
-    if info.get("first_date") and info.get("last_date"):
-        if info.get("last_days") and info.get("window_start") and info.get("window_end"):
+    has_dates = bool(info.get("first_date") and info.get("last_date"))
+    has_window = bool(info.get("window_start") and info.get("window_end"))
+    if has_dates or has_window:
+        if has_window and (info.get("last_days") or not has_dates):
             when = date_range_text(info["window_start"], info["window_end"])
         else:
             when = date_range_text(info["first_date"], info["last_date"])
@@ -551,16 +600,16 @@ def title_lines(info, cells, station, cutoff, min_points, cell):
             span = "selected dates"
         else:
             span = "whole archive"
-        days = info.get("days")
+        days = info.get("days") or 0
         frames = info.get("frames") or {}
         nfr = sum(frames.values())
         per_cam = ", ".join(f"{c} {n:,}" for c, n in sorted(frames.items()))
-        if info.get("last_days") and days and days < info["last_days"]:
+        if info.get("last_days") and days < info["last_days"]:
             day_txt = f"on {days} of {info['last_days']} days"
         else:
             day_txt = f"on {days} day{'s' if days != 1 else ''}"
         line1 = f"Intertidal DEM, {station}: {when} ({span})"
-        facts = [f"{nfr:,} frames {day_txt} ({per_cam})"]
+        facts = [f"{nfr:,} frames {day_txt}" + (f" ({per_cam})" if per_cam else "")]
     else:
         line1 = f"Intertidal DEM, {station}: dates unknown"
         facts = ["dates and frames not recorded (no <stem>_info.json)"]
@@ -682,6 +731,67 @@ def draw_page(stem, output=None, info=None, calibration=None, profiles=None, n_p
                           max_spread, min_points, dpi)
 
 
+def draw_message_page(stem, output, info, station, message, detail, cells=None, cutoff=0.5,
+                      min_points=3, cell=2.0, dpi=150):
+    """
+    A short page in place of the maps: the same heading (dates, frames,
+    what the filters left out) and a message saying why there is no map.
+    Drawn when a build has too few cells -- or no points at all -- so
+    the page the email attaches always says what THIS build found, and
+    a week with nothing to map never shows last week's maps.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_agg import RendererAgg
+    from matplotlib.font_manager import FontProperties
+
+    if cells is None:
+        cells = {"filled": 0, "blanked": 0, "no_value": 0, "interpolated": 0}
+    W, left = 14.0, 0.95
+    l1, facts, left_out = title_lines(info or {}, cells, station, cutoff, min_points, cell)
+    measure = RendererAgg(int(W * dpi), 200, dpi)
+
+    def width_px(text, size, weight="normal"):
+        return measure.get_text_width_height_descent(
+            text, FontProperties(size=size, weight=weight), ismath=False)[0]
+
+    max_px = (W - left - 0.35) * dpi
+    with plt.rc_context(PAGE_RC):
+        fact_lines = wrap_facts(facts, max_px, lambda t: width_px(t, 11))
+        out_lines = wrap_facts(left_out, max_px, lambda t: width_px(t, 10)) if left_out else []
+        msg_lines = wrap_words(message, max_px, lambda t: width_px(t, 14, "bold"))
+        det_paras = [wrap_words(t, max_px, lambda x: width_px(x, 10.5)) for t in detail]
+        y = [0.42]
+        for _ in fact_lines:
+            y.append(y[-1] + (0.30 if len(y) == 1 else 0.23))
+        for _ in out_lines:
+            y.append(y[-1] + (0.25 if len(y) == 1 + len(fact_lines) else 0.21))
+        y_msg = y[-1] + 0.75
+        H = y_msg + 0.32 * len(msg_lines) + sum(0.22 * len(p) + 0.12 for p in det_paras) + 0.3
+        fig = plt.figure(figsize=(W, H), dpi=dpi, facecolor="white")
+        fig.text(left / W, 1 - y[0] / H, l1, fontsize=16, fontweight="bold", color=INK)
+        for i, t in enumerate(fact_lines):
+            fig.text(left / W, 1 - y[1 + i] / H, t, fontsize=11, color=INK2)
+        for i, t in enumerate(out_lines):
+            fig.text(left / W, 1 - y[1 + len(fact_lines) + i] / H, t, fontsize=10, color=MUTED)
+        fig.add_artist(plt.Line2D([left / W, (W - 0.35) / W], [1 - (y_msg - 0.42) / H] * 2,
+                                  color=AXIS, lw=0.8))
+        yy = y_msg
+        for t in msg_lines:
+            fig.text(left / W, 1 - yy / H, t, fontsize=14, fontweight="bold", color=INK)
+            yy += 0.32
+        yy -= 0.08                          # the message sits on its baseline, the text below hangs
+        for para in det_paras:
+            fig.text(left / W, 1 - yy / H, "\n".join(para), fontsize=10.5, color=INK2,
+                     va="top", linespacing=1.35)
+            yy += 0.22 * len(para) + 0.12
+        out = Path(output) if output else Path(str(stem) + "_dem.png")
+        fig.savefig(out, dpi=dpi, facecolor="white")
+        plt.close(fig)
+    return out
+
+
 def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, max_spread,
                min_points, dpi):
     import matplotlib.pyplot as plt
@@ -716,10 +826,21 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     if source is not None:
         interpolated |= filled & (source == 2)
     core = filled | blanked                 # cells with enough frames to say something
-    if core.sum() < 10:
-        raise ValueError(f"{stem}: fewer than 10 cells with {min_points} or more frames")
     cells = {"filled": int((filled & ~interpolated).sum()), "blanked": int(blanked.sum()),
              "no_value": int(no_value.sum()), "interpolated": int(interpolated.sum())}
+    if core.sum() < MIN_CORE_CELLS:
+        print(f"NOTE: {int(core.sum())} cell(s) with {min_points} or more frames "
+              f"(fewer than {MIN_CORE_CELLS}): short page, no maps")
+        return draw_message_page(
+            stem, output, info, station,
+            f"Too few cells to map: {int(core.sum())} cell{'' if core.sum() == 1 else 's'} "
+            f"crossed by {min_points} or more frames ({MIN_CORE_CELLS} needed).",
+            ["No elevation or repeatability map is drawn: a handful of cells would be drawn "
+             "as a beach, and they are not one.",
+             "Likely causes: the cameras or the water-level record were down for most of the "
+             "window, or the build's filters left out most of the frames (e.g. a stormy week "
+             "and --max-hs). The cron log has the build's own report."],
+            cells=cells, cutoff=cutoff, min_points=min_points, cell=cell, dpi=dpi)
 
     # cell centres and corners
     rr, cc = np.mgrid[0:nrows, 0:ncols]
@@ -799,8 +920,12 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
         "shows up as spread too.",
         f"Maps are drawn as seen from the bluff, sea at the top; cross-shore is "
         f"{stretch_txt}.{cover}",
-        f"Profiles: the cells within {cell:g} m of each position; the slope is the "
-        "least-squares line through them.",
+        f"Profiles: the cells within {cell:g} m of each position, with the slope of the "
+        "least-squares line through the measured ones, and how many of the cells between "
+        "the profile's ends those are. A line breaks where no cell was measured (a dot: one "
+        "measured cell between breaks); □ on a row "
+        f"below the lines marks a cell blanked for spread (> {cutoff:g} m), one row per "
+        "profile.",
     ]
     w_c = 6.9
     x_notes = left + w_c + 0.6
@@ -821,7 +946,8 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
               f"(the most whose colours stay distinct)")
     profs = []
     for i, p in enumerate(profiles[:MAX_PROFILES]):
-        profs.append((p, profile_at(uc.ravel(), vc.ravel(), zc.ravel(), p, cell),
+        profs.append((p, profile_at(uc.ravel(), vc.ravel(), zc.ravel(), p, cell,
+                                    blanked=blanked.ravel()),
                       chr(ord("A") + i), PROFILE_COLOURS[i]))
 
     cam_names = sorted(views) or sorted(cams)
@@ -1165,21 +1291,49 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
         ax_c.plot(pr["v"], pr["z"], "o", ms=3, color=col, alpha=0.35, mec="none", zorder=2)
         slope = (f"tanβ {pr['tanb']:.3f} (1:{1 / pr['tanb']:.0f})" if pr["tanb"] > 0
                  else "no seaward slope")
-        ax_c.plot(pr["bv"], pr["bz"], "-", color=col, lw=2, zorder=3,
-                  label=f"{letter}  {p:.0f} m:  {slope}")
+        ax_c.plot(pr["line_v"], pr["line_z"], "-", color=col, lw=2, zorder=3,
+                  label=f"{letter}  {p:.0f} m:  {slope}, {pr['n_meas']} of {pr['n_span']} cells")
+        if pr["lone_v"].size:
+            ax_c.plot(pr["lone_v"], pr["lone_z"], "o", ms=4.5, color=col, mec="none", zorder=3)
     if drawn:
         ax_c.legend(loc="best", frameon=False, fontsize=9.5, handlelength=1.6,
-                    title="alongshore position: foreshore slope", title_fontsize=9.5)
+                    title="alongshore position: foreshore slope, cells measured",
+                    title_fontsize=9.5)
         xs = np.concatenate([pr["v"] for _, pr, _, _ in drawn])
         zz = np.concatenate([pr["z"] for _, pr, _, _ in drawn])
-        ax_c.set_xlim(xs.min() - 3, xs.max() + 8)
-        ax_c.set_ylim(zz.min() - 0.15, zz.max() + 0.15)
+        x0, x1 = xs.min() - 3, xs.max() + 8
+        # Blanked cells on each profile: a row of open squares per profile,
+        # below the lines, where the map hatches them (inside the panel's range).
+        rows = [(pr["blank_v"][(pr["blank_v"] >= x0) & (pr["blank_v"] <= x1)], letter, col)
+                for _, pr, letter, col in drawn]
+        rows = [r for r in rows if r[0].size]
+        z_lo, z_hi = zz.min() - 0.15, zz.max() + 0.15
+        row_h = 0.075 * (z_hi - z_lo)
+        for i, (bvs, letter, col) in enumerate(rows):
+            y = z_lo - (i + 0.6) * row_h
+            ax_c.plot(bvs, np.full(bvs.size, y), "s", ms=5.5, mfc="white", mec=col, mew=1.3,
+                      zorder=4, clip_on=False)
+            ax_c.text(x0 + 0.4, y, letter, ha="left", va="center", fontsize=8.5,
+                      fontweight="bold", color=col)
+        z_sep = z_lo
+        if rows:
+            z_lo -= (len(rows) + 0.2) * row_h
+            ax_c.axhline(z_sep, color=AXIS, lw=0.6, zorder=1)
+        ax_c.set_xlim(x0, x1)
+        ax_c.set_ylim(z_lo, z_hi)
+        if rows:
+            # elevation ticks and grid only above the rows: the squares have no elevation
+            ax_c.set_yticks([t for t in ax_c.get_yticks() if z_sep <= t <= z_hi])
+            ax_c.set_ylim(z_lo, z_hi)
+        blank_key = (f"   ·   □ below the lines: blanked cell (spread > {cutoff:g} m)"
+                     if rows else "")
         # Letters just beyond the seaward ends; where the lines converge
         # they are moved apart, with a leader back to their line.
         ends = np.array([[pr["bv"][-1], pr["bz"][-1]] for _, pr, _, _ in drawn])
         ends_px = ax_c.transData.transform(ends)
         bb = ax_c.get_window_extent()
-        lab_px = place_end_labels(ends_px, (11 * dpi / 72, 12 * dpi / 72), (bb.y0, bb.y1),
+        y_floor = ax_c.transData.transform((x0, zz.min() - 0.15))[1] if rows else bb.y0
+        lab_px = place_end_labels(ends_px, (11 * dpi / 72, 12 * dpi / 72), (y_floor, bb.y1),
                                   dx_px=9 * dpi / 72)
         for (_, _, letter, _), end, e, lp in zip(drawn, ends, ends_px, lab_px):
             off = (lp - e) * 72 / dpi
@@ -1188,17 +1342,20 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
             ax_c.annotate(letter, tuple(end), xytext=tuple(off), textcoords="offset points",
                           ha="center", va="center", fontsize=10.5, fontweight="bold",
                           color=INK, arrowprops=arrow)
-        h_m = (zz.max() - zz.min() + 0.3) / h_c          # metres per inch, vertical
-        w_m = (xs.max() - xs.min() + 11) / w_c            # metres per inch, horizontal
+        h_m = (z_hi - z_lo) / h_c                         # metres per inch, vertical
+        w_m = (x1 - x0) / w_c                             # metres per inch, horizontal
         title_c = (f"Cross-shore profiles at {drawn[0][2]}–{drawn[-1][2]}"
                    if len(drawn) > 1 else f"Cross-shore profile at {drawn[0][2]}")
         title_c += f" (vertical ×{w_m / h_m:.0f})" if w_m / h_m >= 1.5 else ""
     else:
         ax_c.text(0.5, 0.5, "no profile with enough cells", transform=ax_c.transAxes,
                   ha="center", va="center", color=MUTED)
+        ax_c.set_xticks([])
+        ax_c.set_yticks([])
         title_c = "Cross-shore profiles"
-    ax_c.set_xlabel("cross-shore distance seaward of the camera (m)" if frame["from_camera"]
-                    else "cross-shore distance (m)", fontsize=10)
+        blank_key = ""
+    ax_c.set_xlabel(("cross-shore distance seaward of the camera (m)" if frame["from_camera"]
+                     else "cross-shore distance (m)") + blank_key, fontsize=10)
     ax_c.set_ylabel("elevation (m NAVD88)", fontsize=10)
     fig.text(left / W, 1 - (y_c - 0.12) / H, title_c, fontsize=12, fontweight="bold",
              color=INK, va="bottom")
