@@ -66,6 +66,24 @@ ARCHIVE_PRODUCTS="bright dark snap var"
 GNSSR_SPLINE=/home/argus_user/GNSS/v4.1/products/refl_code/Files/usgs/usgs_spline_out.txt
 CONTOURS="$BASE/contour_points_timex.csv"
 
+# Waterline consistency (waterline_consistency.py). In one image column
+# the waterline row must move monotonically with water elevation; lines,
+# or parts of lines, that the other lines from the same camera and nearby
+# days clearly contradict (by more than 0.75 m of elevation) are left out
+# of the maps, the ground points and the DEM. On 29 Sep - 5 Oct 2026 C1
+# drew +1 m lines seaward of -0.5 m lines on the right of its frame, and
+# the DEM's southern ~80 m (C1 only) came out blanked for spread.
+# The unfiltered file is kept as it is; the filtered copy is
+# CONTOURS_QC, the report of every line affected is CONSISTENCY_REPORT,
+# and waterline_consistency_<cam>.png shows the last week's rejections on
+# a photo. If the filter fails, everything downstream uses the unfiltered
+# file (WARNING in the log) -- no product is lost. Set CONSISTENCY_ENABLE=0
+# to skip it.
+CONSISTENCY_ENABLE=1
+CONTOURS_QC="$BASE/contour_points_timex_qc.csv"
+CONSISTENCY_REPORT="$BASE/waterline_consistency_report.csv"
+CONSISTENCY_PLOT="$BASE/waterline_consistency"
+
 # Map windows. The 7-day map is the diagnostic one: over a week a
 # filled band is still mostly measurement repeatability. Over 30 days
 # real morphological change dominates, so the monthly map shows change
@@ -156,12 +174,25 @@ DEM_WINDOW_DAYS=7
 DEM_SERIES="$BASE/archive/dems"
 
 # Wave-setup correction (extract_elevation_contours.py --setup-coef): each
-# waterline's elevation becomes water level + C*sqrt(Hs*L0). Fit C with
-#   python3 dem_from_contours.py contour_points_ground.csv /tmp/fit --fit-setup --no-plot
-# on contours built WITHOUT the correction. It changes the DEM's absolute
-# level (typically by a few tenths of a metre), which the fit cannot check,
-# so it stays off ("") until confirmed against a survey or the runup data.
-SETUP_COEF=""
+# waterline's elevation becomes water level + C*sqrt(Hs*L0), Hs and Tp from
+# the wave record the contours carry (offshore_hs_m, offshore_tp_s). A timex
+# shows the water's edge where waves run up to, above still water, so
+# without it the DEM reads low in rough water.
+#
+# C = 0.037, confirmed two independent ways on 29 Sep - 5 Oct 2026:
+#  - against the 2026-09-29 RTK transects: the waterlines lying on them sat
+#    on beach 0.33 m higher than their still-water level; per frame
+#    C = -(line - RTK)/sqrt(Hs*L0) gives median 0.037, 90% 0.028-0.058
+#    (14 frames, 4 days, +0.8 to +1.3 m only: the RTK did not go lower);
+#  - internally, repeat crossings of a cell agree best at C = 0.03-0.04
+#    (dem_from_contours.py --fit-setup on uncorrected contours).
+# That is the Stockdon (2006) setup, 0.35*beta*sqrt(H0*L0), for a ~1:10
+# beach face. About +0.37 m at Hs 1 m, Tp 8 s. Refit (same command, on
+# contours built with SETUP_COEF="") after a low-tide survey, or if the
+# wave source (WAVE_BUOY / USE_MARCONI_WAVES) changes. Turning it on lifts
+# every DEM by that amount, so the first week's dem_change.py map shows a
+# uniform rise, which it flags as a likely calibration shift.
+SETUP_COEF="0.037"
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
@@ -345,9 +376,35 @@ else
     if [ $? -ne 0 ]; then
         log "ERROR: contour extraction failed -- see above. Maps not regenerated."
     else
+        # 5d. Consistency filter. MAP_CONTOURS is what the maps and
+        #     georectification read: the filtered copy when the filter ran
+        #     cleanly, otherwise the unfiltered file. The old filtered copy is
+        #     removed first, so a failed run can never leave last run's file
+        #     looking current.
+        MAP_CONTOURS="$CONTOURS"
+        if [ "$CONSISTENCY_ENABLE" = "1" ]; then
+            rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp"
+            qc_out=$(python3 "$BASE/waterline_consistency.py" "$CONTOURS" \
+                --output "$CONTOURS_QC" --report "$CONSISTENCY_REPORT" \
+                --plot "$CONSISTENCY_PLOT" --image-dir "$ARCHIVE_IMG" \
+                --plot-days "$MAP_WEEK_DAYS" 2>&1)
+            qc_rc=$?
+            echo "$qc_out" >> "$LOG"
+            if [ $qc_rc -eq 0 ] && [ -s "$CONTOURS_QC" ]; then
+                MAP_CONTOURS="$CONTOURS_QC"
+                log "waterline consistency: $(echo "$qc_out" | grep '^CONSISTENCY ' | tail -1 | cut -c13-)"
+            else
+                rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp"
+                log "WARNING: waterline consistency filter failed (exit $qc_rc) -- maps, ground points"
+                log "         and DEM use the UNFILTERED $(basename "$CONTOURS"). See above."
+            fi
+        else
+            log "waterline consistency filter disabled (CONSISTENCY_ENABLE=$CONSISTENCY_ENABLE)"
+        fi
+
         for cam in c1 c2; do
             # Rolling week -- the diagnostic view.
-            python3 "$BASE/daily_elevation_map.py" "$CONTOURS" "$ARCHIVE_IMG" "$cam" \
+            python3 "$BASE/daily_elevation_map.py" "$MAP_CONTOURS" "$ARCHIVE_IMG" "$cam" \
                 "$BASE/elevation_map_${cam}_${MAP_WEEK_DAYS}day.png" \
                 --days "$MAP_WEEK_DAYS" >> "$LOG" 2>&1
             if [ $? -eq 0 ]; then
@@ -357,7 +414,7 @@ else
             fi
 
             # Rolling month -- the change view.
-            python3 "$BASE/daily_elevation_map.py" "$CONTOURS" "$ARCHIVE_IMG" "$cam" \
+            python3 "$BASE/daily_elevation_map.py" "$MAP_CONTOURS" "$ARCHIVE_IMG" "$cam" \
                 "$BASE/elevation_map_${cam}_${MAP_MONTH_DAYS}day.png" \
                 --days "$MAP_MONTH_DAYS" \
                 --max-lines "$MAP_MONTH_MAX_LINES" >> "$LOG" 2>&1
@@ -380,7 +437,7 @@ else
           || [ ! -f "$CAL/CACO05_c2_20240801_IO.yaml" ]; then
             log "ERROR: calibration not found in $CAL -- skipping georectification and DEM."
         else
-            python3 "$BASE/georectify.py" "$CONTOURS" "$GROUND" \
+            python3 "$BASE/georectify.py" "$MAP_CONTOURS" "$GROUND" \
                 --io-c1 "$CAL/CACO05_c1_20240801_IO.yaml" \
                 --eo-c1 "$CAL/CACO05_c1_20251113_EO-CV.yaml" \
                 --io-c2 "$CAL/CACO05_c2_20240801_IO.yaml" \
