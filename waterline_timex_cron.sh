@@ -491,7 +491,17 @@ else
                         else
                             log "WARNING: window DEM grids written but its page was NOT drawn -- no $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_dem.png this run (see above)"
                         fi
-                        python3 "$BASE/dem_change.py" --series "$DEM_SERIES" --days "$DEM_WINDOW_DAYS" >> "$LOG" 2>&1 \
+                        # Week-to-week change. The reference week is rebuilt from the
+                        # CURRENT ground file with this DEM's settings (like for like:
+                        # the archived copies were built by the processing of their
+                        # day); a degenerate one (too few cells, < 0.5 m of relief) is
+                        # skipped for the nearest adequate one, and a change statement
+                        # always says how many cells it rests on.
+                        python3 "$BASE/dem_change.py" --series "$DEM_SERIES" --days "$DEM_WINDOW_DAYS" \
+                            --rebuild "$GROUND" -- $hs_arg \
+                            --cell "$DEM_CELL" \
+                            --min-points "$DEM_MIN_POINTS" \
+                            --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1 \
                             || log "WARNING: beach-change map failed (see above)"
                     elif [ $win_rc -eq 4 ]; then
                         log "WARNING: window DEM not built: no waterline points in the last ${DEM_WINDOW_DAYS} days (its page says so; see above)"
