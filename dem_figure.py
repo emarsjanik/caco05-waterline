@@ -26,7 +26,10 @@ could not show that, or why.
 WHAT IT SHOWS, AND WHY EACH CHOICE
   * The beach frame. x is alongshore distance from the camera along the
     strip's principal axis; y is cross-shore distance seaward of the
-    camera. The maps are drawn as seen from the bluff looking out to
+    camera. A patch not clearly longer alongshore than across (one
+    camera's near field, a short window) has no such axis: its axes
+    follow its own downhill slope instead, or with too few measured cells
+    the station's surveyed shore normal (beach_frame()). The maps are drawn as seen from the bluff looking out to
     sea -- sea at the top, the N-NW end (c2's view) on the left and the
     S-SE end (c1's) on the right. That is a rotation of the map, not a
     mirror image, so north is where the arrow says and the alongshore
@@ -105,6 +108,7 @@ Usage:
     python3 dem_figure.py <stem> [--output PNG] [--profiles 40,150,260]
         [--n-profiles 4] [--calibration DIR] [--station NAME]
         [--max-spread 0.5] [--min-points 3]
+    python3 dem_figure.py --self-test      (the beach frame, frame_self_test())
 """
 
 import sys
@@ -157,6 +161,17 @@ MIN_CORE_CELLS = 10
 # Contour pieces shorter than this (m along the page, cross-shore stretched) are not drawn.
 CONTOUR_MIN_M = 12.0
 NICE_EXAGGERATION = (1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 12, 15, 20)
+# Beach frame (beach_frame()): a patch whose two principal variances are
+# within this ratio is 'round' -- its shape gives no alongshore axis.
+ROUND_RATIO = 2.0
+# A plane through the measured cells orients the frame only if it is at
+# least this steep (1:200); the flattest foreshore here is ~1:50.
+MIN_PLANE_SLOPE = 0.005
+# The station's seaward direction: the beach surveyed by RTK on 29 Sep 2026
+# runs 345.8 deg (N-NW), so seaward is 75.8 deg -- the frame the 7-day and
+# archive pages come out in. Used for a round patch with too few measured
+# cells to show its own slope, when the calibration places it here.
+SHORE_NORMAL_DEG = 75.8
 COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
            "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
 
@@ -247,20 +262,58 @@ def load_cameras(cal_dir):
 # Geometry
 # ---------------------------------------------------------------------
 
-def beach_frame(E, N, Z, camera_xy):
+def beach_frame(E, N, Z, camera_xy, shore_normal=None):
     """
-    Alongshore unit vector `a` (the strip's principal axis, pointing
-    from the camera towards most of the strip), seaward unit vector `s`
-    (the side where the beach is lower), and the origin (the camera, or
-    without one the strip's near end and landward edge).
-    `flip_x`: with the sea drawn at the top, a true (unmirrored)
-    rotation has the alongshore axis increasing to the left.
+    Alongshore unit vector `a` (pointing from the camera towards most of the
+    strip), seaward unit vector `s` (the side where the beach is lower), and
+    the origin (the camera, or without one the strip's near end and landward
+    edge). `flip_x`: with the sea drawn at the top, a true (unmirrored)
+    rotation has the alongshore axis increasing to the left. `oriented_by`
+    says which rule set the axes.
+
+    The axes come from the strip's SHAPE -- its principal axis is the
+    alongshore one -- when the shape says so: the station's pages are strips
+    ~400 m long and ~30 m wide, and the principal axis lies within 0.1-1.2
+    deg of the beach's downhill direction's normal. A patch that is not
+    clearly longer alongshore than across (one camera's near field over a
+    few days, a seam patch) has no such axis, and PCA picked the cross-shore
+    direction: the page then labelled the seaward direction 'alongshore,
+    increasing towards ENE', put the sea on the left under a caption saying
+    'sea at the top', and drew an alongshore line as the 'cross-shore
+    profile' (review, Oct 2026: c1's cells 10-30 m from the camera, 84 deg
+    off). So the beach's own slope is the check: a plane z = gE E + gN N + c
+    through the measured cells (10 or more, and steeper than 1:200) points
+    downhill, i.e. seaward. If the principal axis' normal is more than
+    45 deg from that, or the patch is round (variance ratio of the two
+    axes 2 or less), `s` is the downhill direction and `a` is normal to it.
+    Without a usable plane (most cells blanked, or flat), a round patch takes
+    `shore_normal` -- the station's surveyed seaward bearing, passed when
+    the calibration places the DEM at this station. The sign rules below
+    (s downhill, a towards most of the strip) apply whichever way the axes
+    were found.
     """
     ec, nc = E.mean(), N.mean()
-    _, vecs = np.linalg.eigh(np.cov(np.stack([E - ec, N - nc])))
+    evals, vecs = np.linalg.eigh(np.cov(np.stack([E - ec, N - nc])))
     a = vecs[:, 1].copy()
     s = np.array([a[1], -a[0]])
+    ratio = evals[1] / evals[0] if evals[0] > 1e-12 else np.inf
     ok = np.isfinite(Z)
+    oriented_by = "shape"
+    down = None
+    if ok.sum() >= 10:
+        X = np.column_stack([E[ok] - ec, N[ok] - nc, np.ones(int(ok.sum()))])
+        (gE, gN, _), *_ = np.linalg.lstsq(X, Z[ok], rcond=None)
+        if np.hypot(gE, gN) >= MIN_PLANE_SLOPE:
+            down = -np.array([gE, gN]) / np.hypot(gE, gN)
+    if down is not None:
+        off = np.degrees(np.arccos(min(1.0, abs(float(s @ down)))))
+        if off > 45.0 or ratio <= ROUND_RATIO:
+            s, a = down, np.array([-down[1], down[0]])
+            oriented_by = "slope"
+    elif ratio <= ROUND_RATIO and shore_normal is not None:
+        s = np.asarray(shore_normal, float) / np.hypot(*shore_normal)
+        a = np.array([-s[1], s[0]])
+        oriented_by = "station"
     if ok.sum() >= 10:
         v = (E[ok] - ec) * s[0] + (N[ok] - nc) * s[1]
         if np.polyfit(v, Z[ok], 1)[0] > 0:
@@ -277,7 +330,7 @@ def beach_frame(E, N, Z, camera_xy):
         origin = origin + a * u.min() + s * v.min()
     flip_x = (a[0] * s[1] - a[1] * s[0]) < 0
     return {"a": a, "s": s, "origin": origin, "flip_x": bool(flip_x),
-            "from_camera": camera_xy is not None}
+            "from_camera": camera_xy is not None, "oriented_by": oriented_by}
 
 
 def to_uv(frame, E, N):
@@ -860,7 +913,13 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
                   f"{max(far.values()) / 1000:.1f} km from this DEM (another site?)")
             cams = {}
     cam_xy = np.mean([v[1][:2] for v in cams.values()], axis=0) if cams else None
-    frame = beach_frame(Ec[core], Nc[core], dem[core], cam_xy)
+    normal = (np.array([np.sin(np.radians(SHORE_NORMAL_DEG)), np.cos(np.radians(SHORE_NORMAL_DEG))])
+              if cams else None)
+    frame = beach_frame(Ec[core], Nc[core], dem[core], cam_xy, shore_normal=normal)
+    if frame["oriented_by"] != "shape":
+        print("NOTE: the DEM is not clearly longer alongshore than across; the page's axes "
+              + ("follow its downhill slope" if frame["oriented_by"] == "slope"
+                 else f"follow the station's shore normal ({SHORE_NORMAL_DEG:g} deg)"))
     frame.update(e0=e0, n0=n0, cell=cell)
     uc, vc = to_uv(frame, Ec, Nc)
     uk, vk = to_uv(frame, Ek, Nk)
@@ -1375,8 +1434,72 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     return out
 
 
+def frame_self_test():
+    """
+    python3 dem_figure.py --self-test
+
+    beach_frame() on synthetic DEM cells (2 m grid) in the station's frame:
+    camera at E 420086 N 4638323, beach running 345.8 deg, falling seaward
+    (75.8 deg) at 1:10 with 2 cm of scatter. The seaward axis must come out
+    within the stated angle of 75.8 deg, the cells seaward of the camera
+    (positive cross-shore), and the rule that set it as stated:
+      1. the 7-day strip, 400 m alongshore x 30 m: by its shape, within 3 deg.
+      2. c1's near field, 10-30 m alongshore of the camera x 30 m across
+         (review, Oct 2026: the principal axis was the cross-shore one and
+         the page came out 84 deg off): by its slope, within 10 deg.
+      3. a strip running E-W, 40 m x 10 m, whose shape says 'alongshore =
+         E-W' (review: 86 deg off): by its slope, within 10 deg.
+      4. a round patch with every cell blanked (no slope to read): the
+         station's shore normal.
+    Returns 0 if all pass, 1 otherwise.
+    """
+    rng = np.random.default_rng(3)
+    cam = np.array([420086.0, 4638323.0])
+    t_al = np.array([np.sin(np.radians(345.8)), np.cos(np.radians(345.8))])
+    t_cs = np.array([np.sin(np.radians(75.8)), np.cos(np.radians(75.8))])
+    normal = np.array([np.sin(np.radians(SHORE_NORMAL_DEG)), np.cos(np.radians(SHORE_NORMAL_DEG))])
+
+    def cells(a_rng, s_rng, blank=False, en=None):
+        """Unique 2 m cell centres covering the shore-frame box a_rng x s_rng
+        (m from the camera), or the E/N box `en`; z on the 1:10 plane."""
+        if en is None:
+            A, S = np.meshgrid(np.arange(*a_rng, 0.5), np.arange(*s_rng, 0.5))
+            E = cam[0] + A.ravel() * t_al[0] + S.ravel() * t_cs[0]
+            N = cam[1] + A.ravel() * t_al[1] + S.ravel() * t_cs[1]
+        else:
+            E, N = [g.ravel() for g in np.meshgrid(np.arange(en[0], en[1], 0.5), np.arange(en[2], en[3], 0.5))]
+        key = np.unique(np.stack([np.floor(E / 2), np.floor(N / 2)], axis=1), axis=0)
+        Ec, Nc = key[:, 0] * 2 + 1, key[:, 1] * 2 + 1
+        v = (Ec - cam[0]) * t_cs[0] + (Nc - cam[1]) * t_cs[1]
+        Z = 2.5 - 0.1 * v + rng.normal(0, 0.02, Ec.size)
+        return Ec, Nc, (np.full(Ec.size, np.nan) if blank else Z)
+
+    c_ew = cam + 40 * t_cs                        # E-W strip centred 40 m seaward
+    cases = [("7-day strip 400 x 30 m", cells((-80, 320), (15, 45)), 3.0, "shape"),
+             ("c1 near field 10-30 m x 30 m", cells((10, 30), (15, 45)), 10.0, "slope"),
+             ("E-W strip 40 x 10 m",
+              cells(None, None, en=(c_ew[0] - 20, c_ew[0] + 20, c_ew[1] - 5, c_ew[1] + 5)), 10.0, "slope"),
+             ("round patch, all blanked", cells((40, 60), (20, 40), blank=True), 1.0, "station")]
+    failures = []
+    for name, (E, N, Z), tol, rule in cases:
+        f = beach_frame(E, N, Z, cam, shore_normal=normal)
+        bearing = np.degrees(np.arctan2(f["s"][0], f["s"][1])) % 360
+        off = abs((bearing - SHORE_NORMAL_DEG + 180) % 360 - 180)
+        _, v = to_uv(f, E, N)
+        ok = off <= tol and f["oriented_by"] == rule and np.median(v) > 0
+        print(f"  {name:30s}: {len(E):4d} cells, seaward {bearing:5.1f} deg ({off:4.1f} off, limit {tol:g}), "
+              f"by {f['oriented_by']}{'' if ok else '  <-- FAIL'}")
+        if not ok:
+            failures.append(name)
+    print("SELF-TEST " + ("PASSED" if not failures else "FAILED: " + ", ".join(failures)))
+    return 0 if not failures else 1
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Draw the DEM page from existing grids.")
+    if "--self-test" in sys.argv[1:]:
+        sys.exit(frame_self_test())
+    ap = argparse.ArgumentParser(description="Draw the DEM page from existing grids "
+                                             "(--self-test: check the beach frame).")
     ap.add_argument("stem", help="DEM stem, e.g. dem_intertidal_7day for dem_intertidal_7day_dem.asc")
     ap.add_argument("--output", default=None, help="PNG to write (default <stem>_dem.png)")
     ap.add_argument("--profiles", default=None,
