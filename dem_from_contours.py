@@ -39,25 +39,36 @@ Usage:
     python3 dem_from_contours.py contour_points_ground.csv dem_out \\
         [--cell 2.0] [--min-points 3] [--camera c1|c2|both]
         [--max-spread 0.5] [--fill-gaps] [--start-date ...] [--end-date ...]
+
+Writes dem_out_{dem,spread,count}.asc (and _source.asc with
+--interpolate-edge), dem_out_info.json (dates, frames per camera and
+what the filters left out -- what the page needs and the grids do not
+hold) and the page dem_out_dem.png, drawn by dem_figure.py. To redraw
+the page from those files without rebuilding: python3 dem_figure.py dem_out
 """
 
 import sys
 import csv
+import json
 import argparse
 from pathlib import Path
 
 import numpy as np
 
 
-def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, exclude=None):
+def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, exclude=None,
+                stats=None):
     """Reads georectified contour points. Rows without ground coordinates are skipped.
-    `exclude`: regular expressions; frames whose source_file matches any are left out."""
+    `exclude`: regular expressions; frames whose source_file matches any are left out.
+    `stats`: a dict to receive the number of frames each filter left out, and the
+    share of points whose elevation includes the wave setup (for the page)."""
     import re
     exclude = [re.compile(x) for x in (exclude or [])]
     excluded = set()
     E, N, Z, cams, dates, frames = [], [], [], [], [], []
     missing_ground = 0
     rough_frames, unknown_hs_frames = set(), set()
+    with_setup = 0
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
         if "easting_utm19" not in (reader.fieldnames or []):
@@ -96,7 +107,9 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             N.append(float(r["northing_utm19"]))
             # Beach elevation = water level + setup when the contours were
             # extracted with --setup-coef; otherwise the water level.
-            Z.append(float(r.get("beach_elevation_navd88") or r["tide_elevation_navd88"]))
+            beach = r.get("beach_elevation_navd88")
+            with_setup += bool(beach)
+            Z.append(float(beach or r["tide_elevation_navd88"]))
             cams.append(r["camera"])
             dates.append(day)
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
@@ -105,6 +118,9 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     if max_hs is not None:
         print(f"Wave filter       : {len(rough_frames)} frame(s) left out, offshore Hs > "
               f"{max_hs} m; {len(unknown_hs_frames)} frame(s) with no wave record kept")
+    if stats is not None:
+        stats.update(excluded_frames=len(excluded), rough_frames=len(rough_frames),
+                     setup_share=with_setup / len(Z) if Z else 0.0)
     return (np.array(E), np.array(N), np.array(Z),
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
 
@@ -569,7 +585,9 @@ def main():
                     help="Leave out frames whose file name matches this regular expression "
                          "(repeatable), e.g. 'Jan.22.*[.]c2[.]' -- for frames shown by their "
                          "overlays to have followed something other than the water's edge.")
-    ap.add_argument("--no-plot", action="store_true")
+    ap.add_argument("--no-plot", action="store_true",
+                    help="Skip the page (<stem>_dem.png). The grids and <stem>_info.json are "
+                         "still written; 'python3 dem_figure.py <stem>' draws the page later.")
     args = ap.parse_args()
 
     if args.last_days:
@@ -581,8 +599,11 @@ def main():
         args.start_date = (date.fromisoformat(end) - timedelta(days=args.last_days - 1)).isoformat()
         print(f"Window            : last {args.last_days} day(s), {args.start_date} to {args.end_date}")
 
+    load_stats = {}
     E, N, Z, cams, dates, frames, missing = load_points(
-        args.contour_csv, args.camera, args.start_date, args.end_date, args.max_hs, args.exclude)
+        args.contour_csv, args.camera, args.start_date, args.end_date, args.max_hs, args.exclude,
+        stats=load_stats)
+    rejected_frames, rejected_days = set(), set()
 
     if len(E) == 0:
         print("No georectified points matched. Check --camera and the date range.")
@@ -624,6 +645,7 @@ def main():
               f"{len(bad)} rejected")
         for k in sorted(bad):
             print(f"   {k}   {bad[k]:+.3f} m  <-- REJECTED")
+        rejected_frames = set(bad)
         if bad:
             keep = np.array([f not in bad for f in frames])
             E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
@@ -680,6 +702,7 @@ def main():
                 note = ""
             off_s = f"{off:+.3f} m" if np.isfinite(off) else "   --   "
             print(f"   {k}   {off_s}   ({n} samples){note}")
+        rejected_days = set(rejected)
         if rejected:
             frame_key = {f: f"{cam_of[f]} {local_day(epoch[f])}" for f in set(frames)}
             keep = np.array([frame_key[f] not in rejected for f in frames])
@@ -769,35 +792,42 @@ def main():
                              args.cell, nodata=0.0)
             print(f"series            : {sstem}_{{dem,spread,count}}.asc")
 
+    # What the page needs and the grids do not hold: dates, frames, filters.
+    # Written always, so 'python3 dem_figure.py <stem>' can redraw the page
+    # later without a rebuild.
+    page_info = {
+        "first_date": str(min(dates)), "last_date": str(max(dates)),
+        "days": int(len(set(dates))),
+        "last_days": args.last_days,
+        "window_start": args.start_date, "window_end": args.end_date,
+        "camera": args.camera,
+        "frames": {c: int(len(set(frames[cams == c]))) for c in sorted(set(cams))},
+        "points": {c: int((cams == c).sum()) for c in sorted(set(cams))},
+        "cell": args.cell, "min_points": args.min_points, "max_spread": args.max_spread,
+        # share of the points whose elevation includes the wave setup
+        # (beach_elevation_navd88, extract_elevation_contours.py --setup-coef)
+        "setup_share": round(load_stats.get("setup_share", 0.0), 4),
+        # True: this build wrote <stem>_source.asc (and the page may trust
+        # it); False: any _source.asc beside the grids is an older run's.
+        "interpolated": source is not None,
+        "filters": {
+            "max_hs": args.max_hs, "rough_frames": load_stats.get("rough_frames", 0),
+            "excluded_frames": load_stats.get("excluded_frames", 0),
+            "max_frame_offset": args.max_frame_offset,
+            "frames_rejected": len(rejected_frames),
+            "max_day_offset": args.max_day_offset,
+            "camera_days_rejected": sorted(rejected_days),
+        },
+    }
+    with open(str(stem) + "_info.json", "w") as f:
+        json.dump(page_info, f, indent=1)
+    print(f"wrote {stem}_info.json   (dates, frames, filters: for the page)")
+
     if not args.no_plot:
         try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-            fig, axes = plt.subplots(1, 2, figsize=(16, 7), dpi=110)
-            extent = [e0, e0 + ncols * args.cell, n0, n0 + nrows * args.cell]
-
-            im0 = axes[0].imshow(dem, origin="lower", extent=extent,
-                                 cmap="terrain", aspect="equal")
-            axes[0].set_title(f"Intertidal DEM  ({min(dates)} to {max(dates)})\n"
-                              + (f"{filled} measured + {int((source == 2).sum())} interpolated "
-                                 f"cells at {args.cell} m" if source is not None
-                                 else f"{filled} cells at {args.cell} m"), fontsize=10)
-            plt.colorbar(im0, ax=axes[0], label="elevation (m NAVD88)", shrink=0.8)
-
-            im1 = axes[1].imshow(spread, origin="lower", extent=extent,
-                                 cmap="magma", aspect="equal", vmin=0,
-                                 vmax=args.max_spread if args.max_spread else None)
-            axes[1].set_title("Repeatability\n16-84 percentile elevation range", fontsize=10)
-            plt.colorbar(im1, ax=axes[1], label="spread (m)", shrink=0.8)
-
-            for ax in axes:
-                ax.set_xlabel("easting (m, UTM 19N)")
-                ax.set_ylabel("northing (m, UTM 19N)")
-                ax.ticklabel_format(useOffset=False, style="plain")
-            plt.tight_layout()
-            plt.savefig(str(stem) + "_dem.png", bbox_inches="tight")
-            print(f"wrote {stem}_dem.png")
+            import dem_figure
+            out = dem_figure.draw_page(stem, info=page_info)
+            print(f"wrote {out}")
         except Exception as exc:
             print(f"(plot skipped: {exc})")
 
