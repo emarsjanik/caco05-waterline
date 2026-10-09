@@ -1933,8 +1933,10 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                        f"{head['points_in_empty_dem_cells']} on empty cells)")
         camr = [r for r in rows if r["group_type"] == "camera"]
         for r in camr:
-            box.append(f"  {r['group']:>7s}: median {r['median']:+.3f} m, NMAD {fv(r['nmad'], '{:.3f} m')}, "
-                       f"n {r['n']}")
+            # 'neither': cells outside every camera's footprint (assign_camera)
+            g = "outside the camera views" if r["group"] == "neither" else r["group"]
+            box.append(f"  {g}: median {r['median']:+.3f} m, NMAD {fv(r['nmad'], '{:.3f} m')}, "
+                       f"n {r['n']}" + (" (few)" if r["n"] < MIN_BAND_N else ""))
         if wl_rows:
             w0 = wl_rows[0]
             wu = head["waterlines"]["unit"]
@@ -1946,13 +1948,16 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                     f"  {head['waterlines']['method']}; {head['waterlines']['setup']}"]
             camw = [r for r in wl_rows if r["group_type"] == "waterline_camera"]
             if len(camw) > 1:
-                box.append("  " + ", ".join(f"{r['group']} {r['median']:+.3f} m (n {r['n']})" for r in camw))
+                box.append("  " + ", ".join(f"{r['group']} {r['median']:+.3f} m (n {r['n']}"
+                                            f"{', few' if r['n'] < MIN_BAND_N else ''})" for r in camw))
             ws = head["waterlines"].get("without_setup") or {}
             if ws.get("n"):
-                box.append(f"  without the setup (C = 0): median {ws['median']:+.3f} m"
-                           + ("" if len(ws.get("by_camera") or {}) < 2 else
-                              " (" + ", ".join(f"{k} {v['median']:+.3f}" for k, v in sorted(ws["by_camera"].items()))
-                              + ")"))
+                box.append(f"  without the setup (C = 0): median {ws['median']:+.3f} m (n {ws['n']}"
+                           f"{', few' if ws['n'] < MIN_BAND_N else ''})")
+                if len(ws.get("by_camera") or {}) > 1:
+                    box.append("    " + ", ".join(f"{k} {v['median']:+.3f} m (n {v['n']}"
+                                                  f"{', few' if v['n'] < MIN_BAND_N else ''})"
+                                                  for k, v in sorted(ws["by_camera"].items())))
         box += ["", "\n".join(textwrap.wrap(gap_text, 78))]
         ctx = dict(map_ctx, title=f"{name}: DEM − survey ({survey_type})", label=label,
                    why=why, warn_lines=warn_lines, lim=lim, dem=dem, xll=xll, ytop=ytop, cell=cell,

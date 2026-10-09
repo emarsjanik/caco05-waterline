@@ -277,16 +277,33 @@ def test_round2(d):
           "the fit it was carried from is not here: CIRCULAR as a rule, overruled only by a written reason")
     lab, why = sp.honest_label(mar, pm, args, marf)
     check(lab == "CIRCULAR", "... and without that reason: CIRCULAR")
-    # the earlier check of 2025-01-23 (HIGH lines) leads the caveats, per camera, with what to expect now
+    # the earlier check of 2025-01-23 on the REAL photos leads the caveats, per camera, with what to
+    # expect now. pointing_fix_figure.py printed lidar - water level = c1 +0.46, c2 +0.15: the lines
+    # read LOW (waterline - lidar c1 -0.46, c2 -0.15), the sign a line without setup must have.
     plan = {"era": "adcp", "date": "2025-01-23", "first": "2025-01-18", "last": "2025-01-23", "out": d,
             "surveys": [dict(jan, path=str(janf))],
             "cams": {c: {"eo_file": "CACO03_%s_20250123_EO.yaml" % c, "first": "2025-01-18", "last": "2025-01-23"}
                      for c in ("c1", "c2")}}
+    pc0 = sp.PRIOR_CHECKS[0]
+    check(all(abs(pc0["waterline_minus_survey"][c][0] + pc0["reported"][c][0]) < 1e-12 for c in ("c1", "c2"))
+          and pc0["waterline_minus_survey"]["c1"][0] < 0 and "lidar elevation - water level" in pc0["reported_as"],
+          "the earlier check's sign: lidar - water level +0.46/+0.15 = waterline - lidar -0.46/-0.15 (lines LOW)")
     forcing = {"waves": {"setup_in_window": {"median_m": 0.29, "daytime_median_m": 0.28}}}
     cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=sp.SETUP_COEF), {}, forcing, {})
-    check(cav[0].startswith("EARLIER CHECK, OPPOSITE SIGN") and "+0.46" in cav[0] and "+0.15" in cav[0]
-          and "~+0.7 m" in cav[0] and "~+0.4 m" in cav[0] and "HIGHER than then" in cav[0],
-          "2025-01-23: the earlier HIGH result (c1 +0.46, c2 +0.15) comes first, expecting ~+0.7 / ~+0.4 m now")
+    c0 = cav[0]
+    check(c0.startswith("EARLIER CHECK (real photos)") and "OPPOSITE" not in c0 and "HIGHER" not in c0
+          and "+0.46 m (NMAD 0.19)" in c0 and "+0.15 m (NMAD 0.23)" in c0
+          and "c1 -0.46 m (NMAD 0.19)" in c0 and "c2 -0.15 m (NMAD 0.23)" in c0
+          and "read LOW" in c0 and "no opposite-sign discrepancy" in c0,
+          "2025-01-23: the earlier result comes first, printed as measured (+0.46/+0.15 lidar - level) and as "
+          "waterline - lidar (-0.46/-0.15: LOW, the same sign as no setup)")
+    check("c1 ~-0.24 m" in c0 and "c2 ~+0.07 m" in c0 and "c1 -0.18, c2 +0.13 m if the" in c0,
+          "... expecting c1 ~-0.24 / c2 ~+0.07 m with C = 0.037 (-0.18 / +0.13 m if the whole setup counted)")
+    check("station computer only" in c0 and "synthetic test fixture" in c0 and "nothing about the real beach" in c0,
+          "... and says the real photos are on the station only; a fixture build says nothing about the real beach")
+    cav0 = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.0), {}, forcing, {})
+    check(cav0[0].startswith("EARLIER CHECK (real photos)") and "This build adds the setup" not in cav0[0],
+          "... with C = 0: no expectation from a setup that is not applied")
     other = dict(plan, cams={"c1": dict(plan["cams"]["c1"], eo_file="CACO05_c1_20250219_corr_EO.yaml")})
     check(not sp.prior_checks(other), "... not claimed for another calibration")
     # a constant horizon offset is reported from 0.05 deg (not only above the 12 px day-to-day limit)

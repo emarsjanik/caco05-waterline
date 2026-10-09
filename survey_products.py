@@ -195,22 +195,34 @@ SETUP_FITS = {
                           "frames": 18, "window": "2026-09-29 .. 2026-10-05"}},
 }
 
-# Earlier measurements of a date's photos, with the same calibrations, against its survey, made
-# before this script: until the date is built on the station they are the only real numbers for
-# it, and they can point the other way from the biases the README lists (which all make the
-# 2025 dates read LOW). The README states them, per camera, next to what this build should then
-# give. Matched by date, survey and every camera's calibration file.
+# Earlier measurements of a date's REAL photos, with the same calibrations, against its survey,
+# made before this script: until the date is built from those photos (on the station computer,
+# where they are) they are the only real numbers for it. The README states them, per camera,
+# next to what this build should then give. Matched by date, survey and every camera's
+# calibration file.
+#
+# SIGN. Each entry keeps the quantity its tool printed ('reported', 'reported_as', and what a
+# positive value means) and the same numbers as waterline - survey ('waterline_minus_survey',
+# the sign of DEM - survey), written out so nothing is flipped in the head. pointing_fix_figure.py
+# prints 'lidar elevation - water level at the waterline': positive = the lidar beach lies ABOVE
+# the level the line was given, i.e. the line reads LOW and waterline - lidar is NEGATIVE.
 PRIOR_CHECKS = [
     {"date": "2025-01-23", "survey_stem": "2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm",
      "survey_text": "the Jan 2025 lidar",
      "eo": {"c1": "CACO03_c1_20250123_EO.yaml", "c2": "CACO03_c2_20250123_EO.yaml"},
      "window": "2025-01-18 .. 2025-01-23",
-     # waterline points - lidar, median and NMAD, per camera
-     "waterline_minus_survey": {"c1": [0.46, 0.19], "c2": [0.15, 0.23]},
+     "tool": "pointing_fix_figure.py",
+     # what pointing_fix_figure.py printed on the real Jan 18-23 photos: median and NMAD per camera
+     "reported_as": "lidar elevation - water level at the waterline",
+     "reported": {"c1": [0.46, 0.19], "c2": [0.15, 0.23]},
+     "reported_meaning": "positive there = the lidar beach lies ABOVE the level each line was given: the lines "
+                         "read LOW",
+     # the same numbers as waterline - lidar (negative = the lines read LOW)
+     "waterline_minus_survey": {"c1": [-0.46, 0.19], "c2": [-0.15, 0.23]},
      "setup_coef": 0.0, "predicted_setup_m": 0.28,
-     "how": "waterline points minus the lidar, unfiltered waterlines, NO wave setup (C = 0), the detection "
-            "search envelope from the earlier lidar-fitted pointing (so its detections may differ from this "
-            "build's, whose envelope is placed with the Mar 2025 lidar)"},
+     "how": "unfiltered waterlines, NO wave setup (C = 0), the detection search envelope from the earlier "
+            "lidar-fitted pointing (so its detections may differ from this build's, whose envelope is placed "
+            "with the Mar 2025 lidar)"},
 ]
 
 # DEM settings of the live cron (waterline_timex_cron.sh), so a survey-date
@@ -3001,39 +3013,59 @@ def prior_checks(plan):
 
 
 def prior_check_caveat(plan, pc, fits, forcing):
-    """The README caveat for an earlier check: what it found per camera, and what this build
-    should then give with its setup (the setup less the part a landward re-projection takes
-    back: (without - with) / applied on the 2026 RTK, ~0.8)."""
+    """The README caveat for an earlier check of the real photos: what its tool printed, the same
+    numbers as waterline - survey (per camera, signs written out), and what this build should then
+    give with its setup (the setup less the part a landward re-projection takes back: (without -
+    with) / applied on the 2026 RTK, ~0.8)."""
     wv = (forcing or {}).get("waves", {})
     su = wv.get("setup_in_window") or {}
     med = su.get("daytime_median_m") if su.get("daytime_median_m") is not None else su.get("median_m")
+    setup = med if med is not None else pc["predicted_setup_m"]
     C = fits[0]["coef"] if fits else None
     rc = (SETUP_FITS.get(C) or {}).get("rtk_check") if C else None
     keep = ((rc["without_setup_m"] - rc["with_setup_m"]) / rc["setup_applied_m"]) if rc else 1.0
-    add = (med if med is not None else pc["predicted_setup_m"]) * keep if C else 0.0
-    per = pc["waterline_minus_survey"]
-    found = ", ".join(f"{c} {per[c][0]:+.2f} m (NMAD {per[c][1]:.2f})" for c in sorted(pc["cameras"], reverse=True))
-    expect = ", ".join(f"{c} ~{per[c][0] + add:+.1f} m" for c in sorted(pc["cameras"], reverse=True))
-    hi = [c for c in pc["cameras"] if per[c][0] > 0.05]
-    text = (("EARLIER CHECK, OPPOSITE SIGN" if hi else "EARLIER CHECK")
-            + f": before this script, the same photos ({pc['window']}) with these same "
-            f"calibrations ({', '.join(pc['eo'][c] for c in pc['cameras'])}) gave waterline - {pc['survey_text']} "
-            f"of {found} ({pc['how']})."
-            + (f" The lines of {' and '.join(sorted(hi))} read HIGH" + (" before any setup" if not pc["setup_coef"] else "")
-               + "." if hi else "") + " ")
-    if C:
-        text += (f"This build adds the setup (C = {C}: median {med if med is not None else pc['predicted_setup_m']:.2f} m "
-                 f"in the window's daytime{'' if med is not None else ', predicted'}), which raises every line"
-                 f"{' further' if hi else ''} (by ~{keep:.1f} x the setup once a line's landward re-projection is "
-                 f"counted, as on the 2026 RTK): unless this build's envelope changes the detections, expect "
-                 f"waterline - {pc['survey_text']} of about {expect}, i.e. HIGHER than then, not lower. ")
-    vals = [per[c][0] for c in pc["cameras"]]
-    text += (("The biases listed below that make this date read LOW (the setup's under-correction, the still-water "
-              "reference) work the other way and cannot explain a HIGH offset. " if hi else "")
-             + (f"A difference between the cameras ({' vs '.join(f'{c} {per[c][0]:+.2f}' for c in sorted(pc['cameras']))} m "
-                f"with the same water level) points at the pointing or the lens model, not the water level: see the "
-                f"horizon offsets per camera in this README. " if len(vals) > 1 and max(vals) - min(vals) > 0.1 else "")
-             + "Read the per-camera lines of the headline and the C = 0 sensitivity in compare/*_comparison.txt.")
+    cams = sorted(pc["cameras"])
+    per, rep = pc["waterline_minus_survey"], pc.get("reported") or {}
+    low = [c for c in cams if per[c][0] < -0.05]
+    high = [c for c in cams if per[c][0] > 0.05]
+    wms = ", ".join(f"{c} {per[c][0]:+.2f} m (NMAD {per[c][1]:.2f})" for c in cams)
+    text = (f"EARLIER CHECK (real photos): before this script, {pc.get('tool', 'an earlier check')} on the real "
+            f"photos of {pc['window']} with these same calibrations ({', '.join(pc['eo'][c] for c in pc['cameras'])}), "
+            f"{pc['how']}, ")
+    if rep and pc.get("reported_as"):
+        text += (f"printed {pc['reported_as']} of "
+                 + ", ".join(f"{c} {rep[c][0]:+.2f} m (NMAD {rep[c][1]:.2f})" for c in cams if c in rep)
+                 + f" ({pc.get('reported_meaning', '')}). As waterline - {pc['survey_text']} (the sign of DEM - "
+                   f"survey in this README) that is {wms}. ")
+    else:
+        text += f"gave waterline - {pc['survey_text']} of {wms}. "
+    nosetup = not pc.get("setup_coef")
+    if low and not high and nosetup:
+        text += ("LOW is the sign a line given no setup must have (a timex line is marked where the swash reaches, "
+                 "above still water), the sign of the biases listed below and the sign this build's C = 0 "
+                 "sensitivity should show: there is no opposite-sign discrepancy. ")
+    elif high and not low and nosetup:
+        text += ("HIGH without any setup is NOT what the swash explains (it would make the lines read low): the "
+                 "setup will make them read higher still, so look for a pointing or water-level error. ")
+    if C and nosetup:
+        expect = ", ".join(f"{c} ~{per[c][0] + setup * keep:+.2f} m" for c in cams)
+        full = ", ".join(f"{c} {per[c][0] + setup:+.2f}" for c in cams)
+        text += (f"This build adds the setup (C = {C}: median {setup:.2f} m in the window's daytime"
+                 f"{'' if med is not None else ', predicted'}), which raises every line, by ~{keep:.1f} x the setup "
+                 f"once a line's landward re-projection is counted (as on the 2026 RTK): unless this build's envelope "
+                 f"changes the detections, expect waterline - {pc['survey_text']} of about {expect} ({full} m if the "
+                 f"whole setup counted)"
+                 + (", before the still-water-reference bias listed below. " if plan.get("era") in ("adcp", "chatham")
+                    else ". "))
+    vals = [per[c][0] for c in cams]
+    if len(vals) > 1 and max(vals) - min(vals) > 0.1:
+        text += (f"The difference between the cameras ({' vs '.join(f'{c} {per[c][0]:+.2f}' for c in cams)} m) "
+                 f"cannot come from the water level or the setup, which are the same for both: it points at the "
+                 f"pointing or the lens model; see the horizon offsets per camera in this README. ")
+    text += (f"Until this product is built from the real photos of {pc['window']} (on the station computer only) "
+             f"these are the only real numbers for this date: a build from other photos (e.g. the synthetic test "
+             f"fixture, rendered with the setup planted) says nothing about the real beach. Read the per-camera lines "
+             f"of the headline and the C = 0 sensitivity in compare/*_comparison.txt.")
     return text
 
 
@@ -3270,7 +3302,9 @@ def per_camera_text(by_cam):
     for k, v in sorted((by_cam or {}).items()):
         n = (v or {}).get("n") or 0
         if n and v.get("median") is not None:
-            parts.append(f"{k} {v['median']:+.3f} m (n {n}{', too few' if n < FEW_N else ''})")
+            # survey_compare.py's 'neither': cells outside every camera's footprint (from the calibrations)
+            name = "outside the camera views" if k == "neither" else k
+            parts.append(f"{name} {v['median']:+.3f} m (n {n}{', too few' if n < FEW_N else ''})")
     return ", ".join(parts)
 
 

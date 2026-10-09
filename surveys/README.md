@@ -65,19 +65,32 @@ folder, the waterline folder and its calibration folder, the repository's
 The live date was first called 27 Sep; the user confirmed that its survey is
 the 29 Sep RTK, so the product is dated 2026-09-29.
 
-**2025-01-23: an earlier check points the other way.** Before this script,
-the same photos (18-23 Jan) with the same CACO03_<cam>_20250123 GCP
-calibrations, unfiltered, with no setup and the envelope from the earlier
-lidar-fitted pointing, gave waterline - Jan lidar **+0.46 m for c1** (NMAD
-0.19) and **+0.15 m for c2** (NMAD 0.23): HIGH, not low. The setup (C = 0.037,
-~0.28 m that week) raises every line further (by ~0.8 x the setup once the
-landward re-projection is counted, as on the 2026 RTK), so unless the new
-envelope changes the detections, expect about +0.7 m (c1) and +0.4 m (c2).
-The biases listed under Labels that make the 2025 dates read LOW cannot
-explain that; a 0.3 m difference between cameras on the same water level
-points at the pointing or the lens model. The README of that date says so,
-gives the headline per camera, the C = 0 sensitivity (the same lines without
-the setup) and each camera's sea-horizon offset against its calibration.
+**2025-01-23: the earlier check of the real photos.** Before this script,
+`pointing_fix_figure.py` on the REAL photos of 18-23 Jan, with the same
+CACO03_<cam>_20250123 GCP calibrations, unfiltered, with no setup and the
+envelope from the earlier lidar-fitted pointing, printed *lidar elevation -
+water level at the waterline* of **+0.46 m for c1** (NMAD 0.19) and **+0.15 m
+for c2** (NMAD 0.23). Positive there means the lidar beach lies ABOVE the
+level each line was given: the lines read **LOW**, i.e. waterline (or DEM) -
+Jan lidar **c1 -0.46 m, c2 -0.15 m** without setup. That is the sign a line
+given no setup must have (a timex line is marked where the swash reaches),
+the sign of the biases listed under Labels and the sign the C = 0
+sensitivity of this product should show: no discrepancy of sign. The setup
+(C = 0.037, ~0.28 m that week) raises every line, by ~0.8 x the setup once
+the landward re-projection is counted (as on the 2026 RTK), so unless the new
+envelope changes the detections, expect DEM - lidar of about **c1 -0.24 m,
+c2 +0.07 m** (c1 -0.18, c2 +0.13 m if the whole setup counted). The 0.3 m
+difference between the cameras, on the same water level and setup, points at
+the pointing or the lens model. The README of that date says so, gives the
+headline per camera, the C = 0 sensitivity (the same lines without the setup)
+and each camera's sea-horizon offset against its calibration.
+
+The real January (and March) photos are on the station computer only. The
+numbers in a build made here, from the synthetic test fixture (photos
+rendered from the lidar with the ADCP water level and the setup planted), test
+the pipeline, not the real beach: never read them as real-data results. The
+real numbers for these dates come from running `survey_products.py` on the
+station.
 
 ## surveys.csv: one row per survey to compare with
 
