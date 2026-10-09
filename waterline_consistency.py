@@ -123,7 +123,10 @@ HOW, per camera:
      contradict it: a stray out on the water at the window's LOWEST
      water level became the bottom knot itself, residual 0. So the most
      seaward lines are judged one at a time against all the others,
-     from the seaward end in, until one passes (seaward_end()).
+     from the seaward end in, until one passes among them; one that
+     passes only beyond their end is held out of the reference while
+     the next is judged, so a run of strays (glare or fog over several
+     frames) cannot vouch for itself (seaward_end()).
   5. Decide. A bin fails when |residual| exceeds the threshold below
      and the lines on both sides of it in time say so too (5b).
      In a failing bin and the bins either side, each point is then
@@ -294,6 +297,8 @@ csv.field_size_limit(10 ** 7)
 DAY = 86400.0
 TIDE_CYCLE = 12.42 * 3600.0          # one semidiurnal (M2) tide, s
 AGREE = 0.5                          # time_test(): a reference agrees within this x its threshold
+SEAWARD_RUN = 3                      # seaward_end(): a run of up to this many strays is judged
+TWIN_M = 0.1                         # seaward_end(): lines this close in level lean on each other
 
 # Which way the detected row moves as the water rises, in every column of
 # every camera here: DOWN the image (row increases). Higher water puts the
@@ -712,9 +717,17 @@ def bottom_up(t, z, y, p):
 
 def seaward_end(z, y, w, keep, r, thr, p):
     """
-    Judge the bin's most seaward lines one at a time against all the OTHER
-    kept lines, from the most seaward inwards, stopping at the first that
-    passes. Returns (residuals with those judgements in, keep).
+    Judge the bin's most seaward lines one at a time against the OTHER kept
+    lines, from the most seaward inwards. A line fails when its residual
+    exceeds the threshold and it lies more than --noise-k x --row-noise-px
+    (4 x 2 px) seaward of where those lines put its water level. The
+    peeling stops at the first line that passes -- unless it passed by
+    leaning on a TWIN: the most seaward of the other lines is within 0.1 m
+    of its level (TWIN_M) and fewer than 3 of them lie within 8 px of it.
+    Then it is held back, out of the reference, while the twin is judged in
+    turn; if the twin fails, the lines held back are judged again without
+    it (up to SEAWARD_RUN = 3 lines in a run). Returns (residuals with
+    those judgements in, keep).
 
     WHY: the most seaward line of a bin is the end of the monotone fit, and a
     line at the end of a fit cannot be contradicted by it. A stray far out
@@ -728,33 +741,75 @@ def seaward_end(z, y, w, keep, r, thr, p):
     empty cells out on the water). Judged against the others it is beyond
     their most seaward line, where the elevation must keep falling at no less
     than half the fit's rate: a line tens of metres out on the water cannot
-    be within centimetres of the lowest water level. The other low-water
-    lines stay in the reference -- they are the best evidence against it.
-    An honest lowest-tide line is a few pixels beyond the others and passes
-    the same rule, which ends the peeling: usually one extra fit a bin.
+    be within centimetres of the lowest water level.
+
+    WHY HOLD BACK: strays come in runs. Glare or fog lasts several frames at
+    slack low water (the station's c2 frames of 2 Oct 2026 15:00-16:30 all
+    had strays), and the same light comes back at the same hour the next
+    days. Stopping at the first line that passed, the stray judged first had
+    its twin in the reference -- a few pixels landward at almost the same
+    level -- so it passed, and the twin, the line it leaned on, was never
+    judged (review, Oct 2026: a -0.60 m stray 25-28 m out alone, 304 of 338
+    points dropped; with the next frame's -0.59 m stray, both kept whole;
+    the real 2 Oct 15:00 stray relabelled to the window's lowest level
+    dropped whole, with a copy 5 min later both kept whole). A run of strays
+    from one glare or fog lies at one level -- slack water moves less than
+    0.1 m in an hour -- each a few pixels from the next, and as a run they
+    are consistent with the order; only the lines landward of the run can
+    say that its level does not belong out there. So a line that passes by
+    leaning on a line of its own level is held back while that line is
+    judged. An honest lowest-tide line either lies among the lines of its
+    own slack water (3 or more within 8 px: the peeling ends at once, as
+    before) or leans on a line of a different level, and is judged as
+    before. Not held back: a line leaning on a line more than 0.1 m from
+    its level. Peeling past those too caught more of a scattered week of
+    strays (review's 8-stray week: 31% -> 42% of their points) but dropped
+    honest spring-low lines where the profile is far flatter per pixel at
+    the low end than above it (c2's left edge: -0.71 m and -1.13 m lines
+    35-57 px beyond a -0.39 m line, each judged by extrapolation from the
+    upper beach; megacusps 3,178 -> 3,310 honest points). So strays on
+    different days at levels 0.1 m or more apart, each a few metres beyond
+    the next and within the threshold of it, still vouch for one another:
+    in that 8-stray week 31% of their points go, as before (the DEM's
+    3-frames-per-cell rule kept them out of its cells).
     A stray ABOVE the window's lowest water level but further out than its
     lowest line (review, Oct 2026: 0.3-0.5 m above a spring-low line) is
     out of order with that line; residuals() counts the height difference
-    and the rest of the way out at the fit's average rate, and it goes.
+    and the rest of the way out at the fit's average rate, and it goes. The
+    row guard keeps a few pixels of detector scatter from counting as
+    metres where the waterline barely moves with the tide (c2's far field).
     """
     keep = keep.copy()
+    guard = p.noise_k * p.row_noise_px
+    held = []                         # passed by leaning on a twin, out of the reference
     for i in np.argsort(ROW_SIGN * y, kind="stable"):
         if not keep[i]:
             continue
         rest = keep.copy()
         rest[i] = False
+        rest[held] = False
         if rest.sum() < 2 or n_eff(w[rest]) < p.min_frames \
                 or z[rest].max() - z[rest].min() < p.min_z_range:
             break
         fit = fit_column(z[rest], y[rest], w[rest])
         if fit is None:
             break
-        ri = float(residuals(fit, z[i:i + 1], y[i:i + 1], p.extrapolate_flatten)[0])
-        if abs(ri) > abs(r[i]):
-            r[i] = ri
-        if abs(r[i]) <= thr:
-            break
-        keep[i] = False
+        judge = np.array([i] + held, np.int64)
+        ri = residuals(fit, z[judge], y[judge], p.extrapolate_flatten)
+        gap = np.interp(z[judge], fit[2], fit[1]) - fit[0] * y[judge]
+        out = (ri > thr) & (gap > guard)
+        if out[0]:
+            # out of order with the lines landward of it -- and so are the
+            # lines held back beyond it that the same lines contradict
+            r[judge[out]] = np.maximum(r[judge[out]], ri[out])
+            keep[judge[out]] = False
+            held = [k for k in held if keep[k]]
+            continue
+        among = int((ROW_SIGN * y[rest] <= ROW_SIGN * y[i] + guard).sum())
+        lean = np.flatnonzero(rest)[np.argmin(ROW_SIGN * y[rest])]   # the line it leans on
+        if among >= SEAWARD_RUN or abs(z[lean] - z[i]) > TWIN_M or len(held) >= SEAWARD_RUN - 1:
+            break                     # passed among the lines landward of it, or on its own merits
+        held.append(i)
     return r, keep
 
 
@@ -1647,6 +1702,12 @@ def self_test(cal_dir, keep_dir=None):
          overruled an agreeing side, the 19:30 and 20:00 lines were dropped
          whole -- for good, as nothing ever comes before them; the survey-date
          products filter 7-day windows, so every window has such a first day.)
+      9. A RUN OF STRAYS (review, Oct 2026): case 4's c2 lines, two
+         consecutive frames at slack low water leaving the waterline on the
+         right of the photo for lines 40 m and 36 m out on the water, both at
+         the window's lowest level. Each must lose at least 90% of its points
+         out there (both were kept whole when the first stray, judged against
+         the others, leaned on its twin), and the honest lines less than 0.5%.
     Returns 0 if all pass, 1 otherwise.
     """
     import tempfile
@@ -1881,6 +1942,7 @@ def self_test(cal_dir, keep_dir=None):
                 c, rr, _ = keep_rows(cam, r, cols)
                 if c.size >= 20:
                     frames.append([f"{int(ep)}.{cam}.storm", cam, ep, z, c, rr, None, h])
+    base4 = [list(f) for f in frames]           # case 9 starts from the same lines
     if not frames:
         frames = None
     else:
@@ -1935,6 +1997,54 @@ def self_test(cal_dir, keep_dir=None):
             failures.append(f"storm: {fh:.2%} of honest points dropped (limit 0.5%)")
         if catch_s < 0.90:
             failures.append(f"storm: only {catch_s:.1%} of the lowest-level stray's points dropped (need 90%)")
+
+    # 9. A RUN OF STRAYS (review, Oct 2026): case 4's c2 lines, and in two
+    #    consecutive frames at slack low water -- glare or fog lasts -- the
+    #    line leaves the waterline on the right of the photo for one 40 m and
+    #    36 m out on the water, both at the lowest water level of the window.
+    #    Each was the other's reference: judged against all the others, the
+    #    first leaned on its twin a few pixels landward, passed, and the
+    #    peeling stopped before the twin was judged; both were kept whole.
+    if base4:
+        c2 = sorted((f for f in base4 if f[1] == "c2"), key=lambda f: f[2])
+        pairs = [(a, b) for a, b in zip(c2[:-1], c2[1:])
+                 if b[2] - a[2] <= 3600 and 6 <= (a[2] - t_start) / DAY < 8]
+        if not pairs:
+            failures.append("run of strays: no two consecutive c2 frames to make it from")
+            pairs = [(None, None)]
+    if base4 and pairs[0][0] is not None:
+        twin = min(pairs, key=lambda ab: ab[0][3] + ab[1][3])
+        low = min(f[3] for f in c2 if abs(f[2] - twin[0][2]) <= 3.5 * DAY
+                  and f is not twin[0] and f is not twin[1])
+        for k, (f, metres) in enumerate(zip(twin, (40.0, 36.0))):
+            def on_water(a, metres=metres):
+                return metres * np.clip((260.0 - a) / 60.0, 0, 1)
+            dev = line("c2", f[3], f[2], beach) - line("c2", f[3], f[2], beach, out=on_water)
+            dc = np.interp(f[4], cols, np.nan_to_num(dev, nan=0.0))
+            f[5] = f[5] - dc
+            f[6] = dc >= 0.95 * np.nanmax(dev)
+            f[3] = low - 0.01 + 0.005 * k
+        frames = [tuple(f) for f in c2]
+        dropped, out, summary, plot_info, args = run_case("twin", frames)
+        n_h = d_h = 0
+        caught = []
+        for fname, cam, ep, z, c, r, far, h in frames:
+            dr = dropped[fname]
+            if far is None:
+                n_h += dr.size; d_h += int(dr.sum())
+            else:
+                caught.append((int((dr & far).sum()), int(far.sum()), z))
+        print("  two strays in consecutive frames at the window's lowest level (c2): "
+              + "; ".join(f"{a:,} of {b:,} points {m:g} m out dropped ({z:+.2f} m)"
+                          for (a, b, z), m in zip(caught, (40, 36)))
+              + f"; honest lines {d_h:,} of {n_h:,} ({d_h / max(n_h, 1):.2%})")
+        for line_ in summary:
+            print(f"  CONSISTENCY {line_}")
+        for (a, b, z), m in zip(caught, (40, 36)):
+            if a < 0.9 * b:
+                failures.append(f"run of strays: only {a} of {b} points of the {m} m one dropped (need 90%)")
+        if d_h >= 0.005 * n_h:
+            failures.append(f"run of strays: {d_h / max(n_h, 1):.2%} of honest points dropped (limit 0.5%)")
 
     # 5. megacusps, c2
     rng = np.random.default_rng(11)
