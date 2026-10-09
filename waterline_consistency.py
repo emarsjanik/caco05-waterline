@@ -770,15 +770,20 @@ def time_test(t, z, y, ref, cand, sign, p):
     threshold, the same way), AGREES with the line (within half its
     threshold), or cannot say (in between; too few lines; or the line lies
     beyond the end of its lines in the direction it failed, where only a
-    bound or an extrapolation speaks -- see verdict()). Where a side cannot
-    say, the lines of the line's own tide (+/- 12.42 h) judge it instead.
-    The line is EXCUSED -- kept, as beach change -- when a reference that
-    can say agrees with it; otherwise the window's verdict stands -- except
-    for a LANDWARD failure that nothing after it can judge (the end of the
-    record, a column the later lines do not reach): neither the past nor
-    its own tide, which holds the hours before a cut in that tide, drops
-    it. A storm cuts a beach in hours, and the lines after the cut are
-    landward of everything before it; the beach builds back seaward over
+    bound or an extrapolation speaks -- see verdict()). The line is EXCUSED
+    -- kept, as beach change -- when a side that can say agrees with it.
+    Where no side agrees and one cannot say, the lines of the line's own
+    tide (+/- 12.42 h) judge it instead -- never against a side that agrees:
+    in the tide of a cut they hold the hours before it too (review, Oct
+    2026: a 0.8 m cut on the record's first day, 26 Sep 13:00-19:00; the
+    19:30 and 20:00 c1 lines had too few lines before them to judge, the
+    lines after them agreed, and their own tide dropped them whole -- for
+    good, as nothing ever comes before them). Otherwise the window's verdict
+    stands -- except for a LANDWARD failure that nothing after it can judge
+    (the end of the record, a column the later lines do not reach): neither
+    the past nor its own tide, which holds the hours before a cut in that
+    tide, drops it. A storm cuts a beach in hours, and the lines after the
+    cut are landward of everything before it; the beach builds back seaward over
     days to weeks, and the errors seen on this station lie seaward (c1's
     envelope floor, c2's lines on the water), so a seaward failure the past
     alone confirms still goes. A line kept this way is judged again in the
@@ -903,6 +908,11 @@ def time_test(t, z, y, ref, cand, sign, p):
             # LANDWARD of the beach before it, and nothing after it can
             # say: the past alone does not drop it -- nor its own tide,
             # which holds the hours before a cut in that tide
+            out[k] = False
+        elif False in votes:
+            # a side that can judge it agrees: it belongs to the beach of
+            # that side -- change. Its own tide does not overrule that: in
+            # the tide of a cut it holds the beach before the cut too
             out[k] = False
         else:
             if None in votes:
@@ -1629,6 +1639,14 @@ def self_test(cal_dir, keep_dir=None):
          No honest line may be dropped whole, and less than 1% of the
          points after the cut (the version before: 9 lines whole at 0.8 m,
          3 at 0.5 m).
+      8. CUT ON THE RECORD'S FIRST DAY (review, Oct 2026): case 7's 0.8 m cut
+         on 26 Sep 13:00-19:00 instead, so the post-cut lines of that evening
+         have too few lines before them to judge and their own tide (+/-
+         12.42 h) still holds the beach before the cut. The lines after them
+         agree with them; the same limits as case 7. (When the own tide
+         overruled an agreeing side, the 19:30 and 20:00 lines were dropped
+         whole -- for good, as nothing ever comes before them; the survey-date
+         products filter 7-day windows, so every window has such a first day.)
     Returns 0 if all pass, 1 otherwise.
     """
     import tempfile
@@ -2009,6 +2027,9 @@ def self_test(cal_dir, keep_dir=None):
     #    the cut the high-tide lines fall below the envelope's floor, so no
     #    line after it reaches the levels the old beach had where the new
     #    mid-tide lines now lie. Every line is honest.
+    # 8. The same with a 0.8 m cut on the FIRST day of the record (26 Sep
+    #    13:00-19:00): nothing before the post-cut lines can vouch for them,
+    #    and their own tide still holds the beach before the cut.
     try:                                  # c1's search envelope: no line found below its floor
         from waterline_detector_v5 import CAMERAS
         prof = CAMERAS["CACO05_C1"]
@@ -2017,9 +2038,12 @@ def self_test(cal_dir, keep_dir=None):
         floor_c1 = crop["c1"][0] + np.interp(cols / (W - 1.0), ex_, hi_) * (crop["c1"][1] - crop["c1"][0]) + 11
     except Exception:                     # no detector here: the photo's crop alone
         floor_c1 = np.full(cols.size, float(crop["c1"][1]))
-    for mag in ((0.8, 0.5) if sig_t else ()):
+    cuts = ((0.8, datetime(2026, 10, 2, 12, tzinfo=timezone.utc)),
+            (0.5, datetime(2026, 10, 2, 12, tzinfo=timezone.utc)),
+            (0.8, datetime(2026, 9, 26, 13, tzinfo=timezone.utc)))
+    for mag, when in (cuts if sig_t else ()):
         rng = np.random.default_rng(13)
-        t_cut2 = datetime(2026, 10, 2, 12, tzinfo=timezone.utc).timestamp()
+        t_cut2 = when.timestamp()
         beach = {"rtk": True, "cut": (t_cut2, 6 * 3600.0, mag)}
         frames = []
         for d in range(10):
@@ -2036,21 +2060,23 @@ def self_test(cal_dir, keep_dir=None):
                 c, rr, _ = keep_rows("c1", r, cols)
                 if c.size >= 20:
                     frames.append((f"{int(ep)}.c1.cut", "c1", ep, z, c, rr, None, h))
-        dropped, out, summary, plot_info, args = run_case(f"cut{mag:g}", frames)
+        dropped, out, summary, plot_info, args = run_case(f"cut{mag:g}_{when:%m%d}", frames)
         after = [f[0] for f in frames if f[2] >= t_cut2]
         n_a = sum(dropped[k].size for k in after); d_a = sum(int(dropped[k].sum()) for k in after)
         whole = [k for k in dropped if dropped[k].all()]
         n_all = sum(v.size for v in dropped.values()); d_all = sum(int(v.sum()) for v in dropped.values())
         fa = d_a / max(n_a, 1)
-        print(f"  erosion {mag:g} m on 2 Oct, surveyed beach, c1 with its envelope: after the cut "
+        what = (f"erosion {mag:g} m on {when.day} {when:%b %H:%M}"
+                + (", the record's first day" if when.day == 26 else ""))
+        print(f"  {what}, surveyed beach, c1 with its envelope: after the cut "
               f"{d_a:,} of {n_a:,} honest points dropped ({fa:.2%}), {len(whole)} line(s) whole; "
               f"all {d_all:,} of {n_all:,}")
         for line_ in summary:
             print(f"  CONSISTENCY {line_}")
         if whole:
-            failures.append(f"erosion {mag:g} m: {len(whole)} honest line(s) dropped whole (limit none)")
+            failures.append(f"{what}: {len(whole)} honest line(s) dropped whole (limit none)")
         if fa >= 0.01:
-            failures.append(f"erosion {mag:g} m: {fa:.2%} of the honest points after the cut dropped "
+            failures.append(f"{what}: {fa:.2%} of the honest points after the cut dropped "
                             f"(limit 1%)")
 
     if not keep_dir:
