@@ -363,10 +363,12 @@ def map_limits(u, v, width_in, height_in, pad=4.0):
     Axis limits that fill a width_in x height_in box, and the cross-shore
     stretch: the largest round factor at which the strip still fits.
     The cross-shore extent is taken between the 0.25 and 99.75
-    percentiles, so a few stray cells cannot shrink the stretch; the
-    window then slides to hold every cell when they all fit in it (the
-    real 29 Sep - 5 Oct 2026 7-day DEM lost one measured cell off its edge
-    when the window was centred on the percentiles).
+    percentiles, so a few stray cells cannot shrink the stretch much; the
+    window then slides to hold every cell when they all fit in it, and
+    the stretch goes down ONE round step if that makes them fit (the real
+    29 Sep - 5 Oct 2026 7-day DEM lost one measured cell off its edge at
+    x2.5, centred on the percentiles; it is drawn at x2). A cell further
+    out than that stays off the page.
     """
     u_lo, u_hi = u.min() - pad, u.max() + pad
     v_lo, v_hi = np.percentile(v, [0.25, 99.75])
@@ -374,6 +376,11 @@ def map_limits(u, v, width_in, height_in, pad=4.0):
     lu, lv = u_hi - u_lo, v_hi - v_lo
     bound = (height_in / width_in) * lu / lv
     ex = max([x for x in NICE_EXAGGERATION if x <= bound] or [1])
+    a_lo, a_hi = v.min() - pad / 4, v.max() + pad / 4     # every cell, half a 2 m cell each side
+    lower = [x for x in NICE_EXAGGERATION if x < ex]
+    if a_hi - a_lo > lu * (height_in / width_in) / ex and lower \
+            and a_hi - a_lo <= lu * (height_in / width_in) / lower[-1]:
+        ex = lower[-1]                    # one step flatter holds every cell
     v_span = lu * (height_in / width_in) / ex
     if v_span < lv:                    # wider than long even at 1:1 -- widen alongshore
         u_mid, u_span = (u_lo + u_hi) / 2, lv * ex * width_in / height_in
@@ -381,7 +388,6 @@ def map_limits(u, v, width_in, height_in, pad=4.0):
         v_span = lv
     v_mid = (v_lo + v_hi) / 2
     lo, hi = v_mid - v_span / 2, v_mid + v_span / 2
-    a_lo, a_hi = v.min() - pad / 2, v.max() + pad / 2
     if a_hi - a_lo <= v_span:              # every cell fits: slide the window to hold them
         if a_lo < lo:
             lo, hi = a_lo, a_lo + v_span
