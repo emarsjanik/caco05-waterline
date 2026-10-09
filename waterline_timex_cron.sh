@@ -388,12 +388,13 @@ else
     else
         # 5d. Consistency filter. MAP_CONTOURS is what the maps and
         #     georectification read: the filtered copy when the filter ran
-        #     cleanly, otherwise the unfiltered file. The old filtered copy is
-        #     removed first, so a failed run can never leave last run's file
-        #     looking current.
+        #     cleanly, otherwise the unfiltered file. Last run's filtered copy,
+        #     report and diagnostic plots are removed first, so a failed (or
+        #     disabled) run can never leave them looking current.
         MAP_CONTOURS="$CONTOURS"
+        rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp" "$CONSISTENCY_REPORT" "$CONSISTENCY_REPORT.tmp" \
+            "${CONSISTENCY_PLOT}_c1.png" "${CONSISTENCY_PLOT}_c2.png"
         if [ "$CONSISTENCY_ENABLE" = "1" ]; then
-            rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp"
             qc_out=$(python3 "$BASE/waterline_consistency.py" "$CONTOURS" \
                 --output "$CONTOURS_QC" --report "$CONSISTENCY_REPORT" \
                 --plot "$CONSISTENCY_PLOT" --image-dir "$ARCHIVE_IMG" \
@@ -407,7 +408,8 @@ else
                 # (the detector wrong for most lines there): first line of each
                 echo "$qc_out" | grep '^WARNING' | while read -r l; do log "  $l"; done
             else
-                rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp"
+                rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp" "$CONSISTENCY_REPORT" "$CONSISTENCY_REPORT.tmp" \
+                    "${CONSISTENCY_PLOT}_c1.png" "${CONSISTENCY_PLOT}_c2.png"
                 log "WARNING: waterline consistency filter failed (exit $qc_rc) -- maps, ground points"
                 log "         and DEM use the UNFILTERED $(basename "$CONTOURS"). See above."
             fi
