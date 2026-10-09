@@ -249,6 +249,32 @@ THRESHOLDS, and why:
   is suspect -- e.g. a camera knocked out of aim -- and that is for a
   person to look at.
 
+KNOWN LIMIT -- a camera wrong for MOST lines of a column AND a cut in the
+  window (review, Oct 2026; not a regression: 566eef7 does the same). In c1's
+  right half after a 0.8 m cut, every line above ~0 m left the search
+  envelope and was redrawn on the water (the review's env1_ero08): the
+  honest lines there span only -0.6..0 m, the wrong ones 0..+1.8 m on the
+  same rows. The lowest wrong lines are only 0.6 m out of order -- under the
+  threshold -- and those of the record's last days have nothing after them
+  to judge them, so they stay; the window's kept lines then show no clear
+  order and the bin is 'unclear: kept' (215 of 760 c1 bin-days; 82% of the
+  wrong points dropped, against 96% without the cut). Tried, each on the
+  review's scenarios: capping the out-of-sample elevation scatter at what
+  2 px of row noise make of the reference (82%); only lines that AGREE with
+  lower water as references for higher layers (86%); the bottom-up verdicts
+  in 'unclear' bins (87-88%, also with only failures 64 px or more seaward
+  counted, or only where the lower lines move 60 px or more per metre).
+  Every one dropped more honest c2 lines on a crenulated shoreline (cusp15
+  3,178 -> 3,447..4,391 points; c2-only 4,881 -> 5,035..7,925), where c2's
+  oblique view folds the high-tide lines behind the horns seaward of lower
+  ones -- the same signature in the photo. Telling the two apart needs the
+  viewing geometry: from the calibration, how far a waterline can move per
+  metre of water in each column (>= 34 px/m in c1, >= 4.7 px/m in c2's far
+  field, on the surveyed beach). Not done here. What it costs: the post-cut
+  7-day DEM south of the seam had 16 of 448 cells off by more than 0.5 m and
+  51 blanked (unfiltered: 71 and 410; the station's real 29 Sep - 5 Oct
+  contours: no c1 line kept below lower water on the ground).
+
 ELEVATION: beach_elevation_navd88 when the contour file has it (water
 level + wave setup, --setup-coef), else tide_elevation_navd88 -- the
 same choice, row by row, as georectify.py and dem_from_contours.py, so
@@ -258,7 +284,9 @@ OUTPUTS:
   --output   filtered copy, same columns and row order, rows removed.
   --report   one row per line affected: frame, camera, capture time,
              elevation, points in the line and dropped, bins judged and
-             failed, columns dropped, median and largest residual (m),
+             failed, columns dropped, median residual of the failing bins
+             (of the sign most of them have; the reason counts each sign
+             when they differ) and the largest (m),
              threshold (m), action (frame / segments / NOT APPLIED),
              reason, and how many of its failing bins were REVERSED.
   --plot     <stem>_<camera>.png: the last --plot-days of lines on a
@@ -375,10 +403,11 @@ def read_points(path):
                 elevs.append(z)
                 beach_used.append(bool(b))
             fid.append(k)
-            try:
-                us.append(float(r[i_u])); vs.append(float(r[i_v]))
+            try:                     # both or neither: the arrays must stay aligned
+                u_, v_ = float(r[i_u]), float(r[i_v])
             except ValueError:
-                us.append(np.nan); vs.append(np.nan)
+                u_ = v_ = np.nan
+            us.append(u_); vs.append(v_)
     elev_col = "beach_elevation_navd88" if i_beach is not None else "tide_elevation_navd88"
     return dict(header=header, frame=np.frombuffer(fid, dtype=np.int32),
                 col=np.frombuffer(us, dtype=np.float32), row=np.frombuffer(vs, dtype=np.float32),
@@ -1254,13 +1283,21 @@ def _col_ranges(bins, bin_px):
     return out
 
 
-def bin_summary(cam, status, p):
+def bin_summary(cam, status, p, change=None):
     """
     Counts of column bins x days by status, for the CONSISTENCY line, and
     WARNING lines for REVERSED bins: rows running against the water level
-    there mean the detector is wrong for most lines, which is for a person
-    to look at (search envelope? camera moved?) even though the filter
-    drops what it can.
+    there are for a person to look at even though the filter drops what it
+    can. Physics says only that the order is broken, not which lines are
+    wrong: the high-tide lines may sit seaward (the detector unable to reach
+    the real line, c1's search-envelope floor), the low-tide lines landward
+    (the wet/dry line on the ebb), or the beach changed within the window.
+    `change`: {(day, bin): (lines out of order with the window's fit, of
+    those kept as beach change by time_test())}; where in most reversed
+    bin-days nothing is out of order beyond the threshold, or most of it is
+    kept as change, the first line (the one the cron logs) says 'beach
+    change?' (review, Oct 2026: it blamed the high-tide lines and the
+    envelope on an honest week after the beach was lowered 0.8 m).
     """
     kinds = [v[0] for v in status.values()]
     n = len(kinds)
@@ -1280,18 +1317,28 @@ def bin_summary(cam, status, p):
         rcs = np.array([rc for _, _, rc in rev])
         ranges = ", ".join(f"{a}-{b}" for a, b in _col_ranges([b for _, b, _ in rev], p.column_bin))
         recent = [b for d, b, _ in rev if d > days_all[-1] - p.plot_days]
+        def explained(n_out, n_exc):
+            # nothing beyond the threshold (reversed by rank alone), or most
+            # of what was beyond it kept as beach change by the test in time
+            return n_out == 0 or n_exc > 0.5 * n_out
+        mostly = sum(1 for d, b, _ in rev if change and explained(*change.get((d, b), (0, 0))))
         warn.append(f"WARNING: camera {cam}: waterline rows run AGAINST the water level in pixel "
-                    f"columns {ranges}")
+                    f"columns {ranges}"
+                    + (" (beach change? in most of them no line is out of order beyond the "
+                       "threshold, or it is kept as change)" if mostly > 0.5 * len(rev) else ""))
         warn.append(f"         ({len(rev)} column bin-days on {len(days_rev)} of {len(days_all)} days, "
                     f"{first} to {last}; rank correlation {rcs.min():+.2f} to {rcs.max():+.2f}).")
         if recent:
             warn.append("         In the last {} days: columns {}.".format(
                 p.plot_days, ", ".join(f"{a}-{b}" for a, b in _col_ranges(recent, p.column_bin))))
         warn.append("         Higher water must put the line LOWER in the photo (nearer the camera);")
-        warn.append("         here the high-tide lines sit seaward of the low-tide ones, so most of")
-        warn.append("         them are wrong -- the detector cannot reach the real line (search")
-        warn.append("         envelope floor above the high-tide waterline?). Lines seaward of")
-        warn.append("         lower-water lines there are dropped; look at the diagnostic plot.")
+        warn.append("         here it does not. Either the high-tide lines sit seaward (the detector")
+        warn.append("         cannot reach the real line: search envelope floor above the high-tide")
+        warn.append("         waterline?), or the low-tide lines sit landward (the wet/dry line?), or")
+        warn.append(f"         the beach changed in the window ({mostly} of these bin-days: no line out")
+        warn.append("         of order beyond the threshold, or most of those kept as change). Lines")
+        warn.append("         seaward of lower-water lines there are dropped -- the low-tide lines are")
+        warn.append("         taken as right; look at the diagnostic plot.")
     return msg, warn
 
 
@@ -1329,7 +1376,15 @@ def run(args):
         resid, thresh, R, fits, status, excused = judge_camera(epochs, elevs, fl, col, row,
                                                                frames.size, args)
         fail, whole, n_judged, n_fail = decide(resid, thresh, args, excused)
-        bins_msg, warn = bin_summary(cam, status, args)
+        fday = np.floor(epochs / DAY)
+        change = {}
+        for (d, b), kind in status.items():
+            if kind[0] == "reversed":
+                on_day = fday == d
+                with np.errstate(invalid="ignore"):
+                    n_out = int((on_day & (np.abs(resid[:, b]) > thresh[:, b])).sum())
+                change[(d, b)] = (n_out, int((on_day & (excused[:, b] != 0)).sum()))
+        bins_msg, warn = bin_summary(cam, status, args, change)
         for line in warn:
             print(line)
 
@@ -1353,20 +1408,29 @@ def run(args):
             n_rev = int(sum(status.get((fday[f], b), ("",))[0] == "reversed"
                             for b in np.flatnonzero(fail[f])))
             rr = resid[f][fail[f]] if fail[f].any() else resid[f][np.isfinite(resid[f])]
-            med = float(np.median(rr)) if rr.size else float("nan")
+            # failing bins can disagree in sign (seaward in some columns,
+            # landward in others): the median of the majority's, and the
+            # count of each, rather than a median across both that calls a
+            # line seaward when most of it is landward
+            n_sea, n_land = int((rr > 0).sum()), int((rr < 0).sum())
+            maj = rr[rr > 0] if n_sea >= n_land else rr[rr < 0]
+            med = float(np.median(maj)) if maj.size else float("nan")
             worst = float(rr[np.argmax(np.abs(rr))]) if rr.size else float("nan")
             thr = float(np.nanmedian(thresh[f][fail[f]])) if fail[f].any() else float("nan")
             side = "lower" if med > 0 else "higher"
             where = "seaward" if med > 0 else "landward"
+            mixed = (f" ({n_sea} bin(s) seaward, {n_land} landward)"
+                     if fail[f].any() and n_sea and n_land else "")
             if whole[f]:
                 action = "frame"
                 reason = (f"{n_fail[f]} of {n_judged[f]} judged column bins out of order "
-                          f"(> {args.frame_fraction:.0%}): whole line dropped; median residual "
-                          f"{med:+.2f} m, i.e. it sits {where} of where its water level belongs")
+                          f"(> {args.frame_fraction:.0%}){mixed}: whole line dropped; median "
+                          f"residual {med:+.2f} m, i.e. it sits {where} of where its water level "
+                          f"belongs")
             else:
                 action = "segments"
-                reason = (f"out of order in {n_fail[f]} of {n_judged[f]} judged column bins: the line "
-                          f"sits where the other lines put water {abs(med):.2f} m {side} "
+                reason = (f"out of order in {n_fail[f]} of {n_judged[f]} judged column bins{mixed}: "
+                          f"the line sits where the other lines put water {abs(med):.2f} m {side} "
                           f"({where} of its level; threshold {thr:.2f} m)")
             if n_rev:
                 reason += (f"; {n_rev} of the failing bins REVERSED (rows run against the water "
@@ -1572,7 +1636,7 @@ def plot_camera(cam, info, data, report, args, out_png):
             ax.text((a + b) / 2, 0.012 * height, "REVERSED", color="white", fontsize=7.5,
                     fontweight="bold", ha="center", va="top")
         rev_note = (f"\nred bar: columns where rows ran AGAINST the water level on {n_days} "
-                    f"day(s) -- most lines there wrong (search envelope?)")
+                    f"day(s) -- high-tide lines seaward, low-tide lines landward, or beach change")
     ax.set_xlim(0, width); ax.set_ylim(height, 0); ax.axis("off")
     status = "" if info["applied"] else "   [NOT APPLIED: would drop too much, see log]"
     ax.set_title(f"{cam.upper()}  {first} to {last}: {len(listed)} line(s) with parts dropped as out of "
