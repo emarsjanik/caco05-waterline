@@ -116,7 +116,9 @@ HOW, per camera:
          ground, which roughly makes up for it; half leaves margin. So
          a line out on the water, whose level is too HIGH for how far
          out it lies, counts; a lowest-tide line slightly beyond the
-         others does not.
+         others does not. A line whose water is HIGHER than the lowest
+         line's and yet lies beyond it is out of order already and gets
+         no margin: the average rate (residuals()).
      The most seaward line of a bin is the end of the fit, which cannot
      contradict it: a stray out on the water at the window's LOWEST
      water level became the bottom knot itself, residual 0. So the most
@@ -435,18 +437,36 @@ def residuals(fit, z, y, flatten):
         there. Only a line BELOW the top level is out of order.
       * seaward of every level (beyond the lowest line): the beach goes on
         down seaward, but may flatten (a low-tide terrace is ~0.4x the
-        slope of the beach face). The elevation is taken to fall at no
-        less than 1/`flatten` of the fit's average rate, so only a line
-        whose water level is too HIGH for how far out it lies counts -- a
-        line far out on the water, which no flattening explains.
+        slope of the beach face). For a line whose water is LOWER than the
+        bottom knot's -- a new lowest tide beyond the others -- the
+        elevation is taken to fall at no less than 1/`flatten` of the fit's
+        average rate, so only a line whose water level is too HIGH for how
+        far out it lies counts: a line far out on the water, which no
+        flattening explains.
+        A line whose water is HIGHER than the bottom knot's and yet lies
+        seaward of it is out of order already, by the height difference,
+        and gets no margin for a flatter terrace: the rest of the way out
+        is counted at the fit's average rate. Further out each row covers
+        more ground, which makes up for the flatter terrace about as much as
+        it costs. Review, Oct 2026: a c2 stray 32-44 m out on the water,
+        0.42 m above a spring-low line of an hour later and 52 px beyond it,
+        was +0.62 m at half the rate -- under the threshold, kept whole --
+        and is +0.82 m at the average rate; the bed it was drawn on, 40 m out
+        on the 1:67 terrace beyond -1.2 m, is 0.87 m below its water level.
+        The local slope of the lowest knots was tried and came out flatter
+        still (0.0041-0.0045 m/px against the true 0.0066): the lowest lines
+        are the noisiest, 0.1 m of water-level error moving one 7 m on the
+        flat terrace.
     """
     sgn, ky, kz = fit
     yy = sgn * np.asarray(y, float)
+    z = np.asarray(z, float)
     r = z - np.interp(yy, ky, kz)
     span = ky[-1] - ky[0]
     slope = (kz[-1] - kz[0]) / span if span > 0 else 0.0
     seaward = yy < ky[0]
-    z_max = kz[0] - (ky[0] - yy) * slope / flatten
+    rate = np.where(z > kz[0], slope, slope / flatten)
+    z_max = kz[0] - (ky[0] - yy) * rate
     r = np.where(seaward, np.maximum(0.0, z - z_max), r)
     landward = yy > ky[-1]
     r = np.where(landward, np.minimum(0.0, z - kz[-1]), r)
@@ -663,6 +683,10 @@ def seaward_end(z, y, w, keep, r, thr, p):
     lines stay in the reference -- they are the best evidence against it.
     An honest lowest-tide line is a few pixels beyond the others and passes
     the same rule, which ends the peeling: usually one extra fit a bin.
+    A stray ABOVE the window's lowest water level but further out than its
+    lowest line (review, Oct 2026: 0.3-0.5 m above a spring-low line) is
+    out of order with that line; residuals() counts the height difference
+    and the rest of the way out at the fit's average rate, and it goes.
     """
     keep = keep.copy()
     for i in np.argsort(ROW_SIGN * y, kind="stable"):
@@ -1337,6 +1361,17 @@ def self_test(cal_dir, keep_dir=None):
          must stay below 5% (origin/main 3.9%; 7.3% when the bottom-up pass
          judged the higher lines' few-pixel offsets from the lower lines in
          metres).
+      6. STRAY ABOVE THE LOWEST LINE (review, Oct 2026): c2 on the
+         RTK-style beach (foreshore 0.13, terrace 0.035 to -1.2 m, 0.015
+         beyond, the survey's alongshore variation), the storm week's water levels: a line at
+         spring tides 0.3-0.5 m above the lowest line of its window leaves
+         the waterline on the right of the photo for a line on the water
+         10 m beyond where that lowest level meets the beach (~30 m beyond
+         its own). Half the fit's rate beyond the lowest line put it under
+         the threshold (88% of that stretch dropped, the ramp into it kept,
+         in the version before); at least 95% of the points of its stretch
+         on the water must be dropped, and less than 0.5% of the honest
+         points.
     Returns 0 if all pass, 1 otherwise.
     """
     import tempfile
@@ -1365,13 +1400,28 @@ def self_test(cal_dir, keep_dir=None):
         -0.2 m, linear between -- so the h contour after the cut is where
         the old beach stood at h0, h0 - lowering(h0) = h (the mid-beach
         flattens; the review's generator, Oct 2026); beach['cusp'] = (m, m):
-        alongshore undulation amplitude and wavelength (default 5, 150)."""
+        alongshore undulation amplitude and wavelength (default 5, 150).
+        beach['rtk']: the profile the 29 Sep 2026 RTK checkshots describe
+        instead -- foreshore 0.13 from the berm crest (+3.75 m, s = 12) to
+        0 m, low-tide terrace 0.035 to -1.2 m, 0.015 beyond -- with the
+        survey's alongshore variation (the +1.2 m contour ~11 m further
+        seaward around 130 m south of the cameras, 3 m undulation every
+        140 m)."""
         if "storm" in beach:
             tc, dur, mag = beach["storm"]
             f = float(np.clip((t - tc) / dur, 0, 1))
             m = mag * f * f * (3 - 2 * f)
             if h > -0.2 and m > 0:
                 h = h + m if h > 1.0 - m else (h + 0.2 * m / 1.2) / (1 - m / 1.2)
+        if beach.get("rtk"):
+            s_f = 12 + 3.75 / 0.13
+            if h >= 0:
+                s = 12 + (3.75 - h) / 0.13
+            elif h >= -1.2:
+                s = s_f - h / 0.035
+            else:
+                s = s_f + 1.2 / 0.035 + (-1.2 - h) / 0.015
+            return s + 11.0 * np.exp(-0.5 * ((a + 130.0) / 55.0) ** 2) + 3.0 * np.sin(2 * np.pi * a / 140.0)
         if h >= 0:
             s = 12 + (3.75 - h) / 0.125
         else:
@@ -1622,6 +1672,67 @@ def self_test(cal_dir, keep_dir=None):
         print(f"  CONSISTENCY {line_}")
     if fc >= 0.05:
         failures.append(f"megacusps: {fc:.2%} of honest points dropped (limit 5%)")
+
+    # 6. A c2 stray at spring tides, 0.3-0.5 m ABOVE the lowest line of its
+    #    window, on the surveyed beach (review, Oct 2026: env05, 26 Sep
+    #    21:00, -0.71 m, 0.42 m above a -1.13 m line of an hour later, 32-44 m
+    #    out on the water on the right of c2's photo but only ~50 px beyond
+    #    that line, kept whole). The storm week's water levels and setup, c2
+    #    keeping 60% of its frames.
+    if sig_t:
+        rng = np.random.default_rng(17)
+        beach = {"rtk": True}
+        frames = []
+        for d in range(8):
+            for k in range(24):
+                ep = t_start + d * DAY + 11 * 3600 + k * 1800
+                if rng.random() > 0.6:
+                    continue
+                h = float(np.interp(ep, sig_t, sig_wl)) + 0.09
+                hs, tp = float(np.interp(ep, sig_t, sig_hs)), float(np.interp(ep, sig_t, sig_tp))
+                z = h + 0.037 * np.sqrt(hs * 9.81 * tp * tp / (2 * np.pi))
+                noise = 1.0 + 0.5 * max(0.0, hs - 1.5)
+                r = line("c2", z + rng.normal(0, 0.05 + 0.03 * hs), ep, beach) \
+                    + noise * (rng.normal(0, 1.2, cols.size) + rng.normal(0, 1.5))
+                c, rr, _ = keep_rows("c2", r, cols)
+                if c.size >= 20:
+                    frames.append([f"{int(ep)}.c2.rtk", "c2", ep, z, c, rr, None, h])
+
+        def window_low(f):
+            return min(g[3] for g in frames if abs(g[2] - f[2]) <= 3.5 * DAY and g is not f)
+        stray = min((f for f in frames if (f[2] - t_start) / DAY < 3),
+                    key=lambda f: abs(f[3] - window_low(f) - 0.4))
+        above = stray[3] - window_low(stray)
+
+        def on_water(a):
+            # 10 m beyond where the window's lowest water level meets the
+            # beach (~30 m beyond its own level, ~60 px beyond the lowest
+            # line in the photo, as in the review's case), ramping in over
+            # 60 m from 200 m alongshore of the cameras towards the seam
+            beyond = contour_s(window_low(stray), a, stray[2], beach) - contour_s(stray[3], a, stray[2], beach)
+            return (beyond + 10.0) * np.clip((260.0 - a) / 60.0, 0, 1)
+        dev = line("c2", stray[3], stray[2], beach) - line("c2", stray[3], stray[2], beach, out=on_water)
+        dc = np.interp(stray[4], cols, np.nan_to_num(dev, nan=0.0))
+        stray[5] = stray[5] - dc
+        far, ramp = dc >= 0.95 * np.nanmax(dev), dc >= 0.25 * np.nanmax(dev)
+        frames = [tuple(f) for f in frames]
+        dropped, out, summary, plot_info, args = run_case("stray_rtk", frames)
+        dr = dropped[stray[0]]
+        catch_s = int((dr & far).sum()) / max(int(far.sum()), 1)
+        n_h = sum(v.size for k, v in dropped.items() if k != stray[0])
+        d_h = sum(int(v.sum()) for k, v in dropped.items() if k != stray[0])
+        print(f"  stray {above:.2f} m above its window's lowest line ({stray[3]:+.2f} m, c2, surveyed "
+              f"beach), 10 m beyond it: {int((dr & far).sum()):,} of {int(far.sum()):,} points of the "
+              f"stretch on the water dropped ({catch_s:.1%}); {int((dr & ramp).sum()):,} of "
+              f"{int(ramp.sum()):,} of the ramp in; honest lines {d_h:,} of {n_h:,} "
+              f"({d_h / max(n_h, 1):.2%})")
+        for line_ in summary:
+            print(f"  CONSISTENCY {line_}")
+        if catch_s < 0.95:
+            failures.append(f"stray above the lowest line: only {catch_s:.1%} of its points on the "
+                            f"water dropped (need 95%)")
+        if d_h >= 0.005 * n_h:
+            failures.append(f"stray case: {d_h / max(n_h, 1):.2%} of honest points dropped (limit 0.5%)")
 
     if not keep_dir:
         for p_ in tmp.iterdir():
