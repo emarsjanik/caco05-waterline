@@ -1521,8 +1521,13 @@ def plot_camera(cam, info, data, report, args, out_png):
             ax.plot(c, r, color="black", lw=3.6, alpha=0.6, ls="--" if whole else "-")
             ax.plot(c, r, color=colour, lw=2.2, ls="--" if whole else "-")
         listed.append(f)
-    # Numbers in two staggered rows above the lines, spread sideways with a
+    # Numbers in staggered rows above the lines, spread sideways with a
     # leader to each dropped part, so rejections in one place stay readable.
+    # As many rows as the numbers need to sit side by side (at least two),
+    # stacked upwards from 5% of the photo above the highest dropped line --
+    # and, where that would leave the photo, downwards from its top edge
+    # instead: both rows were once clamped to the same height there, and on
+    # the station's c2 week 24 of 29 numbers overlapped another.
     if listed:
         top = float(np.nanmin(row[drop & np.isin(fl, listed)]))
         anchors = []
@@ -1533,8 +1538,13 @@ def plot_camera(cam, info, data, report, args, out_png):
             anchors.append((float(c[i]), float(r[i])))
         order = list(np.argsort([a[0] for a in anchors]))
         sep = 0.032 * width
-        for tier in (0, 1):
-            ids = order[tier::2]
+        n_tiers = max(2, int(np.ceil(len(order) * sep / (0.95 * width))))
+        step = 0.035 * height
+        ly_first = top - 0.05 * height                      # the row nearest the lines
+        if ly_first - (n_tiers - 1) * step < 0.03 * height:
+            ly_first = 0.03 * height + (n_tiers - 1) * step
+        for tier in range(n_tiers):
+            ids = order[tier::n_tiers]
             xs = [anchors[n][0] for n in ids]
             for k in range(1, len(xs)):                      # spread rightwards
                 xs[k] = max(xs[k], xs[k - 1] + sep)
@@ -1542,7 +1552,7 @@ def plot_camera(cam, info, data, report, args, out_png):
                 xs[-1] = width - sep / 2
                 for k in range(len(xs) - 2, -1, -1):
                     xs[k] = min(xs[k], xs[k + 1] - sep)
-            ly = max(top - (0.05 + 0.035 * tier) * height, 0.03 * height)
+            ly = ly_first - tier * step
             for n, lx in zip(ids, xs):
                 lx = max(lx, sep / 2)
                 x, y = anchors[n]
@@ -1607,21 +1617,32 @@ def plot_camera(cam, info, data, report, args, out_png):
     ax2.tick_params(labelsize=7)
     ax2.grid(alpha=0.3)
 
+    # The table: what its columns mean first, so it is never the part cut
+    # off; then as many rows as the space below the plot holds, and a count
+    # of the rest only when there is a rest. (It printed 34 rows and the
+    # note after them whatever the space: on a busy week the note fell off
+    # the bottom, and '... and 0 more' was printed.)
     ax3 = fig.add_axes([0.66, 0.02, 0.33, 0.47]); ax3.axis("off")
-    lines = ["#   capture (UTC)     elev    pts   resid  action"]
+    fs = 7.4
+    room = int(0.47 * fig.get_figheight() * 72 / (fs * 1.2))        # text lines that fit
+    head = [f"resid = {elev_words} minus the elevation the other lines",
+            "give its row (m): > 0 the line lies seaward of where its level",
+            "belongs, < 0 landward.",
+            "",
+            "#   capture (UTC)     elev    pts   resid  action"]
+    rows = []
     for n, f in enumerate(listed, 1):
         r = rep.get(data["names"][frames[f]])
         if r is None:
             continue
-        lines.append(f"{n:<3d} {r['capture_time_utc'][5:16].replace('T', ' ')}  {r['elevation_navd88']:+5.2f}"
-                     f"  {r['points_dropped']:5d}  {r['median_residual_m']:+5.2f}  {r['action']}")
-        if n >= 34:
-            lines.append(f"... and {len(listed) - n} more: see the report CSV")
-            break
-    lines.append("")
-    lines.append("resid = water level minus the elevation the other lines give its row (m);")
-    lines.append("> 0: line lies seaward of where its water level belongs, < 0 landward.")
-    ax3.text(0, 1, "\n".join(lines), va="top", ha="left", family="monospace", fontsize=7.4)
+        rows.append(f"{n:<3d} {r['capture_time_utc'][5:16].replace('T', ' ')}  "
+                    f"{r['elevation_navd88']:+5.2f}  {r['points_dropped']:5d}  "
+                    f"{r['median_residual_m']:+5.2f}  {r['action']}")
+    fit_rows = room - len(head)
+    if len(rows) > fit_rows:
+        rows = rows[:fit_rows - 1] + [f"... and {len(rows) - (fit_rows - 1)} more: "
+                                      "see the report CSV"]
+    ax3.text(0, 1, "\n".join(head + rows), va="top", ha="left", family="monospace", fontsize=fs)
     fig.savefig(out_png, dpi=110)
     plt.close(fig)
 
