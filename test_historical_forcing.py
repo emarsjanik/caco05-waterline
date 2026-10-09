@@ -285,12 +285,25 @@ def test_partial_and_errors(fx, out):
     # past the end of both records: rows up to the end, the rest reported
     res, log = quiet(lambda: hf.build_forcing("2025-03-09", "2025-03-12", Path(out) / "partial", adcp=fx["adcp"],
                                               adcp_navd88=fx["adcp_navd88"], chatham=fx["chatham"], wis=fx["wis"],
-                                              download=False, plot=False))
+                                              download=False, plot=False, min_wave_cover=0))
     unc = " ".join(res["water_level"]["uncovered_spans"])
     check("partial: hours past the records reported", "2025-03-12" in unc and "WARNING" in log, unc[:100])
     check("partial: --no-download said so", "--no-download" in log)
     kw = dict(adcp=fx["adcp"], adcp_navd88=fx["adcp_navd88"], chatham=fx["chatham"], wis=fx["wis"],
               download=False, plot=False)
+    # with the setup on, waves covering under half the daytime hours FAIL (after writing the files):
+    # an hour of detection would otherwise end with most frames dropped for want of a setup
+    expect_error("error: setup on, too few wave hours",
+                 lambda: hf.build_forcing("2025-03-09", "2025-03-12", Path(out) / "few_waves", **kw),
+                 "waves cover only")
+    check("error: too few wave hours still writes the files",
+          (Path(out) / "few_waves" / "waves.csv").exists() and (Path(out) / "few_waves" / "forcing.json").exists())
+    res0, _ = quiet(lambda: hf.build_forcing("2025-03-09", "2025-03-12", Path(out) / "few_waves_c0",
+                                             **dict(kw, setup_coef=0.0)))
+    check("no setup (C = 0): few wave hours are not an error", res0 is not None)
+    ep = np.arange(hf.parse_day("2025-03-01", "x"), hf.parse_day("2025-03-03", "x"), 3600.0)
+    n_cov, n_day = hf.wave_cover(pd.DataFrame({"ep": ep[:30]}), ep[0], ep[0] + 2 * 86400.0, 3600.0)
+    check("wave_cover: daytime hours of day 1 covered, day 2 not", (n_cov, n_day) == (5, 10), (n_cov, n_day))
     expect_error("error: period outside every record",
                  lambda: hf.build_forcing("2023-06-01", "2023-06-03", Path(out) / "e1", **kw),
                  "outside every water-level record")
@@ -383,8 +396,9 @@ def test_download_fallback(fx, out):
                                                   adcp_navd88=fx["adcp_navd88"], plot=False))
         check("download: not used when the ADCP covers the period", not calls and
               not res["water_level"].get("chatham_downloaded"))
+        # the water level is the subject here: the cut week also has no waves (min_wave_cover=0)
         res, log = quiet(lambda: hf.build_forcing("2025-02-19", "2025-02-20", Path(out) / "dl1", adcp=fx["adcp"],
-                                                  adcp_navd88=fx["adcp_navd88"], plot=False))
+                                                  adcp_navd88=fx["adcp_navd88"], plot=False, min_wave_cover=0))
         saved = Path(out) / "dl1" / hf.DOWNLOADED_CHATHAM
         check("download: fetched when the period needs Chatham", len(calls) == 1 and saved.exists()
               and res["water_level"]["chatham_downloaded"]

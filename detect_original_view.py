@@ -381,8 +381,10 @@ def main():
         sys.exit(f"no {args.camera} timex frames in {' '.join(args.originals)} for those dates")
 
     # 3. detect
-    print(f"detecting         : {n} photos, ~{n * 3.5 / 60:.0f} min on the station NUC (3-4 s each); "
-          f"follow with: tail -f {log}", flush=True)
+    # ~25 s per photo: the detector runs on the whole 2448 x 2048 frame (measured 22-26 s on a
+    # 2.8 GHz Xeon, Oct 2026; not yet on the NUC, whose progress lines below print its rate)
+    print(f"detecting         : {n} photos, ~{n * 25 / 60:.0f} min (~25 s each as measured off the station; "
+          f"the progress lines print the real rate); follow with: tail -f {log}", flush=True)
     if not run([sys.executable, HERE / "waterline_detector_v5.py",
                 "--profile-json", out / "profile.json",
                 "--min-signal-fraction", args.min_signal_fraction,

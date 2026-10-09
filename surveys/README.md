@@ -18,11 +18,18 @@ were made with the same settings, the same scripts (sha256) and the same
 upstream builds; `--force` rebuilds, `--steps compare` (etc.) runs only some
 steps. Every skip is printed. A rebuilt step makes everything after it
 stale: a stale filtered file, DEM or comparison is never used or reported
-as current (the README then says NO CURRENT COMPARISON).
+as current (the README then says NO CURRENT COMPARISON, and why). The setup
+coefficient and the DEM settings (cell, minimum frames, spread, Hs and
+day-offset limits, GeoTIFF EPSG) reported are those the outputs on disk were
+built with, never a later command line's: `--steps compare --dem-cell 1`
+warns that the option is not applied and says to rerun `--steps
+dem,maps,compare`.
 
 Status and exit code: `complete`, exit 0; `partial`, exit 1: a step (a
 comparison included) failed; `partial`, exit 3: a camera contributed nothing,
-or the outputs on disk are not one build; a disabled date exits 2. With `--all` the worst code
+a part is missing (a camera's pointing check or its waterline map on the
+photos: no photo of the window found, e.g. a wrong `--photo-roots`), or the
+outputs on disk are not one build; a disabled date exits 2. With `--all` the worst code
 is returned and the summary table has a status column.
 
 ## survey_dates.csv: one row per (date, camera)
@@ -58,6 +65,20 @@ folder, the waterline folder and its calibration folder, the repository's
 The live date was first called 27 Sep; the user confirmed that its survey is
 the 29 Sep RTK, so the product is dated 2026-09-29.
 
+**2025-01-23: an earlier check points the other way.** Before this script,
+the same photos (18-23 Jan) with the same CACO03_<cam>_20250123 GCP
+calibrations, unfiltered, with no setup and the envelope from the earlier
+lidar-fitted pointing, gave waterline - Jan lidar **+0.46 m for c1** (NMAD
+0.19) and **+0.15 m for c2** (NMAD 0.23): HIGH, not low. The setup (C = 0.037,
+~0.28 m that week) raises every line further (by ~0.8 x the setup once the
+landward re-projection is counted, as on the 2026 RTK), so unless the new
+envelope changes the detections, expect about +0.7 m (c1) and +0.4 m (c2).
+The biases listed under Labels that make the 2025 dates read LOW cannot
+explain that; a 0.3 m difference between cameras on the same water level
+points at the pointing or the lens model. The README of that date says so,
+gives the headline per camera, the C = 0 sensitivity (the same lines without
+the setup) and each camera's sea-horizon offset against its calibration.
+
 ## surveys.csv: one row per survey to compare with
 
 | column | meaning |
@@ -85,13 +106,21 @@ actually ran and can only make the label worse, saying why:
 
 * a search envelope placed with this survey -> PARTLY-CIRCULAR;
 * a camera pointing fitted to a survey (`fit_eo_to_survey.py`, `*_lidar_EO.yaml`) -> CIRCULAR;
+  so is a pointing CARRYING such a fit's change to another period
+  (`apply_pointing_correction.py`, `*_corr_EO.yaml`, e.g.
+  CACO05_c1_20250219_corr_EO.yaml from the Jan lidar fit): the fit its notes
+  name is read in turn (next to it, in `calibration/`, `--calibration` and the
+  survey folders) and its survey matched by name or content; when it cannot
+  be followed, CIRCULAR as a rule that can misfire (overrulable);
 * a GCP survey on the calibration's own day -> PARTLY-CIRCULAR;
 * a point survey made on the calibration's own day -> PARTLY-CIRCULAR, whatever
   the file is called (it may be the GCPs the calibration was solved from);
 * **a setup coefficient fitted to this survey -> CIRCULAR.** The survey is
   recognised by its content (sha256), not its file name, so a renamed copy is
-  still caught; a points survey of the same date as the fit's is treated as
-  possibly the same shots. C = 0.037 (`waterline_timex_cron.sh`, the station's
+  still caught; so is a re-export (more than half its points within 0.05 m of
+  the fit's shots, when that file is here); a points survey of the same date
+  as the fit's (in surveys.csv or in the Emlid file's own 'Averaging start'
+  column) is treated as possibly the same shots. C = 0.037 (`waterline_timex_cron.sh`, the station's
   C, used by default) is the median per-frame C of the waterlines lying on the
   2026-09-29 RTK transects, so the 2026-09-29 comparison with those shots
   cannot test the setup (nor the overall level it sets): it is CIRCULAR for as
@@ -152,7 +181,38 @@ geoid model is unknown; GEOID12B and GEOID18 differ by a few cm here).
 headline label is the worst of all of them, with every reason. On RTK
 transects the waterlines are compared as `compare_rtk.py` does (one value
 per frame, the RTK interpolated along the transect); isolated points
-(GCPs) are matched to the nearest line point, not slope-corrected.
+(GCPs) are matched to the nearest line point, not slope-corrected. The
+headline is given per camera too, and, when the lines carry a setup, again
+WITHOUT it (C = 0: each line at its still-water level, re-projected with the
+calibration as a C = 0 build would place it) as a sensitivity.
+
+Pointing: each camera's sea horizon over the window is compared with where
+its calibration puts it; the constant tilt/roll is printed for every camera
+and, above 0.05 deg, given with its DEM sensitivity per range band (0.1 deg
+of tilt is ~0.13-0.17 m of DEM at 250-350 m). Only day-to-day CHANGES of
+pointing (`horizon_check.py`, 12 px) leave days out.
+
+## Run time on the NUC
+
+Detection dominates: `detect_original_view.py` runs the detector on the
+whole 2448 x 2048 frame, measured at 22-26 s per photo here (not yet on the
+NUC10i3; its progress lines print the real rate), i.e. **~50 min for a
+two-camera week** of daytime photos. Everything else takes a few minutes. The
+run lowers its own priority (`--nice 10`, the default) and warns when it
+would overlap the station's jobs (waterline cron 12:30, 19:25, 20:55;
+cleanup.sh 19:45, 21:00; owg.sh hourly at :40); a start after ~21:30 local
+keeps clear of them. `--dry-run` prints the estimate.
+
+## Deploying on the station
+
+The work is on a branch until it is merged; the NUC runs `main`. After the
+merge, on the NUC:
+
+```
+cd /mnt/I2Rgus_Data/waterline && git pull
+python3 survey_products.py --date 2025-01-23 --dry-run   # inputs found, labels, run time
+python3 survey_products.py --date 2025-01-23             # then 2025-03-06, 2026-09-29, --summary
+```
 
 ## When the October GCP file arrives
 
@@ -167,3 +227,16 @@ from the water levels). Days before 23 Oct may have had another pointing
 (the 2024-08-27 calibration differs by ~2.3-2.5 deg in azimuth): the pointing
 step checks every day against a photo of 23 Oct and leaves out the days that
 differ.
+
+The October date also needs its forcing files, which are NOT downloaded:
+* WIS ST63064 hourly waves (`WIS_ST63064_2024-10_to_2025-03.csv`) and/or
+  NDBC 44013 (`NDBC_44013_2024-10_to_2025-03.csv`) in
+  `/mnt/I2Rgus_Data/Chelsea_calibration` (or `--wis` / `--ndbc`): with the
+  setup on, `historical_forcing.py` fails (exit 2) when waves cover less than
+  half of the window's daytime hours, before any detection;
+* the Chatham 8447435 record (`chatham_2024-10_to_2025-03.csv`; downloaded
+  from NOAA when missing, unless `--no-download`) and the ADCP files (the
+  transfer is fitted on their overlap).
+
+Run `--date 2024-10-23 --force-disabled --dry-run` first: it lists each
+forcing file found or NOT FOUND.

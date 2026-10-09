@@ -191,7 +191,13 @@ def test_dsm_offset(d):
     check(abs(float(c1["median"]) - 0.10) < 0.005 and abs(float(c2["median"]) + 0.30) < 0.005,
           "waterlines: c1 (setup column) +0.10, c2 (tide only) -0.30")
     check("beach_elevation_navd88 for" in wl["elevation_used"], "mixed setup columns reported")
+    ws = wl.get("without_setup") or {}
+    check(abs(ws["by_camera"]["c1"]["median"] + 0.30) < 0.005 and abs(wl["by_camera"]["c1"]["median"] - 0.10) < 0.005
+          and "overstates" in ws["how"],
+          "C = 0 sensitivity: c1 at its still-water level -0.30 (with the setup +0.10), per camera, said to "
+          "overstate without a calibration")
     txt = (out / "synth_dsm_comparison.txt").read_text()
+    check("SENSITIVITY: WATERLINES vs SURVEY WITHOUT THE WAVE SETUP" in txt, "the sensitivity is in the txt")
     check(txt.splitlines()[2] == "LABEL      : INDEPENDENT" and "WHY        : synthetic test" in txt,
           "label at the top of the txt, exactly as passed")
     check("DOWNGRADE" not in txt, "no downgrade warning when nothing contradicts the label")
@@ -318,6 +324,23 @@ def test_label_checks(d):
     txt = (out / "lab1_comparison.txt").read_text()
     check(txt.splitlines()[2] == "LABEL      : INDEPENDENT" and "DOWNGRADE WARNING" in txt,
           "label still printed as passed, with the warning")
+    # apply_pointing_correction.py: the fit's change carried to another period (*_corr_EO.yaml)
+    corr = cal / "CACO05_c1_20250219_corr_EO.yaml"
+    corr.write_text("x: 420088.0\ny: 4638319.0\nz: 20.8\nazimuth: 72.0\ntilt: 71.6\nroll: -6.6\n"
+                    f"# apply_pointing_correction.py: CACO04_c1_20250219_EO.yaml + (+1.000, +0.000, +0.000) deg "
+                    f"from {fit.name}; 2024-10-01..2025-01-17\n")
+    h, _ = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "carried", name="lab1c",
+                 output_dir=str(out), camera_eo={"c1": corr}, plot=False)
+    f_ = [f for f in h["findings"] if f["suggested"] == "CIRCULAR"]
+    check(h["suggested_label"] == "CIRCULAR" and f_ and f_[0]["kind"] == "chain" and "carries" in f_[0]["text"],
+          "a pointing carried from a fit to this survey (*_corr_EO.yaml) -> CIRCULAR, a chain fact")
+    lost = cal / "CACO05_c2_20250219_corr_EO.yaml"
+    lost.write_text(corr.read_text().replace(fit.name, "CACO05_c2_gone_lidar_EO.yaml"))
+    shutil.copy(HERE / "calibration" / "CACO05_c2_20240801_IO.yaml", cal / "CACO05_c2_20240801_IO.yaml")
+    sh = sc.audit_label("INDEPENDENT", str(lid), "dsm", "2025-01-23", sc.load_cameras({"c2": lost}, {}), None,
+                        str(dem_p))
+    check(any(x[0] == "CIRCULAR" and x[2] == "rule" and "cannot be" in x[1] for x in sh),
+          "its fit not on this computer: CIRCULAR as a rule that can misfire")
     other = cal / "CACO05_c1_2025-03-01_to_2025-03-06_lidar_EO.yaml"
     other.write_text(fit.read_text().replace(lid.name, "2025005FA_Marconi_Mar_YSMP_Lidar_DSM_25cm.tif"))
     h, _ = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "other survey",

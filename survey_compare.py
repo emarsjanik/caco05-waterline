@@ -28,7 +28,11 @@ A comparison is never better than its weakest step. The script cannot
 know the whole chain, but it checks what it can see and prints a
 DOWNGRADE WARNING when the caller's label looks too good: a camera EO
 file named or annotated as a survey fit (fit_eo_to_survey.py writes
-*_lidar_EO.yaml with 'fitted to <survey>' in its notes), a calibration
+*_lidar_EO.yaml with 'fitted to <survey>' in its notes), or carrying
+one (apply_pointing_correction.py writes *_corr_EO.yaml naming the fit
+it came from: that fit is read in turn, --eo-dirs, and its survey
+compared by name and by content; a lineage that cannot be followed is
+a downgrade too, as a rule that can misfire), a calibration
 dated the day of a point survey (solved from those GCPs?), a GCP target
 file as the survey, a search envelope (--envelope-source, or a
 provenance.json next to the DEM) placed with this survey. It also
@@ -107,6 +111,11 @@ The waterline's elevation is beach_elevation_navd88 (still water + wave
 setup) where present, else tide_elevation_navd88 (still water only,
 which puts a swash-marked line LOW by about the setup); the report says
 which, per row count. Per day and camera: frames, values, median, NMAD.
+When the lines carry a setup, the same comparison is repeated WITHOUT it
+(C = 0) as a sensitivity: each line at its still-water level and, with
+--camera-eo, re-projected onto that lower plane as a C = 0 build would
+place it (same detections), per camera. The setup coefficient is the
+least certain step; this shows how much of the answer it carries.
 
 FEW VALUES. NMAD, p5 and p95 are not given for fewer than 3 values (the
 NMAD of one value is 0, which would read as perfect agreement), and any
@@ -362,6 +371,7 @@ def read_points(path):
 def read_contours(path, first=None, last=None):
     """Georectified waterline points -> dict of arrays; rows without ground coordinates skipped."""
     E, N, Z, cam, day, frame, used_beach = [], [], [], [], [], [], []
+    ZT, U, V = [], [], []
     with open(path, newline="") as f:
         rd = csv.reader(f)
         head = next(rd)
@@ -371,6 +381,7 @@ def read_contours(path, first=None, last=None):
         ie, inn = ix["easting_utm19"], ix["northing_utm19"]
         it, ib = ix.get("tide_elevation_navd88"), ix.get("beach_elevation_navd88")
         ic, itime, isrc = ix.get("camera"), ix.get("capture_time_utc"), ix.get("source_file")
+        iu, iv = ix.get("pixel_column"), ix.get("pixel_row")
         for r in rd:
             if len(r) <= max(ie, inn) or not r[ie]:
                 continue
@@ -384,11 +395,57 @@ def read_contours(path, first=None, last=None):
                 continue
             E.append(float(r[ie])); N.append(float(r[inn])); Z.append(z)
             used_beach.append(zb is not None)
+            ZT.append(zt if zt is not None else np.nan)
+            U.append(_num(r[iu]) if iu is not None and iu < len(r) else None)
+            V.append(_num(r[iv]) if iv is not None and iv < len(r) else None)
             cam.append(r[ic] if ic is not None else "?"); day.append(d)
             frame.append(r[isrc] if isrc is not None else d)
     return {"E": np.array(E), "N": np.array(N), "Z": np.array(Z), "cam": np.array(cam),
             "day": np.array(day), "frame": np.array(frame), "beach": np.array(used_beach, bool),
+            "Zt": np.array(ZT, float), "U": np.array([np.nan if u is None else u for u in U], float),
+            "V": np.array([np.nan if v is None else v for v in V], float),
             "has_beach_column": ib is not None}
+
+
+def without_setup(cont, cams):
+    """
+    The waterlines as a C = 0 build would have them: each line at its still-water level
+    (tide_elevation_navd88) and, where the camera's calibration and the line's pixels are known,
+    re-projected onto that lower plane (georectify.pixel_to_ground), i.e. a little seaward,
+    where the beach is lower too. Without the calibration the lines keep their positions and
+    only lose the setup, which overstates the change.
+    -> (contours dict like cont, how)
+    """
+    from georectify import pixel_to_ground
+    c0 = dict(cont)
+    c0["Z"] = cont["Zt"].copy()
+    c0["beach"] = np.zeros(len(cont["Z"]), bool)
+    E, N = cont["E"].copy(), cont["N"].copy()
+    moved, kept = 0, 0
+    for cam in sorted(set(cont["cam"].tolist())):
+        m = (cont["cam"] == cam) & np.isfinite(cont["Zt"])
+        c = (cams or {}).get(cam)
+        ok = m & np.isfinite(cont["U"]) & np.isfinite(cont["V"])
+        if c is None or c.get("io") is None or not ok.any():
+            kept += int(m.sum())
+            continue
+        X, Y = pixel_to_ground(cont["U"][ok], cont["V"][ok], cont["Zt"][ok], c["io"], c["eo"])
+        E[ok], N[ok] = X, Y
+        moved += int(ok.sum())
+    c0["E"], c0["N"] = E, N
+    good = np.isfinite(E) & np.isfinite(N) & np.isfinite(c0["Z"])
+    for k in ("E", "N", "Z", "cam", "day", "frame", "beach", "Zt", "U", "V"):
+        c0[k] = c0[k][good]
+    if moved and not kept:
+        how = ("each line re-projected at its still-water level with the calibration (as a C = 0 build "
+               "would place it, the same detections)")
+    elif moved:
+        how = (f"{moved} line points re-projected at their still-water level with the calibration; {kept} "
+               f"without a calibration or pixel position kept in place (setup removed only)")
+    else:
+        how = ("lines kept in place with the setup removed (no --camera-eo or no pixel columns): this "
+               "overstates the change; a C = 0 build would also move each line a little seaward")
+    return c0, how
 
 
 # ---------------------------------------------------------------------
@@ -719,56 +776,181 @@ def _walk(obj, path=""):
         yield path, obj
 
 
-def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_source, dem_path):
+def eo_notes(path):
+    """The comment lines (# ...) of an EO file, joined; '' when it cannot be read."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return ""
+    return " ".join(ln.lstrip("#").strip() for ln in text.splitlines() if ln.strip().startswith("#"))
+
+
+_SHA = {}
+
+
+def file_sha256(path):
+    """sha256 of a file (cached per run), or None."""
+    p = str(path)
+    if p not in _SHA:
+        try:
+            import hashlib
+            h = hashlib.sha256()
+            with open(p, "rb") as f:
+                for b in iter(lambda: f.read(1 << 20), b""):
+                    h.update(b)
+            _SHA[p] = h.hexdigest()
+        except OSError:
+            _SHA[p] = None
+    return _SHA[p]
+
+
+def _find_named(name, dirs):
+    """A file named in an EO's notes: as given if it exists, else by its name in `dirs`."""
+    p = Path(name)
+    if p.is_absolute() and p.is_file():
+        return p
+    for d in dirs:
+        q = Path(d) / p.name
+        if q.is_file():
+            return q
+    return None
+
+
+def same_survey(name, survey_path, dirs=()):
+    """Is the survey a note calls `name` the file survey_path? By file name (or stem), or by
+    content: `name` found in survey_path's folder or `dirs` with the same sha256 (a renamed copy)."""
+    n, s = Path(str(name).rstrip(".,;:)'\"")), Path(survey_path)
+    if n.name == s.name or (len(s.stem) > 6 and n.stem == s.stem):
+        return True
+    if not s.is_file():
+        return False
+    q = _find_named(n.name, [s.parent] + list(dirs))
+    return bool(q and q.resolve() != s.resolve() and file_sha256(q) == file_sha256(s))
+
+
+def pointing_lineage(eo_path, dirs=(), _depth=0):
     """
-    What the script can see of the chain. -> list of (suggested label or None, text):
-    a suggested label worse than `label` is a DOWNGRADE WARNING; None is a note.
+    Where a camera pointing came from, following the files its notes name.
+      * fit_eo_to_survey.py writes *_lidar_EO.yaml, 'fitted to <survey>' in its notes: a pointing
+        fitted to a survey;
+      * apply_pointing_correction.py writes *_corr_EO.yaml, '<pointing> + (...) deg from <fitted
+        EO>' in its notes: the change a survey fit made, CARRIED to another period. Such a pointing
+        is as survey-derived as the fit it came from, so the fit file is read in turn (looked for
+        next to the EO, then in `dirs`) for the survey it was fitted to.
+    -> {"survey_fit": bool, "fitted_to": [survey names], "chain": [file names],
+        "unresolved": [why the survey of a link is not known], "notes": all notes read}
+    """
+    p = Path(eo_path)
+    notes = eo_notes(p)
+    out = {"survey_fit": False, "fitted_to": [], "chain": [p.name], "unresolved": [], "notes": notes}
+    direct = "_lidar_EO" in p.name or "_survey" in p.name or "fit_eo_to_survey" in notes
+    named_fits = re.findall(r"deg from (\S+?\.ya?ml)", notes) + re.findall(r"(\S+_lidar_EO\.ya?ml)", notes)
+    named_fits = [f for f in dict.fromkeys(x.rstrip(".,;:)'\"") for x in named_fits) if Path(f).name != p.name]
+    carried = "_corr_EO" in p.name or "apply_pointing_correction" in notes or bool(named_fits)
+    if direct:
+        out["survey_fit"] = True
+        ft = [x.rstrip(".,;:)'\"") for x in re.findall(r"fitted to (\S+)", notes)]
+        if ft:
+            out["fitted_to"] += ft
+        else:
+            out["unresolved"].append(f"{p.name} is a survey fit (fit_eo_to_survey.py naming) and does not "
+                                     f"say which survey")
+    if carried:
+        out["survey_fit"] = True
+        if not named_fits:
+            out["unresolved"].append(f"{p.name} carries a survey-fitted correction (apply_pointing_correction.py) "
+                                     f"and does not name the fit it came from")
+        for f in named_fits:
+            q = _find_named(f, [p.parent] + list(dirs))
+            if q is None:
+                out["unresolved"].append(f"{Path(f).name}, the fit {p.name} was carried from, is not on this "
+                                         f"computer: the survey it was fitted to is not known")
+            elif _depth >= 5:
+                out["unresolved"].append(f"{p.name}: the chain of carried corrections is too long to follow")
+            else:
+                sub = pointing_lineage(q, dirs, _depth + 1)
+                out["chain"] += sub["chain"]
+                out["fitted_to"] += sub["fitted_to"]
+                out["unresolved"] += sub["unresolved"]
+                out["notes"] += " " + sub["notes"]
+                if not sub["survey_fit"]:
+                    out["unresolved"].append(f"{q.name}, named by {p.name}, does not say how it was fitted")
+    out["fitted_to"] = list(dict.fromkeys(out["fitted_to"]))
+    return out
+
+
+def lineage_text(lin):
+    return " <- ".join(lin["chain"])
+
+
+# The kinds of a label finding. 'chain': what the chain did (an envelope or a pointing that
+# names this very survey, a provenance entry): cannot be overruled. 'rule': a date or file-name
+# rule that can misfire (a calibration dated the day of a point survey, a GCP-like file name, a
+# survey fit that does not say which survey): survey_products.py lets a reason written in
+# surveys.csv overrule it. 'note': no downgrade.
+KINDS = ("chain", "rule", "note")
+
+
+def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_source, dem_path, dirs=()):
+    """
+    What the script can see of the chain. -> list of (suggested label or None, text, kind):
+    a suggested label worse than `label` is a DOWNGRADE WARNING; None is a note. kind is one of
+    KINDS. dirs: extra folders where files named in the EO notes are looked for.
     """
     found = []
     sname, sstem = Path(survey_path).name, Path(survey_path).stem
     gcp_file = survey_type == "points" and re.search(r"target|gcp", sname, re.I)
     gcp_date = _date_from_name(sname) if gcp_file else None
+    look = list(dirs) + [HERE / "calibration"]
     for cam, c in sorted((cams or {}).items()):
         p = Path(c["eo_path"])
-        text = p.read_text(errors="replace")
-        notes = " ".join(ln.lstrip("#").strip() for ln in text.splitlines() if ln.strip().startswith("#"))
-        fitted = re.findall(r"fitted to (\S+)", notes)
-        survey_fit = ("_lidar_EO" in p.name or "_survey" in p.name or "fit_eo_to_survey" in notes)
-        if sname in notes or (len(sstem) > 6 and sstem in notes):
-            found.append(("CIRCULAR", f"{cam} pointing {p.name} was fitted to this survey "
-                                      f"(its notes: '{textwrap.shorten(notes, 170)}')"))
-        elif survey_fit and fitted:
+        lin = pointing_lineage(p, look)
+        notes = lin["notes"]
+        via = f" (lineage {lineage_text(lin)})" if len(lin["chain"]) > 1 else ""
+        hit = [f for f in lin["fitted_to"] if same_survey(f, survey_path, look)]
+        named = sname in notes or (len(sstem) > 6 and sstem in notes)
+        if hit or (lin["survey_fit"] and named):
+            found.append(("CIRCULAR", f"{cam} pointing {p.name} "
+                                      + ("carries a correction fitted to" if len(lin["chain"]) > 1 else
+                                         "was fitted to")
+                                      + f" this survey{via} (notes: '{textwrap.shorten(notes, 170)}')", "chain"))
+        elif named:
+            found.append(("CIRCULAR", f"{cam} calibration {p.name} names this survey in its notes (was it "
+                                      f"fitted to it?): '{textwrap.shorten(notes, 170)}'", "rule"))
+        elif lin["survey_fit"] and lin["unresolved"]:
+            found.append(("CIRCULAR", f"{cam} pointing {p.name} is survey-derived{via} and the survey cannot be "
+                                      f"resolved ({'; '.join(lin['unresolved'])}): if this one, the comparison "
+                                      f"is CIRCULAR", "rule"))
+        elif lin["survey_fit"]:
             found.append((None, f"{cam} pointing {p.name} was fitted to another survey "
-                                f"({', '.join(fitted)}): not circular against this one, but say so"))
-        elif survey_fit:
-            found.append(("CIRCULAR", f"{cam} pointing {p.name} is a survey fit "
-                                      f"(fit_eo_to_survey.py naming) and does not say which survey: "
-                                      f"if this one, the comparison is CIRCULAR"))
+                                f"({', '.join(lin['fitted_to'])}){via}: not circular against this one, but say so",
+                          "note"))
         eo_date = _date_from_name(p.name)
         hist = history_note(p)
         if survey_type == "points" and eo_date and (eo_date == survey_date or eo_date == gcp_date):
             found.append(("PARTLY-CIRCULAR", f"{cam} calibration {p.name} is dated the day of these "
                           f"points ({eo_date}): if it was solved from them, the pointing is fitted to "
                           f"them (elevations still come from water levels) -> PARTLY-CIRCULAR"
-                          + (f". History: '{hist}'" if hist else "")))
+                          + (f". History: '{hist}'" if hist else ""), "rule"))
         elif survey_type == "dsm" and eo_date and eo_date == survey_date:
             found.append((None, f"{cam} calibration {p.name} is dated the survey day; check it was "
                                 f"not fitted to this survey"
-                                + (f". History: '{hist}'" if hist else " (no history note)")))
+                                + (f". History: '{hist}'" if hist else " (no history note)"), "note"))
     if gcp_file and not cams:
         found.append(("PARTLY-CIRCULAR", f"{sname} looks like calibration targets (GCPs): if the "
                       f"cameras' calibration was solved from these points, the comparison is "
-                      f"PARTLY-CIRCULAR (no --camera-eo to check)"))
-    elif gcp_file and not any(s == "PARTLY-CIRCULAR" for s, _ in found):
+                      f"PARTLY-CIRCULAR (no --camera-eo to check)", "rule"))
+    elif gcp_file and not any(f[0] == "PARTLY-CIRCULAR" for f in found):
         found.append((None, f"{sname} looks like calibration targets (GCPs), but no camera EO "
-                            f"given is dated {gcp_date or 'their day'}: not the calibration's own points"))
+                            f"given is dated {gcp_date or 'their day'}: not the calibration's own points", "note"))
     if envelope_source:
         en = Path(envelope_source)
-        if en.name == sname or en.stem == sstem:
+        if en.name == sname or en.stem == sstem or (en.is_file() and Path(survey_path).is_file()
+                                                   and file_sha256(en) == file_sha256(survey_path)):
             found.append(("PARTLY-CIRCULAR", f"the detection search envelope was placed with this "
-                                             f"survey ({en.name})"))
+                                             f"survey ({en.name})", "chain"))
         else:
-            found.append((None, f"search envelope placed with {en.name}, not this survey"))
+            found.append((None, f"search envelope placed with {en.name}, not this survey", "note"))
     # provenance.json next to the DEM (survey_products.py): any step that names this survey
     for d in (Path(dem_path).resolve().parent, Path(dem_path).resolve().parent.parent):
         pj = d / "provenance.json"
@@ -777,23 +959,23 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
         try:
             prov = json.loads(pj.read_text())
         except (OSError, ValueError):
-            found.append((None, f"{pj} unreadable: not checked"))
+            found.append((None, f"{pj} unreadable: not checked", "note"))
             break
         for key, val in _walk(prov):
             k = key.lower()
             if "compar" in k or not (sname in val or (len(sstem) > 6 and sstem in val)):
                 continue
             if "envelope" in k:
-                found.append(("PARTLY-CIRCULAR", f"provenance {pj.name}: {key} = {val}"))
+                found.append(("PARTLY-CIRCULAR", f"provenance {pj.name}: {key} = {val}", "chain"))
             elif re.search(r"calib|pointing|fit|(^|[._\[])eo([._\]]|$)", k):
-                found.append(("CIRCULAR", f"provenance {pj.name}: {key} = {val}"))
+                found.append(("CIRCULAR", f"provenance {pj.name}: {key} = {val}", "chain"))
             else:
-                found.append((None, f"provenance {pj.name} names this survey at {key}"))
+                found.append((None, f"provenance {pj.name} names this survey at {key}", "note"))
         if not envelope_source:
             env = [(k, v) for k, v in _walk(prov) if "envelope" in k.lower()]
             if env:
                 found.append((None, "provenance search envelope: " + "; ".join(
-                    f"{k} = {v}" for k, v in env[:3])))
+                    f"{k} = {v}" for k, v in env[:3]), "note"))
         break
     return found
 
@@ -1223,9 +1405,10 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             survey_date=None, photo_dates=None, contours=None, camera_eo=None, camera_io=None,
             spread=None, count=None, envelope_source=None, min_cover=0.5, tolerance=1.0,
             epsg=NOMINAL_EPSG, plot=True, transect_tolerance=TRANSECT_TOLERANCE,
-            transect_split=TRANSECT_SPLIT, transect_min_points=TRANSECT_MIN_POINTS):
+            transect_split=TRANSECT_SPLIT, transect_min_points=TRANSECT_MIN_POINTS, eo_dirs=None):
     """
-    Compares a DEM with a survey and writes the outputs. camera_eo / camera_io: {cam: path}.
+    Compares a DEM with a survey and writes the outputs. camera_eo / camera_io: {cam: path};
+    eo_dirs: folders where the files an EO's notes name (a carried correction's fit) are looked for.
     Returns the headline (also written as NAME_comparison.json).
     """
     t0 = time.time()
@@ -1286,19 +1469,19 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
 
     # -- the label: what can be checked
     findings = audit_label(label, survey_path, survey_type, survey_date, cams, envelope_source,
-                           dem_path)
+                           dem_path, dirs=eo_dirs or ())
     outside, from_mid, gap_text = time_gap(survey_date, photo_dates)
     worst = label
-    for sug, _ in findings:
+    for sug, _, _ in findings:
         if sug and _rank(sug) > _rank(worst):
             worst = sug
     warn_lines = []
     if worst != label:
         warn_lines.append(f"DOWNGRADE WARNING: passed {label}, but the checks below suggest "
                           f"{worst} (a comparison is never better than its weakest step):")
-        for sug, txt in findings:
+        for sug, txt, kind in findings:
             if sug and _rank(sug) > _rank(label):
-                warn_lines.append(f"  - [{sug}] {txt}")
+                warn_lines.append(f"  - [{sug}{', a rule that can misfire' if kind == 'rule' else ''}] {txt}")
     if outside is not None and outside > TIME_GAP_WARN_DAYS:
         warn_lines.append(f"TIME GAP: {gap_text}. The beach changes; part of the difference may be "
                           f"real change, not error.")
@@ -1313,7 +1496,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         lines.append("checks     : nothing the script can see contradicts the label"
                      + (" (no camera EO, envelope source or provenance to check)"
                         if not cams and not envelope_source else ""))
-    notes = [txt for sug, txt in findings if not (sug and _rank(sug) > _rank(label))]
+    notes = [txt for sug, txt, _ in findings if not (sug and _rank(sug) > _rank(label))]
     for n_ in notes:
         lines.append(f"note       : {n_}")
     lines += [f"time gap   : {gap_text}",
@@ -1323,6 +1506,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
 
     head = {"name": name, "label": label, "why": why, "suggested_label": worst,
             "downgrade_warning": worst != label, "warnings": warn_lines,
+            "findings": [{"suggested": sug, "text": txt, "kind": kind} for sug, txt, kind in findings],
             "notes": notes, "survey": str(survey_path), "survey_type": survey_type,
             "dem": str(dem_path), "survey_date": survey_date,
             "photo_dates": list(photo_dates) if photo_dates else None,
@@ -1585,6 +1769,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
 
     # -- waterlines against the survey
     wl_rows = []
+    wl0_rows = []
     wl_frames_csv = None
     if cont is not None and len(cont["E"]):
         transects = []
@@ -1594,37 +1779,35 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                 transects = load_transects(survey_path, transect_split)
             except (KeyError, ValueError) as exc:          # not an Emlid file after all
                 lines.append(f"  (transects not read: {exc})")
-        if transects:
-            # compare_rtk.py's check: one value per frame, the RTK interpolated along the profile
-            per, okw = waterlines_on_transects(cont, transects, transect_tolerance, transect_min_points)
-            dw = per["d"]
-            wl_cont = per
-            unit = "frames"
-            n_other = sum(not is_transect(x) for x in pts["desc"])
-            how_w = (f"compare_rtk.py's transect check: {len(transects)} RTK transects (consecutive "
-                     f"'Transect' points, split at gaps > {transect_split:g} m); a waterline point "
-                     f"counts within {transect_tolerance:g} m of a transect and inside its surveyed "
-                     f"stretch (never extrapolated), the RTK interpolated along the profile; ONE value "
-                     f"per frame with >= {transect_min_points} points (their median)"
-                     + (f"; the {n_other} other points (wrack lines etc.: the swash limit, not the "
-                        f"sand) are not used for the waterlines" if n_other else ""))
-            method = "frames on RTK transects (compare_rtk.py)"
-        else:
+
+        def lines_vs_survey(cc):
+            """-> (d, used mask, per-frame or per-point arrays d refers to, unit, how, method)."""
+            if transects:
+                # compare_rtk.py's check: one value per frame, the RTK interpolated along the profile
+                per, okw_ = waterlines_on_transects(cc, transects, transect_tolerance, transect_min_points)
+                n_other = sum(not is_transect(x) for x in pts["desc"])
+                how_ = (f"compare_rtk.py's transect check: {len(transects)} RTK transects (consecutive "
+                        f"'Transect' points, split at gaps > {transect_split:g} m); a waterline point "
+                        f"counts within {transect_tolerance:g} m of a transect and inside its surveyed "
+                        f"stretch (never extrapolated), the RTK interpolated along the profile; ONE value "
+                        f"per frame with >= {transect_min_points} points (their median)"
+                        + (f"; the {n_other} other points (wrack lines etc.: the swash limit, not the "
+                           f"sand) are not used for the waterlines" if n_other else ""))
+                return per["d"], okw_, per, "frames", how_, "frames on RTK transects (compare_rtk.py)"
             dists = []
-            dw = waterlines_vs_survey(cont, survey_type, wl_grid, pts, tolerance, dist_out=dists)
-            okw = np.isfinite(dw)
-            wl_cont = cont
-            unit = "points"
+            d_ = waterlines_vs_survey(cc, survey_type, wl_grid, pts, tolerance, dist_out=dists)
             if survey_type == "dsm":
-                how_w = "the survey sampled bilinearly at each waterline point"
-                method = "waterline points on the DSM"
-            else:
-                md = float(np.median(dists)) if dists else float("nan")
-                how_w = (f"the nearest survey point within {tolerance:g} m of each waterline point, one "
-                         f"value per frame and survey point (a frame's points share one water level); "
-                         f"NOT slope-corrected: the pairs lie a median {fv(md, '{:.2f}')} m apart, and "
-                         f"1 m along a 1:10 beach face is 0.1 m of elevation")
-                method = f"nearest point within {tolerance:g} m, not slope-corrected"
+                return (d_, np.isfinite(d_), cc, "points", "the survey sampled bilinearly at each waterline "
+                        "point", "waterline points on the DSM")
+            md = float(np.median(dists)) if dists else float("nan")
+            how_ = (f"the nearest survey point within {tolerance:g} m of each waterline point, one "
+                    f"value per frame and survey point (a frame's points share one water level); "
+                    f"NOT slope-corrected: the pairs lie a median {fv(md, '{:.2f}')} m apart, and "
+                    f"1 m along a 1:10 beach face is 0.1 m of elevation")
+            return d_, np.isfinite(d_), cc, "points", how_, f"nearest point within {tolerance:g} m, not slope-corrected"
+
+        dw, okw, wl_cont, unit, how_w, method = lines_vs_survey(cont)
+        per = wl_cont
         nb, nt = int((cont["beach"] & okw).sum()), int((~cont["beach"] & okw).sum())
         if nb and not nt:
             setup_mode = "setup-corrected"
@@ -1651,7 +1834,9 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                          + ("  (few)" if r["n"] < MIN_BAND_N else ""))
         head["waterlines"] = {"file": str(contours), "points": int(len(cont["E"])),
                               "points_on_survey": int(okw.sum()), "elevation_used": col,
-                              "setup": setup_mode, "method": method, "how": how_w, "unit": unit}
+                              "setup": setup_mode, "method": method, "how": how_w, "unit": unit,
+                              "by_camera": {r["group"]: {k: r[k] for k in ("n", "median", "nmad", "frames")}
+                                            for r in wl_rows if r["group_type"] == "waterline_camera"}}
         if transects:
             wl_frames_csv = out / f"{name}_waterline_frames.csv"
             with open(wl_frames_csv, "w", newline="") as f:
@@ -1673,6 +1858,34 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         else:
             head["waterlines"].update({"n": 0, "frames": 0})
             print(f"waterlines        : no waterline on the survey ({method})")
+        # Sensitivity: the same lines WITHOUT the wave setup (C = 0), from their own still-water
+        # level (the rows carry both columns). The setup coefficient is the least certain step
+        # of the chain; this shows how much of the answer it carries, per camera.
+        if nb and np.isfinite(cont["Zt"]).any():
+            c0, how0 = without_setup(cont, cams)
+            dw0, okw0, wl_cont0, unit0, _, _ = lines_vs_survey(c0)
+            wl0_rows = waterline_rows(wl_cont0, dw0)
+            lines += ["", "SENSITIVITY: WATERLINES vs SURVEY WITHOUT THE WAVE SETUP (C = 0; tide_elevation_navd88)",
+                      "  " + "\n  ".join(textwrap.wrap(how0, 100)),
+                      f"  {'camera':>16s} {'frames':>6s} {unit0:>7s} {'median':>7s} {'NMAD':>6s}   "
+                      f"(with the setup: median)"]
+            with_cam = {r["group"]: r for r in wl_rows if r["group_type"] in ("waterline_all", "waterline_camera")}
+            for r in wl0_rows:
+                if r["group_type"] not in ("waterline_all", "waterline_camera"):
+                    continue
+                w_ = with_cam.get(r["group"])
+                lines.append(f"  {r['group']:>16s} {r['frames']:>6d} {r['n']:>7d} {r['median']:>+7.3f} "
+                             f"{fv(r['nmad'], '{:.3f}'):>6s}   ({fv(w_['median'] if w_ else None, '{:+.3f}')})"
+                             + ("  (few)" if r["n"] < MIN_BAND_N else ""))
+            head["waterlines"]["without_setup"] = dict(
+                {k: wl0_rows[0][k] for k in STAT_KEYS} if wl0_rows else {"n": 0},
+                frames=wl0_rows[0]["frames"] if wl0_rows else 0, how=how0, unit=unit0,
+                by_camera={r["group"]: {k: r[k] for k in ("n", "median", "nmad", "frames")}
+                           for r in wl0_rows if r["group_type"] == "waterline_camera"})
+            if wl0_rows:
+                print(f"without setup     : waterline - survey median {wl0_rows[0]['median']:+.3f} m with C = 0 "
+                      f"({wl0_rows[0]['n']} {unit0}); " + ", ".join(
+                          f"{r['group']} {r['median']:+.3f}" for r in wl0_rows if r["group_type"] == "waterline_camera"))
 
     # -- write
     txt = out / f"{name}_comparison.txt"
@@ -1687,6 +1900,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             w.writerow(dict(r, name=name, label=label, quantity="dem_minus_survey", frames=""))
         for r in wl_rows:
             w.writerow(dict(r, name=name, label=label, quantity="waterline_minus_survey"))
+        for r in wl0_rows:
+            w.writerow(dict(r, name=name, label=label, quantity="waterline_minus_survey_without_setup"))
     files["csv"] = str(cs)
     head["by_camera"] = {r["group"]: {k: r[k] for k in ("n", "median", "nmad")}
                          for r in rows if r["group_type"] == "camera"}
@@ -1714,7 +1929,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                            f"covered only: median {fv(fc.get('median'), '{:+.3f}')} m (n {fc.get('n')})")
         else:
             box.append(f"  points on the DEM: {head['points_compared']} of {head['points']} "
-                       f"({head['points_outside_dem']} outside it)")
+                       f"({head['points_outside_dem']} outside its extent, "
+                       f"{head['points_in_empty_dem_cells']} on empty cells)")
         camr = [r for r in rows if r["group_type"] == "camera"]
         for r in camr:
             box.append(f"  {r['group']:>7s}: median {r['median']:+.3f} m, NMAD {fv(r['nmad'], '{:.3f} m')}, "
@@ -1728,6 +1944,15 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                      f"points on the transects" if wu == "frames" else f"  ({w0['n']} {wu}, {w0['frames']} frames")
                     + ("; TOO FEW: not an estimate" if w0["n"] < MIN_BAND_N else "") + ")",
                     f"  {head['waterlines']['method']}; {head['waterlines']['setup']}"]
+            camw = [r for r in wl_rows if r["group_type"] == "waterline_camera"]
+            if len(camw) > 1:
+                box.append("  " + ", ".join(f"{r['group']} {r['median']:+.3f} m (n {r['n']})" for r in camw))
+            ws = head["waterlines"].get("without_setup") or {}
+            if ws.get("n"):
+                box.append(f"  without the setup (C = 0): median {ws['median']:+.3f} m"
+                           + ("" if len(ws.get("by_camera") or {}) < 2 else
+                              " (" + ", ".join(f"{k} {v['median']:+.3f}" for k, v in sorted(ws["by_camera"].items()))
+                              + ")"))
         box += ["", "\n".join(textwrap.wrap(gap_text, 78))]
         ctx = dict(map_ctx, title=f"{name}: DEM − survey ({survey_type})", label=label,
                    why=why, warn_lines=warn_lines, lim=lim, dem=dem, xll=xll, ytop=ytop, cell=cell,
@@ -1790,6 +2015,9 @@ def main():
     ap.add_argument("--transect-min-points", type=int, default=TRANSECT_MIN_POINTS,
                     help=f"RTK transects: waterline points a frame needs on them to count "
                          f"(default {TRANSECT_MIN_POINTS})")
+    ap.add_argument("--eo-dirs", nargs="+", default=None,
+                    help="folders where the files an EO's notes name are looked for (the fit a carried "
+                         "*_corr_EO.yaml came from); default: the EO's own folder and calibration/")
     ap.add_argument("--epsg", type=int, default=NOMINAL_EPSG,
                     help="horizontal EPSG written into the difference GeoTIFF (default 32619)")
     ap.add_argument("--no-plot", action="store_true")
@@ -1810,7 +2038,7 @@ def main():
             count=args.count, envelope_source=args.envelope_source, min_cover=args.min_cover,
             tolerance=args.tolerance, epsg=args.epsg, plot=not args.no_plot,
             transect_tolerance=args.transect_tolerance, transect_split=args.transect_split,
-            transect_min_points=args.transect_min_points)
+            transect_min_points=args.transect_min_points, eo_dirs=args.eo_dirs)
     return 0
 
 

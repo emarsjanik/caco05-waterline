@@ -248,6 +248,92 @@ def test_labels(d):
     check(lab == "PARTLY-CIRCULAR", "a point survey of the calibration day under any name ('_control.csv'): PARTLY-CIRCULAR")
 
 
+def test_round2(d):
+    print("carried pointings, earlier checks, horizon offsets, missing parts, DEM settings of the build")
+    d = Path(d) / "round2"
+    d.mkdir()
+    args = SimpleNamespace(setup_coef=0.037)
+    jan = {"name": "jan_lidar", "survey_type": "dsm", "survey_date": "2025-01-23", "label": "INDEPENDENT", "why": ""}
+    mar = dict(jan, name="mar_lidar", survey_date="2025-03-06")
+    janf, marf = (Path("2025005FA_Marconi_%s_YSMP_Lidar_DSM_25cm.tif" % m) for m in ("Jan", "Mar"))
+    base = (HERE / "calibration" / "CACO03_c1_20250123_EO.yaml").read_text()
+    # apply_pointing_correction.py carries a lidar fit's change to another period (*_corr_EO.yaml)
+    (d / "CACO05_c1_2025-01-18_to_2025-01-22_lidar_EO.yaml").write_text(
+        "# fit_eo_to_survey.py: fitted to 2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif\n" + base)
+    corr = ("# apply_pointing_correction.py: CACO04_c1_20250219_EO.yaml + (+0.120, -0.310, +0.020) deg from "
+            "CACO05_c1_2025-01-18_to_2025-01-22_lidar_EO.yaml; 2024-10-01..2025-01-17\n" + base)
+    p = plan_for(d, eo="CACO05_c1_20250219_corr_EO.yaml", eo_text=corr)
+    v = sp.Verdict(dict(jan, label_override_reason="anything"))
+    sp.honest_label(jan, p, args, janf, verdict=v)
+    check(v.label == "CIRCULAR" and any("carries a correction fitted to" in r for r in v.reasons),
+          "a *_corr_EO.yaml carried from the Jan lidar fit, against the Jan lidar: CIRCULAR, not overrulable")
+    pm = plan_for(d, eo="CACO05_c1_20250219_corr_EO.yaml", eo_text=corr, env=janf.name)   # Mar: envelope from Jan
+    lab, why = sp.honest_label(mar, pm, args, marf)
+    check(lab == "INDEPENDENT", "... against the Mar lidar (another survey): INDEPENDENT")
+    (d / "CACO05_c1_2025-01-18_to_2025-01-22_lidar_EO.yaml").unlink()
+    v = sp.Verdict(dict(mar, label_override_reason="the fit was to the Jan lidar (operator's notes)"))
+    sp.honest_label(mar, pm, args, marf, verdict=v)
+    check(v.label == "INDEPENDENT" and v.overridden and "cannot be resolved" in v.overridden[0],
+          "the fit it was carried from is not here: CIRCULAR as a rule, overruled only by a written reason")
+    lab, why = sp.honest_label(mar, pm, args, marf)
+    check(lab == "CIRCULAR", "... and without that reason: CIRCULAR")
+    # the earlier check of 2025-01-23 (HIGH lines) leads the caveats, per camera, with what to expect now
+    plan = {"era": "adcp", "date": "2025-01-23", "first": "2025-01-18", "last": "2025-01-23", "out": d,
+            "surveys": [dict(jan, path=str(janf))],
+            "cams": {c: {"eo_file": "CACO03_%s_20250123_EO.yaml" % c, "first": "2025-01-18", "last": "2025-01-23"}
+                     for c in ("c1", "c2")}}
+    forcing = {"waves": {"setup_in_window": {"median_m": 0.29, "daytime_median_m": 0.28}}}
+    cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=sp.SETUP_COEF), {}, forcing, {})
+    check(cav[0].startswith("EARLIER CHECK, OPPOSITE SIGN") and "+0.46" in cav[0] and "+0.15" in cav[0]
+          and "~+0.7 m" in cav[0] and "~+0.4 m" in cav[0] and "HIGHER than then" in cav[0],
+          "2025-01-23: the earlier HIGH result (c1 +0.46, c2 +0.15) comes first, expecting ~+0.7 / ~+0.4 m now")
+    other = dict(plan, cams={"c1": dict(plan["cams"]["c1"], eo_file="CACO05_c1_20250219_corr_EO.yaml")})
+    check(not sp.prior_checks(other), "... not claimed for another calibration")
+    # a constant horizon offset is reported from 0.05 deg (not only above the 12 px day-to-day limit)
+    info = {"window_horizon_dtilt_deg": 0.232, "window_horizon_droll_deg": 0.01, "clear_horizon_days": 5,
+            "window_horizon_offset_px": 10.8}
+    off = sp.pointing_offset(info, "CACO03_c1_20250123_EO.yaml")
+    check(off and abs(off[0] - 0.232) < 1e-9 and "11 px" in off[2], "a 0.23 deg tilt under 12 px: reported")
+    check(sp.pointing_offset(dict(info, window_horizon_dtilt_deg=0.03), "x") is None, "0.03 deg: not reported")
+    # a camera whose pointing was not checked or whose photo map is missing: status partial
+    miss = sp.missing_parts({"out": d, "date": "2025-01-23", "cams": {"c1": {}}},
+                            {"pointing": {"c1": {"rows": [], "info": {}}}})
+    check(any("pointing NOT checked" in m for m in miss) and any("no waterline map" in m for m in miss),
+          "no photos for the pointing check or the photo map: listed as missing parts")
+    # the DEM settings reported are those the DEM on disk was built with
+    sp.write_stamp(d, "dem", {"cmd": "python3 dem_from_contours.py x.csv out --cell 2.0 --min-points 3 --max-spread 0.5 "
+                                     "--max-hs 1.5 --max-day-offset 0.15", "tif": "python3 asc_to_geotiff.py a --epsg 32619"})
+    built = sp.dem_settings_built(d)
+    check(built == {"cell_m": 2.0, "min_points": 3, "max_spread_m": 0.5, "max_hs_m": 1.5, "max_day_offset_m": 0.15,
+                    "geotiff_epsg": 32619}, "DEM settings read back from the build's own commands")
+    want = sp.dem_settings_requested(SimpleNamespace(dem_cell=1.0, dem_min_points=3, dem_max_spread=0.5, dem_max_hs=3.0,
+                                                     dem_max_day_offset=0.15, geotiff_epsg=32619))
+    dd = sp.dem_settings_differ(built, want)
+    check("cell_m 2.0 (asked 1.0)" in dd and "max_hs_m 1.5 (asked 3.0)" in dd and "min_points" not in dd,
+          "a later command line's other DEM options are named as NOT applied")
+    later = SimpleNamespace(dem_cell=1.0, dem_min_points=3, dem_max_spread=0.5, dem_max_hs=3.0, dem_max_day_offset=0.15,
+                            geotiff_epsg=6348, setup_coef=sp.SETUP_COEF)
+    b = sp.built_args(later, {"out": d, "date": "2025-01-23", "cams": {"c1": {}}})
+    check(b.dem_cell == 2.0 and b.dem_max_hs == 1.5 and b.geotiff_epsg == 32619 and later.dem_cell == 1.0,
+          "the 'rebuild everything' line takes the DEM settings the DEM was built with, not this run's")
+    # a re-export of the RTK the station's C was fitted to, entered under another date: same shots
+    rtk_src = Path("/tmp/claude-0/-home-user-caco05-waterline/1e668ac9-7b7a-5204-b62b-1a0cde16501d/scratchpad/"
+                   "survey_inputs/2026-09-29_Marconi_Checkshots.csv")
+    if rtk_src.exists():
+        lines = rtk_src.read_text().splitlines()
+        lines[1] = lines[1].replace(",", ", ", 1)
+        rex = d / "rtk_reexport.csv"
+        rex.write_text("\n".join(lines) + "\n")
+        rtk = {"name": "rtk_other", "survey_type": "points", "survey_date": "2026-09-30", "label": "INDEPENDENT",
+               "why": ""}
+        pl = plan_for(d, era="live", env=None, eo="CACO05_c1_20251113_EO-CV.yaml")
+        lab, why = sp.honest_label(rtk, pl, SimpleNamespace(setup_coef=0.037, survey_dirs=[str(rtk_src.parent)]), rex)
+        check(lab == "CIRCULAR" and "re-exported" in why[0], "a byte-changed re-export under another date: CIRCULAR "
+                                                               "by its coordinates")
+    else:
+        print("  skip  re-exported-RTK check (the real RTK file is not on this computer)")
+
+
 def test_setup_in_use(d):
     print("the label and provenance use the C the waterlines were built with")
     d = Path(d) / "inuse"
@@ -499,6 +585,7 @@ def main():
         test_frames_per_day(d)
         test_caveats(d)
         test_stamps(d)
+        test_round2(d)
         test_py38()
     finally:
         if not args.keep:

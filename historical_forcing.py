@@ -108,7 +108,11 @@ NDBC files are looked for in /mnt/I2Rgus_Data/Chelsea_calibration (then
 needs Chatham and no file is found (or it does not cover the period), the
 6-min NAVD88 record is downloaded from NOAA CO-OPS (compare_gnssr_to_gauge
 .fetch_gauge; internet needed, --no-download to forbid) and saved in the
-output folder, which forcing.json then names.
+output folder, which forcing.json then names. With the setup on (C > 0) a
+period whose waves cover less than half of its daytime hours FAILS (exit 2,
+after writing its files): every frame without waves would be left out of
+the products after an hour of detection (--min-wave-cover; the October
+2024 date needs the WIS ST63064 / NDBC 44013 files, there is no download).
 
 RUN TIME: a few seconds here; ~10-30 s on the station NUC (two cores), most
 of it the two transfers' cross-validation and the figure.
@@ -1139,6 +1143,19 @@ def setup_share_fit(resid, x):
             "r": float(np.corrcoef(x[ok], resid[ok])[0, 1])}
 
 
+def setup_share_inputs(spline=None, gauge_csv=None, waves_csv=None):
+    """The three files gnssr_setup_share() reads, as it resolves them: the GNSS-R spline and the
+    Chatham archive (marconi_water_level.py's defaults) and archive/waves_marconi.csv. survey_products.py
+    puts their size and time in the forcing step's signature, so a file that arrives or changes
+    refreshes the measured share. -> [spline, gauge_csv, waves_csv] as strings (None if unknown)."""
+    try:
+        from marconi_water_level import GNSSR_SPLINE, GAUGE_CSV
+    except Exception:
+        GNSSR_SPLINE = GAUGE_CSV = None
+    return [str(x) if x else None for x in (spline or GNSSR_SPLINE, gauge_csv or GAUGE_CSV,
+                                            waves_csv or HERE / "archive" / "waves_marconi.csv")]
+
+
 def gnssr_setup_share(coef, spline=None, gauge_csv=None, waves_csv=None):
     """
     How much of the wave setup the GNSS-R level already contains: regress (GNSS-R - Chatham
@@ -1149,12 +1166,10 @@ def gnssr_setup_share(coef, spline=None, gauge_csv=None, waves_csv=None):
     the files are not on this computer).
     """
     try:
-        from marconi_water_level import WaterLevel, GNSSR_SPLINE, GAUGE_CSV
+        from marconi_water_level import WaterLevel
     except Exception as exc:
         return {"quantified": False, "note": f"marconi_water_level.py not importable ({exc})"}
-    spline = spline or GNSSR_SPLINE
-    gauge_csv = gauge_csv or GAUGE_CSV
-    waves_csv = waves_csv or str(HERE / "archive" / "waves_marconi.csv")
+    spline, gauge_csv, waves_csv = setup_share_inputs(spline, gauge_csv, waves_csv)
     missing = [str(p) for p in (spline, gauge_csv, waves_csv) if not Path(p).exists()]
     if missing:
         return {"quantified": False, "note": "needs " + ", ".join(missing) + " (not on this computer)",
@@ -1479,13 +1494,29 @@ def parse_day(text, what):
     return to_epoch([ts.normalize()])[0]
 
 
+def wave_cover(wv_df, t0, t1, max_gap_s):
+    """(daytime hours of [t0, t1) with a wave row within max_gap_s, daytime hours): the hours the
+    photos are taken in, which is what the setup (and so the products) needs waves for."""
+    hours = np.arange(np.ceil(t0 / 3600.0) * 3600.0, t1, 3600.0)
+    dh = hours[daytime(hours)]
+    if not len(dh) or not len(wv_df):
+        return 0, int(len(dh))
+    e = np.sort(wv_df["ep"].to_numpy(float))
+    i = np.clip(np.searchsorted(e, dh), 1, max(len(e) - 1, 1))
+    d = np.minimum(np.abs(e[np.clip(i, 0, len(e) - 1)] - dh), np.abs(e[i - 1] - dh))
+    return int((d <= max_gap_s).sum()), int(len(dh))
+
+
 def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None, wis=None, ndbc=None,
                   fit_start=None, fit_end=None, max_gap_minutes=60.0, method="auto",
                   setup_coef=SETUP_COEF, plot=True, download=True, gnssr_spline=None, gauge_archive=None,
-                  waves_archive=None):
+                  waves_archive=None, min_wave_cover=0.5):
     """Writes water_level.csv, waves.csv, forcing_report.txt, forcing.png and forcing.json
     for start..end (whole UTC days, end inclusive) into out_dir. Returns the forcing.json
-    content plus 'water_level_csv' and 'waves_csv'. Raises ForcingError on unusable input.
+    content plus 'water_level_csv' and 'waves_csv'. Raises ForcingError on unusable input,
+    and (after writing everything, so it can be looked at) when the setup is on (C > 0) and
+    the waves cover less than min_wave_cover of the daytime hours: every frame without waves
+    would then be left out of the products, after an hour of detection.
     download=False never contacts NOAA for a missing Chatham record."""
     t_all = time.time()
     t0 = parse_day(start, "--start")
@@ -1698,6 +1729,20 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
     say("done", f"{time.time() - t_all:.0f} s")
     result["water_level_csv"] = str(wl_csv)
     result["waves_csv"] = str(wv_csv)
+    n_cov, n_day = wave_cover(wv_df, t0, t1, max_gap_s)
+    say("wave cover", f"{n_cov} of {n_day} daytime hours ({DAYTIME_UTC[0]:g}-{DAYTIME_UTC[1]:g} UTC) have waves")
+    if setup_coef and min_wave_cover and n_day and n_cov < min_wave_cover * n_day:
+        missing = [k for k in ("adcp", "wis", "ndbc") if not paths[k]]
+        raise ForcingError(
+            f"waves cover only {n_cov} of the {n_day} daytime hours of {start} .. {end}. With the setup on "
+            f"(C = {setup_coef}) every frame without a wave height and period is left out, so the products "
+            f"would lose {100 * (1 - n_cov / float(n_day)):.0f}% of their photos after the detection. "
+            + (f"Wave files not found: {', '.join(missing)} (looked for as "
+               + "; ".join(f"{k}: {', '.join(DEFAULT_NAMES[k])}" for k in missing)
+               + f" in {', '.join(str(d) for d in SEARCH_DIRS)}; or give --wis / --ndbc / --adcp). "
+               if missing else "")
+            + f"Or build with --setup-coef 0 (no setup), or lower --min-wave-cover (now {min_wave_cover:g}). "
+              f"The files written are in {out} to look at.")
     return result
 
 
@@ -1743,13 +1788,17 @@ def main():
                     help="Chatham archive for that check (default archive/gauge_8447435.csv)")
     ap.add_argument("--waves-archive", default=None,
                     help="waves for that check (default archive/waves_marconi.csv)")
+    ap.add_argument("--min-wave-cover", type=float, default=0.5,
+                    help="with --setup-coef > 0, fail (exit 2, after writing the files) when waves cover less "
+                         "than this share of the daytime hours (default 0.5; 0 = never)")
     a = ap.parse_args()
     try:
         build_forcing(a.start, a.end, a.output_dir, adcp=a.adcp, adcp_navd88=a.adcp_navd88, chatham=a.chatham,
                       wis=a.wis, ndbc=a.ndbc, fit_start=a.fit_start, fit_end=a.fit_end,
                       max_gap_minutes=a.max_gap_minutes, method=a.method, setup_coef=a.setup_coef,
                       plot=not a.no_plot, download=not a.no_download, gnssr_spline=a.gnssr_spline,
-                      gauge_archive=a.gauge_archive, waves_archive=a.waves_archive)
+                      gauge_archive=a.gauge_archive, waves_archive=a.waves_archive,
+                      min_wave_cover=a.min_wave_cover)
     except ForcingError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2

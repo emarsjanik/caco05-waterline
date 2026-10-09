@@ -93,18 +93,24 @@ its label and why, its caveats, the exact commands).
 
 STATUS AND EXIT CODE. complete, exit 0. partial, exit 1: a step failed
 (a failed comparison included). partial, exit 3: a camera contributed
-nothing, or the outputs on disk are not one build (e.g. a step rebuilt
-without the steps after it). A disabled date exits 2.
+nothing, a part is missing (a camera's pointing check or its waterline
+map on the photos: no photo found, e.g. a wrong photo root), or the
+outputs on disk are not one build (e.g. a step rebuilt without the steps
+after it). A disabled date exits 2.
 
 DISABLED DATES. A date whose rows in survey_dates.csv all have enabled=0
 is refused with the reason, unless --force-disabled.
 
-RUN TIME on the station NUC (2 cores): forcing 10-30 s; pointing ~3 s per
-day and camera; detection ~3-4 s per photo (e.g. ~15-25 min for a
-2-camera week of daytime photos); filter, DEM and GeoTIFFs under a
-minute; maps ~20 s per camera; each lidar comparison 15-40 s. The live
-era reads the station's whole contour file (~1-2 min) instead of
-detecting.
+RUN TIME: forcing 10-30 s; pointing ~3 s per day and camera; detection
+~25 s per photo (detect_original_view.py on the whole frame: measured 22-26
+s per photo on a 2.8 GHz Xeon, not yet on the station's NUC, whose
+progress lines print the real rate), i.e. ~50 min for a two-camera week
+of daytime photos (~120); filter, DEM and GeoTIFFs under a minute; maps
+~20 s per camera; each lidar comparison 15-40 s. The live era reads the
+station's whole contour file (~1-2 min) instead of detecting. The run
+lowers its own priority (--nice 10) so the station's cron keeps the two
+cores; it says when it would overlap the cron (12:30, 19:25, 20:55 local)
+and cleanup.sh (19:45, 21:00): a start after ~21:30 local keeps clear.
 
 Usage:
     python3 survey_products.py --date 2025-01-23
@@ -189,6 +195,24 @@ SETUP_FITS = {
                           "frames": 18, "window": "2026-09-29 .. 2026-10-05"}},
 }
 
+# Earlier measurements of a date's photos, with the same calibrations, against its survey, made
+# before this script: until the date is built on the station they are the only real numbers for
+# it, and they can point the other way from the biases the README lists (which all make the
+# 2025 dates read LOW). The README states them, per camera, next to what this build should then
+# give. Matched by date, survey and every camera's calibration file.
+PRIOR_CHECKS = [
+    {"date": "2025-01-23", "survey_stem": "2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm",
+     "survey_text": "the Jan 2025 lidar",
+     "eo": {"c1": "CACO03_c1_20250123_EO.yaml", "c2": "CACO03_c2_20250123_EO.yaml"},
+     "window": "2025-01-18 .. 2025-01-23",
+     # waterline points - lidar, median and NMAD, per camera
+     "waterline_minus_survey": {"c1": [0.46, 0.19], "c2": [0.15, 0.23]},
+     "setup_coef": 0.0, "predicted_setup_m": 0.28,
+     "how": "waterline points minus the lidar, unfiltered waterlines, NO wave setup (C = 0), the detection "
+            "search envelope from the earlier lidar-fitted pointing (so its detections may differ from this "
+            "build's, whose envelope is placed with the Mar 2025 lidar)"},
+]
+
 # DEM settings of the live cron (waterline_timex_cron.sh), so a survey-date
 # DEM is built like the station's own.
 DEM_CELL, DEM_MIN_POINTS, DEM_MAX_SPREAD, DEM_MAX_HS, DEM_MAX_DAY_OFFSET = 2.0, 3, 0.5, 1.5, 0.15
@@ -199,9 +223,42 @@ POINT_WARN_DEG, POINT_FAIL_DEG = 0.1, 0.5
 # Fewer compared cells or points than this is not an estimate (as survey_compare.py's MIN_BAND_N).
 FEW_N = 10
 
-# Expected NUC run times, for the printed estimates.
-SEC_PER_PHOTO_DETECT = 3.5
+# Expected run times, for the printed estimates. Detection: detect_original_view.py runs the
+# detector on the whole 2448 x 2048 frame, measured at 22-26 s per photo on a 2.8 GHz Xeon in
+# Oct 2026 (60 photos in 1358-1505 s; the 3.5 s used before was process_chelsea.py's cropped,
+# resampled frames). NOT yet measured on the station's NUC10i3: its per-10% progress lines
+# print the real rate; put it here once seen.
+SEC_PER_PHOTO_DETECT = 25.0
 SEC_PER_DAY_POINTING = 3.0
+
+# The station's own jobs (local time; crontab lines in waterline_timex_cron.sh and owg.sh). A long
+# detection on the 2-core NUC should not run across the waterline cron, which reads the same
+# disks and needs both cores; this run lowers its own priority (--nice) and says when it would
+# overlap them.
+STATION_JOBS_LOCAL = [("12:30", "waterline_timex_cron.sh"), ("19:25", "waterline_timex_cron.sh"),
+                      ("19:45", "cleanup.sh"), ("20:55", "waterline_timex_cron.sh"), ("21:00", "cleanup.sh")]
+
+
+def station_job_overlap(seconds, now=None):
+    """The station jobs (STATION_JOBS_LOCAL) that start within the next `seconds` of local time.
+    -> list of 'HH:MM name'."""
+    now = now or datetime.now()
+    hits = []
+    for day in (0, 1, 2):
+        base = (now + timedelta(days=day)).replace(second=0, microsecond=0)
+        for hm, name in STATION_JOBS_LOCAL:
+            t = base.replace(hour=int(hm[:2]), minute=int(hm[3:]))
+            if now <= t <= now + timedelta(seconds=seconds):
+                hits.append(f"{hm} {name}")
+    return hits
+
+
+def overlap_note(seconds):
+    hits = station_job_overlap(seconds)
+    return ("" if not hits else
+            f"it would overlap the station's own jobs ({', '.join(hits)} local): it runs at a lower priority "
+            f"(--nice), but a start after ~21:30 or before ~06:00 local keeps clear of them (owg.sh also runs "
+            f"hourly at :40, 06:40-20:40)")
 
 # The scripts each step runs. Their sha256 is part of the step's signature,
 # so a changed script rebuilds the step (another job revises some of these),
@@ -568,6 +625,10 @@ def forcing_cmd(plan, args):
         v = getattr(args, opt)
         if v:
             cmd += ["--" + opt.replace("_", "-"), v]
+    if getattr(args, "gnssr_spline", None):
+        cmd += ["--gnssr-spline", args.gnssr_spline]
+    if getattr(args, "gauge_csv", None):
+        cmd += ["--gauge-archive", args.gauge_csv]
     if args.no_download:
         cmd.append("--no-download")
     return cmd
@@ -603,10 +664,17 @@ def step_forcing(plan, args, state):
         return live_forcing(plan, args, state)
     cmd = forcing_cmd(plan, args)
     found = forcing_inputs(args)
+    # The 2026 record the share of setup GNSS-R sees is measured from (README, provenance
+    # setup.still_water_reference). NOT in the signature: archive/waves_marconi.csv grows every
+    # day with the cron, and a new forcing token would redo an hour of detection for a number
+    # only the README reports. A file that arrives or changes refreshes that number in place.
+    share_sig = setup_share_sig(args)
     sig = {"cmd": cmd_text(cmd), "inputs": {k: file_sig(p) for k, p in found.items()},
            "scripts": scripts_sig("forcing")}
     fresh, why = is_fresh(out, "forcing", sig, outputs, list(found.values()))
     if fresh and not args.force:
+        if (read_stamp(out, "forcing") or {}).get("setup_share_inputs") != share_sig:
+            return refresh_setup_share(out, args, share_sig)
         say("forcing", f"SKIPPED: {fdir} is up to date (--force to rebuild)")
         return "skipped"
     say("forcing", f"{plan['first']} .. {plan['last']} ({why}); expected 10-30 s on the NUC")
@@ -615,9 +683,58 @@ def step_forcing(plan, args, state):
     drop_stamp(out, "forcing")
     rc = run_cmd(cmd, out / "logs" / "forcing.log")
     if rc != 0 or not all(o.exists() for o in outputs):
-        raise StepFailed(f"historical_forcing.py failed (exit {rc}); see {out / 'logs' / 'forcing.log'}")
-    write_stamp(out, "forcing", sig, [cmd], scripts=STEP_SCRIPTS["forcing"])
+        raise StepFailed(f"historical_forcing.py failed (exit {rc}); see {out / 'logs' / 'forcing.log'}"
+                         + ("" if rc != 2 else " (its ERROR line says why: e.g. too few wave hours for the setup)"))
+    n_waves = max(0, sum(1 for _ in open(fdir / "waves.csv")) - 1)
+    if args.setup_coef and not n_waves:
+        # never an hour of detection that then drops every frame for want of a setup
+        raise StepFailed(f"{fdir / 'waves.csv'} has no wave hours, and the setup (C = {args.setup_coef}) needs "
+                         f"them: give the wave files (--wis, --ndbc, --adcp) or --setup-coef 0")
+    write_stamp(out, "forcing", sig, [cmd], scripts=STEP_SCRIPTS["forcing"],
+                extra={"setup_share_inputs": share_sig})
     return "built"
+
+
+SHARE_KEYS = ("quantified", "note", "share", "k", "k_se", "c", "n", "r", "typical_x", "typical_m", "how", "inputs")
+
+
+def setup_share_sig(args):
+    """[[path, size, mtime], ...] of the three files historical_forcing.gnssr_setup_share() reads."""
+    from historical_forcing import setup_share_inputs
+    share = setup_share_inputs(getattr(args, "gnssr_spline", None), getattr(args, "gauge_csv", None))
+    return normal([[p, file_sig(p)] for p in share])
+
+
+def refresh_setup_share(out, args, share_sig):
+    """The forcing is current but the files the GNSS-R setup share is measured from changed (or
+    arrived): measure it again into forcing.json and the stamp, KEEPING the stamp's token, so
+    nothing downstream rebuilds (water level and waves are unchanged). forcing_report.txt keeps
+    the old text; the README and provenance read forcing.json."""
+    from historical_forcing import gnssr_setup_share
+    fj = out / "forcing" / "forcing.json"
+    d = load_json(fj) or {}
+    wv = d.get("waves") or {}
+    coef = wv.get("setup_coef")
+    swr = dict(wv.get("still_water_reference") or {})
+    if coef:
+        for k in SHARE_KEYS:
+            swr.pop(k, None)
+        swr.update(gnssr_setup_share(coef, getattr(args, "gnssr_spline", None), getattr(args, "gauge_csv", None)))
+        wv["still_water_reference"] = swr
+        d["waves"] = wv
+        tmp = Path(str(fj) + ".tmp")
+        tmp.write_text(json.dumps(d, indent=1) + "\n")
+        os.replace(str(tmp), str(fj))
+    st = read_stamp(out, "forcing") or {}
+    st["setup_share_inputs"] = share_sig
+    sp = stamp_path(out, "forcing")
+    tmp = Path(str(sp) + ".tmp")
+    tmp.write_text(json.dumps(st, indent=1) + "\n")
+    os.replace(str(tmp), str(sp))
+    say("forcing", "up to date; GNSS-R setup share measured again (its 2026 input files changed): "
+        + (f"GNSS-R sees {swr['share']:.2f} of the setup" if swr.get("quantified") and swr.get("share") is not None
+           else (swr.get("note") or "not measured")))
+    return "skipped (up to date; setup share refreshed)"
 
 
 class StepFailed(Exception):
@@ -1019,18 +1136,44 @@ def check_pointing(plan, cam, photos, args):
             "calibration": c["eo_file"], "window_horizon_dtilt_deg": round(med_t, 3),
             "window_horizon_droll_deg": round(med_r, 3), "clear_horizon_days": len(clear)}
     offs_all = [r["horizon_offset_px"] for r in clear]
-    if offs_all and float(np.median(offs_all)) > MOVED_PX:
-        info["calibration_offset_deg"] = [round(med_t, 3), round(med_r, 3)]
-        info["calibration_offset"] = (
-            f"the sea horizon sits {np.median(offs_all):.0f} px from where {c['eo_file']} puts it on every day "
-            f"with a clear horizon (as a tilt/roll change: {med_t:+.2f}/{med_r:+.2f} deg). A constant offset "
-            f"like this is either a calibration error or the lens model's error near the top of the frame "
-            f"(the horizon lies far outside the GCPs the calibration was solved from); only day-to-day "
-            f"CHANGES are used to leave days out. If it is pointing, it matters: the view grazes the beach, so "
-            f"0.1 deg of tilt moves a waterline ~6-9 m along a range of 250-350 m, ~0.13-0.17 m of DEM there "
-            f"(rough rate: ~{abs(med_t) / 0.1 * 0.15:.2f} m for this offset at ~300 m; the README gives it per "
-            f"range band from this date's own DEM)")
+    info["window_horizon_offset_px"] = round(float(np.median(offs_all)), 1) if offs_all else None
+    off = pointing_offset(info, c["eo_file"])
+    if off:
+        info["calibration_offset_deg"], info["calibration_offset"] = [off[0], off[1]], off[2]
     return rows, info
+
+
+# A constant tilt or roll of the whole window against the calibration larger than this (deg) is
+# reported with its DEM sensitivity (0.05 deg of tilt is ~0.07 m of DEM at 250-350 m). It is
+# never used to leave days out: horizon_check.py's MOVED_PX and RUN_TOL_DEG judge a CHANGE of
+# pointing from day to day; this judges what a constant offset may do to the DEM.
+OFFSET_REPORT_DEG = 0.05
+
+
+def pointing_offset(info, eo_file):
+    """(tilt, roll, text) of the window's constant horizon offset against the calibration when
+    either exceeds OFFSET_REPORT_DEG (from check_pointing's info; an older result's own text is
+    kept), else None."""
+    if not info:
+        return None
+    dt, dr = info.get("window_horizon_dtilt_deg"), info.get("window_horizon_droll_deg")
+    if info.get("calibration_offset") and info.get("calibration_offset_deg"):
+        a, b = info["calibration_offset_deg"]
+        return a, b, info["calibration_offset"]
+    if dt is None or dr is None or not info.get("clear_horizon_days") or \
+            max(abs(dt), abs(dr)) <= OFFSET_REPORT_DEG:
+        return None
+    px = info.get("window_horizon_offset_px")
+    text = (f"the sea horizon sits " + (f"{px:.0f} px " if px is not None else "")
+            + f"from where {eo_file} puts it over the window ({info.get('clear_horizon_days')} day(s) with a clear "
+            f"horizon; as a tilt/roll change: {dt:+.2f}/{dr:+.2f} deg). A constant offset like this is either "
+            f"a calibration error or the lens model's error near the top of the frame (the horizon lies far "
+            f"outside the GCPs the calibration was solved from); only day-to-day CHANGES are used to leave "
+            f"days out. If it is pointing, it matters: the view grazes the beach, so 0.1 deg of tilt moves a "
+            f"waterline ~6-9 m along a range of 250-350 m, ~0.13-0.17 m of DEM there (rough rate: "
+            f"~{abs(dt) / 0.1 * 0.15:.2f} m for this offset at ~300 m; the README gives it per range band from "
+            f"this date's own DEM)")
+    return dt, dr, text
 
 
 POINTING_VERSION = 3
@@ -1168,8 +1311,9 @@ def print_pointing(cam, res, args):
         off = f"{r['horizon_offset_px']:.1f}" if r["horizon_offset_px"] != "" else "-"
         print(f"  {r['date']}  {r['photos']:5d}  {off:>10s}  {hz:>19s}  {ang:>26s}  {str(r['inliers']):>7s}  "
               f"{r['verdict']}")
-    if info.get("calibration_offset"):
-        warn(f"{cam}: {info['calibration_offset']}")
+    off = pointing_offset(info, info.get("calibration"))
+    if off:
+        warn(f"{cam}: {off[2]}")
     if info.get("warning"):
         warn(f"{cam}: {info['warning']}")
     if res.get("different_days"):
@@ -1266,8 +1410,11 @@ def step_detect(plan, args, state):
                     else ""))
                 continue
             say(f"detect {cam}", f"{len(photos)} photos ({why}); expected ~{len(photos) * SEC_PER_PHOTO_DETECT / 60:.0f} "
-                f"min on the NUC ({SEC_PER_PHOTO_DETECT:.1f} s per photo; follow with tail -f "
-                f"{wdir / cam / 'processing.log'})")
+                f"min (~{SEC_PER_PHOTO_DETECT:.0f} s per photo as measured off the station; the progress lines "
+                f"below print the real rate; follow with tail -f {wdir / cam / 'processing.log'})")
+            note = overlap_note(len(photos) * SEC_PER_PHOTO_DETECT)
+            if note:
+                warn(f"detect {cam}: {note}")
             rc = run_cmd(cmd, out / "logs" / f"detect_{cam}.log")
             if rc != 0 or not ground.exists():
                 warn(f"detect {cam} FAILED (exit {rc}); see {out / 'logs' / f'detect_{cam}.log'} and "
@@ -1749,7 +1896,7 @@ def step_dem(plan, args, state):
         raise StepFailed(f"asc_to_geotiff.py failed (exit {rc}); see {log}")
     view_calibration(plan)
     rc = run_cmd(page, log)
-    extra = {"cells": cells, "source": str(src)}
+    extra = {"cells": cells, "source": str(src), "settings": dem_settings_requested(args)}
     if rc != 0 or not Path(f"{stem}_dem.png").exists():
         warn(f"the DEM page (dem_figure.py) failed (exit {rc}); the grids are fine. See {log}")
         write_stamp(out, "dem", dict(sig, page_failed=True), [cmd, tif, page], scripts=STEP_SCRIPTS["dem"],
@@ -1757,6 +1904,52 @@ def step_dem(plan, args, state):
         return "built (page failed)"
     write_stamp(out, "dem", sig, [cmd, tif, page], scripts=STEP_SCRIPTS["dem"], extra=extra)
     return "built"
+
+
+DEM_SETTING_OPTS = {"cell_m": "--cell", "min_points": "--min-points", "max_spread_m": "--max-spread",
+                    "max_hs_m": "--max-hs", "max_day_offset_m": "--max-day-offset"}
+
+
+def dem_settings_requested(args):
+    """The DEM and GeoTIFF settings this run asks for (0 = off -> None, as dem_cmds passes them)."""
+    return {"cell_m": float(args.dem_cell), "min_points": int(args.dem_min_points),
+            "max_spread_m": float(args.dem_max_spread), "max_hs_m": float(args.dem_max_hs) or None,
+            "max_day_offset_m": float(args.dem_max_day_offset) or None, "geotiff_epsg": int(args.geotiff_epsg)}
+
+
+def dem_settings_built(out):
+    """The settings the DEM ON DISK was built with: from its stamp (recorded since Oct 2026, else read
+    back from the dem_from_contours.py and asc_to_geotiff.py commands the stamp holds). None when no
+    DEM has finished. A later run with other options (e.g. --steps compare --dem-cell 1) does not
+    change them: the provenance, README and labels report these."""
+    st = read_stamp(out, "dem")
+    if not st:
+        return None
+    if st.get("settings"):
+        return dict(st["settings"])
+    sig = st.get("sig") or {}
+    try:
+        cmd, tif = shlex.split(sig.get("cmd", "")), shlex.split(sig.get("tif", ""))
+    except ValueError:
+        return None
+
+    def opt(words, name, cast):
+        return cast(words[words.index(name) + 1]) if name in words[:-1] else None
+    d = {k: opt(cmd, o, int if k == "min_points" else float) for k, o in DEM_SETTING_OPTS.items()}
+    d["geotiff_epsg"] = opt(tif, "--epsg", int)
+    return d
+
+
+def dem_settings_differ(built, wanted):
+    """The settings that differ between the DEM on disk and this run's options, as text ('' if none)."""
+    if not built:
+        return ""
+    diff = []
+    for k, v in wanted.items():
+        b = built.get(k)
+        if (b is None) != (v is None) or (b is not None and abs(float(b) - float(v)) > 1e-9):
+            diff.append(f"{k} {b} (asked {v})")
+    return ", ".join(diff)
 
 
 def dem_log_counts(log):
@@ -1863,7 +2056,10 @@ def step_maps(plan, args, state):
             built = True
         except Exception as exc:
             warn(f"plan-view map failed: {exc!r}")
-    return "built" if built else "skipped"
+    missing = [cam for cam in plan["cams"] if not (mdir / f"{plan['date']}_waterlines_{cam}.png").exists()]
+    if missing:
+        warn(f"waterline map(s) on the photos NOT drawn: {', '.join(missing)} (status partial)")
+    return ("built" if built else "skipped") + (f" (photo maps missing: {', '.join(missing)})" if missing else "")
 
 
 def read_ground_points(path, first, last, max_points=150000):
@@ -2157,8 +2353,47 @@ def setup_in_use(plan, args):
         "this run's --setup-coef (nothing built yet)"
 
 
-def survey_matches_fit(fit, s, survey_path):
-    """Is survey s the one setup coefficient `fit` was fitted to?
+_FIT_POINTS = {}
+
+
+def fit_survey_points(fit, args):
+    """(E, N) of the shots a setup coefficient was fitted to, when that file is on this computer
+    (found by its name in the survey folders, with the fit's sha256 when one is known); else None."""
+    names = [n for n in (fit.get("survey_name"), (fit.get("survey_stem") or "") + ".csv") if n and n != ".csv"]
+    dirs = [str(x) for x in (getattr(args, "survey_dirs", None) or [])] if args is not None else []
+    key = (tuple(names), fit.get("survey_sha256"), tuple(dirs))
+    if key not in _FIT_POINTS:
+        _FIT_POINTS[key] = None
+        for n in names:
+            hits = resolve_file(n, dirs)
+            if hits and (not fit.get("survey_sha256") or file_sha(hits[0]) == fit["survey_sha256"]):
+                try:
+                    from survey_compare import read_points
+                    p = read_points(hits[0])
+                    _FIT_POINTS[key] = (p["E"], p["N"], hits[0].name)
+                except (SystemExit, Exception):
+                    pass
+                break
+    return _FIT_POINTS[key]
+
+
+def file_dates(path):
+    """The days in an Emlid file's own 'Averaging start' column (local dates), or set()."""
+    try:
+        with open(path, newline="") as f:
+            rd = csv.DictReader(f)
+            if "Averaging start" not in (rd.fieldnames or []):
+                return set()
+            return {r["Averaging start"][:10] for r in rd if re.match(r"\d{4}-\d\d-\d\d", r.get("Averaging start") or "")}
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return set()
+
+
+def survey_matches_fit(fit, s, survey_path, args=None):
+    """Is survey s the one setup coefficient `fit` was fitted to? By content (sha256), file name,
+    the shots' own coordinates (more than half within 0.05 m of the fit's shots, when that file is
+    here: a re-export changes the bytes, not the points), then by type and date: the table's
+    survey_date or, in an Emlid file, its own 'Averaging start' dates.
     -> ('same' | 'maybe' | None, why)."""
     if not fit or fit.get("kind") in ("none", "unknown") or not (fit.get("survey_stem") or fit.get("survey_sha256")):
         return None, ""
@@ -2170,10 +2405,29 @@ def survey_matches_fit(fit, s, survey_path):
     names = {fit.get("survey_stem"), fit.get("survey_name")} - {None}
     if names & {p.stem, p.name}:
         return "same", f"file name {p.name}"
-    if fit.get("survey_type") and fit.get("survey_date") and s.get("survey_type") == fit["survey_type"] \
-            and s.get("survey_date") == fit["survey_date"]:
-        return "maybe", (f"a {fit['survey_type']} survey of {fit['survey_date']}, the type and date of the survey "
-                         f"C was fitted to: a copy or re-export of it cannot be ruled out by content")
+    if s.get("survey_type") == "points" and p.is_file() and fit.get("survey_type", "points") == "points":
+        ref = fit_survey_points(fit, args)
+        if ref is not None:
+            try:
+                from survey_compare import read_points
+                q = read_points(p)
+                d = np.full(len(q["E"]), np.inf)
+                for k in range(0, len(ref[0]), 500):
+                    d = np.minimum(d, np.min(np.hypot(q["E"][:, None] - ref[0][None, k:k + 500],
+                                                      q["N"][:, None] - ref[1][None, k:k + 500]), axis=1))
+                near = int((d <= 0.05).sum())
+                if len(d) and near > 0.5 * len(d):
+                    return "same", (f"{near} of its {len(d)} points lie within 0.05 m of the shots C was fitted "
+                                    f"to ({ref[2]}): the same shots, re-exported")
+            except (SystemExit, Exception):
+                pass
+    if fit.get("survey_type") and fit.get("survey_date") and s.get("survey_type") == fit["survey_type"]:
+        if s.get("survey_date") == fit["survey_date"]:
+            return "maybe", (f"a {fit['survey_type']} survey of {fit['survey_date']}, the type and date of the survey "
+                             f"C was fitted to: a copy or re-export of it cannot be ruled out by content")
+        if p.is_file() and fit["survey_date"] in file_dates(p):
+            return "maybe", (f"its own 'Averaging start' dates include {fit['survey_date']}, the date of the survey "
+                             f"C was fitted to (whatever surveys.csv says): a copy or re-export cannot be ruled out")
     return None, ""
 
 
@@ -2212,12 +2466,26 @@ def honest_label(s, plan, args, survey_path, fits=None, verdict=None):
             v.worse("PARTLY-CIRCULAR", f"the {cam} search envelope was placed with this survey ({Path(env).name})")
         eo = c.get("eo_path")
         if eo and Path(eo).exists():
-            text = Path(eo).read_text(errors="replace")
-            notes = " ".join(ln.lstrip("#").strip() for ln in text.splitlines() if ln.strip().startswith("#"))
-            if "_lidar_EO" in Path(eo).name or "fit_eo_to_survey" in notes:
-                if sstem in notes or sname in notes or not re.search(r"fitted to (\S+)", notes):
-                    v.worse("CIRCULAR", f"the {cam} pointing {Path(eo).name} is a survey fit "
-                                        f"(fit_eo_to_survey.py){' to this survey' if sstem in notes else ''}")
+            # A pointing fitted to a survey (fit_eo_to_survey.py, *_lidar_EO.yaml) or carrying such a
+            # fit's change to another period (apply_pointing_correction.py, *_corr_EO.yaml): the
+            # lineage is followed to the survey each fit names, recognised by name or content.
+            from survey_compare import pointing_lineage, same_survey, lineage_text
+            look = eo_dirs(args)
+            lin = pointing_lineage(eo, look)
+            via = f" (lineage {lineage_text(lin)})" if len(lin["chain"]) > 1 else ""
+            hit = [f for f in lin["fitted_to"] if same_survey(f, survey_path, look)]
+            named = sname in lin["notes"] or (len(sstem) > 6 and sstem in lin["notes"])
+            if hit or (lin["survey_fit"] and named):
+                v.worse("CIRCULAR", f"the {cam} pointing {Path(eo).name} "
+                                    + ("carries a correction fitted to" if len(lin["chain"]) > 1 else "was fitted to")
+                                    + f" this survey{via}")
+            elif named:
+                v.worse("CIRCULAR", f"the {cam} calibration {Path(eo).name} names this survey in its notes "
+                                    f"(was it fitted to it?)", heuristic=True)
+            elif lin["survey_fit"] and lin["unresolved"]:
+                v.worse("CIRCULAR", f"the {cam} pointing {Path(eo).name} is survey-derived{via} and which survey "
+                                    f"cannot be resolved ({'; '.join(lin['unresolved'])}): it may be this one",
+                        heuristic=True)
         # any point survey made on the calibration's own day may be the GCPs it was solved from,
         # whatever the file is called
         if s["survey_type"] == "points" and eo_date(c["eo_file"]) == s.get("survey_date"):
@@ -2231,7 +2499,7 @@ def honest_label(s, plan, args, survey_path, fits=None, verdict=None):
             v.worse("PARTLY-CIRCULAR", f"setup coefficient C = {f['coef']} of unknown origin (no "
                                        f"--setup-fitted-to): it may have been fitted to this survey{cams}")
             continue
-        how, why = survey_matches_fit(f, s, survey_path)
+        how, why = survey_matches_fit(f, s, survey_path, args)
         if how:
             v.worse("CIRCULAR", f"the setup coefficient C = {f['coef']} was fitted to this survey ({why}{cams}), "
                                 f"so this comparison cannot test the setup or the overall level; its spread "
@@ -2239,9 +2507,19 @@ def honest_label(s, plan, args, survey_path, fits=None, verdict=None):
     return v.label, v.reasons
 
 
-def survey_compare_findings(plan, s, survey_path, label, dem):
+def eo_dirs(args):
+    """Folders where the files an EO's notes name (the fit a *_corr_EO.yaml was carried from) are
+    looked for: the calibration folder given, the repository's, and the survey folders."""
+    dirs = [str(getattr(args, "calibration", None) or HERE / "calibration"), str(HERE / "calibration")]
+    dirs += [str(d) for d in (getattr(args, "survey_dirs", None) or [])]
+    return list(dict.fromkeys(dirs))
+
+
+def survey_compare_findings(plan, s, survey_path, label, dem, args=None):
     """survey_compare.py's own label checks (audit_label), run here BEFORE the comparison so the
-    headline label already includes them. -> list of (suggested label or None, text)."""
+    headline label already includes them. -> list of (suggested label or None, text, kind), kind
+    'chain' (what the chain did: never overruled), 'rule' (a date or name rule that can misfire:
+    overruled only by surveys.csv label_override_reason) or 'note'."""
     from survey_compare import audit_label, load_cameras
     eos = {cam: Path(c["eo_path"]) for cam, c in plan["cams"].items()
            if c.get("eo_path") and (plan["out"] / "waterlines" / cam / "contour_points_ground.csv").exists()}
@@ -2249,9 +2527,9 @@ def survey_compare_findings(plan, s, survey_path, label, dem):
     try:
         cams = load_cameras(eos, {}) if eos else {}
         return audit_label(label, survey_path, s["survey_type"], s.get("survey_date"), cams,
-                           envs[0] if len(envs) == 1 else None, dem)
+                           envs[0] if len(envs) == 1 else None, dem, dirs=eo_dirs(args) if args else ())
     except SystemExit as exc:                      # its loaders exit on a missing file
-        return [(None, f"survey_compare.py's checks could not run: {exc}")]
+        return [(None, f"survey_compare.py's checks could not run: {exc}", "note")]
 
 
 def frames_used_dates(plan):
@@ -2301,8 +2579,13 @@ def step_compare(plan, args, state):
              f"(C = {', '.join(str(c) for c in sorted(used))}): the label, README and provenance use the C that "
              f"built them. To apply {args.setup_coef}, rebuild from the detection (--steps detect,filter,dem,"
              f"maps,compare or all steps)")
+    dd = dem_settings_differ(dem_settings_built(out), dem_settings_requested(args))
+    if dd:
+        warn(f"this run's DEM options are NOT what the DEM on disk was built with ({dd}): the comparison, README "
+             f"and provenance use the DEM on disk and its settings. To apply them, rebuild: --steps dem,maps,compare")
     first_used, last_used, used_how = frames_used_dates(plan)
     built = False
+    failed_any = 0
     for s, paths, note in todo:
         name = f"{plan['date']}_{s['name']}"
         if note:
@@ -2313,10 +2596,12 @@ def step_compare(plan, args, state):
             survey_path = merged_points(paths, cdir / f"{name}_survey_points.csv")
             say("compare", f"{len(paths)} files merged into {survey_path}")
         v = Verdict(s)
-        honest_label(s, plan, args, paths[0], fits=fits, verdict=v)
-        for sug, txt in survey_compare_findings(plan, s, survey_path, v.label, dem):
+        # every file of the survey (several point files are merged): the worst of them
+        for p_ in paths:
+            honest_label(s, plan, args, p_, fits=fits, verdict=v)
+        for sug, txt, kind in survey_compare_findings(plan, s, survey_path, v.label, dem, args):
             if sug and LABELS.index(sug) > LABELS.index(v.label):
-                v.worse(sug, f"survey_compare.py check: {txt}", heuristic=True)
+                v.worse(sug, f"survey_compare.py check: {txt}", heuristic=(kind == "rule"))
         label = v.label
         why = s["why"] + ("" if not v.reasons else " | chain checks -> " + "; ".join(v.reasons))
         if v.overridden:
@@ -2334,13 +2619,15 @@ def step_compare(plan, args, state):
                "--survey-type", s["survey_type"], "--name", name, "--output-dir", cdir,
                "--label", label, "--why", why, "--photo-dates", first_used, last_used,
                "--contours", waterline_file(plan),
-               "--spread", f"{stem}_spread.asc", "--count", f"{stem}_count.asc", "--epsg", args.geotiff_epsg]
+               "--spread", f"{stem}_spread.asc", "--count", f"{stem}_count.asc",
+               # the difference GeoTIFF carries the same tag as the DEM's
+               "--epsg", (dem_settings_built(out) or {}).get("geotiff_epsg") or args.geotiff_epsg]
         if s.get("survey_date"):
             cmd += ["--survey-date", s["survey_date"]]
         eos = [f"{cam}={c['eo_path']}" for cam, c in plan["cams"].items() if c["eo_path"] and
                (out / "waterlines" / cam / "contour_points_ground.csv").exists()]
         if eos:
-            cmd += ["--camera-eo"] + eos
+            cmd += ["--camera-eo"] + eos + ["--eo-dirs"] + eo_dirs(args)
         if len(envs) == 1:
             cmd += ["--envelope-source", envs[0]]
         sig = {"cmd": cmd_text(cmd), "after": {"dem": token(out, "dem"), "waterlines": waterline_token(plan)},
@@ -2368,15 +2655,21 @@ def step_compare(plan, args, state):
             warn(f"comparison {name} FAILED (exit {rc}); see {log}")
             results[s["name"]] = dict(info, status="failed")
             state["failures"].append(f"compare {s['name']}: survey_compare.py failed (exit {rc}); see {log}")
+            failed_any += 1
             continue
         head = load_json(js) or {}
         sug = head.get("suggested_label")
-        already = any(o.startswith(f"{sug}: survey_compare.py check") for o in v.overridden)
-        if sug in LABELS and LABELS.index(sug) > LABELS.index(label) and not already:
+        if sug in LABELS and LABELS.index(sug) > LABELS.index(label):
             # its checks still found something worse than the checks run before it (they should be
-            # the same): the worse label wins, and the page is drawn again with it
-            v.worse(sug, "survey_compare.py check after the run: " + "; ".join(head.get("warnings") or []),
-                    heuristic=True)
+            # the same): the worse label wins (a rule that can misfire only if not overruled), and
+            # the page is drawn again with it
+            for f_ in head.get("findings") or [{"suggested": sug, "text": "; ".join(head.get("warnings") or []),
+                                                 "kind": "rule"}]:
+                fs = f_.get("suggested")
+                if fs in LABELS and LABELS.index(fs) > LABELS.index(label) and \
+                        not any(o.startswith(f"{fs}: survey_compare.py check") for o in v.overridden):
+                    v.worse(fs, "survey_compare.py check after the run: " + str(f_.get("text")),
+                            heuristic=(f_.get("kind") != "chain"))
             info.update(label=v.label, reasons=v.reasons, overridden=v.overridden)
             if v.label != label:
                 warn(f"{s['name']}: survey_compare.py's checks make it {v.label}: drawn again with that label")
@@ -2387,10 +2680,13 @@ def step_compare(plan, args, state):
                 if rc != 0 or not js.exists():
                     results[s["name"]] = dict(info, status="failed")
                     state["failures"].append(f"compare {s['name']}: survey_compare.py failed (exit {rc}); see {log}")
+                    failed_any += 1
                     continue
         write_stamp(out, f"compare_{s['name']}", sig, [cmd], scripts=STEP_SCRIPTS["compare"], extra={"label": info})
         results[s["name"]] = dict(info, status="built", json=str(js))
         built = True
+    if failed_any:
+        return f"built ({failed_any} failed)" if built else "failed"
     return "built" if built else "skipped"
 
 
@@ -2550,6 +2846,29 @@ def failed_cameras(plan, state):
     return failed
 
 
+def missing_parts(plan, state):
+    """The parts a complete product has that are missing, per camera that has waterlines: the
+    pointing check (it needs the photos) and the waterline map on the photos. On the station a
+    wrong or empty photo root would otherwise look like a finished product. -> list of text."""
+    out = plan["out"]
+    failed = failed_cameras(plan, state)
+    miss = []
+    for cam in plan["cams"]:
+        if cam in failed:
+            continue                              # already a reason of its own
+        res = (state.get("pointing") or {}).get(cam) or load_json(out / "pointing" / f"pointing_{cam}.json")
+        if res is None:
+            miss.append(f"{cam}: pointing not checked (the pointing step has not run)")
+        elif not res.get("rows"):
+            miss.append(f"{cam}: pointing NOT checked (no photo of the window in the photo roots)")
+        if not (out / "maps" / f"{plan['date']}_waterlines_{cam}.png").exists():
+            miss.append(f"{cam}: no waterline map on the photos"
+                        + (" (no photo of the window in the photo roots)"
+                           if not (out / "waterlines" / cam / "src").exists()
+                           or not any((out / "waterlines" / cam / "src").iterdir()) else ""))
+    return miss
+
+
 def chain_current(plan, maps=True):
     """Do the outputs on disk form ONE build? Each stamp names the upstream stamps it was built
     after (its token); a stamp dropped by a failed or interrupted rebuild breaks the chain.
@@ -2569,6 +2888,20 @@ def chain_current(plan, maps=True):
     if not d:
         return False, "the DEM has no finished build"
     keys.append(("dem", d))
+    # the grids on disk are the ones that stamp's settings built (dem_from_contours.py writes its own
+    # settings into <date>_info.json): a grid rebuilt by hand or by another run is not this build
+    built = dem_settings_built(out) or {}
+    info = load_json(out / "dem" / f"{plan['date']}_info.json") or {}
+    if info and built:
+        filt = info.get("filters") or {}
+        on_disk = {"cell_m": info.get("cell"), "min_points": info.get("min_points"),
+                   "max_spread_m": info.get("max_spread"), "max_hs_m": filt.get("max_hs"),
+                   "max_day_offset_m": filt.get("max_day_offset")}
+        for k, v in on_disk.items():
+            b = built.get(k)
+            if (b is None) != (v is None) or (b is not None and abs(float(b) - float(v)) > 1e-9):
+                return False, (f"the DEM grids on disk ({plan['date']}_info.json: {k} {v}) are not the ones the DEM "
+                               f"stamp built ({k} {b}); rerun --steps dem,maps,compare")
     for k, st in keys:
         for up, tk in ((st.get("sig") or {}).get("after") or {}).items():
             if token(out, up) != tk:
@@ -2653,6 +2986,57 @@ def survey_path_for(s, plan, args):
     return hits[0] if hits else Path(s.get("path") or s["name"])
 
 
+def prior_checks(plan):
+    """The PRIOR_CHECKS entries for this date: same date, one of its surveys, the same calibration
+    for every camera the entry measured that this date builds."""
+    out = []
+    stems = {Path(s.get("path") or "").stem for s in plan.get("surveys") or []}
+    for pc in PRIOR_CHECKS:
+        if pc["date"] != plan.get("date") or pc["survey_stem"] not in stems:
+            continue
+        cams = [c for c in pc["eo"] if c in plan["cams"]]
+        if cams and all(plan["cams"][c].get("eo_file") == pc["eo"][c] for c in cams):
+            out.append(dict(pc, cameras=cams))
+    return out
+
+
+def prior_check_caveat(plan, pc, fits, forcing):
+    """The README caveat for an earlier check: what it found per camera, and what this build
+    should then give with its setup (the setup less the part a landward re-projection takes
+    back: (without - with) / applied on the 2026 RTK, ~0.8)."""
+    wv = (forcing or {}).get("waves", {})
+    su = wv.get("setup_in_window") or {}
+    med = su.get("daytime_median_m") if su.get("daytime_median_m") is not None else su.get("median_m")
+    C = fits[0]["coef"] if fits else None
+    rc = (SETUP_FITS.get(C) or {}).get("rtk_check") if C else None
+    keep = ((rc["without_setup_m"] - rc["with_setup_m"]) / rc["setup_applied_m"]) if rc else 1.0
+    add = (med if med is not None else pc["predicted_setup_m"]) * keep if C else 0.0
+    per = pc["waterline_minus_survey"]
+    found = ", ".join(f"{c} {per[c][0]:+.2f} m (NMAD {per[c][1]:.2f})" for c in sorted(pc["cameras"], reverse=True))
+    expect = ", ".join(f"{c} ~{per[c][0] + add:+.1f} m" for c in sorted(pc["cameras"], reverse=True))
+    hi = [c for c in pc["cameras"] if per[c][0] > 0.05]
+    text = (("EARLIER CHECK, OPPOSITE SIGN" if hi else "EARLIER CHECK")
+            + f": before this script, the same photos ({pc['window']}) with these same "
+            f"calibrations ({', '.join(pc['eo'][c] for c in pc['cameras'])}) gave waterline - {pc['survey_text']} "
+            f"of {found} ({pc['how']})."
+            + (f" The lines of {' and '.join(sorted(hi))} read HIGH" + (" before any setup" if not pc["setup_coef"] else "")
+               + "." if hi else "") + " ")
+    if C:
+        text += (f"This build adds the setup (C = {C}: median {med if med is not None else pc['predicted_setup_m']:.2f} m "
+                 f"in the window's daytime{'' if med is not None else ', predicted'}), which raises every line"
+                 f"{' further' if hi else ''} (by ~{keep:.1f} x the setup once a line's landward re-projection is "
+                 f"counted, as on the 2026 RTK): unless this build's envelope changes the detections, expect "
+                 f"waterline - {pc['survey_text']} of about {expect}, i.e. HIGHER than then, not lower. ")
+    vals = [per[c][0] for c in pc["cameras"]]
+    text += (("The biases listed below that make this date read LOW (the setup's under-correction, the still-water "
+              "reference) work the other way and cannot explain a HIGH offset. " if hi else "")
+             + (f"A difference between the cameras ({' vs '.join(f'{c} {per[c][0]:+.2f}' for c in sorted(pc['cameras']))} m "
+                f"with the same water level) points at the pointing or the lens model, not the water level: see the "
+                f"horizon offsets per camera in this README. " if len(vals) > 1 and max(vals) - min(vals) > 0.1 else "")
+             + "Read the per-camera lines of the headline and the C = 0 sensitivity in compare/*_comparison.txt.")
+    return text
+
+
 def setup_caveats(plan, args, state, forcing, fits, era):
     """Caveats about the setup coefficient actually used, its origin and its reference frame."""
     cav = []
@@ -2702,7 +3086,7 @@ def setup_caveats(plan, args, state, forcing, fits, era):
                       "--setup-coef <that C> --setup-fitted-to 'none:repeat crossings, <window>'; the label "
                       "stays INDEPENDENT.")
         same = [s for s in plan.get("surveys") or []
-                if survey_matches_fit(f, s, survey_path_for(s, plan, args))[0]]
+                if survey_matches_fit(f, s, survey_path_for(s, plan, args), args)[0]]
         if same:
             cav.append(f"{', '.join(s['name'] for s in same)}: CIRCULAR for as long as C = {C} is used, because C "
                        f"was fitted to those very shots (see 'C fitted' under WHAT WAS USED). That comparison cannot test "
@@ -2765,6 +3149,8 @@ def collect_caveats(plan, args, state, forcing, prov):
                        f"on (6 Oct 2026); this product adds the setup (C = {C}) to those rows with the "
                        "formula of extract_elevation_contours.py --setup-coef, from each row's own offshore_hs_m / "
                        "offshore_tp_s.")
+    # an earlier real measurement of these photos first: it can contradict the expectations below
+    cav[:0] = [prior_check_caveat(plan, pc, fits, forcing) for pc in prior_checks(plan)]
     cav += setup_caveats(plan, args, state, forcing, fits, era)
     # frames that got no setup: left out of the waterlines (and so the DEM), counted
     m = read_stamp(out, "merge") or {}
@@ -2808,10 +3194,11 @@ def collect_caveats(plan, args, state, forcing, prov):
             cav.append(f"{cam}: days with a different pointing KEPT in the detection: "
                        f"{', '.join(res['different_days'])}"
                        + (" (--keep-moved-days)." if getattr(args, "keep_moved_days", False) else "."))
-        if info.get("calibration_offset"):
-            text = f"{cam}: {info['calibration_offset']}"
-            dt, dr = (info.get("calibration_offset_deg") or [None, None])
-            sens = tilt_sensitivity(plan, cam, dt, dr) if dt is not None else None
+        off = pointing_offset(info, info.get("calibration") or plan["cams"].get(cam, {}).get("eo_file"))
+        if off:
+            text = f"{cam}: {off[2]}"
+            dt, dr = off[0], off[1]
+            sens = tilt_sensitivity(plan, cam, dt, dr)
             if sens:
                 text += (f". From this date's own DEM and calibration, a pointing error of {dt:+.2f}/{dr:+.2f} deg "
                          f"(tilt/roll) would shift the DEM by: "
@@ -2842,7 +3229,8 @@ def collect_caveats(plan, args, state, forcing, prov):
     elif read_stamp(out, "merge") and not waterline_file(plan, quiet_=True).name.endswith("_filtered.csv"):
         cav.append("No current consistency-filtered waterlines (the filter step failed or has not run on the "
                    "current merged file): the DEM, maps and comparison use the UNFILTERED waterlines.")
-    epsg = getattr(args, "geotiff_epsg", GEOTIFF_EPSG)
+    epsg = ((dem_settings_built(out) or {}).get("geotiff_epsg")      # what the GeoTIFFs on disk carry
+            or getattr(args, "geotiff_epsg", GEOTIFF_EPSG))
     cav.append(f"Coordinates: the grids are in the frame of the calibration's GCPs and of the surveys "
                f"(NAD83(2011) / UTM zone 19N, EPSG:6348); the GeoTIFFs are tagged EPSG:{epsg}"
                + (" (WGS 84 / UTM 19N) as asked, a NOMINAL tag: read them as NAD83(2011) (WGS 84 differs by "
@@ -2874,6 +3262,16 @@ def collect_caveats(plan, args, state, forcing, prov):
 
 def few(n):
     return n is None or n < FEW_N
+
+
+def per_camera_text(by_cam):
+    """'c1 median +0.120 m (n 345), c2 ...' from a {camera: {n, median, ...}} dict ('' if none)."""
+    parts = []
+    for k, v in sorted((by_cam or {}).items()):
+        n = (v or {}).get("n") or 0
+        if n and v.get("median") is not None:
+            parts.append(f"{k} {v['median']:+.3f} m (n {n}{', too few' if n < FEW_N else ''})")
+    return ", ".join(parts)
 
 
 def stat_text(h, prefix="DEM - survey"):
@@ -2937,6 +3335,7 @@ def write_provenance(plan, args, state, final=True):
         if r.get("status", "").startswith("skipped (up to date)") and not cur:
             status = f"stale ({why_not})"
         comps.append({"name": s["name"], "survey_path": s["path"], "survey_type": s["survey_type"],
+                      "why_not_current": None if cur else why_not,
                       "survey_date": s["survey_date"], "table_label": s["label"],
                       "label": (lab.get("label") or s["label"]) if (cur or r) else s["label"],
                       "label_reasons": lab.get("reasons"),
@@ -2952,6 +3351,7 @@ def write_provenance(plan, args, state, final=True):
                                                              "waterlines", "days_outside_photo_window",
                                                              "days_from_photo_window_middle", "photo_dates",
                                                              "dem_cells_compared_partial_cover",
+                                                             "points_outside_dem", "points_in_empty_dem_cells",
                                                              "vertical_datum_note")}
                                    if head else None)})
     stamps = {}
@@ -2959,7 +3359,8 @@ def write_provenance(plan, args, state, final=True):
         d = load_json(p) or {}
         if d.get("commands"):
             stamps[p.stem] = d["commands"]
-    commands = {"survey_products": cmd_text([sys.executable, Path(__file__).resolve()] + state["argv"])}
+    commands = {"survey_products": cmd_text([sys.executable, Path(__file__).resolve()]
+                                            + state_argv(built_args(args, plan), plan["date"]))}
     if fits_from.startswith("the waterlines") and \
             {round(float(f["coef"]), 6) for f in fits} != {round(float(args.setup_coef), 6)}:
         commands["note"] = (f"this run asked for C = {args.setup_coef}, but the waterlines on disk were built with "
@@ -2968,15 +3369,25 @@ def write_provenance(plan, args, state, final=True):
     order = {st: i for i, st in enumerate(("forcing", "pointing", "detect", "filter", "dem", "map", "compare"))}
     for k in sorted(stamps, key=lambda k: (order.get(k.split("_")[0], 99), k)):
         commands[k if not k.startswith("compare_") else "comparison_" + k[8:]] = stamps[k]
+    dem_want = dem_settings_requested(args)
+    dem_built = dem_settings_built(out)
+    dem_set = dem_built or dem_want
+    dem_diff = dem_settings_differ(dem_built, dem_want)
+    if dem_diff:
+        commands["note_dem"] = (f"this run asked for other DEM settings than the DEM on disk was built with ({dem_diff}): "
+                                f"the grids, README and provenance are those of the build; rerun --steps dem,maps,"
+                                f"compare to apply this run's")
     failed_cams = failed_cameras(plan, state)
+    missing = missing_parts(plan, state)
     status = ("in progress" if not final else
-              "complete" if not state.get("failures") and not failed_cams and chain_ok else "partial")
+              "complete" if not state.get("failures") and not failed_cams and chain_ok and not missing
+              else "partial")
     info = load_json(out / "dem" / f"{plan['date']}_info.json")
     prov = {
         "date": plan["date"], "era": plan["era"], "built_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "status": status,
         "status_why": ([f"{c}: {w}" for c, w in failed_cams.items()] + list(state.get("failures", []))
-                       + ([] if chain_ok else [f"outputs on disk are not one build: {chain_why}"])),
+                       + ([] if chain_ok else [f"outputs on disk are not one build: {chain_why}"]) + missing),
         "steps_this_run": state.get("steps", {}), "failures": state.get("failures", []),
         "cameras_failed": failed_cams or None,
         "window": {"first_day": plan["first"], "last_day": plan["last"]},
@@ -3009,17 +3420,18 @@ def write_provenance(plan, args, state, final=True):
                                                                            **((flt or {}).get("settings") or {})),
                    "result": (flt or {}).get("summary"), "failed": bool(state.get("filter_failed")),
                    "file": str(waterline_file(plan, quiet_=True))},
-        "dem": {"script": "dem_from_contours.py", "cell_m": args.dem_cell, "min_points": args.dem_min_points,
-                "max_spread_m": args.dem_max_spread, "max_hs_m": args.dem_max_hs or None,
-                "max_day_offset_m": args.dem_max_day_offset or None,
-                "files": {k: f"{out / 'dem' / plan['date']}_{k}" for k in ("dem", "spread", "count")},
-                "cells": dstamp.get("cells"),
-                "built_from": info,
-                "geotiff": (f"asc_to_geotiff.py: tagged EPSG:{args.geotiff_epsg}"
-                            + (" (WGS 84 / UTM 19N), NOMINAL" if args.geotiff_epsg == 32619 else "")
-                            + "; the grid coordinates are in the GCP / survey frame, NAD83(2011) / UTM zone 19N "
-                              "(EPSG:6348), untransformed; only the _dem GeoTIFF carries vertical keys (NAVD88, "
-                              "EPSG:5703); spread, count and difference grids are not heights")},
+        "dem": dict(dem_set, script="dem_from_contours.py",
+                    settings_from=("the DEM on disk (its build stamp)" if dem_built else
+                                   "this run's options (no DEM built yet)"),
+                    requested_this_run=dem_want,
+                    files={k: f"{out / 'dem' / plan['date']}_{k}" for k in ("dem", "spread", "count")},
+                    cells=dstamp.get("cells"),
+                    built_from=info,
+                    geotiff=(f"asc_to_geotiff.py: tagged EPSG:{dem_set.get('geotiff_epsg')}"
+                             + (" (WGS 84 / UTM 19N), NOMINAL" if dem_set.get("geotiff_epsg") == 32619 else "")
+                             + "; the grid coordinates are in the GCP / survey frame, NAD83(2011) / UTM zone 19N "
+                               "(EPSG:6348), untransformed; only the _dem GeoTIFF carries vertical keys (NAVD88, "
+                               "EPSG:5703); spread, count and difference grids are not heights")),
         "chain": {"current": chain_ok, "why": chain_why or None},
         "comparisons": comps,
         "commands": commands,
@@ -3079,7 +3491,9 @@ def write_readme(plan, args, prov):
             w(f"  {c['name']}: NOT COMPARED. {c.get('reason') or ''}")
             continue
         if not c.get("current"):
-            w(f"  {c['name']}: NO CURRENT COMPARISON ({c['status']}).")
+            wn = c.get("why_not_current") or ""
+            w(f"  {c['name']}: NO CURRENT COMPARISON ({c['status']}"
+              + (f"; {wn}" if wn and wn not in c["status"] else "") + ").")
             continue
         w(f"  {c['name']} ({c['survey_type']}, {c['survey_date']}): {c['label']}")
         w(f"    why: {c['why']}")
@@ -3089,11 +3503,22 @@ def write_readme(plan, args, prov):
             w(f"    survey_compare.py's own checks suggest {c['suggested_by_survey_compare']}")
         if h.get("n") is not None:
             w("    " + stat_text(h) + " (positive = DEM too high)")
+            line = per_camera_text(h.get("by_camera"))
+            if line:
+                w("      by camera: " + line)
         wl_ = h.get("waterlines") or {}
         if wl_.get("n"):
             w("    " + stat_text(wl_, "waterlines - survey")
               + (f" ({wl_.get('method')}: one value per frame)" if wl_.get("unit") == "frames" else
                  f", {wl_.get('frames')} frames ({wl_.get('method')})"))
+            line = per_camera_text(wl_.get("by_camera"))
+            if line:
+                w("      by camera: " + line)
+            ws = wl_.get("without_setup") or {}
+            if ws.get("n"):
+                w(f"      without the wave setup (C = 0, a sensitivity): median {ws['median']:+.3f} m"
+                  + (f"; by camera {per_camera_text(ws.get('by_camera'))}" if ws.get("by_camera") else "")
+                  + f" ({ws.get('how')})")
         if h.get("time_gap"):
             w(f"    {h['time_gap']} (frames used; product date {d})")
     w("  Labels: INDEPENDENT = nothing in the chain was fitted to or placed with this survey; "
@@ -3122,6 +3547,15 @@ def write_readme(plan, args, prov):
             for r in pc_["per_day"]:
                 verdicts.setdefault(r["verdict"], []).append(r["date"])
             w("      pointing check: " + "; ".join(f"{k} {', '.join(v)}" for k, v in verdicts.items()))
+        ref = pc_.get("reference") or {}
+        if ref.get("window_horizon_dtilt_deg") is not None and ref.get("clear_horizon_days"):
+            w(f"      sea horizon vs the calibration over the window: tilt/roll {ref['window_horizon_dtilt_deg']:+.2f}/"
+              f"{ref['window_horizon_droll_deg']:+.2f} deg"
+              + (f" ({ref['window_horizon_offset_px']:.1f} px)" if ref.get("window_horizon_offset_px") is not None else "")
+              + f" on {ref['clear_horizon_days']} clear day(s)"
+              + (f" (above {OFFSET_REPORT_DEG} deg: DEM sensitivity under KNOWN CAVEATS)"
+                 if max(abs(ref["window_horizon_dtilt_deg"]), abs(ref["window_horizon_droll_deg"])) > OFFSET_REPORT_DEG
+                 else ""))
     wl, wv = prov.get("water_level") or {}, prov.get("waves") or {}
     srcs = wl.get("sources_used") or {}
     if plan["era"] != "live" and srcs and set(srcs) == {"adcp"}:
@@ -3153,7 +3587,10 @@ def write_readme(plan, args, prov):
          (prov["filter"]["result"] or "not run yet")))
     dm = prov["dem"]
     w(f"  DEM: {dm['script']} cell {dm['cell_m']} m, min {dm['min_points']} frames per cell, max spread "
-      f"{dm['max_spread_m']} m, max Hs {dm['max_hs_m']} m, max day offset {dm['max_day_offset_m']} m")
+      f"{dm['max_spread_m']} m, max Hs {dm['max_hs_m']} m, max day offset {dm['max_day_offset_m']} m "
+      f"(from {dm.get('settings_from')})"
+      + (f"; this run asked for {dem_settings_differ(dm, dm.get('requested_this_run') or {})}: NOT applied, "
+         f"rerun --steps dem,maps,compare" if dem_settings_differ(dm, dm.get("requested_this_run") or {}) else ""))
     cl = dm.get("cells") or {}
     if cl:
         w(f"      cells the waterlines crossed {cl.get('with_points')}: filled {cl.get('filled')}, blanked "
@@ -3228,11 +3665,31 @@ def dry_run(plan, args, steps):
         say("GNSS-R spline", f"{args.gnssr_spline} " + ("" if Path(args.gnssr_spline).exists() else "(not here)"))
     else:
         say("forcing", cmd_text(forcing_cmd(plan, args)))
+        # the files historical_forcing.py will use, so a missing one shows now, not after the detection
+        try:
+            found = forcing_inputs(args)
+        except StepFailed as exc:
+            found = {}
+            say("  inputs", f"ERROR: {exc}")
+        need = ({"chatham": "the Chatham gauge (else downloaded from NOAA when the period needs it)",
+                 "wis": "WIS ST63064 waves (no download: required for the setup unless NDBC 44013 covers)",
+                 "ndbc": "NDBC 44013 waves"} if plan["era"] == "chatham" else
+                {"adcp": "the ADCP (water level and waves)", "adcp_navd88": "the ADCP on NAVD88"})
+        for k, p in found.items():
+            say(f"  {k}", (str(p) if p else "NOT FOUND") + (f"  <- {need[k]}" if k in need and not p else ""))
+        if plan["era"] == "chatham" and args.setup_coef and not (found.get("wis") or found.get("ndbc")):
+            warn("no WIS or NDBC wave file: the forcing step will FAIL (no waves for the setup); give --wis / "
+                 "--ndbc or put the files in the Chelsea_calibration folder")
+        from historical_forcing import setup_share_inputs
+        sh = setup_share_inputs(getattr(args, "gnssr_spline", None), getattr(args, "gauge_csv", None))
+        say("  setup share", "2026 record for the share of setup GNSS-R sees: "
+            + ", ".join(f"{Path(p).name} {'here' if p and Path(p).exists() else 'NOT here'}" for p in sh))
     for s in plan["surveys"]:
         paths, note = resolve_survey(s, plan, args)
         v = Verdict(s)
-        label, reasons = honest_label(s, plan, args, paths[0] if paths else Path(s["path"] or s["name"]),
-                                      fits=[setup_fit_info(args.setup_coef, args)], verdict=v)
+        for p_ in (paths or [Path(s["path"] or s["name"])]):
+            honest_label(s, plan, args, p_, fits=[setup_fit_info(args.setup_coef, args)], verdict=v)
+        label, reasons = v.label, v.reasons
         say(f"survey {s['name']}", f"{paths[0] if paths else 'MISSING'}{' (' + note + ')' if note else ''}")
         if not paths:
             say("  then", missing_survey_message(s, plan, args, note))
@@ -3246,7 +3703,10 @@ def dry_run(plan, args, steps):
         if key:
             d = read_stamp(out, key)
             say(f"  {st}", "built before (" + d["finished_utc"] + ")" if d else "not built yet")
-    say("expected", f"~{est / 60:.0f} min on the station NUC")
+    say("expected", f"~{est / 60:.0f} min (detection ~{SEC_PER_PHOTO_DETECT:.0f} s per photo, measured off the "
+        f"station; the NUC's own rate is printed by the detection's progress lines)")
+    if overlap_note(est):
+        say("  note", f"started now, {overlap_note(est)}")
 
 
 def build_date(date, cfg, surveys, args, steps):
@@ -3287,6 +3747,16 @@ def build_date(date, cfg, surveys, args, steps):
         h = c.get("headline") or {}
         if c.get("current") and h.get("n") is not None:
             say(c["name"], f"{c['label']}: " + stat_text(h))
+            if per_camera_text(h.get("by_camera")):
+                say("  by camera", per_camera_text(h.get("by_camera")))
+            wl_ = h.get("waterlines") or {}
+            if wl_.get("n"):
+                say("  waterlines", stat_text(wl_, "waterlines - survey") + "; by camera "
+                    + (per_camera_text(wl_.get("by_camera")) or "-"))
+            ws = wl_.get("without_setup") or {}
+            if ws.get("n"):
+                say("  without setup", f"C = 0 sensitivity: waterlines - survey median {ws['median']:+.3f} m; by camera "
+                    + (per_camera_text(ws.get("by_camera")) or "-"))
         else:
             say(c["name"], f"{c['label']}: {c['status']}")
     # what an operator must not miss, again at the end
@@ -3310,8 +3780,34 @@ def build_date(date, cfg, surveys, args, steps):
     return "built" if prov["status"] == "complete" else "partial"
 
 
+def built_args(args, plan):
+    """args with the settings the outputs ON DISK were built with in place of this run's: the DEM
+    settings and GeoTIFF EPSG (dem stamp) and the setup coefficient (merge stamp). The 'rebuild
+    everything' line must rebuild THIS product, not what a later --steps compare asked for."""
+    b = argparse.Namespace(**vars(args))
+    dem = dem_settings_built(plan["out"])
+    if dem:
+        for k, opt in (("cell_m", "dem_cell"), ("min_points", "dem_min_points"), ("max_spread_m", "dem_max_spread"),
+                       ("max_hs_m", "dem_max_hs"), ("max_day_offset_m", "dem_max_day_offset")):
+            if k in dem:
+                setattr(b, opt, dem[k] if dem[k] is not None else 0.0)
+        if dem.get("geotiff_epsg"):
+            b.geotiff_epsg = int(dem["geotiff_epsg"])
+    if read_stamp(plan["out"], "merge"):
+        fits, _ = setup_in_use(plan, args)
+        coefs = {f.get("coef") for f in fits}
+        if len(coefs) == 1 and None not in coefs and abs(float(fits[0]["coef"]) - float(args.setup_coef)) > 1e-9:
+            f = fits[0]
+            b.setup_coef = float(f["coef"])
+            b.setup_fitted_to = (None if f.get("kind") != "declared" else
+                                 f.get("survey_name") or "none:" + str(f.get("how", "")).split(" (declared with")[0])
+    return b
+
+
 def state_argv(args, date):
-    """The command line that rebuilds this date (with the options that change the result)."""
+    """The command line that rebuilds this date: every option that changes the result and is not
+    at its default (the inputs, window and hours, setup, calibration, GNSS-R, pointing and DEM
+    settings). --force, --steps, --nice and --keep-detector-debug change no result and are left out."""
     a = ["--date", date, "--output-root", str(args.output_root)]
     if Path(args.config).resolve() != DEFAULT_CONFIG.resolve():
         a += ["--config", str(args.config)]
@@ -3336,6 +3832,25 @@ def state_argv(args, date):
         a += ["--setup-fitted-to", args.setup_fitted_to]
     if args.geotiff_epsg != GEOTIFF_EPSG:
         a += ["--geotiff-epsg", str(args.geotiff_epsg)]
+    if Path(args.calibration).resolve() != (HERE / "calibration").resolve():
+        a += ["--calibration", str(args.calibration)]
+    try:
+        from marconi_water_level import GNSSR_SPLINE, GAUGE_CSV
+    except Exception:
+        GNSSR_SPLINE = GAUGE_CSV = None
+    if args.gnssr_spline and str(args.gnssr_spline) != str(GNSSR_SPLINE):
+        a += ["--gnssr-spline", str(args.gnssr_spline)]
+    if getattr(args, "gauge_csv", None) and str(args.gauge_csv) != str(GAUGE_CSV):
+        a += ["--gauge-csv", str(args.gauge_csv)]
+    if str(args.live_cron) != str(LIVE_CRON):
+        a += ["--live-cron", str(args.live_cron)]
+    if str(args.pointing_log_dir) != str(HERE / "archive"):
+        a += ["--pointing-log-dir", str(args.pointing_log_dir)]
+    for opt, default in (("pointing_frames", 3), ("pointing_fail", POINT_FAIL_DEG), ("dem_cell", DEM_CELL),
+                         ("dem_min_points", DEM_MIN_POINTS), ("dem_max_spread", DEM_MAX_SPREAD),
+                         ("dem_max_hs", DEM_MAX_HS), ("dem_max_day_offset", DEM_MAX_DAY_OFFSET)):
+        if getattr(args, opt) != default:
+            a += ["--" + opt.replace("_", "-"), str(getattr(args, opt))]
     if args.keep_moved_days:
         a.append("--keep-moved-days")
     if args.force_disabled:
@@ -3422,14 +3937,37 @@ def summary(args):
                          "days_survey_minus_product_date": dprod,
                          "setup_coef": (prov.get("setup") or {}).get("coef"),
                          "built_utc": prov.get("built_utc"), "why": c.get("why")})
-    if not rows:
+    # the dates the configuration leaves out (the user asked to skip them): listed, so the summary
+    # never reads as if they had been forgotten
+    disabled = []
+    try:
+        cfg = read_table(args.config, CONFIG_FIELDS)
+        srv = read_table(args.surveys, SURVEY_FIELDS)
+        built_dates = {r["date"] for r in rows}
+        for d in sorted({r["date"] for r in cfg}):
+            rr = [r for r in cfg if r["date"] == d]
+            if any(r["enabled"] in ("1", "yes", "true", "True") for r in rr) or d in built_dates:
+                continue
+            why = "; ".join(sorted({r["notes"].split(". ")[0] for r in rr if r["notes"]})) or "disabled"
+            for sv in ([x for x in srv if x["date"] == d] or [{"name": "-", "survey_type": "", "survey_date": "",
+                                                                  "label": ""}]):
+                disabled.append({"date": d, "survey": sv["name"], "survey_type": sv["survey_type"],
+                                 "survey_date": sv["survey_date"], "table_label": sv["label"],
+                                 "comparison": f"not built: disabled in {Path(args.config).name} ({why})"})
+    except SystemExit:
+        pass
+    if not rows and not disabled:
         print(f"no product with a comparison under {root} yet")
         return 1
-    fields = list(rows[0].keys())
+    fields = list(rows[0].keys()) if rows else ["date", "survey", "survey_type", "survey_date", "comparison"]
+    for k in ("table_label",):
+        if k not in fields:
+            fields.append(k)
     with open(root / "summary.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.DictWriter(f, fieldnames=fields, restval="", extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
+        w.writerows(disabled)
 
     def fmt(v, s="{:+.3f}"):
         if v is None or v == "" or (isinstance(v, float) and not np.isfinite(v)):
@@ -3465,6 +4003,11 @@ def summary(args):
         if r["survey_compare_suggests"] and r["survey_compare_suggests"] != r["label"]:
             lines.append(f"{'':<11} survey_compare.py's checks suggest {r['survey_compare_suggests']}"
                          + (f" (overruled: {r['overruled']})" if r["overruled"] else ""))
+    if disabled:
+        lines += ["", "Not built (disabled at the user's request in the configuration):"]
+        for r in disabled:
+            lines.append(f"  {r['date']} {r['survey']}: {r['comparison']}"
+                         + (f"; its label when built: {r['table_label']}" if r.get("table_label") else ""))
     lines += ["", "Why each label:"]
     for r in rows:
         lines.append(f"  {r['date']} {r['survey']}: {r['label']} -- {r['label_reason']}")
@@ -3472,16 +4015,16 @@ def summary(args):
     (root / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
     try:
-        summary_figure(rows, root / "summary.png")
+        summary_figure(rows, root / "summary.png", disabled)
         print(f"\nwrote {root / 'summary.csv'}, {root / 'summary.txt'}, {root / 'summary.png'}")
     except Exception as exc:
         warn(f"summary figure failed: {exc!r}")
     return 0
 
 
-def summary_figure(rows, path):
+def summary_figure(rows, path, disabled=()):
     """Dot plot: median DEM - survey per comparison, NMAD as the bar (n >= 3 only), the label and the
-    reason for it written beside it."""
+    reason for it written beside it; the dates not built (disabled) listed under it."""
     import textwrap
     import matplotlib
     matplotlib.use("Agg")
@@ -3548,6 +4091,11 @@ def summary_figure(rows, path):
                  fontsize=10.5, color=INK)
     fig.tight_layout()
     fig.subplots_adjust(right=0.64)
+    if disabled:
+        dd = sorted({(r["date"], r["comparison"].split("(", 1)[-1].rstrip(")")) for r in disabled})
+        txt = "Not built, at the user's request: " + "; ".join(
+            f"{d} ({textwrap.shorten(w, 60, placeholder='...')})" for d, w in dd)
+        fig.text(0.01, 0.005, "\n".join(textwrap.wrap(txt, 150)), fontsize=8, color=INK2, va="bottom", ha="left")
     fig.savefig(path, dpi=130, facecolor="white", bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)
 
@@ -3609,6 +4157,9 @@ def main():
     ap.add_argument("--pointing-fail", type=float, default=POINT_FAIL_DEG,
                     help=f"deg: a day rotated more than this from the reference is a different pointing "
                          f"(default {POINT_FAIL_DEG}, as pointing_check.py)")
+    ap.add_argument("--nice", type=int, default=10,
+                    help="lower this run's priority by this much (os.nice; inherited by every script it runs) so "
+                         "the station's cron keeps the two cores (default 10; 0 = not lowered)")
     ap.add_argument("--dem-cell", type=float, default=DEM_CELL)
     ap.add_argument("--dem-min-points", type=int, default=DEM_MIN_POINTS)
     ap.add_argument("--dem-max-spread", type=float, default=DEM_MAX_SPREAD)
@@ -3618,6 +4169,12 @@ def main():
 
     if args.summary:
         return summary(args)
+    if args.nice and not args.dry_run:
+        try:
+            level = os.nice(int(args.nice))
+            say("priority", f"niceness {level} (--nice {args.nice}: the station's cron keeps priority)")
+        except (OSError, AttributeError) as exc:
+            warn(f"--nice {args.nice} not applied: {exc}")
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
     bad = [s for s in steps if s not in STEPS]
     if bad:
@@ -3673,7 +4230,8 @@ def main():
 
 
 # Exit codes: 0 built (or dry run), 1 a step failed, 2 the date is disabled, 3 built but PARTIAL
-# (a camera contributed nothing, or the outputs on disk are not one build).
+# (a camera contributed nothing, a part is missing: a camera's pointing check or photo map, or the
+# outputs on disk are not one build).
 EXIT_CODES = {"built": 0, "dry-run": 0, "disabled": 2, "failed": 1, "partial": 3}
 
 
