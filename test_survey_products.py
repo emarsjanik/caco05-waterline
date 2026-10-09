@@ -601,6 +601,17 @@ def test_live_rows(d):
     check(n_out == 6 and len(frames) == 2, "only the date's station ID kept (CACO05)")
     check(other == {"c2": {"CACO04": 3}}, "rows of frames named for another station counted, per camera")
     check(bad == 1, "a cut-off row skipped and counted, no traceback")
+    # with --force the rows are read once per run, not once per step that asks for them (the forcing
+    # and the detection): two reads would leave them two different builds, never one product
+    pl = dict(plan, out=d / "prod", first="2026-09-29", last="2026-09-29", date="2026-09-29")
+    a = SimpleNamespace(live_contours=str(src), force=True)
+    state = {}
+    quiet(sp.live_rows_file, pl, a, state)
+    t1 = sp.token(pl["out"], "archive_rows")
+    quiet(sp.live_rows_file, pl, a, state)
+    check(t1 and sp.token(pl["out"], "archive_rows") == t1, "--force: the live rows read once per run")
+    quiet(sp.live_rows_file, pl, a, {})
+    check(sp.token(pl["out"], "archive_rows") != t1, "... and again by the next forced run")
 
 
 def test_fix1(d):

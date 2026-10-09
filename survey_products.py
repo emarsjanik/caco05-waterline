@@ -804,7 +804,10 @@ def live_rows_file(plan, args, state):
     sig = {"src": str(src), "size": st.st_size, "mtime": int(st.st_mtime), "v": 2,
            "cams": {c: [v["first"], v["last"], v["hours"], v["station"]] for c, v in plan["cams"].items()}}
     fresh, why = is_fresh(out, "archive_rows", sig, [dst])
-    if fresh and not args.force:
+    # read at most once per run: the forcing and detect steps both ask for the rows, and with --force
+    # a second read would give the detection another archive_rows build than the forcing's (the
+    # outputs would then never be one build)
+    if fresh and (not args.force or state.get("archive_rows_built")):
         return dst
     say("archive rows", f"reading {src} ({st.st_size / 1e6:.0f} MB; ~1 min per GB on the NUC) for "
         f"{plan['first']} .. {plan['last']}")
@@ -837,6 +840,7 @@ def live_rows_file(plan, args, state):
         raise StepFailed(f"no rows in {src} for {plan['first']} .. {plan['last']}")
     write_stamp(out, "archive_rows", sig, extra={"rows_in": n_in, "rows_out": n_out, "frames": len(frames),
                                                  "other_station_rows": other, "malformed_rows": bad})
+    state["archive_rows_built"] = True
     return dst
 
 
