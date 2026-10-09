@@ -153,6 +153,7 @@ MAX_PROFILES = len(PROFILE_COLOURS)
 MAX_CAMERA_DISTANCE = 3000.0
 # "How to read this page": 10 pt at 1.35 line spacing, and the gap between paragraphs (in).
 NOTE_LINE, NOTE_GAP = 0.19, 0.13
+KEY_ROW = 0.235                       # inches per row of the profiles' key (9.5 pt)
 PAGE_RC = {"font.size": 10, "axes.edgecolor": AXIS, "axes.labelcolor": INK2,
            "xtick.color": INK2, "ytick.color": INK2, "text.color": INK,
            "hatch.linewidth": 0.9, "axes.linewidth": 0.8}
@@ -395,7 +396,8 @@ def camera_view(cams, frame, Ec, Nc, Zc, core, z_edge):
             E, N = pixel_to_ground(pu, pv, z_edge, io, eo)
             r = np.floor((N - frame["n0"]) / frame["cell"])
             c = np.floor((E - frame["e0"]) / frame["cell"])
-            inside = np.isfinite(r) & (r >= 0) & (r < nrows) & (c >= 0) & (c < ncols)
+            with np.errstate(invalid="ignore"):     # NaN off the image (numpy < 1.18 warns)
+                inside = np.isfinite(r) & (r >= 0) & (r < nrows) & (c >= 0) & (c < ncols)
             keep = np.zeros_like(inside)
             keep[inside] = grown[r[inside].astype(int), c[inside].astype(int)]
             if keep.sum() >= 2:
@@ -875,7 +877,8 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     # So was a value over the cutoff: the build blanked it, then a gap
     # fill put a value back.
     interpolated = filled & ~np.isfinite(spread)
-    interpolated |= filled & np.isfinite(spread) & (spread > cutoff)
+    with np.errstate(invalid="ignore"):
+        interpolated |= filled & np.isfinite(spread) & (spread > cutoff)
     if source is not None:
         interpolated |= filled & (source == 2)
     core = filled | blanked                 # cells with enough frames to say something
@@ -1044,7 +1047,17 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     y_b = y_cov + 0.95                    # spread map
     y_c = y_b + map_h + 1.05              # profiles
     h_c = 2.15
-    H = max(y_c + h_c + 0.62, y_c + notes_h + 0.25)
+    # The profiles' key goes UNDER the panel, below its axis label, never on
+    # the lines: drawn inside the panel (loc="best") it sat on top of them
+    # wherever the lines filled the corners -- on the emailed 7-day page
+    # (review, Oct 2026) 12% of the profile lines ran under it and a key
+    # swatch read as a piece of profile D. The notes column beside the
+    # panel is taller than the panel, so the key mostly uses room the page
+    # already had.
+    n_keys = sum(pr is not None for _, pr, _, _ in profs)
+    y_key = y_c + h_c + 0.62
+    key_h = KEY_ROW * (n_keys + 1) if n_keys else 0.0
+    H = max(y_key + key_h + 0.2, y_c + notes_h + 0.25)
 
     def box(x, top, w, h):
         return [x / W, 1 - (top + h) / H, w / W, h / H]
@@ -1355,9 +1368,13 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
         if pr["lone_v"].size:
             ax_c.plot(pr["lone_v"], pr["lone_z"], "o", ms=4.5, color=col, mec="none", zorder=3)
     if drawn:
-        ax_c.legend(loc="best", frameon=False, fontsize=9.5, handlelength=1.6,
-                    title="alongshore position: foreshore slope, cells measured",
-                    title_fontsize=9.5)
+        key = ax_c.legend(loc="upper left", bbox_to_anchor=(left / W, 1 - y_key / H),
+                          bbox_transform=fig.transFigure, borderaxespad=0, borderpad=0,
+                          frameon=False, fontsize=9.5, handlelength=1.6,
+                          title="Profiles — alongshore position: foreshore slope, cells measured",
+                          title_fontsize=9.5)
+        if hasattr(key, "_legend_box"):           # title flush with the entries
+            key._legend_box.align = "left"
         xs = np.concatenate([pr["v"] for _, pr, _, _ in drawn])
         zz = np.concatenate([pr["z"] for _, pr, _, _ in drawn])
         x0, x1 = xs.min() - 3, xs.max() + 8
