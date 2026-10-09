@@ -106,20 +106,29 @@ with the survey directly:
     limit, not the sand) are not used for the waterlines;
   * on isolated points (GCPs, a CSV without transects), the nearest
     point within --tolerance m, one value per frame and point, NOT
-    slope-corrected (the report gives the median distance).
+    slope-corrected (the report gives the median distance). Many frames
+    see the same few points: the statistic rests on the DISTINCT survey
+    points, which are counted and tested for 'too few', not the values.
 The waterline's elevation is beach_elevation_navd88 (still water + wave
 setup) where present, else tide_elevation_navd88 (still water only,
 which puts a swash-marked line LOW by about the setup); the report says
-which, per row count. Per day and camera: frames, values, median, NMAD.
+which, per row count. Per day and camera, and per 0.5 m band of the
+survey elevation: frames, values, median, NMAD. WHERE: the elevation
+range of the line points compared, next to that of all the lines (RTK
+transects that start at +1.2 m check the upper beach only).
 When the lines carry a setup, the same comparison is repeated WITHOUT it
 (C = 0) as a sensitivity: each line at its still-water level and, with
 --camera-eo, re-projected onto that lower plane as a C = 0 build would
-place it (same detections), per camera. The setup coefficient is the
-least certain step; this shows how much of the answer it carries.
+place it (same detections), per camera. Lines at still water move
+seaward and some leave the survey, so the effect of the setup is read
+on the SAME frames (points) both ways ('paired'), and the ones that drop
+out are counted. The setup coefficient is the least certain step; this
+shows how much of the answer it carries.
 
 FEW VALUES. NMAD, p5 and p95 are not given for fewer than 3 values (the
 NMAD of one value is 0, which would read as perfect agreement), and any
-group with fewer than 10 is marked as not an estimate.
+group with fewer than 10 is marked as not an estimate (for the lines:
+fewer than 10 frames, or 10 distinct survey points).
 
 OUTPUT (in --output-dir):
   NAME_dem_minus_survey.asc / .tif   (dsm only) the difference grid
@@ -404,7 +413,8 @@ def read_contours(path, first=None, last=None):
             "day": np.array(day), "frame": np.array(frame), "beach": np.array(used_beach, bool),
             "Zt": np.array(ZT, float), "U": np.array([np.nan if u is None else u for u in U], float),
             "V": np.array([np.nan if v is None else v for v in V], float),
-            "has_beach_column": ib is not None}
+            # each point's index: the same point with and without the setup is paired by it
+            "row": np.arange(len(E)), "has_beach_column": ib is not None}
 
 
 def without_setup(cont, cams):
@@ -434,8 +444,9 @@ def without_setup(cont, cams):
         moved += int(ok.sum())
     c0["E"], c0["N"] = E, N
     good = np.isfinite(E) & np.isfinite(N) & np.isfinite(c0["Z"])
-    for k in ("E", "N", "Z", "cam", "day", "frame", "beach", "Zt", "U", "V"):
-        c0[k] = c0[k][good]
+    for k in ("E", "N", "Z", "cam", "day", "frame", "beach", "Zt", "U", "V", "row"):
+        if k in c0:
+            c0[k] = c0[k][good]
     if moved and not kept:
         how = ("each line re-projected at its still-water level with the calibration (as a C = 0 build "
                "would place it, the same detections)")
@@ -738,6 +749,11 @@ def standard_groups(d, zref, cam, dist, extra=()):
 
 
 def repeatability_groups(d, spread, count):
+    with np.errstate(invalid="ignore"):          # NaN cells (no DEM value) compare False, quietly
+        return _repeatability_groups(d, spread, count)
+
+
+def _repeatability_groups(d, spread, count):
     g = []
     if spread is not None:
         for lo, hi in ((0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.5), (0.5, 99)):
@@ -1005,17 +1021,23 @@ def time_gap(survey_date, photo_dates):
 # Waterlines against the survey
 # ---------------------------------------------------------------------
 
-def waterlines_vs_survey(cont, survey_type, grid=None, pts=None, tolerance=1.0, dist_out=None):
+def waterlines_vs_survey(cont, survey_type, grid=None, pts=None, tolerance=1.0, dist_out=None, info=None):
     """waterline - survey at each waterline point (NaN where the survey has nothing). DSM: the
     survey sampled at the point. Points: the nearest survey point within `tolerance` m, one value
-    per frame and survey point, NOT slope-corrected (dist_out, a list, gets the distances)."""
+    per frame and survey point, NOT slope-corrected (dist_out, a list, gets the distances).
+    info (a dict) gets 'zref' (the survey elevation each value was taken against) and, for
+    points, 'match' (the index of that survey point, -1 where none)."""
     if survey_type == "dsm":
         g, x0, y0, c = grid
         zs = sample(g, x0, y0, c, cont["E"], cont["N"])
+        if info is not None:
+            info["zref"] = np.asarray(zs, float)
         return cont["Z"] - zs
     d = np.full(cont["E"].shape, np.nan)
     match = np.full(cont["E"].shape, -1)
     dist = np.full(cont["E"].shape, np.nan)
+    if info is not None:
+        info["zref"], info["match"] = np.full(cont["E"].shape, np.nan), match
     if not len(pts["E"]):
         return d
     lo_e, hi_e = pts["E"].min() - tolerance, pts["E"].max() + tolerance
@@ -1041,6 +1063,11 @@ def waterlines_vs_survey(cont, survey_type, grid=None, pts=None, tolerance=1.0, 
         keep = np.zeros(len(d), bool)
         keep[hit[o[first]]] = True
         d[~keep] = np.nan
+    match[~np.isfinite(d)] = -1
+    if info is not None:
+        zr = np.full(cont["E"].shape, np.nan)
+        zr[match >= 0] = pts["Z"][match[match >= 0]]
+        info["zref"], info["match"] = zr, match
     if dist_out is not None:
         dist_out.extend(dist[np.isfinite(d)].tolist())
     return d
@@ -1057,7 +1084,8 @@ def waterlines_on_transects(cont, transects, tolerance=TRANSECT_TOLERANCE, min_p
     transect line and between its first and last surveyed point; the RTK elevation is
     interpolated along the profile there. ONE value per frame with >= min_points such points:
     the median of waterline - RTK.
-    -> (per-frame dict {d, cam, day, frame, points} of arrays, per-point mask of the points used).
+    -> (per-frame dict {d, cam, day, frame, points, z} of arrays (z: the median RTK elevation under
+    the frame's points), per-point mask of the points used).
     """
     n = len(cont["E"])
     zr = np.full(n, np.nan)
@@ -1069,7 +1097,7 @@ def waterlines_on_transects(cont, transects, tolerance=TRANSECT_TOLERANCE, min_p
         m = (lat <= tolerance) & (s >= t["s"][0]) & (s <= t["s"][-1]) & ~on
         zr[m] = np.interp(s[m], t["s"], t["z"])
         on |= m
-    fr = {"d": [], "cam": [], "day": [], "frame": [], "points": []}
+    fr = {"d": [], "cam": [], "day": [], "frame": [], "points": [], "z": []}
     used = np.zeros(n, bool)
     idx = np.nonzero(on)[0]
     if len(idx):
@@ -1085,31 +1113,63 @@ def waterlines_on_transects(cont, transects, tolerance=TRANSECT_TOLERANCE, min_p
             fr["day"].append(cont["day"][grp[0]])
             fr["frame"].append(cont["frame"][grp[0]])
             fr["points"].append(len(grp))
+            fr["z"].append(float(np.median(zr[grp])))
             used[grp] = True
-    out = {k: np.array(v, dtype=float if k == "d" else (int if k == "points" else object))
+    out = {k: np.array(v, dtype=float if k in ("d", "z") else (int if k == "points" else object))
            for k, v in fr.items()}
     return out, used
 
 
-def waterline_rows(cont, d):
-    """Per camera and per day: frames, values, statistics of d (one value per point, or per frame
-    for the transect check, where cont holds the per-frame arrays)."""
+def waterline_rows(cont, d, zref=None, spt=None):
+    """Per camera, per day and (with zref, the survey elevation of each value) per 0.5 m band of
+    survey elevation: frames, values, statistics of d (one value per point, or per frame for the
+    transect check, where cont holds the per-frame arrays). With spt (the survey point each value
+    was taken at, a points survey) each row also counts the DISTINCT survey points: a handful of
+    points seen by many frames is a handful of points, whatever the number of values."""
     ok = np.isfinite(d)
     rows = []
+
+    def row(gt, g, m):
+        r = dict({"group_type": gt, "group": g, "frames": int(len(set(cont["frame"][m].tolist())))}, **stats(d[m]))
+        if spt is not None:
+            r["survey_points"] = int(len(set(spt[m & (spt >= 0)].tolist())))
+        return r
     for cam in sorted(set(cont["cam"][ok].tolist())):
-        m = ok & (cont["cam"] == cam)
-        rows.append(dict({"group_type": "waterline_camera", "group": cam,
-                          "frames": int(len(set(cont["frame"][m].tolist())))}, **stats(d[m])))
+        rows.append(row("waterline_camera", cam, ok & (cont["cam"] == cam)))
     for day in sorted(set(cont["day"][ok].tolist())):
         for cam in sorted(set(cont["cam"][ok].tolist())):
             m = ok & (cont["day"] == day) & (cont["cam"] == cam)
             if m.any():
-                rows.append(dict({"group_type": "waterline_day", "group": f"{day} {cam}",
-                                  "frames": int(len(set(cont["frame"][m].tolist())))}, **stats(d[m])))
+                rows.append(row("waterline_day", f"{day} {cam}", m))
+    if zref is not None:
+        zb = np.floor(np.asarray(zref, float) / BAND) * BAND
+        for lo in sorted(set(zb[ok & np.isfinite(zb)].tolist())):
+            rows.append(row("waterline_band", band_name(lo), ok & (zb == lo)))
     if ok.any():
-        rows.insert(0, dict({"group_type": "waterline_all", "group": "all",
-                             "frames": int(len(set(cont["frame"][ok].tolist())))}, **stats(d[ok])))
+        rows.insert(0, row("waterline_all", "all", ok))
     return rows
+
+
+def independent_n(r, unit):
+    """(count, what) a waterline statistic rests on: frames on RTK transects (one value each), the
+    DISTINCT survey points of a points survey (each seen by many frames), frames on a DSM (a frame's
+    points share one water level and one detection)."""
+    if unit == "frames":
+        return r["n"], "frames"
+    if r.get("survey_points") is not None:
+        return r["survey_points"], "survey points"
+    return r.get("frames", r["n"]), "frames"
+
+
+def elevation_range(z):
+    """{min, p5, median, p95, max, n} of finite z, or None."""
+    z = np.asarray(z, float)
+    z = z[np.isfinite(z)]
+    if not len(z):
+        return None
+    p5, med, p95 = np.percentile(z, [5, 50, 95])
+    return {"n": int(len(z)), "min": float(z.min()), "p5": float(p5), "median": float(med),
+            "p95": float(p95), "max": float(z.max())}
 
 
 # ---------------------------------------------------------------------
@@ -1531,8 +1591,10 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         lines.append(f"survey grid: {sg.shape[1]} x {sg.shape[0]} cells at {sc:g} m; horizontal CRS "
                      f"as stated in the file: {crs or 'not stated'}; compared in the same UTM 19N "
                      f"metres as the DEM, no shift applied (the DEM grid is in the frame of the "
-                     f"calibration's GCPs, which were surveyed in NAD83(2011) / UTM 19N like the "
-                     f"surveys; an EPSG:{epsg} tag on the GeoTIFFs is"
+                     f"calibration's GCPs, ASSUMED to be NAD83(2011) / UTM 19N like the surveys: the GCP "
+                     f"files state no CRS; were they WGS 84 / ITRF, the grid would sit ~1-1.5 m off the "
+                     f"survey, up to ~0.1-0.15 m of elevation across a 1:10 foreshore; an EPSG:{epsg} tag "
+                     f"on the GeoTIFFs is"
                      + (" nominal)" if epsg == 32619 else " as given)"))
         lines.append(f"survey vertical datum: {vert}" if vert else f"survey vertical datum: {vnote}")
         if vnote:
@@ -1781,7 +1843,11 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                 lines.append(f"  (transects not read: {exc})")
 
         def lines_vs_survey(cc):
-            """-> (d, used mask, per-frame or per-point arrays d refers to, unit, how, method)."""
+            """The lines against the survey. -> dict: d (the values), used (mask of the line points
+            that took part), per (the per-frame or per-point arrays d refers to), unit, how, method,
+            key (what pairs a value with the same value of another build of the lines: the frame on
+            transects, the line point on a DSM, frame|survey point for points), zref (the survey
+            elevation of each value), spt (points: the survey point of each value, else None)."""
             if transects:
                 # compare_rtk.py's check: one value per frame, the RTK interpolated along the profile
                 per, okw_ = waterlines_on_transects(cc, transects, transect_tolerance, transect_min_points)
@@ -1793,20 +1859,30 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                         f"per frame with >= {transect_min_points} points (their median)"
                         + (f"; the {n_other} other points (wrack lines etc.: the swash limit, not the "
                            f"sand) are not used for the waterlines" if n_other else ""))
-                return per["d"], okw_, per, "frames", how_, "frames on RTK transects (compare_rtk.py)"
+                return {"d": per["d"], "used": okw_, "per": per, "unit": "frames", "how": how_,
+                        "method": "frames on RTK transects (compare_rtk.py)",
+                        "key": np.asarray(per["frame"]).astype(str), "zref": per["z"], "spt": None}
             dists = []
-            d_ = waterlines_vs_survey(cc, survey_type, wl_grid, pts, tolerance, dist_out=dists)
+            info_ = {}
+            d_ = waterlines_vs_survey(cc, survey_type, wl_grid, pts, tolerance, dist_out=dists, info=info_)
             if survey_type == "dsm":
-                return (d_, np.isfinite(d_), cc, "points", "the survey sampled bilinearly at each waterline "
-                        "point", "waterline points on the DSM")
+                return {"d": d_, "used": np.isfinite(d_), "per": cc, "unit": "points",
+                        "how": "the survey sampled bilinearly at each waterline point",
+                        "method": "waterline points on the DSM", "key": np.asarray(cc["row"]).astype(str),
+                        "zref": info_.get("zref"), "spt": None}
             md = float(np.median(dists)) if dists else float("nan")
             how_ = (f"the nearest survey point within {tolerance:g} m of each waterline point, one "
                     f"value per frame and survey point (a frame's points share one water level); "
                     f"NOT slope-corrected: the pairs lie a median {fv(md, '{:.2f}')} m apart, and "
                     f"1 m along a 1:10 beach face is 0.1 m of elevation")
-            return d_, np.isfinite(d_), cc, "points", how_, f"nearest point within {tolerance:g} m, not slope-corrected"
+            j = info_.get("match")
+            key = np.char.add(np.char.add(np.asarray(cc["frame"]).astype(str), "|"), np.asarray(j).astype(str))
+            return {"d": d_, "used": np.isfinite(d_), "per": cc, "unit": "points", "how": how_,
+                    "method": f"nearest point within {tolerance:g} m, not slope-corrected", "key": key,
+                    "zref": info_.get("zref"), "spt": j}
 
-        dw, okw, wl_cont, unit, how_w, method = lines_vs_survey(cont)
+        R = lines_vs_survey(cont)
+        dw, okw, wl_cont, unit, how_w, method = R["d"], R["used"], R["per"], R["unit"], R["how"], R["method"]
         per = wl_cont
         nb, nt = int((cont["beach"] & okw).sum()), int((~cont["beach"] & okw).sum())
         if nb and not nt:
@@ -1820,72 +1896,161 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             setup_mode = "setup on some rows only"
             col = (f"beach_elevation_navd88 for {nb} points, tide_elevation_navd88 (no setup) for "
                    f"{nt}")
-        wl_rows = waterline_rows(wl_cont, dw)
+        wl_rows = waterline_rows(wl_cont, dw, R["zref"], R["spt"])
+        # where on the beach the check is: the elevations of the line points compared, against
+        # those of every line point in the window (an RTK that starts at +1.2 m checks the upper
+        # beach only, whatever the DEM covers)
+        zr_used, zr_all = elevation_range(cont["Z"][okw]), elevation_range(cont["Z"])
         lines += ["", "WATERLINES vs SURVEY (waterline elevation - survey; positive = waterline "
                       "elevation too high)",
                   f"  {contours}: {len(cont['E'])} points, {int(okw.sum())} used"]
         lines += ["  " + ln for ln in textwrap.wrap(how_w, 100)]
         lines.append(f"  elevation used: {col}")
-        lines.append(f"  {'day camera':>16s} {'frames':>6s} {unit:>7s} {'median':>7s} "
-                     f"{'NMAD':>6s} {'RMSE':>6s} {'20cm':>6s}")
+        if zr_used:
+            lines.append(f"  WHERE: the line points compared lie at {zr_used['min']:+.2f} to {zr_used['max']:+.2f} m "
+                         f"(p5 {zr_used['p5']:+.2f}, median {zr_used['median']:+.2f}, p95 {zr_used['p95']:+.2f})"
+                         + (f"; all line points in the window: p5 {zr_all['p5']:+.2f}, median {zr_all['median']:+.2f}, "
+                            f"p95 {zr_all['p95']:+.2f} m" if zr_all else "")
+                         + ": this check says nothing about the beach outside that range")
+        all_r = [r for r in wl_rows if r["group_type"] == "waterline_all"]
+        indep = independent_n(all_r[0], unit) if all_r else (0, "frames")
+        sp_col = R["spt"] is not None
+        lines.append(f"  {'day camera':>16s} {'frames':>6s} {unit:>7s} " + (f"{'svy pts':>7s} " if sp_col else "")
+                     + f"{'median':>7s} {'NMAD':>6s} {'RMSE':>6s} {'20cm':>6s}")
+
+        def wl_line(r):
+            k, _ = independent_n(r, unit)
+            return (f"  {r['group']:>16s} {r['frames']:>6d} {r['n']:>7d} "
+                    + (f"{r['survey_points']:>7d} " if sp_col else "")
+                    + f"{r['median']:>+7.3f} {fv(r['nmad'], '{:.3f}'):>6s} {r['rmse']:>6.3f} "
+                      f"{100 * r['within_0.20']:>5.0f}%" + ("  (few)" if k < MIN_BAND_N else ""))
         for r in wl_rows:
-            lines.append(f"  {r['group']:>16s} {r['frames']:>6d} {r['n']:>7d} {r['median']:>+7.3f} "
-                         f"{fv(r['nmad'], '{:.3f}'):>6s} {r['rmse']:>6.3f} {100 * r['within_0.20']:>5.0f}%"
-                         + ("  (few)" if r["n"] < MIN_BAND_N else ""))
+            if r["group_type"] != "waterline_band":
+                lines.append(wl_line(r))
+        bands_w = [r for r in wl_rows if r["group_type"] == "waterline_band"]
+        if bands_w:
+            lines += ["", f"  WATERLINES BY SURVEY ELEVATION ({BAND} m bands of the survey elevation each value was "
+                          f"taken against" + ("; a frame's value: the median RTK under its points" if unit == "frames"
+                                              else "") + ")"]
+            lines += [wl_line(r) for r in bands_w]
+        if sp_col and all_r:
+            vpp = np.bincount(R["spt"][np.isfinite(dw) & (R["spt"] >= 0)])
+            vpp = vpp[vpp > 0]
+            lines.append(f"  {all_r[0]['n']} values from {all_r[0]['survey_points']} distinct survey point(s) "
+                         f"(values per point: median {np.median(vpp):.0f}, max {vpp.max()}): the statistic rests "
+                         f"on the survey points, not on the number of values"
+                         + (f" -- TOO FEW (fewer than {MIN_BAND_N} survey points): not an estimate"
+                            if all_r[0]["survey_points"] < MIN_BAND_N else ""))
         head["waterlines"] = {"file": str(contours), "points": int(len(cont["E"])),
                               "points_on_survey": int(okw.sum()), "elevation_used": col,
                               "setup": setup_mode, "method": method, "how": how_w, "unit": unit,
-                              "by_camera": {r["group"]: {k: r[k] for k in ("n", "median", "nmad", "frames")}
-                                            for r in wl_rows if r["group_type"] == "waterline_camera"}}
+                              "line_elevation_compared": zr_used, "line_elevation_all": zr_all,
+                              "n_independent": indep[0], "n_independent_unit": indep[1],
+                              "by_camera": {r["group"]: {k: r.get(k) for k in ("n", "median", "nmad", "frames",
+                                                                                "survey_points") if k in r}
+                                            for r in wl_rows if r["group_type"] == "waterline_camera"},
+                              "by_elevation": [{k: r.get(k) for k in ("group", "n", "median", "nmad", "frames",
+                                                                      "survey_points") if k in r} for r in bands_w]}
+        if sp_col and all_r:
+            head["waterlines"]["survey_points"] = all_r[0]["survey_points"]
         if transects:
             wl_frames_csv = out / f"{name}_waterline_frames.csv"
             with open(wl_frames_csv, "w", newline="") as f:
                 w = csv.writer(f)
-                w.writerow(["frame", "camera", "day", "points_on_transects", "waterline_minus_rtk_m"])
+                w.writerow(["frame", "camera", "day", "points_on_transects", "rtk_elevation_navd88",
+                            "waterline_minus_rtk_m"])
                 for k in range(len(dw)):
                     w.writerow([per["frame"][k], per["cam"][k], per["day"][k], per["points"][k],
-                                f"{dw[k]:+.4f}"])
+                                f"{per['z'][k]:+.3f}", f"{dw[k]:+.4f}"])
             files["waterline_frames_csv"] = str(wl_frames_csv)
         if wl_rows:
             head["waterlines"].update({k: wl_rows[0][k] for k in STAT_KEYS})
             head["waterlines"]["frames"] = wl_rows[0]["frames"]
-            few_w = wl_rows[0]["n"] < MIN_BAND_N
+            few_w = indep[0] < MIN_BAND_N
             print(f"waterlines        : waterline - survey median {wl_rows[0]['median']:+.3f} m, "
                   f"NMAD {fv(wl_rows[0]['nmad'], '{:.3f} m')} ({wl_rows[0]['n']} {unit}"
                   + ("" if unit == "frames" else f", {wl_rows[0]['frames']} frames")
+                  + (f", {indep[0]} survey points" if indep[1] == "survey points" else "")
                   + f"{'; TOO FEW: not an estimate' if few_w else ''}); "
-                  f"{method}; {col.split(' (')[0]}")
+                  f"{method}; {col.split(' (')[0]}"
+                  + (f"; line points at {zr_used['p5']:+.2f}..{zr_used['max']:+.2f} m (p5..max)" if zr_used else ""))
         else:
             head["waterlines"].update({"n": 0, "frames": 0})
             print(f"waterlines        : no waterline on the survey ({method})")
         # Sensitivity: the same lines WITHOUT the wave setup (C = 0), from their own still-water
         # level (the rows carry both columns). The setup coefficient is the least certain step
-        # of the chain; this shows how much of the answer it carries, per camera.
+        # of the chain; this shows how much of the answer it carries, per camera. The effect of the
+        # setup is read on the SAME frames (points) both ways: lines placed at still water move
+        # seaward, and some leave the survey (off the RTK's surveyed stretch, past the lidar's dry
+        # edge), so a median over what is left compares other lines.
         if nb and np.isfinite(cont["Zt"]).any():
             c0, how0 = without_setup(cont, cams)
-            dw0, okw0, wl_cont0, unit0, _, _ = lines_vs_survey(c0)
-            wl0_rows = waterline_rows(wl_cont0, dw0)
+            R0 = lines_vs_survey(c0)
+            dw0, unit0 = R0["d"], R0["unit"]
+            wl0_rows = waterline_rows(R0["per"], dw0, None, R0["spt"])
+            k1 = {k: i for i, k in enumerate(R["key"]) if np.isfinite(dw[i])}
+            k0 = {k: i for i, k in enumerate(R0["key"]) if np.isfinite(dw0[i])}
+            both_k = sorted(set(k1) & set(k0))
+            i1 = np.array([k1[k] for k in both_k], int)
+            i0 = np.array([k0[k] for k in both_k], int)
+            cam_p = np.asarray(R["per"]["cam"])[i1] if len(i1) else np.array([], object)
+            only_w = sorted(set(k1) - set(k0))
+            only_0 = sorted(set(k0) - set(k1))
+            what_p = "frames" if unit == "frames" else ("line points" if survey_type == "dsm" else "(frame, survey point) pairs")
+            why_drop = ("their line, placed at still water, lies seaward: off the RTK's surveyed stretch (never "
+                        "extrapolated) or with fewer than the minimum points on it" if unit == "frames" else
+                        "placed at still water, they move seaward past the survey's edge (the lidar sees only the "
+                        "beach that was dry at flight time)" if survey_type == "dsm" else
+                        f"placed at still water, the line moves more than {tolerance:g} m from the survey point")
+
+            def pstats(m=None):
+                m = np.ones(len(i1), bool) if m is None else m
+                if not m.any():
+                    return {"n": 0}
+                a, b = dw[i1][m], dw0[i0][m]
+                return {"n": int(m.sum()), "with_setup_median": float(np.median(a)),
+                        "without_setup_median": float(np.median(b)), "setup_effect_median": float(np.median(a - b))}
+            paired = pstats()
+            paired["by_camera"] = {c: pstats(cam_p == c) for c in sorted(set(cam_p.tolist()))}
+            paired["unit"] = what_p
+            unp = {"with_setup_only": len(only_w), "without_setup_only": len(only_0), "why": why_drop,
+                   "with_setup_only_median": (float(np.median(dw[[k1[k] for k in only_w]])) if only_w else None)}
             lines += ["", "SENSITIVITY: WATERLINES vs SURVEY WITHOUT THE WAVE SETUP (C = 0; tide_elevation_navd88)",
                       "  " + "\n  ".join(textwrap.wrap(how0, 100)),
-                      f"  {'camera':>16s} {'frames':>6s} {unit0:>7s} {'median':>7s} {'NMAD':>6s}   "
-                      f"(with the setup: median)"]
-            with_cam = {r["group"]: r for r in wl_rows if r["group_type"] in ("waterline_all", "waterline_camera")}
+                      f"  {'camera':>16s} {'frames':>6s} {unit0:>7s} {'median':>7s} {'NMAD':>6s} | "
+                      f"{'paired':>7s} {'with setup':>10s} {'C = 0':>7s} {'effect':>7s}"]
             for r in wl0_rows:
                 if r["group_type"] not in ("waterline_all", "waterline_camera"):
                     continue
-                w_ = with_cam.get(r["group"])
+                p_ = paired if r["group"] == "all" else paired["by_camera"].get(r["group"], {"n": 0})
+                k_, _ = independent_n(r, unit0)
                 lines.append(f"  {r['group']:>16s} {r['frames']:>6d} {r['n']:>7d} {r['median']:>+7.3f} "
-                             f"{fv(r['nmad'], '{:.3f}'):>6s}   ({fv(w_['median'] if w_ else None, '{:+.3f}')})"
-                             + ("  (few)" if r["n"] < MIN_BAND_N else ""))
+                             f"{fv(r['nmad'], '{:.3f}'):>6s} | {p_['n']:>7d} "
+                             f"{fv(p_.get('with_setup_median'), '{:+.3f}'):>10s} "
+                             f"{fv(p_.get('without_setup_median'), '{:+.3f}'):>7s} "
+                             f"{fv(p_.get('setup_effect_median'), '{:+.3f}'):>7s}"
+                             + ("  (few)" if k_ < MIN_BAND_N else ""))
+            lines += ["  " + ln for ln in textwrap.wrap(
+                f"paired = the same {what_p} with and without the setup: 'with setup' and 'C = 0' are their "
+                f"medians, 'effect' the median of each one's difference. The left columns are all the C = 0 "
+                f"values. {len(only_w)} {what_p} of the headline have no C = 0 value ({why_drop})"
+                + (f"; their median with the setup is {unp['with_setup_only_median']:+.3f} m" if only_w else "")
+                + f"; {len(only_0)} have a value only at C = 0.", 100)]
             head["waterlines"]["without_setup"] = dict(
                 {k: wl0_rows[0][k] for k in STAT_KEYS} if wl0_rows else {"n": 0},
                 frames=wl0_rows[0]["frames"] if wl0_rows else 0, how=how0, unit=unit0,
-                by_camera={r["group"]: {k: r[k] for k in ("n", "median", "nmad", "frames")}
-                           for r in wl0_rows if r["group_type"] == "waterline_camera"})
+                by_camera={r["group"]: {k: r.get(k) for k in ("n", "median", "nmad", "frames", "survey_points")
+                                        if k in r}
+                           for r in wl0_rows if r["group_type"] == "waterline_camera"},
+                paired=paired, unpaired=unp)
             if wl0_rows:
                 print(f"without setup     : waterline - survey median {wl0_rows[0]['median']:+.3f} m with C = 0 "
-                      f"({wl0_rows[0]['n']} {unit0}); " + ", ".join(
-                          f"{r['group']} {r['median']:+.3f}" for r in wl0_rows if r["group_type"] == "waterline_camera"))
+                      f"({wl0_rows[0]['n']} {unit0}); paired over {paired['n']} {what_p}: with the setup "
+                      f"{fv(paired.get('with_setup_median'), '{:+.3f}')}, C = 0 "
+                      f"{fv(paired.get('without_setup_median'), '{:+.3f}')} m; " + ", ".join(
+                          f"{c} {fv(v.get('with_setup_median'), '{:+.3f}')} / {fv(v.get('without_setup_median'), '{:+.3f}')}"
+                          f" (n {v['n']})" for c, v in paired["by_camera"].items())
+                      + f"; {len(only_w)} with the setup only, {len(only_0)} at C = 0 only")
 
     # -- write
     txt = out / f"{name}_comparison.txt"
@@ -1893,7 +2058,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     files["txt"] = str(txt)
     cs = out / f"{name}_comparison.csv"
     with open(cs, "w", newline="") as f:
-        fields = ["name", "label", "quantity", "group_type", "group", "frames"] + list(STAT_KEYS)
+        fields = ["name", "label", "quantity", "group_type", "group", "frames", "survey_points"] + list(STAT_KEYS)
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for r in rows:
@@ -1939,25 +2104,35 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                        f"n {r['n']}" + (" (few)" if r["n"] < MIN_BAND_N else ""))
         if wl_rows:
             w0 = wl_rows[0]
-            wu = head["waterlines"]["unit"]
+            hw = head["waterlines"]
+            wu = hw["unit"]
+            ni, niu = hw.get("n_independent", w0["n"]), hw.get("n_independent_unit", "frames")
             box += ["", f"waterlines − survey: median {w0['median']:+.3f} m, NMAD "
                         f"{fv(w0['nmad'], '{:.3f} m')}",
-                    (f"  ({w0['n']} frames, one value each; {head['waterlines']['points_on_survey']} line "
-                     f"points on the transects" if wu == "frames" else f"  ({w0['n']} {wu}, {w0['frames']} frames")
-                    + ("; TOO FEW: not an estimate" if w0["n"] < MIN_BAND_N else "") + ")",
-                    f"  {head['waterlines']['method']}; {head['waterlines']['setup']}"]
+                    (f"  ({w0['n']} frames, one value each; {hw['points_on_survey']} line "
+                     f"points on the transects" if wu == "frames" else f"  ({w0['n']} {wu}, {w0['frames']} frames"
+                     + (f", {ni} survey points" if niu == "survey points" else ""))
+                    + (f"; TOO FEW {niu}: not an estimate" if ni < MIN_BAND_N else "") + ")",
+                    f"  {hw['method']}; {hw['setup']}"]
+            zu = hw.get("line_elevation_compared")
+            if zu:
+                box.append(f"  line points compared at {zu['p5']:+.2f}..{zu['max']:+.2f} m only (p5..max)")
             camw = [r for r in wl_rows if r["group_type"] == "waterline_camera"]
             if len(camw) > 1:
-                box.append("  " + ", ".join(f"{r['group']} {r['median']:+.3f} m (n {r['n']}"
-                                            f"{', few' if r['n'] < MIN_BAND_N else ''})" for r in camw))
-            ws = head["waterlines"].get("without_setup") or {}
-            if ws.get("n"):
-                box.append(f"  without the setup (C = 0): median {ws['median']:+.3f} m (n {ws['n']}"
-                           f"{', few' if ws['n'] < MIN_BAND_N else ''})")
-                if len(ws.get("by_camera") or {}) > 1:
-                    box.append("    " + ", ".join(f"{k} {v['median']:+.3f} m (n {v['n']}"
-                                                  f"{', few' if v['n'] < MIN_BAND_N else ''})"
-                                                  for k, v in sorted(ws["by_camera"].items())))
+                box.append("  " + ", ".join(
+                    f"{r['group']} {r['median']:+.3f} m (n {r['n']}"
+                    + (f", {r['survey_points']} pts" if r.get("survey_points") is not None else "")
+                    + f"{', few' if independent_n(r, wu)[0] < MIN_BAND_N else ''})" for r in camw))
+            ws = hw.get("without_setup") or {}
+            pr = ws.get("paired") or {}
+            if ws.get("n") and pr.get("n"):
+                box.append(f"  C = 0 sensitivity, the same {pr['n']} {pr.get('unit', wu)} both ways:")
+                box.append(f"    with the setup {pr['with_setup_median']:+.3f} m, without {pr['without_setup_median']:+.3f} m"
+                           + (f"; {ws['unpaired']['with_setup_only']} drop out at C = 0"
+                              if (ws.get("unpaired") or {}).get("with_setup_only") else ""))
+                if len(pr.get("by_camera") or {}) > 1:
+                    box.append("    " + ", ".join(f"{k} {v['with_setup_median']:+.3f} / {v['without_setup_median']:+.3f}"
+                                                  f" (n {v['n']})" for k, v in sorted(pr["by_camera"].items()) if v.get("n")))
         box += ["", "\n".join(textwrap.wrap(gap_text, 78))]
         ctx = dict(map_ctx, title=f"{name}: DEM − survey ({survey_type})", label=label,
                    why=why, warn_lines=warn_lines, lim=lim, dem=dem, xll=xll, ytop=ytop, cell=cell,

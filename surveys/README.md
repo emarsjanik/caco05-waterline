@@ -28,9 +28,22 @@ dem,maps,compare`.
 Status and exit code: `complete`, exit 0; `partial`, exit 1: a step (a
 comparison included) failed; `partial`, exit 3: a camera contributed nothing,
 a part is missing (a camera's pointing check or its waterline map on the
-photos: no photo of the window found, e.g. a wrong `--photo-roots`), or the
-outputs on disk are not one build; a disabled date exits 2. With `--all` the worst code
-is returned and the summary table has a status column.
+photos: no photo of the window found, e.g. a wrong `--photo-roots`; or a
+survey whose file `surveys.csv` names was not found, e.g. a misnamed lidar or a
+wrong `--survey-dirs`, or has no current comparison), or the outputs on disk
+are not one build; a disabled date exits 2. A row with no survey file yet
+(the October GCPs) is not a missing part. With `--all` the worst code is
+returned and the summary table has a status column.
+
+A build first marks the product `in progress` (provenance.json, and a
+`BUILD IN PROGRESS / INTERRUPTED` banner over the previous README) and
+rewrites both when it ends. A build that dies on the way (Ctrl-C, a full
+disk) writes `status: failed` with the reason, or, if even that cannot be
+written, leaves the mark: the previous build's numbers are never presented
+as current over files that have since changed. `--summary` re-checks every
+comparison against the files on disk (the build stamps) rather than trusting
+provenance.json. The detection checks first that the disk has room for it
+(~12 MB a photo of debug images until each camera is done, + ~0.3 GB).
 
 ## survey_dates.csv: one row per (date, camera)
 
@@ -60,26 +73,29 @@ folder, the waterline folder and its calibration folder, the repository's
 | 2025-01-23 | enabled | c1+c2 CACO03, 18-23 Jan (24 Jan left out: re-set that day) | CACO03_<cam>_20250123_EO (GCPs, not the lidar) | ADCP | Jan 2025 lidar | INDEPENDENT (envelope from the Mar lidar) |
 | 2025-03-06 | enabled | c2 only, CACO04, 3-9 Mar | CACO04_c2_20250219_EO | ADCP (ends 10 Mar 15:00) | Mar 2025 lidar | INDEPENDENT (envelope from the Jan lidar) |
 | 2025-03-19 | **skipped** (user's request) | none on the NUC within 7 days | - | no ADCP | - | - |
-| 2026-09-29 | enabled | c1+c2 CACO05, 26 Sep - 2 Oct (centred on the survey day; leaves out most of the 25-26 Sep storm), the live archive | CACO05_<cam>_20251113_EO-CV | GNSS-R / live waves | RTK check shots of 29 Sep | **CIRCULAR with C = 0.037** (see below) |
+| 2026-09-29 | enabled | c1+c2 CACO05, 26 Sep - 2 Oct (centred on the survey day; leaves out most of the 25-26 Sep storm, whose last day is in: the README's STORM caveat), the live archive | CACO05_<cam>_20251113_EO-CV | GNSS-R / live waves | RTK check shots of 29 Sep | **CIRCULAR with C = 0.037** (the default); INDEPENDENT with C = 0 (see below) |
 
 The live date was first called 27 Sep; the user confirmed that its survey is
 the 29 Sep RTK, so the product is dated 2026-09-29.
 
-**2025-01-23: the earlier check of the real photos.** Before this script,
+**2025-01-23: the earlier check of the real photos** (itself
+**PARTLY-CIRCULAR**: its search envelope was placed with this same Jan lidar,
+through the earlier lidar-fitted pointing). Before this script,
 `pointing_fix_figure.py` on the REAL photos of 18-23 Jan, with the same
-CACO03_<cam>_20250123 GCP calibrations, unfiltered, with no setup and the
-envelope from the earlier lidar-fitted pointing, printed *lidar elevation -
-water level at the waterline* of **+0.46 m for c1** (NMAD 0.19) and **+0.15 m
-for c2** (NMAD 0.23). Positive there means the lidar beach lies ABOVE the
-level each line was given: the lines read **LOW**, i.e. waterline (or DEM) -
-Jan lidar **c1 -0.46 m, c2 -0.15 m** without setup. That is the sign a line
-given no setup must have (a timex line is marked where the swash reaches),
-the sign of the biases listed under Labels and the sign the C = 0
+CACO03_<cam>_20250123 GCP calibrations, unfiltered and with no setup, printed
+*lidar elevation - water level at the waterline* of **+0.46 m for c1** (NMAD
+0.19) and **+0.15 m for c2** (NMAD 0.23). Positive there means the lidar
+beach lies ABOVE the level each line was given: the lines read **LOW**, i.e.
+waterline - Jan lidar **c1 -0.46 m, c2 -0.15 m** without setup. That is the
+sign a line given no setup must have (a timex line is marked where the swash
+reaches), the sign of the biases listed under Labels and the sign the C = 0
 sensitivity of this product should show: no discrepancy of sign. The setup
-(C = 0.037, ~0.28 m that week) raises every line, by ~0.8 x the setup once
-the landward re-projection is counted (as on the 2026 RTK), so unless the new
-envelope changes the detections, expect DEM - lidar of about **c1 -0.24 m,
-c2 +0.07 m** (c1 -0.18, c2 +0.13 m if the whole setup counted). The 0.3 m
+(C = 0.037, ~0.28 m that week) raises every line; once re-projected landward
+each line keeps ~0.71 x its setup (per frame on the 2026 RTK), so unless the
+new envelope changes the detections, expect waterline - Jan lidar of about
+**c1 -0.26 m, c2 +0.05 m** (+/-0.01 with the window's own setup; c1 -0.18,
+c2 +0.13 m if the whole setup counted). That expectation already holds the
+setup's under-correction (below): it is not to be added again. The 0.3 m
 difference between the cameras, on the same water level and setup, points at
 the pointing or the lens model. The README of that date says so, gives the
 headline per camera, the C = 0 sensitivity (the same lines without the setup)
@@ -136,10 +152,14 @@ actually ran and can only make the label worse, saying why:
   column) is treated as possibly the same shots. C = 0.037 (`waterline_timex_cron.sh`, the station's
   C, used by default) is the median per-frame C of the waterlines lying on the
   2026-09-29 RTK transects, so the 2026-09-29 comparison with those shots
-  cannot test the setup (nor the overall level it sets): it is CIRCULAR for as
-  long as C = 0.037 is used. Its spread and its dependence on elevation still
-  say something. **An independent 2026 check needs another survey** that
-  fitted nothing, e.g. a calm low-tide RTK across the intertidal.
+  cannot test the setup (nor the overall level it sets): this rule makes it
+  CIRCULAR for as long as C = 0.037 is used (the table row says INDEPENDENT,
+  which a build with C = 0, or with a C fitted to other data, keeps: nothing
+  else in its chain used the shots). Its spread still says something, over
+  the narrow band the transects cover (they start at ~+1.2 m: the waterline
+  check covers ~+1.0 to +1.6 m only). **An independent check of the whole
+  2026 intertidal needs another survey** that fitted nothing, e.g. a calm
+  low-tide RTK across it.
 * the setup coefficient is read from the waterlines the DEM was built with
   (the detection stamps, checked against the setup the rows imply), never from
   the command line of a later `--steps compare`. A `--setup-coef` other than a
@@ -150,16 +170,22 @@ actually ran and can only make the label worse, saying why:
 
 The setup itself is not exact either (the station's C is not changed here;
 each README states the bias):
-* **under-correction.** C = 0.037 was fitted with the RTK elevation where each
-  line lay WITHOUT setup, but a line given the setup is re-projected landward
-  onto higher beach, which closes only part of the gap. `compare_rtk.py` on
-  the 18 frames of 29 Sep - 5 Oct lying on the transects gives RTK - waterline
-  +0.33 m without setup and still +0.13 m with C = 0.037 (median setup applied
-  0.26 m; Oct 2026): the 2026 lines still read ~0.13 m low on the RTK, about
-  half the applied setup. Every product made with C = 0.037 may read low by
-  roughly 0.5 x its setup (each README gives the figure for its date). The
-  synthetic test beach shows the same geometry: a line mapped onto the
-  still-water plane reads low by about 0.65-0.7 x the setup.
+* **under-correction.** On the 18 frames of 29 Sep - 5 Oct lying on the RTK
+  transects both ways, RTK - waterline is +0.33 m without setup and still
+  +0.13 m with C = 0.037 (median setup applied 0.26 m; Oct 2026). Two causes,
+  measured on those same frames (each line without setup re-projected at
+  still water, with the setup added in place, and with it re-projected):
+  (1) a line given the setup is re-projected landward onto higher beach,
+  which takes back ~0.07 m: each line keeps ~0.71 x its setup (the per-frame
+  median; ~0.3 x is lost, by the beach slope and the cross-shore distance);
+  (2) C = 0.037 is below those frames' own per-frame C (0.046 with no
+  re-projection; C was fitted on 14 of them, each line taken where it lay
+  WITHOUT setup): ~0.06 m. The re-projection part carries over to any date
+  (~0.3 x its setup; each README gives it in metres); the C mismatch belongs
+  to those frames. The synthetic test beach shows the same geometry: a line
+  mapped onto the still-water plane reads low by about 0.65-0.7 x the setup
+  (the share kept). For
+  2025-01-23 the earlier-check expectation above already holds both.
 * **still-water reference (2025 dates).** C was fitted with each line at the
   GNSS-R water level. The GNSS-R footprint is the surf zone (`gnssr_qc.py`,
   `gnssir_reflection_audit.py`), where breaking waves raise the mean level:
@@ -182,10 +208,13 @@ each README states the bias):
   C > 0 (listed in `waterlines/no_setup_frames.csv` and counted in the README):
   kept, they would read about one setup low.
 
-Coordinates: the grids are in the frame of the calibration's GCPs and of the
-surveys, NAD83(2011) / UTM 19N (EPSG:6348). The GeoTIFFs are tagged
-EPSG:32619 (WGS 84 / UTM 19N) as asked: a nominal tag (WGS 84 differs by
-~1-1.5 m here; nothing is transformed). `--geotiff-epsg 6348` writes the true
+Coordinates: the grids are in the frame of the calibration's GCPs, ASSUMED
+to be that of the surveys, NAD83(2011) / UTM 19N (EPSG:6348): the GCP files
+state no CRS. Were the GCPs in WGS 84 / ITRF instead, the grid would sit
+~1-1.5 m off the surveys, up to ~0.1-0.15 m of elevation where that shift runs
+across a 1:10 foreshore. The GeoTIFFs are tagged EPSG:32619 (WGS 84 / UTM 19N)
+as asked: a nominal tag (WGS 84 differs by ~1-1.5 m here; nothing is
+transformed). `--geotiff-epsg 6348` writes the true
 code. The 2025 lidar files state no vertical datum: NAVD88 is assumed (the
 geoid model is unknown; GEOID12B and GEOID18 differ by a few cm here).
 
@@ -194,16 +223,31 @@ geoid model is unknown; GEOID12B and GEOID18 differ by a few cm here).
 headline label is the worst of all of them, with every reason. On RTK
 transects the waterlines are compared as `compare_rtk.py` does (one value
 per frame, the RTK interpolated along the transect); isolated points
-(GCPs) are matched to the nearest line point, not slope-corrected. The
-headline is given per camera too, and, when the lines carry a setup, again
-WITHOUT it (C = 0: each line at its still-water level, re-projected with the
-calibration as a C = 0 build would place it) as a sensitivity.
+(GCPs) are matched to the nearest line point, not slope-corrected, and the
+statistic is judged on the DISTINCT survey points (many frames see the same
+few points: fewer than 10 points is TOO FEW whatever the number of values).
+The headline is given per camera, per 0.5 m band of survey elevation, with
+WHERE on the beach the compared line points lie (next to all the lines'
+range), and, when the lines carry a setup, again WITHOUT it (C = 0: each line
+at its still-water level, re-projected with the calibration as a C = 0 build
+would place it) as a sensitivity, read on the SAME frames (points) both ways:
+lines at still water move seaward and some leave the survey; those are
+counted. `--summary` gives each camera's median too (a pooled median near
+zero can hide two cameras off in opposite directions: more than 0.1 m apart
+is flagged) and the C = 0 sensitivity.
 
 Pointing: each camera's sea horizon over the window is compared with where
 its calibration puts it; the constant tilt/roll is printed for every camera
 and, above 0.05 deg, given with its DEM sensitivity per range band (0.1 deg
 of tilt is ~0.13-0.17 m of DEM at 250-350 m). Only day-to-day CHANGES of
-pointing (`horizon_check.py`, 12 px) leave days out.
+pointing (`horizon_check.py`, 12 px) leave days out. The predicted horizon
+(`estimate_eo_rotation.horizon_rows`) holds the full Earth-curvature dip with
+standard refraction (k = 0.13): a perfectly calibrated camera reads 0.00 deg
+(+/-0.01 for k from 0 to 0.25). Until Oct 2026 it held half the dip, which
+read +0.06-0.07 deg on a perfect camera (so the earlier "c2 ~0.4 deg off" is
+~0.33 deg). On the synthetic test fixture the horizon is an artefact of the
+rendering (not a curved sea): the offsets a fixture build reports are not
+camera offsets.
 
 ## Run time on the NUC
 
@@ -226,6 +270,11 @@ cd /mnt/I2Rgus_Data/waterline && git pull
 python3 survey_products.py --date 2025-01-23 --dry-run   # inputs found, labels, run time
 python3 survey_products.py --date 2025-01-23             # then 2025-03-06, 2026-09-29, --summary
 ```
+
+The code is tested here under the station's oldest libraries too (Python
+3.8, numpy 1.17.4, matplotlib 3.3.4, pandas 1.1.5). The waterline maps on the
+photos need the `daily_elevation_map.py` that falls back to `plt.get_cmap`
+on matplotlib 3.3/3.4 (the version merged with the waterline work).
 
 ## When the October GCP file arrives
 

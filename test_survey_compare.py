@@ -410,6 +410,30 @@ def test_transects(d):
     check(abs(wl["median"] + 0.15) < 1e-3 and wl["nmad"] < 1e-3, f"waterline - RTK = -0.15 exactly ({wl['median']:+.4f})")
     check("wrack" in wl["how"] and (out / "synth_tr_waterline_frames.csv").exists(),
           "wrack points not used for the waterlines; per-frame values written")
+    # WHERE on the beach: the elevations of the line points compared, and by survey elevation
+    zu = wl["line_elevation_compared"]
+    check(abs(zu["min"] - 0.85) < 1e-6 and abs(zu["max"] - 1.95) < 1e-6 and len(wl["by_elevation"]) >= 2
+          and "WHERE: the line points compared lie at +0.85 to +1.95 m" in (out / "synth_tr_comparison.txt").read_text(),
+          "WHERE: the compared line points' elevation range (+0.85..+1.95 m) and the values by survey elevation")
+    # the C = 0 sensitivity on the SAME frames: two frames have no still-water level, so no C = 0 value
+    cp2 = Path(d) / "contours_rtk_c0.csv"
+    rows_ = list(csv.reader(open(cp)))
+    with open(cp2, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(rows_[0])
+        for r in rows_[1:]:
+            if r[0] in ("f0", "f1"):
+                r = r[:3] + [""] + r[4:]
+            w.writerow(r)
+    h3, _ = quiet(sc.compare, str(dem_p), str(rtk), "points", "CIRCULAR", "transect test", name="synth_tr0",
+                  output_dir=str(out), contours=str(cp2), photo_dates=("2026-09-29", "2026-09-29"), plot=False)
+    ws = h3["waterlines"]["without_setup"]
+    pr, un = ws["paired"], ws["unpaired"]
+    check(h3["waterlines"]["n"] == 12 and ws["n"] == 10 and pr["n"] == 10 and un["with_setup_only"] == 2
+          and abs(pr["with_setup_median"] + 0.15) < 1e-3 and abs(pr["without_setup_median"] + 0.40) < 1e-3
+          and abs(pr["setup_effect_median"] - 0.25) < 1e-3,
+          "C = 0 sensitivity paired: 10 frames both ways (-0.15 with, -0.40 without, effect +0.25), the 2 with no "
+          "C = 0 value counted, not mixed into a median over other frames")
     # isolated points (no transects): nearest point, not slope-corrected, and said so
     gen = Path(d) / "isolated.csv"
     gen.write_text("E,N,Z\n" + "".join(f"{X0 + 30:.3f},{Y0 + n:.3f},{beach(X0 + 30, 0):.4f}\n"
@@ -418,6 +442,11 @@ def test_transects(d):
                   output_dir=str(out), contours=str(cp), plot=False)
     check("NOT slope-corrected" in h2["waterlines"]["how"], "isolated points: matched to the nearest line point, "
           "NOT slope-corrected (said)")
+    w2 = h2["waterlines"]
+    check(w2.get("survey_points") is not None and w2["survey_points"] <= 3 and w2["n_independent"] == w2["survey_points"]
+          and w2["n_independent_unit"] == "survey points" and w2["n"] >= w2["survey_points"]
+          and "TOO FEW (fewer than 10 survey points)" in (out / "synth_iso_comparison.txt").read_text(),
+          f"isolated points: {w2['n']} values from {w2['survey_points']} survey points: judged on the points, TOO FEW")
     # few values: no NMAD, valid JSON (no NaN)
     s1 = sc.stats(np.array([0.3]))
     check(s1["n"] == 1 and np.isnan(s1["nmad"]) and np.isnan(s1["p5"]), "one value: NMAD and p5/p95 not given")

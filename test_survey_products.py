@@ -297,8 +297,17 @@ def test_round2(d):
           and "read LOW" in c0 and "no opposite-sign discrepancy" in c0,
           "2025-01-23: the earlier result comes first, printed as measured (+0.46/+0.15 lidar - level) and as "
           "waterline - lidar (-0.46/-0.15: LOW, the same sign as no setup)")
-    check("c1 ~-0.24 m" in c0 and "c2 ~+0.07 m" in c0 and "c1 -0.18, c2 +0.13 m if the" in c0,
-          "... expecting c1 ~-0.24 / c2 ~+0.07 m with C = 0.037 (-0.18 / +0.13 m if the whole setup counted)")
+    check("c1 ~-0.26 m" in c0 and "c2 ~+0.05 m" in c0 and "c1 -0.18, c2 +0.13 m if the" in c0
+          and "0.71 x its setup" in c0,
+          "... expecting c1 ~-0.26 / c2 ~+0.05 m with C = 0.037: each line keeps 0.71 x its setup, paired per frame "
+          "on the 2026 RTK (-0.18 / +0.13 m if the whole setup counted)")
+    check("PARTLY-CIRCULAR: its search envelope was placed with this same Jan 2025 lidar" in c0,
+          "... the earlier check carries its own label: PARTLY-CIRCULAR (envelope placed with the same lidar)")
+    under = [c for c in cav if c.startswith("C = 0.037 under-corrects")]
+    check("do not subtract it again" in c0 and under and "already inside the EARLIER CHECK expectation" in under[0]
+          and "~0.07 m" in under[0] and "0.046" in under[0],
+          "... the under-correction (re-projection ~0.07 m + C mismatch, per-frame C 0.046) is said to be inside "
+          "that expectation, never to be counted twice")
     check("station computer only" in c0 and "synthetic test fixture" in c0 and "nothing about the real beach" in c0,
           "... and says the real photos are on the station only; a fixture build says nothing about the real beach")
     cav0 = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.0), {}, forcing, {})
@@ -307,16 +316,28 @@ def test_round2(d):
     other = dict(plan, cams={"c1": dict(plan["cams"]["c1"], eo_file="CACO05_c1_20250219_corr_EO.yaml")})
     check(not sp.prior_checks(other), "... not claimed for another calibration")
     # a constant horizon offset is reported from 0.05 deg (not only above the 12 px day-to-day limit)
-    info = {"window_horizon_dtilt_deg": 0.232, "window_horizon_droll_deg": 0.01, "clear_horizon_days": 5,
-            "window_horizon_offset_px": 10.8}
+    info = {"window_horizon_dtilt_deg": 0.12, "window_horizon_droll_deg": 0.01, "clear_horizon_days": 5,
+            "window_horizon_offset_px": 5.6}          # made-up values: a unit test, not a measurement
     off = sp.pointing_offset(info, "CACO03_c1_20250123_EO.yaml")
-    check(off and abs(off[0] - 0.232) < 1e-9 and "11 px" in off[2], "a 0.23 deg tilt under 12 px: reported")
+    check(off and abs(off[0] - 0.12) < 1e-9 and "6 px" in off[2], "a constant 0.12 deg tilt under 12 px: reported")
     check(sp.pointing_offset(dict(info, window_horizon_dtilt_deg=0.03), "x") is None, "0.03 deg: not reported")
     # a camera whose pointing was not checked or whose photo map is missing: status partial
     miss = sp.missing_parts({"out": d, "date": "2025-01-23", "cams": {"c1": {}}},
                             {"pointing": {"c1": {"rows": [], "info": {}}}})
     check(any("pointing NOT checked" in m for m in miss) and any("no waterline map" in m for m in miss),
           "no photos for the pointing check or the photo map: listed as missing parts")
+    # a survey surveys.csv names whose file is not found: a missing part (status partial, exit 3);
+    # a row with no file yet (the Oct GCPs) is not
+    empty = d / "no_surveys_here"
+    empty.mkdir()
+    named = dict(jan, path=str(janf.name))
+    nofile = {"name": "oct_gcps", "survey_type": "points", "survey_date": "2024-10-23", "label": "PARTLY-CIRCULAR",
+              "why": "", "path": ""}
+    miss = sp.missing_parts({"out": d, "date": "2025-01-23", "cams": {}, "surveys": [named, nofile]}, {},
+                            SimpleNamespace(survey_dirs=[str(empty)]))
+    check(any(m.startswith("jan_lidar: survey file") and "NOT FOUND" in m for m in miss)
+          and not any(m.startswith("oct_gcps") for m in miss),
+          "a named survey file not found: a missing part; a row with no file yet: not")
     # the DEM settings reported are those the DEM on disk was built with
     sp.write_stamp(d, "dem", {"cmd": "python3 dem_from_contours.py x.csv out --cell 2.0 --min-points 3 --max-spread 0.5 "
                                      "--max-hs 1.5 --max-day-offset 0.15", "tif": "python3 asc_to_geotiff.py a --epsg 32619"})
@@ -326,8 +347,9 @@ def test_round2(d):
     want = sp.dem_settings_requested(SimpleNamespace(dem_cell=1.0, dem_min_points=3, dem_max_spread=0.5, dem_max_hs=3.0,
                                                      dem_max_day_offset=0.15, geotiff_epsg=32619))
     dd = sp.dem_settings_differ(built, want)
-    check("cell_m 2.0 (asked 1.0)" in dd and "max_hs_m 1.5 (asked 3.0)" in dd and "min_points" not in dd,
-          "a later command line's other DEM options are named as NOT applied")
+    check("cell_m: asked 1.0, DEM on disk 2.0" in dd and "max_hs_m: asked 3.0, DEM on disk 1.5" in dd
+          and "min_points" not in dd,
+          "a later command line's other DEM options are named as NOT applied, asked vs on disk the right way round")
     later = SimpleNamespace(dem_cell=1.0, dem_min_points=3, dem_max_spread=0.5, dem_max_hs=3.0, dem_max_day_offset=0.15,
                             geotiff_epsg=6348, setup_coef=sp.SETUP_COEF)
     b = sp.built_args(later, {"out": d, "date": "2025-01-23", "cams": {"c1": {}}})
@@ -418,8 +440,17 @@ def test_config(d):
           "2026-09-29 (the user first called it 27 Sep): window 26 Sep - 2 Oct, the 29 Sep RTK")
     check(not [r for r in cfg if r["date"] == "2026-09-27"], "no 2026-09-27 product left in the table")
     rtk_row = [s for s in srv if s["name"] == "rtk_2026-09-29"][0]
-    check(rtk_row["label"] == "CIRCULAR" and "calm low-tide RTK" in rtk_row["why"],
-          "the 2026 RTK row says CIRCULAR plainly, and what an independent check needs")
+    check(rtk_row["label"] == "INDEPENDENT" and "CIRCULAR" in rtk_row["why"] and "C = 0.037" in rtk_row["why"]
+          and "calm low-tide RTK" in rtk_row["why"] and "+1.2 m" in rtk_row["why"],
+          "the 2026 RTK row: INDEPENDENT as a table label, saying the setup rule makes it CIRCULAR with C = 0.037, "
+          "where the check is and what an independent check needs")
+    rtk_file = Path(sp.DEFAULT_SURVEY_DIRS[0]) / rtk_row["path"]
+    pl, _ = quiet(sp.build_plan, "2026-09-29", cfg, srv, cfg_args())
+    lab, why = sp.honest_label(rtk_row, pl, SimpleNamespace(setup_coef=sp.SETUP_COEF), rtk_file)
+    check(lab == "CIRCULAR" and "setup coefficient C = 0.037 was fitted to this survey" in why[0],
+          "... a default build (C = 0.037): CIRCULAR by the setup rule (the file's name, or its content when here)")
+    lab, why = sp.honest_label(rtk_row, pl, SimpleNamespace(setup_coef=0.0), rtk_file)
+    check(lab == "INDEPENDENT" and not why, "... a C = 0 build (fitted to nothing): INDEPENDENT")
     plan, _ = quiet(sp.build_plan, "2025-01-23", cfg, srv, cfg_args())
     check(plan["last"] == "2025-01-23" and all(c["station"] == "CACO03" for c in plan["cams"].values()),
           "2025-01-23: CACO03 only, 24 Jan (the re-set) outside the window")
@@ -572,10 +603,99 @@ def test_live_rows(d):
     check(bad == 1, "a cut-off row skipped and counted, no traceback")
 
 
+def test_fix1(d):
+    print("horizon dip, in-progress mark and summary re-check, storm, camera split, independent counts")
+    d = Path(d) / "fix1"
+    d.mkdir()
+    # the predicted sea horizon holds the full Earth-curvature dip: the true horizon of a PERFECT camera
+    # (geometric dip with refraction k, projected with the station EO) fits as no tilt
+    from georectify import load_extrinsics, load_intrinsics
+    from view_reproject import ground_to_pixel
+    from horizon_check import fit_tilt_roll
+    import estimate_eo_rotation as er
+    for eo_name, cam in (("CACO03_c1_20250123_EO.yaml", "c1"), ("CACO05_c2_20251113_EO-CV.yaml", "c2")):
+        io_ = load_intrinsics(HERE / "calibration" / f"CACO05_{cam}_20240801_IO.yaml")
+        eo = load_extrinsics(HERE / "calibration" / eo_name)
+        cols = np.arange(150, int(io_[0]) - 150, 100)
+        fits = []
+        for k in (0.0, er.REFRACTION_K, 0.25):
+            dip, dd_ = er.horizon_dip(eo[2], k), 20000.0
+            az = eo[3] + np.deg2rad(np.linspace(-80, 80, 6000))
+            U, V, ok = ground_to_pixel(eo[0] + dd_ * np.sin(az), eo[1] + dd_ * np.cos(az), eo[2] - dd_ * np.tan(dip),
+                                       io_, eo)
+            o = np.argsort(U[ok])
+            obs = np.interp(cols, U[ok][o], V[ok][o], left=np.nan, right=np.nan)
+            fits.append(float(fit_tilt_roll(io_, eo, cols, obs)[0][0]))
+        check(abs(fits[1]) < 0.003 and max(abs(f) for f in fits) < 0.015 < sp.OFFSET_REPORT_DEG,
+              f"{eo_name}: a perfect camera fits tilt {fits[1]:+.3f} deg (k 0.13), {fits[0]:+.3f}/{fits[2]:+.3f} for "
+              f"k 0/0.25 (was +0.06-0.07 with half the dip), well under the {sp.OFFSET_REPORT_DEG} deg report limit")
+    # a build marks the product in progress first: an interrupted build never leaves the previous
+    # README / provenance looking current, and --summary re-checks against the stamps on disk
+    out = d / "2025-01-23"
+    out.mkdir()
+    (out / "README.txt").write_text("SURVEY-DATE PRODUCT 2025-01-23  (built x, status: complete)\nold numbers\n")
+    (out / "provenance.json").write_text('{"date": "2025-01-23", "status": "complete", "window": {"first_day": '
+                                         '"2025-01-18", "last_day": "2025-01-23"}, "comparisons": [{"name": '
+                                         '"jan_lidar", "current": true, "headline": {"n": 5, "median": 0.1}}]}')
+    plan = {"date": "2025-01-23", "era": "adcp", "first": "2025-01-18", "last": "2025-01-23", "out": out,
+            "cams": {}, "surveys": []}
+    a = cfg_args(output_root=str(d), photo_roots=sp.DEFAULT_PHOTO_ROOTS, adcp=None, adcp_navd88=None, chatham=None,
+                 wis=None, ndbc=None, live_contours=str(sp.DEFAULT_LIVE_CONTOURS), setup_fitted_to=None,
+                 geotiff_epsg=sp.GEOTIFF_EPSG, gnssr_spline=None, gauge_csv=None, live_cron=str(sp.LIVE_CRON),
+                 pointing_log_dir=str(HERE / "archive"), pointing_frames=3, pointing_fail=sp.POINT_FAIL_DEG,
+                 dem_cell=sp.DEM_CELL, dem_min_points=sp.DEM_MIN_POINTS, dem_max_spread=sp.DEM_MAX_SPREAD,
+                 dem_max_hs=sp.DEM_MAX_HS, dem_max_day_offset=sp.DEM_MAX_DAY_OFFSET, keep_moved_days=False,
+                 no_download=False)
+    sp.mark_in_progress(plan, a)
+    sp.mark_in_progress(plan, a)                       # a second attempt: one banner, the old text kept once
+    rd = (out / "README.txt").read_text()
+    prov = sp.load_json(out / "provenance.json")
+    check(rd.startswith("BUILD IN PROGRESS / INTERRUPTED") and rd.count("BUILD IN PROGRESS / INTERRUPTED") == 1
+          and rd.count("old numbers") == 1 and prov["status"] == "in progress"
+          and prov["previous_status"] == "complete" and not prov["comparisons"][0]["current"],
+          "the build marks README and provenance in progress (once), every comparison not current")
+    cur, why, h, _ = sp.summary_comparison(prov, out, prov["comparisons"][0])
+    check(not cur and "in progress" in why and not h, "--summary shows nothing of a product in progress as current")
+    prov2 = dict(prov, status="complete")
+    cur, why, h, _ = sp.summary_comparison(prov2, out, prov2["comparisons"][0])
+    check(not cur and "no finished comparison" in why,
+          "--summary re-checks the stamps on disk: a 'complete' provenance with no comparison stamp is not current")
+    # the storm of 25-26 Sep 2026 reaches into the live window: said, with the storm-tail days
+    pl = {"date": "2026-09-29", "era": "live", "first": "2026-09-26", "last": "2026-10-02", "out": d,
+          "cams": {}, "surveys": [{"name": "rtk", "survey_type": "points", "survey_date": "2026-09-29", "path": ""}]}
+    cav = sp.storm_caveats(pl, cfg_args(survey_dirs=[]), {"frames_per_day": {"c1": {"2026-09-26": 3, "2026-09-27": 2,
+                                                                                    "2026-09-30": 4}}},
+                           "2026-09-26", "2026-10-02")
+    check(len(cav) == 1 and cav[0].startswith("STORM: the 25-26 Sep 2026 storm") and "2026-09-26, 2026-09-27" in cav[0]
+          and "-0.12 m" in cav[0] and "per-day rows" in cav[0],
+          "2026-09-29: the storm caveat names the storm-tail frame days before the survey and the measured change")
+    pl_jan = dict(pl, first="2025-01-18", last="2025-01-23")
+    check(not sp.storm_caveats(pl_jan, cfg_args(survey_dirs=[]), {}, "2025-01-18", "2025-01-23"),
+          "... and nothing for a window far from it")
+    # two cameras off in opposite directions: flagged, whatever the pooled median
+    h = {"median": 0.0, "by_camera": {"c1": {"n": 300, "median": -0.15}, "c2": {"n": 226, "median": 0.15},
+                                      "neither": {"n": 3, "median": 2.0}}}
+    check("0.30 m apart" in sp.camera_split(h) and "pooled median hides" in sp.camera_split(h)
+          and not sp.camera_split({"by_camera": {"c1": {"n": 9, "median": 0.02}, "c2": {"n": 9, "median": 0.05}}}),
+          "cameras 0.30 m apart flagged (the 'outside the views' group ignored); 0.03 m apart: not")
+    # a points survey: 33 values from 7 survey points is 7, TOO FEW
+    wl = {"n": 33, "median": -0.03, "nmad": 0.09, "rmse": 0.1, "unit": "points", "frames": 32, "survey_points": 7,
+          "n_independent": 7, "n_independent_unit": "survey points",
+          "by_camera": {"c1": {"n": 18, "median": -0.02, "frames": 18, "survey_points": 3}}}
+    t = sp.stat_text(wl, "waterlines - survey")
+    check("TOO FEW (7 survey points < 10)" in t and "c1 -0.020 m (n 18, 18 frames, 3 survey points, too few survey points)"
+          in sp.per_camera_text(wl["by_camera"], "points"),
+          "waterlines on a points survey: judged on the distinct survey points (7: TOO FEW), per camera too")
+    t = sp.stat_text({"n": 16, "median": -0.127, "nmad": 0.098, "rmse": 0.19, "unit": "frames", "n_independent": 16,
+                      "n_independent_unit": "frames"}, "waterlines - survey")
+    check("TOO FEW" not in t, "16 frames on RTK transects: an estimate")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
-    for f in ("survey_products.py", "detect_original_view.py", "test_survey_products.py"):
+    for f in ("survey_products.py", "detect_original_view.py", "test_survey_products.py", "estimate_eo_rotation.py",
+              "survey_compare.py"):
         src = (HERE / f).read_text()
         try:
             ast.parse(src, feature_version=(3, 8))
@@ -603,6 +723,7 @@ def main():
         test_caveats(d)
         test_stamps(d)
         test_round2(d)
+        test_fix1(d)
         test_py38()
     finally:
         if not args.keep:
