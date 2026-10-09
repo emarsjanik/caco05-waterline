@@ -1463,6 +1463,9 @@ def plot_camera(cam, info, data, report, args, out_png):
 
     frames, fl, col, row, drop = info["frames"], info["fl"], info["col"], info["row"], info["drop"]
     epochs, elevs = info["epochs"], info["elevs"]
+    # the same words as the elevation maps' colour bar (daily_elevation_map.py)
+    elev_words = ("water level + wave setup" if data["elev_col"] == "beach_elevation_navd88"
+                  else "water level")
     last_day = np.floor(np.nanmax(epochs) / DAY)
     in_win = np.floor(epochs / DAY) > last_day - args.plot_days
     win_frames = np.where(in_win)[0]
@@ -1568,7 +1571,7 @@ def plot_camera(cam, info, data, report, args, out_png):
     sm = matplotlib.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
     cax = fig.add_axes([0.03, 0.035, 0.25, 0.015])
     cb = fig.colorbar(sm, cax=cax, orientation="horizontal")
-    cb.set_label("water elevation of the line (m NAVD88)", fontsize=8)
+    cb.set_label(f"{elev_words} of the line (m NAVD88)", fontsize=8)
     cb.ax.tick_params(labelsize=7)
 
     # Row vs elevation at the column bin with the most rejections in the window.
@@ -1599,7 +1602,7 @@ def plot_camera(cam, info, data, report, args, out_png):
     else:
         ax2.text(0.5, 0.5, "nothing dropped in this window", ha="center", va="center",
                  transform=ax2.transAxes)
-    ax2.set_xlabel("water elevation (m NAVD88)", fontsize=8)
+    ax2.set_xlabel(f"{elev_words} (m NAVD88)", fontsize=8)
     ax2.set_ylabel("detected row (px), image orientation", fontsize=8)
     ax2.tick_params(labelsize=7)
     ax2.grid(alpha=0.3)

@@ -4,10 +4,24 @@ Daily Beach Elevation Map
 ----------------------------
 Takes one day's detected waterlines from contour_points.csv and draws
 them all onto a single background image (by default the ~12:15
-capture), shaded by water elevation.
+capture), shaded by the elevation each line marks on the beach.
+
+WHICH ELEVATION: the one the consistency filter and the DEM use --
+beach_elevation_navd88, the water level plus wave setup, when the
+contour file has it (the cron applies setup, SETUP_COEF), else the
+water level (tide_elevation_navd88), row by row the way
+dem_from_contours.py does. Binned and coloured by the water level alone,
+one 0.1 m bin held lines whose real levels differed by up to ~0.5 m on
+stormy days (setup 0.15-0.88 m a frame in the station archive), the band
+stretched across them, and the colours disagreed with the filter's report
+and the DEM (30-day synthetic station through the cron, Oct 2026: c1's
+7-day bands covered 629k px2 binned by water level, 276k px2 by water
+level + setup; a line coloured +1.05 m here was +1.34 m in the report).
+The colour bar says which elevation it is.
 
 WHAT THE FILLED BANDS MEAN -- read this before interpreting the figure:
-  Lines are grouped into elevation bins (--elevation-bin, 0.10 m). In
+  Lines are grouped into elevation bins (--elevation-bin, 0.10 m; the
+  elevation as above). In
   each image column covered by at least 3 lines of a bin that AGREE,
   the band spans the 16th to 84th percentile of their rows (about
   +/-1 sigma). Lines agree in a column when they form a group of at
@@ -86,16 +100,23 @@ from matplotlib.lines import Line2D
 
 
 ELEVATION_COLUMNS = ("tide_elevation_navd88", "tide_elevation")
+BEACH_COLUMN = "beach_elevation_navd88"       # water level + wave setup (--setup-coef)
 
 
 def load_contours(path, camera, date_filter=None, only=None):
     """
     Groups contour points by source frame. Returns a dict keyed by
     source_file, each with sorted column/row arrays, the elevation,
-    and the capture time.
+    whether that elevation includes wave setup, and the capture time;
+    and the name of the water-level column.
+
+    The elevation is beach_elevation_navd88 (water level + wave setup)
+    where the file has it and the row's value is not blank, else the
+    water level -- the same choice, row by row, as dem_from_contours.py,
+    georectify.py and waterline_consistency.py make.
     """
     frames = defaultdict(lambda: {"columns": [], "rows": [],
-                                  "elevation": None, "capture": None})
+                                  "elevation": None, "setup": False, "capture": None})
 
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
@@ -116,7 +137,11 @@ def load_contours(path, camera, date_filter=None, only=None):
                 continue
             frames[key]["columns"].append(float(row["pixel_column"]))
             frames[key]["rows"].append(float(row["pixel_row"]))
-            frames[key]["elevation"] = float(row[elev_col])
+            beach = row.get(BEACH_COLUMN)
+            frames[key]["elevation"] = float(beach or row[elev_col])
+            # setup_correction_m is blank for a frame with no wave record:
+            # its beach_elevation_navd88 is then the water level itself
+            frames[key]["setup"] = bool(beach) and bool(row.get("setup_correction_m"))
             frames[key]["capture"] = capture
 
     for data in frames.values():
@@ -519,6 +544,14 @@ def main():
     height, width = image_rgb.shape[:2]
 
     elevations = np.array([d["elevation"] for d in frames.values()])
+    n_setup = sum(bool(d["setup"]) for d in frames.values())
+    if n_setup == len(frames):
+        elev_what = "water level + wave setup"
+    elif n_setup:
+        elev_what = (f"water level + wave setup ({len(frames) - n_setup} of {len(frames)} "
+                     f"lines: water level only, no wave record)")
+    else:
+        elev_what = "water level"
     norm = Normalize(vmin=elevations.min(), vmax=elevations.max())
     try:
         colormap = matplotlib.colormaps[args.colormap]      # matplotlib >= 3.5
@@ -636,7 +669,8 @@ def main():
 
     ax.set_title(
         f"{args.camera.upper()}  {date_label}   {len(frames)} waterlines, "
-        f"{elevations.min():+.2f} to {elevations.max():+.2f} m NAVD88\n"
+        f"{elevations.min():+.2f} to {elevations.max():+.2f} m NAVD88 "
+        f"({'water level + wave setup' if n_setup else 'water level'})\n"
         f"background: {bg_day} {bg_capture[11:16]} UTC   |   "
         + ("shaded bands = 16-84% spread of the 3+ same-elevation lines that agree "
            "(repeatability, not morphology)"
@@ -648,7 +682,7 @@ def main():
     scalar_map = matplotlib.cm.ScalarMappable(cmap=colormap, norm=norm)
     scalar_map.set_array([])
     cbar = fig.colorbar(scalar_map, ax=ax, fraction=0.030, pad=0.015)
-    cbar.set_label("water elevation (m, NAVD88)")
+    cbar.set_label(f"{'water level + wave setup' if n_setup else 'water level'} (m NAVD88)")
 
     fig.text(0.01, 0.005, f"lines: {Path(args.contour_csv).name}", fontsize=7, color="0.35",
              ha="left", va="bottom")
@@ -659,7 +693,8 @@ def main():
     print(f"Date range        : {date_label}")
     print(f"Camera            : {args.camera}")
     print(f"Waterlines drawn  : {len(resampled)}")
-    print(f"Elevation range   : {elevations.min():+.3f} to {elevations.max():+.3f} m NAVD88")
+    print(f"Elevation range   : {elevations.min():+.3f} to {elevations.max():+.3f} m NAVD88 "
+          f"({elev_what})")
     print(f"Elevation bins    : {len(bins)}  ({filled_bins} had 3+ agreeing lines somewhere and "
           f"were filled)")
     if bg_score is not None:
