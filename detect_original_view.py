@@ -35,7 +35,9 @@ recursively. On the station the same photo often sits in several of
 them (Chelsea_pics, waterline/composite, owg_marconi/images): a file
 name found more than once is used once (the largest copy -- a reduced
 copy would not fit the lens calibration -- and the first folder given
-on a tie), and the number skipped is printed. --station keeps only the
+on a tie), and the number skipped is printed; a copy whose image is
+not the lens file's size, or that cannot be read (a broken link), is
+never used. --station keeps only the
 photos whose file name carries that station ID (...GMT.2025.CACO03.c1.
 timex.jpg): the ID changes when the cameras are set up again (CACO03 ->
 CACO04 on 24 Jan 2025, when they moved ~5.7 m and turned ~15 deg), so a
@@ -140,11 +142,36 @@ def envelope_from_survey(io, eo, survey, zlo, zhi, max_range, n_cols=40,
     return env, left_far, float(ok.mean())
 
 
-def run(cmd, log):
+def run(cmd, log, progress=None):
+    """Runs cmd with its output appended to log. progress=(total, every): the detector's
+    'Processing: <photo>' lines are counted and every `every`-th is printed with the time
+    left, so a long detection on the station is never silent."""
+    import time
+    t0 = time.time()
     with open(log, "a") as f:
         f.write("\n$ " + " ".join(str(c) for c in cmd) + "\n")
-        p = subprocess.run([str(c) for c in cmd], stdout=f, stderr=subprocess.STDOUT)
-    return p.returncode == 0
+        f.flush()
+        if not progress:
+            p = subprocess.run([str(c) for c in cmd], stdout=f, stderr=subprocess.STDOUT)
+            return p.returncode == 0
+        total, every = progress
+        p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             universal_newlines=True, bufsize=1)
+        k, t1 = 0, None
+        for line in p.stdout:
+            f.write(line)
+            if line.startswith("Processing:"):
+                k += 1
+                now = time.time()
+                if k == 1:
+                    t1 = now                       # the rate is measured from the first photo on
+                    print(f"detecting         : photo 1 of {total} started "
+                          f"({(now - t0) / 60:.1f} min of set-up)", flush=True)
+                elif k % every == 0 or k == total:
+                    per = (now - t1) / (k - 1)     # seconds per photo so far
+                    print(f"detecting         : photo {k} of {total}, {(now - t0) / 60:.1f} min so far, "
+                          f"~{per * (total - k + 1) / 60:.0f} min left ({per:.0f} s per photo)", flush=True)
+        return p.wait() == 0
 
 
 PHOTO_NAME = re.compile(r"^(\d{9,11})\..*\.([A-Za-z]+\d+)\.(c\d)\.timex\.jpg$")
@@ -156,20 +183,41 @@ def station_of(name):
     return m.group(2) if m else None
 
 
-def collect_photos(roots, camera, start_date, end_date, hours, station=None, skip_days=()):
+def jpeg_size(path):
+    """(width, height) from the image header, or None if it cannot be read."""
+    try:
+        from PIL import Image
+        with Image.open(str(path)) as im:
+            return tuple(im.size)
+    except Exception:
+        pass
+    try:
+        import cv2
+        img = cv2.imread(str(path))
+        return (img.shape[1], img.shape[0]) if img is not None else None
+    except Exception:
+        return None
+
+
+def collect_photos(roots, camera, start_date, end_date, hours, station=None, skip_days=(), frame_size=None):
     """
     The camera's timex photos in the date window and UTC hours, from every
     folder in `roots` searched recursively (symbolic links to folders are not
     followed, so a link loop cannot hang it).
-    A name found in several folders is kept once: the largest copy (a reduced
-    copy would not match the lens file), the first root on a tie.
-    -> (sorted list of Paths, counts dict).
+    A name found in several folders is kept once. Copies that cannot be
+    stat'ed (a broken link) are never kept; with frame_size=(width, height)
+    (the lens file's NU, NV) a copy whose image is another size (a reduced
+    copy: its pixels would be georectified with the full-size lens model) or
+    cannot be read is never kept either, and a name with no good copy is
+    left out. Of the good copies the largest is kept, the first root on a tie.
+    -> (sorted list of Paths, counts dict: duplicates, unreadable, wrong_size, ...).
     """
     h0, h1 = hours
     suffix = f".{camera}.timex.jpg"
-    found = {}
+    cands = {}
     n = {"files": 0, "duplicates": 0, "duplicates_differing": 0, "other_station": 0,
-         "outside_window": 0, "outside_hours": 0, "skipped_days": 0, "missing_roots": []}
+         "outside_window": 0, "outside_hours": 0, "skipped_days": 0, "missing_roots": [],
+         "unreadable": 0, "wrong_size": 0, "no_good_copy": 0}
     skip = set(skip_days or ())
     for root in roots:
         if not Path(root).is_dir():
@@ -197,20 +245,32 @@ def collect_photos(roots, camera, start_date, end_date, hours, station=None, ski
                 if day in skip:
                     n["skipped_days"] += 1
                     continue
-                p = Path(dirpath) / name
-                if name in found:
-                    n["duplicates"] += 1
-                    old = found[name]
-                    try:
-                        so, sn = old.stat().st_size, p.stat().st_size
-                    except OSError:
-                        continue
-                    if so != sn:
-                        n["duplicates_differing"] += 1
-                        if sn > so:
-                            found[name] = p
+                cands.setdefault(name, []).append(Path(dirpath) / name)
+    found = {}
+    want = tuple(int(v) for v in frame_size) if frame_size else None
+    for name, paths in cands.items():
+        n["duplicates"] += len(paths) - 1
+        sized = []
+        for k, p in enumerate(paths):
+            try:
+                sized.append((p.stat().st_size, -k, p))
+            except OSError:                       # a broken link or a vanished file
+                n["unreadable"] += 1
+        if len({s for s, _, _ in sized}) > 1:
+            n["duplicates_differing"] += 1
+        for _, _, p in sorted(sized, reverse=True):          # largest first, first root on a tie
+            if want is not None:
+                got = jpeg_size(p)
+                if got is None:
+                    n["unreadable"] += 1
                     continue
-                found[name] = p
+                if got != want:
+                    n["wrong_size"] += 1
+                    continue
+            found[name] = p
+            break
+        else:
+            n["no_good_copy"] += 1
     return [found[k] for k in sorted(found)], n
 
 
@@ -290,9 +350,15 @@ def main():
     # 2. frames
     h0, h1 = (float(v) for v in args.utc_hours.split("-"))
     photos, cnt = collect_photos(args.originals, args.camera, args.start_date, args.end_date,
-                                 (h0, h1), station=args.station, skip_days=args.skip_days)
+                                 (h0, h1), station=args.station, skip_days=args.skip_days,
+                                 frame_size=(io[0], io[1]))
     for r in cnt["missing_roots"]:
         print(f"WARNING           : photo folder not found: {r}")
+    if cnt["wrong_size"] or cnt["unreadable"]:
+        print(f"copies rejected   : {cnt['wrong_size']} of another size than the lens file's "
+              f"{int(io[0])} x {int(io[1])} (reduced copies), {cnt['unreadable']} unreadable (broken links?)"
+              + (f"; {cnt['no_good_copy']} photo(s) had no good copy at all and are left out"
+                 if cnt["no_good_copy"] else ""))
     for p in photos:
         place(p, out / "src" / p.name)
     (out / "photos.txt").write_text("".join(f"{p}\n" for p in photos))
@@ -315,13 +381,15 @@ def main():
         sys.exit(f"no {args.camera} timex frames in {' '.join(args.originals)} for those dates")
 
     # 3. detect
-    print("detecting         : (roughly 3-4 s per frame)")
+    print(f"detecting         : {n} photos, ~{n * 3.5 / 60:.0f} min on the station NUC (3-4 s each); "
+          f"follow with: tail -f {log}", flush=True)
     if not run([sys.executable, HERE / "waterline_detector_v5.py",
                 "--profile-json", out / "profile.json",
                 "--min-signal-fraction", args.min_signal_fraction,
                 "--image-suffix", "timex.jpg",
                 "--source-dir", out / "src", "--input-dir", out / "in",
-                "--output-dir", out / "detections", "--debug-dir", out / "debug"], log):
+                "--output-dir", out / "detections", "--debug-dir", out / "debug"], log,
+               progress=(n, max(1, n // 10))):
         sys.exit(f"detector failed; see {log}")
     dets = sorted((out / "detections").glob("*.csv"))
     print(f"                    {len(dets)} frame(s) passed the detector's quality filters")

@@ -157,6 +157,21 @@ def test_collect_photos(d):
     check(not any("Jan.22" in p.name for p in ph2) and len(ph2) == len(ph) - 3, "--skip-days leaves the day out")
     ph3, _ = collect_photos([str(d / "A")], "c1", "2025-01-21", "2025-01-24", (0, 24))
     check(len(ph3) == 16, "no --station: every station, as before")
+    # real JPEGs: a reduced copy is rejected against the lens file's frame size, a broken link never kept
+    import cv2
+    j = d / "jpg"
+    for sub in ("a", "b", "c"):
+        (j / sub).mkdir(parents=True)
+    t = datetime(2025, 1, 18, 15, 0, tzinfo=timezone.utc)
+    full, half = photo_name(t, "CACO03", "c1"), photo_name(t + timedelta(hours=1), "CACO03", "c1")
+    cv2.imwrite(str(j / "b" / full), np.zeros((64, 80, 3), np.uint8))
+    os.symlink(j / "nowhere.jpg", j / "a" / full)                       # broken, in the first root
+    cv2.imwrite(str(j / "c" / half), np.zeros((32, 40, 3), np.uint8))   # only a reduced copy
+    ph4, n4 = collect_photos([str(j / "a"), str(j / "b"), str(j / "c")], "c1", "2025-01-18", "2025-01-18",
+                             (0, 24), frame_size=(80, 64))
+    check([p.name for p in ph4] == [full] and ph4[0].exists(), "the good copy kept, not the broken link listed first")
+    check(n4["unreadable"] == 1 and n4["wrong_size"] == 1 and n4["no_good_copy"] == 1,
+          f"broken link and reduced copy counted ({n4['unreadable']}, {n4['wrong_size']}); the reduced-only photo left out")
 
 
 def plan_for(d, era="adcp", env="2025005FA_Marconi_Mar_YSMP_Lidar_DSM_25cm.tif",
@@ -191,12 +206,88 @@ def test_labels(d):
     p = plan_for(d, era="live", env=None, eo="CACO05_c1_20251113_EO-CV.yaml")
     lab, why = sp.honest_label(rtk, p, args, Path("2026-09-29_Marconi_Checkshots.csv"))
     check(lab == "CIRCULAR" and "setup" in why[0], "RTK with C = 0.037 (fitted to it): CIRCULAR")
-    lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=0.035), Path("2026-09-29_Marconi_Checkshots.csv"))
-    check(lab == "INDEPENDENT", "RTK with a C fitted elsewhere: the table's label")
+    # a C of unknown origin is never INDEPENDENT; a C declared fitted to no survey keeps the label
+    for c in (0.035, 0.05, 0.0371):
+        lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=c), Path("2026-09-29_Marconi_Checkshots.csv"))
+        check(lab == "PARTLY-CIRCULAR" and "unknown origin" in why[0], f"RTK with C = {c} of unknown origin: PARTLY-CIRCULAR")
+    lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=0.035, setup_fitted_to="none:repeat crossings"),
+                               Path("2026-09-29_Marconi_Checkshots.csv"))
+    check(lab == "INDEPENDENT", "RTK with a C declared fitted to no survey (--setup-fitted-to none:...): INDEPENDENT")
+    # the RTK file under another name is recognised by its content
+    real = Path(d) / "rtk_copy.csv"
+    rtk_src = Path("/tmp/claude-0/-home-user-caco05-waterline/1e668ac9-7b7a-5204-b62b-1a0cde16501d/scratchpad/"
+                   "survey_inputs/2026-09-29_Marconi_Checkshots.csv")
+    if rtk_src.exists():
+        shutil.copy(rtk_src, real)
+        lab, why = sp.honest_label(dict(rtk, survey_date=""), p, args, real)
+        check(lab == "CIRCULAR" and "same content" in why[0], "the RTK shots renamed (rtk_copy.csv): still CIRCULAR, by sha256")
+    else:
+        print("  skip  renamed-RTK check (the real RTK file is not on this computer)")
+    other = Path(d) / "another_rtk.csv"
+    other.write_text("Name,Easting,Northing,Elevation,Description\n1,420100,4638400,1.2,Transect\n")
+    v = sp.Verdict(rtk)
+    sp.honest_label(rtk, p, args, other, verdict=v)
+    check(v.label == "CIRCULAR" and "cannot be ruled out" in v.reasons[0],
+          "another points survey of the fit's date: possibly the same shots -> CIRCULAR")
+    v = sp.Verdict(dict(rtk, label_override_reason="a different survey: the 2026-09-29 afternoon RTK, not the fit's shots"))
+    sp.honest_label(rtk, p, args, other, verdict=v)
+    check(v.label == "INDEPENDENT" and v.overridden and "CIRCULAR" in v.overridden[0],
+          "... overruled only by label_override_reason, and the overruled downgrade is kept")
+    v = sp.Verdict(dict(rtk, label_override_reason="anything"))
+    sp.honest_label(rtk, p, args, real if real.exists() else Path("2026-09-29_Marconi_Checkshots.csv"), verdict=v)
+    check(v.label == "CIRCULAR", "the same shots (content or name) cannot be overruled")
+    # a C declared fitted to a survey file: CIRCULAR against that file
+    lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=0.05, setup_fitted_to=str(other),
+                                                       survey_dirs=[]), other)
+    check(lab == "CIRCULAR", "a C declared fitted to this very file: CIRCULAR")
     gcp = {"name": "oct_gcps", "survey_type": "points", "survey_date": "2024-10-23", "label": "INDEPENDENT", "why": ""}
     p = plan_for(d, eo="CACO03_c1_20241023_EO.yaml")
     lab, why = sp.honest_label(gcp, p, args, Path("2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv"))
     check(lab == "PARTLY-CIRCULAR", "GCPs of the calibration day, even if the table said INDEPENDENT")
+    lab, why = sp.honest_label(gcp, p, args, Path("2024-10-23_control.csv"))
+    check(lab == "PARTLY-CIRCULAR", "a point survey of the calibration day under any name ('_control.csv'): PARTLY-CIRCULAR")
+
+
+def test_setup_in_use(d):
+    print("the label and provenance use the C the waterlines were built with")
+    d = Path(d) / "inuse"
+    (d / "waterlines").mkdir(parents=True)
+    p = plan_for(d, era="live", env=None, eo="CACO05_c1_20251113_EO-CV.yaml")
+    rtk = {"name": "rtk_2026-09-29", "survey_type": "points", "survey_date": "2026-09-29",
+           "label": "INDEPENDENT", "why": ""}
+    built = SimpleNamespace(setup_coef=0.037)
+    sp.write_stamp(d, "merge", {"x": 1}, extra={"setup": {"c1": {"coef": 0.037,
+                                                                  "fit": sp.setup_fit_info(0.037, built),
+                                                                  "implied_coef": 0.0370}}})
+    later = SimpleNamespace(setup_coef=0.02, setup_fitted_to="none:test")
+    fits, src = sp.setup_in_use(p, later)
+    check([f["coef"] for f in fits] == [0.037] and src.startswith("the waterlines"),
+          "a later --setup-coef 0.02 --steps compare: the C in use is the one the waterlines carry (0.037)")
+    lab, why = sp.honest_label(rtk, p, later, Path("2026-09-29_Marconi_Checkshots.csv"))
+    check(lab == "CIRCULAR", "... so the RTK comparison stays CIRCULAR")
+    check(abs(sp.implied_c(0.3541, 0.65, 9.5) - 0.037) < 2e-4, "C implied by a row's own setup, Hs and Tp")
+
+
+def test_merge_drops_no_setup(d):
+    print("frames without a wave record (no setup) are left out when C > 0")
+    d = Path(d) / "nosetup"
+    (d / "waterlines" / "c1").mkdir(parents=True)
+    f = d / "waterlines" / "c1" / "contour_points_ground.csv"
+    f.write_text("source_file,camera,capture_time_utc,capture_epoch,tide_elevation_navd88,offshore_hs_m,"
+                 "offshore_tp_s,setup_correction_m,beach_elevation_navd88,easting_utm19,northing_utm19\n"
+                 "a,c1,2026-09-29T14:00:00Z,1790690400,0.5,1.0,9.0,0.3,0.8,420100,4638400\n"
+                 "a,c1,2026-09-29T14:00:00Z,1790690400,0.5,1.0,9.0,0.3,0.8,420101,4638401\n"
+                 "b,c1,2026-09-29T15:00:00Z,1790694000,0.6,,,,0.6,420100,4638400\n")
+    plan = {"date": "2026-09-29", "era": "live", "out": d, "first": "2026-09-29", "last": "2026-09-29",
+            "cams": {"c1": {}}, "surveys": []}
+    st, out = quiet(sp.merge_cameras, plan, [("c1", f)], SimpleNamespace(setup_coef=0.037))
+    rows = list(csv.DictReader(open(d / "waterlines" / "contour_points_ground.csv")))
+    check(len(rows) == 2 and all(r["source_file"] == "a" for r in rows), "the frame without Hs/Tp is left out")
+    check(st["no_setup_frames"] == {"c1": 1} and "WARNING" in out, "counted per camera and warned")
+    listed = list(csv.DictReader(open(d / "waterlines" / "no_setup_frames.csv")))
+    check(len(listed) == 1 and listed[0]["source_file"] == "b", "listed in no_setup_frames.csv")
+    st, _ = quiet(sp.merge_cameras, plan, [("c1", f)], SimpleNamespace(setup_coef=0.0))
+    check(st["rows"] == 3, "C = 0: nothing left out (no frame has a setup)")
 
 
 def cfg_args(**kw):
@@ -218,6 +309,14 @@ def test_config(d):
         check(plan is not None, f"{date} builds with --force-disabled")
     plan, _ = quiet(sp.build_plan, "2025-03-06", cfg, srv, cfg_args())
     check(list(plan["cams"]) == ["c2"] and plan["cams"]["c2"]["station"] == "CACO04", "2025-03-06: c2 only, CACO04")
+    plan, _ = quiet(sp.build_plan, "2026-09-29", cfg, srv, cfg_args())
+    check(plan["first"] == "2026-09-26" and plan["last"] == "2026-10-02" and plan["era"] == "live"
+          and [s["name"] for s in plan["surveys"]] == ["rtk_2026-09-29"],
+          "2026-09-29 (the user first called it 27 Sep): window 26 Sep - 2 Oct, the 29 Sep RTK")
+    check(not [r for r in cfg if r["date"] == "2026-09-27"], "no 2026-09-27 product left in the table")
+    rtk_row = [s for s in srv if s["name"] == "rtk_2026-09-29"][0]
+    check(rtk_row["label"] == "CIRCULAR" and "calm low-tide RTK" in rtk_row["why"],
+          "the 2026 RTK row says CIRCULAR plainly, and what an independent check needs")
     plan, _ = quiet(sp.build_plan, "2025-01-23", cfg, srv, cfg_args())
     check(plan["last"] == "2025-01-23" and all(c["station"] == "CACO03" for c in plan["cams"].values()),
           "2025-01-23: CACO03 only, 24 Jan (the re-set) outside the window")
@@ -281,17 +380,27 @@ def test_caveats(d):
     out.mkdir()
     a = SimpleNamespace(setup_coef=sp.SETUP_COEF)
     for era in ("live", "adcp"):
-        plan = {"era": era, "date": "2026-09-27", "first": "2026-09-24", "last": "2026-09-30", "out": out,
-                "surveys": [], "cams": {"c1": {"first": "2026-09-24", "last": "2026-09-30"}}}
+        plan = {"era": era, "date": "2026-09-29", "first": "2026-09-26", "last": "2026-10-02", "out": out,
+                "surveys": [], "cams": {"c1": {"first": "2026-09-26", "last": "2026-10-02"}}}
         forcing = {"waves": {"setup_in_window": {"median_m": 0.3, "daytime_median_m": 0.28}}}
         cav = sp.collect_caveats(plan, a, {}, forcing, {"frames_per_day": {"c1": {"2026-09-29": 3}}})
         text = "\n".join(cav)
         first = "Live era" if era == "live" else "ADCP datum"
         check(first in text, f"{era}: its own era caveat is there")
         check("under-corrects" in text, f"{era}: the setup under-correction caveat is there too")
-        check("none on 2026-09-24" in text, f"{era}: the window days without waterlines are listed")
+        check("none on 2026-09-26" in text, f"{era}: the window days without waterlines are listed")
+        check(("GNSS-R" in text and "surf zone" in text) == (era == "adcp"),
+              f"{era}: C's still-water reference (GNSS-R, surf zone) stated for the ADCP era only")
+        check("NOMINAL" in text and "6348" in text, f"{era}: the GeoTIFF CRS tag is said to be nominal")
     cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.05), {}, forcing, {})
-    check(not any("under-corrects" in c for c in cav), "a C fitted elsewhere: no RTK under-correction caveat")
+    check(not any("under-corrects" in c for c in cav) and any("WITHOUT saying where" in c for c in cav),
+          "a C of unknown origin: no RTK caveat, and said to be of unknown origin")
+    cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.05, setup_fitted_to="none:crossings"), {}, forcing, {})
+    check(not any("fitted on this beach in Sep-Oct 2026" in c for c in cav),
+          "a declared C is not described as the 2026 fit")
+    check(sp.stat_text({"n": 1, "median": -0.3, "nmad": 0.0, "rmse": 0.3}).count("NMAD -") == 1
+          and "TOO FEW" in sp.stat_text({"n": 1, "median": -0.3, "nmad": 0.0, "rmse": 0.3}),
+          "one value: no NMAD, and marked too few")
 
 
 def test_stamps(d):
@@ -312,6 +421,52 @@ def test_stamps(d):
     check(not fresh and "newer" in why, "an input newer than the output: rebuilt")
     outp.unlink()
     check(not sp.is_fresh(d, "k", sig, [outp], [])[0], "a missing output: rebuilt")
+    # chained: a rebuilt upstream step makes the filtered file stale
+    plan = {"out": d, "date": "x"}
+    w = d / "waterlines"
+    w.mkdir()
+    (w / "contour_points_ground.csv").write_text("a\n")
+    sp.write_stamp(d, "merge", {"m": 1})
+    (w / "contour_points_ground_filtered.csv").write_text("a\n")
+    sp.write_stamp(d, "filter", {"after": {"merge": sp.token(d, "merge")}})
+    check(sp.waterline_file(plan).name == "contour_points_ground_filtered.csv", "filtered file of the current merge: used")
+    sp.write_stamp(d, "merge", {"m": 2})
+    f, out = quiet(sp.waterline_file, plan)
+    check(f.name == "contour_points_ground.csv" and "NOT used" in out,
+          "filtered file of an earlier merge: NOT used, and said so")
+    check("waterline_consistency.py" in sp.scripts_sig("filter") and sp.scripts_sig("filter")["waterline_consistency.py"],
+          "the script's sha256 is part of the step's signature")
+    st = sp.read_stamp(d, "merge")
+    check(st["software"]["scripts"].get("survey_products.py") and "commit" in st["software"],
+          "each stamp records the commit and the sha256 of the scripts that built it")
+
+
+def test_keep_moved_days(d):
+    print("--keep-moved-days is applied when the detection runs, not stored")
+    res = {"different_days": ["2025-01-24"], "leave_out": True}
+    check(sp.skip_days_of(res, SimpleNamespace(keep_moved_days=False)) == ["2025-01-24"], "default: the day is left out")
+    check(sp.skip_days_of(res, SimpleNamespace(keep_moved_days=True)) == [], "--keep-moved-days on a rerun: kept")
+    check(sp.skip_days_of(dict(res, leave_out=False), SimpleNamespace(keep_moved_days=False)) == [],
+          "most days differ: nothing left out automatically")
+
+
+def test_live_rows(d):
+    print("live rows: window, hours, station ID; malformed rows counted")
+    d = Path(d) / "live"
+    d.mkdir()
+    src = d / "contours.csv"
+    rows = ["source_file,camera,capture_time_utc,tide_elevation_navd88,offshore_hs_m,offshore_tp_s"]
+    for st, h in (("CACO05", 14), ("CACO05", 15), ("CACO04", 16)):
+        t = datetime(2026, 9, 29, h, 0, tzinfo=timezone.utc)
+        n = photo_name(t, st, "c2").replace(".jpg", "")
+        rows += [f"{n},c2,{t:%Y-%m-%dT%H:%M:%SZ},0.5,1.0,9.0"] * 3
+    rows.append("x,c2,2026-09-29T1")                  # a line cut off by the cron's rewrite
+    src.write_text("\n".join(rows) + "\n")
+    plan = {"cams": {"c2": {"first": "2026-09-29", "last": "2026-09-29", "hours": (0.0, 24.0), "station": "CACO05"}}}
+    n_in, n_out, frames, other, bad = sp.read_live_rows(src, d / "out.csv", plan)
+    check(n_out == 6 and len(frames) == 2, "only the date's station ID kept (CACO05)")
+    check(other == {"c2": {"CACO04": 3}}, "rows of frames named for another station counted, per camera")
+    check(bad == 1, "a cut-off row skipped and counted, no traceback")
 
 
 def test_py38():
@@ -336,6 +491,10 @@ def main():
         test_setup_identical(d)
         test_collect_photos(d)
         test_labels(d)
+        test_setup_in_use(d)
+        test_merge_drops_no_setup(d)
+        test_keep_moved_days(d)
+        test_live_rows(d)
         test_config(d)
         test_frames_per_day(d)
         test_caveats(d)

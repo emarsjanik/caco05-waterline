@@ -45,7 +45,11 @@ survey covers at least --min-cover (default 50%) of the cell -- a cell
 mostly on the lidar's water mask is not compared on the sliver that is
 there. A part-covered cell at that edge is still the median of its dry
 part, i.e. biased up the slope by up to slope x cell / 4 (2.5 cm on a
-1:20 beach). Then DEM - survey per cell, written as .asc and
+1:20 beach): such cells (50-99% covered) are counted, per elevation
+band, and the statistics are also given for fully covered cells only.
+The lidar's vertical datum is read from its GeoKeys (VerticalCSType);
+the 2025 YSMP files state none, so NAVD88 is assumed and the report
+says the geoid model is unknown. Then DEM - survey per cell, written as .asc and
 GeoTIFF (metres of difference, not a NAVD88 height: no vertical datum
 keys). A survey coarser than half a DEM cell is sampled bilinearly at
 the cell centres instead. Lidar sees only the beach that was DRY at
@@ -80,14 +84,33 @@ camera whose waterlines crossed that DEM cell most; else the live
 station's seam at northing 4638415 (c1 to the south, c2 to the north;
 right for the 2025-11-13 view only, and the report says so).
 
-WATERLINES (--contours). Every georectified waterline point is also
-compared with the survey (the logic of compare_dem_survey.py): on a DSM
-the survey is sampled bilinearly at the point; for a point survey the
-nearest survey point within --tolerance m counts. The waterline's
-elevation is beach_elevation_navd88 (still water + wave setup) where
-present, else tide_elevation_navd88 (still water only, which puts a
-swash-marked line LOW by about the setup); the report says which, per
-row count. Per day and camera: frames, points, median, NMAD.
+WATERLINES (--contours). The georectified waterlines are also compared
+with the survey directly:
+  * on a DSM, the survey is sampled bilinearly at every waterline point
+    (the logic of compare_dem_survey.py);
+  * on RTK transects (Emlid points described 'Transect'), the logic of
+    compare_rtk.py: consecutive transect points (a jump of more than
+    --transect-split m starts a new transect) make a profile; a
+    waterline point counts if it lies within --transect-tolerance m of
+    the line and between its first and last surveyed point (never
+    extrapolated), where the RTK elevation is interpolated ALONG the
+    profile; each frame with >= --transect-min-points such points gives
+    ONE value, the median of its waterline - RTK. Matching each line to
+    the nearest shot instead would compare points up to a metre apart on
+    a 1:7 face (~0.14 m of slope) and depend on which few lines pass
+    near a shot. Other points of such a file (wrack lines mark the swash
+    limit, not the sand) are not used for the waterlines;
+  * on isolated points (GCPs, a CSV without transects), the nearest
+    point within --tolerance m, one value per frame and point, NOT
+    slope-corrected (the report gives the median distance).
+The waterline's elevation is beach_elevation_navd88 (still water + wave
+setup) where present, else tide_elevation_navd88 (still water only,
+which puts a swash-marked line LOW by about the setup); the report says
+which, per row count. Per day and camera: frames, values, median, NMAD.
+
+FEW VALUES. NMAD, p5 and p95 are not given for fewer than 3 values (the
+NMAD of one value is 0, which would read as perfect agreement), and any
+group with fewer than 10 is marked as not an estimate.
 
 OUTPUT (in --output-dir):
   NAME_dem_minus_survey.asc / .tif   (dsm only) the difference grid
@@ -148,7 +171,13 @@ DISTANCE_BINS = (0, 100, 150, 200, 250, 300, 400, 600, 1e9)
 BAND = 0.5                       # elevation band width, m
 NOMINAL_EPSG = 32619             # as asc_to_geotiff.py writes the DEM
 MIN_BAND_N = 10                  # fewer values than this in a group: flagged as few
+MIN_SPREAD_N = 3                 # fewer than this: no NMAD / p5 / p95 (one value has NMAD 0)
 TIME_GAP_WARN_DAYS = 3
+# Waterlines on RTK transects: compare_rtk.py's defaults.
+TRANSECT_TOLERANCE, TRANSECT_SPLIT, TRANSECT_MIN_POINTS = 2.0, 15.0, 3
+FULL_COVER = 0.999               # a DEM cell the survey covers entirely (8 x 8 sub-cells)
+VERTICAL_UNKNOWN = ("vertical datum not stated in the survey file; assumed NAVD88 (geoid model "
+                    "unknown; GEOID12B and GEOID18 differ by a few cm here)")
 
 # Ink and surfaces as dem_figure.py: neutral, so the only colour is data.
 INK = "#1f1e1c"
@@ -200,6 +229,67 @@ def survey_crs_text(path):
     m = re.search(rb"(?:NAD83|WGS ?84|ETRS89)[^|\x00]{0,40}?UTM [Zz]one ?\d+ ?[NS]?", raw) or \
         re.search(rb"UTM [Zz]one ?\d+ ?[NS]?", raw)
     return m.group(0).decode("ascii", "replace").strip() if m else ""
+
+
+def tiff_geokeys(path):
+    """{GeoKey id: value} of a GeoTIFF / BigTIFF's short-valued GeoKeys, from the first IFD only
+    (the raster is not read). None if the file cannot be parsed."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            hdr = f.read(16)
+            bo = {b"II": "<", b"MM": ">"}.get(hdr[:2])
+            if not bo:
+                return None
+            ver = struct.unpack(bo + "H", hdr[2:4])[0]
+            if ver == 42:
+                off, head, esize, cf = struct.unpack(bo + "I", hdr[4:8])[0], 2, 12, "I"
+            elif ver == 43:
+                off, head, esize, cf = struct.unpack(bo + "Q", hdr[8:16])[0], 8, 20, "Q"
+            else:
+                return None
+            f.seek(off)
+            n = struct.unpack(bo + ("H" if ver == 42 else "Q"), f.read(head))[0]
+            ents = f.read(esize * n)
+            cs = struct.calcsize(cf)
+            for i in range(n):
+                e = ents[esize * i: esize * (i + 1)]
+                tag, typ = struct.unpack(bo + "HH", e[:4])
+                if tag != 34735 or typ != 3:
+                    continue
+                cnt = struct.unpack(bo + cf, e[4:4 + cs])[0]
+                nb = 2 * cnt
+                if nb <= cs:
+                    data = e[4 + cs:4 + cs + nb]
+                else:
+                    f.seek(struct.unpack(bo + cf, e[4 + cs:4 + 2 * cs])[0])
+                    data = f.read(nb)
+                k = struct.unpack(bo + "H" * cnt, data)
+                return {k[j]: k[j + 3] for j in range(4, len(k) - 3, 4) if k[j + 1] == 0}
+        return {}
+    except (OSError, struct.error, ValueError):
+        return None
+
+
+def survey_vertical_text(path):
+    """-> (what the DSM file says of its vertical datum, or '' if nothing; a note when it says
+    nothing). GeoTIFF: VerticalCSType (GeoKey 4096; 5703 = NAVD88). .asc: its .prj."""
+    p = Path(path)
+    if p.suffix.lower() == ".asc":
+        prj = p.with_suffix(".prj")
+        t = prj.read_text(errors="replace") if prj.exists() else ""
+        m = re.search(r'VERTCS\["([^"]+)"', t) or re.search(r"(NAVD ?88[^\"\],]*)", t)
+        return (m.group(1), "") if m else ("", VERTICAL_UNKNOWN)
+    keys = tiff_geokeys(p)
+    if keys is None:
+        return "", "vertical datum not checked (GeoKeys unreadable); assumed NAVD88"
+    v = keys.get(4096)
+    if v is None:
+        return "", VERTICAL_UNKNOWN
+    if v == 5703:
+        return "EPSG:5703 (NAVD88 height)", ""
+    return f"EPSG:{v}", (f"the survey states vertical EPSG:{v}, not NAVD88 (5703): the difference includes "
+                         f"the datum difference")
 
 
 def _num(s):
@@ -539,16 +629,21 @@ STAT_KEYS = ("n", "median", "mean", "nmad", "rmse", "p5", "p95", "within_0.10", 
 
 
 def stats(d):
+    """n, median, mean, NMAD, RMSE, p5, p95, shares within 0.1/0.2/0.5 m. NMAD, p5 and p95 are
+    NaN below MIN_SPREAD_N values: the NMAD of one value is 0, which would read as perfect."""
     d = np.asarray(d, float)
     d = d[np.isfinite(d)]
     if not len(d):
         return dict(zip(STAT_KEYS, [0] + [float("nan")] * 9))
     med = float(np.median(d))
     a = np.abs(d)
+    spread = len(d) >= MIN_SPREAD_N
+    nan = float("nan")
     return {"n": int(len(d)), "median": med, "mean": float(d.mean()),
-            "nmad": float(1.4826 * np.median(np.abs(d - med))),
+            "nmad": float(1.4826 * np.median(np.abs(d - med))) if spread else nan,
             "rmse": float(np.sqrt(np.mean(d ** 2))),
-            "p5": float(np.percentile(d, 5)), "p95": float(np.percentile(d, 95)),
+            "p5": float(np.percentile(d, 5)) if spread else nan,
+            "p95": float(np.percentile(d, 95)) if spread else nan,
             # (+0.1 mm: the grids are written to 0.1 mm, so exactly 0.20 m counts as within 0.20)
             "within_0.10": float(np.mean(a <= 0.10 + 1e-4)),
             "within_0.20": float(np.mean(a <= 0.20 + 1e-4)),
@@ -728,14 +823,17 @@ def time_gap(survey_date, photo_dates):
 # Waterlines against the survey
 # ---------------------------------------------------------------------
 
-def waterlines_vs_survey(cont, survey_type, grid=None, pts=None, tolerance=1.0):
-    """waterline - survey at each waterline point (NaN where the survey has nothing)."""
+def waterlines_vs_survey(cont, survey_type, grid=None, pts=None, tolerance=1.0, dist_out=None):
+    """waterline - survey at each waterline point (NaN where the survey has nothing). DSM: the
+    survey sampled at the point. Points: the nearest survey point within `tolerance` m, one value
+    per frame and survey point, NOT slope-corrected (dist_out, a list, gets the distances)."""
     if survey_type == "dsm":
         g, x0, y0, c = grid
         zs = sample(g, x0, y0, c, cont["E"], cont["N"])
         return cont["Z"] - zs
     d = np.full(cont["E"].shape, np.nan)
     match = np.full(cont["E"].shape, -1)
+    dist = np.full(cont["E"].shape, np.nan)
     if not len(pts["E"]):
         return d
     lo_e, hi_e = pts["E"].min() - tolerance, pts["E"].max() + tolerance
@@ -746,22 +844,74 @@ def waterlines_vs_survey(cont, survey_type, grid=None, pts=None, tolerance=1.0):
         idx = near[k:k + 4096]
         dd = np.hypot(cont["E"][idx, None] - pts["E"][None, :], cont["N"][idx, None] - pts["N"][None, :])
         j = dd.argmin(axis=1)
-        ok = dd[np.arange(len(idx)), j] <= tolerance
+        dmin = dd[np.arange(len(idx)), j]
+        ok = dmin <= tolerance
         d[idx[ok]] = cont["Z"][idx[ok]] - pts["Z"][j[ok]]
         match[idx[ok]] = j[ok]
+        dist[idx[ok]] = dmin[ok]
     # A frame's points all carry its one water level, so every waterline point near the same
-    # survey point repeats the same difference: keep one per (frame, survey point).
+    # survey point repeats the same difference: keep one per (frame, survey point), the nearest.
     hit = np.nonzero(match >= 0)[0]
     if len(hit):
         keys = np.char.add(np.char.add(cont["frame"][hit].astype(str), "|"), match[hit].astype(str))
-        _, first = np.unique(keys, return_index=True)
+        o = np.lexsort((dist[hit], keys))
+        _, first = np.unique(keys[o], return_index=True)
         keep = np.zeros(len(d), bool)
-        keep[hit[first]] = True
+        keep[hit[o[first]]] = True
         d[~keep] = np.nan
+    if dist_out is not None:
+        dist_out.extend(dist[np.isfinite(d)].tolist())
     return d
 
 
+def is_transect(desc):
+    return str(desc).strip().lower() == "transect"
+
+
+def waterlines_on_transects(cont, transects, tolerance=TRANSECT_TOLERANCE, min_points=TRANSECT_MIN_POINTS):
+    """
+    compare_rtk.py's check of the waterlines against RTK transects (transects from
+    compare_rtk.load_transects): a waterline point counts if it lies within `tolerance` m of a
+    transect line and between its first and last surveyed point; the RTK elevation is
+    interpolated along the profile there. ONE value per frame with >= min_points such points:
+    the median of waterline - RTK.
+    -> (per-frame dict {d, cam, day, frame, points} of arrays, per-point mask of the points used).
+    """
+    n = len(cont["E"])
+    zr = np.full(n, np.nan)
+    on = np.zeros(n, bool)
+    for t in transects:
+        re_, rn = cont["E"] - t["c"][0], cont["N"] - t["c"][1]
+        s = re_ * t["d"][0] + rn * t["d"][1]
+        lat = np.abs(-re_ * t["d"][1] + rn * t["d"][0])
+        m = (lat <= tolerance) & (s >= t["s"][0]) & (s <= t["s"][-1]) & ~on
+        zr[m] = np.interp(s[m], t["s"], t["z"])
+        on |= m
+    fr = {"d": [], "cam": [], "day": [], "frame": [], "points": []}
+    used = np.zeros(n, bool)
+    idx = np.nonzero(on)[0]
+    if len(idx):
+        frames = cont["frame"][idx]
+        o = np.argsort(frames, kind="stable")
+        idx, frames = idx[o], frames[o]
+        cuts = np.nonzero(frames[1:] != frames[:-1])[0] + 1
+        for grp in np.split(idx, cuts):
+            if len(grp) < min_points:
+                continue
+            fr["d"].append(float(np.median(cont["Z"][grp] - zr[grp])))
+            fr["cam"].append(cont["cam"][grp[0]])
+            fr["day"].append(cont["day"][grp[0]])
+            fr["frame"].append(cont["frame"][grp[0]])
+            fr["points"].append(len(grp))
+            used[grp] = True
+    out = {k: np.array(v, dtype=float if k == "d" else (int if k == "points" else object))
+           for k, v in fr.items()}
+    return out, used
+
+
 def waterline_rows(cont, d):
+    """Per camera and per day: frames, values, statistics of d (one value per point, or per frame
+    for the transect check, where cont holds the per-frame arrays)."""
     ok = np.isfinite(d)
     rows = []
     for cam in sorted(set(cont["cam"][ok].tolist())):
@@ -784,12 +934,21 @@ def waterline_rows(cont, d):
 # Report
 # ---------------------------------------------------------------------
 
+def fv(v, fmt):
+    """A number in `fmt`, or '-' when it is missing (NaN: too few values for it)."""
+    try:
+        return fmt.format(v) if v is not None and np.isfinite(v) else "-"
+    except (TypeError, ValueError):
+        return "-"
+
+
 def fmt_row(r, what="cells"):
     if not r["n"]:
         return f"  {r['group']:>16s} {0:>7d}"
-    few = "  (few)" if r["n"] < MIN_BAND_N else ""
+    few = f"  (few: n < {MIN_BAND_N}, not an estimate)" if r["n"] < MIN_BAND_N else ""
     return (f"  {r['group']:>16s} {r['n']:>7d} {r['median']:>+7.3f} {r['mean']:>+7.3f} "
-            f"{r['nmad']:>6.3f} {r['rmse']:>6.3f} {r['p5']:>+7.2f} {r['p95']:>+7.2f} "
+            f"{fv(r['nmad'], '{:.3f}'):>6s} {r['rmse']:>6.3f} {fv(r['p5'], '{:+.2f}'):>7s} "
+            f"{fv(r['p95'], '{:+.2f}'):>7s} "
             f"{100 * r['within_0.10']:>5.0f}% {100 * r['within_0.20']:>5.0f}% "
             f"{100 * r['within_0.50']:>5.0f}%{few}")
 
@@ -806,9 +965,24 @@ def table(lines, title, rows, what="cells"):
 
 
 def headline_text(s, what):
-    return (f"median {s['median']:+.3f} m, NMAD {s['nmad']:.3f} m, RMSE {s['rmse']:.3f} m, "
-            f"p5/p95 {s['p5']:+.2f}/{s['p95']:+.2f} m, {100 * s['within_0.20']:.0f}% within "
-            f"+/-0.20 m (n = {s['n']} {what})")
+    return (f"median {s['median']:+.3f} m, NMAD {fv(s['nmad'], '{:.3f} m')}, RMSE {s['rmse']:.3f} m, "
+            f"p5/p95 {fv(s['p5'], '{:+.2f}')}/{fv(s['p95'], '{:+.2f}')} m, {100 * s['within_0.20']:.0f}% "
+            f"within +/-0.20 m (n = {s['n']} {what})")
+
+
+def clean_json(o):
+    """NaN and infinities -> None: JSON has no NaN, and survey_products.py reads this file."""
+    if isinstance(o, dict):
+        return {k: clean_json(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [clean_json(v) for v in o]
+    if isinstance(o, (float, np.floating)):
+        return float(o) if np.isfinite(o) else None
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.bool_):
+        return bool(o)
+    return o
 
 
 # ---------------------------------------------------------------------
@@ -955,9 +1129,13 @@ def draw_figure(path, ctx):
         y0c = max(min(pos.y0, mid - 0.3), 0.17)
         y1c = min(max(pos.y1, mid + 0.3), top)
         cx0, ch = pos.x1 + 0.022, y1c - y0c
+        # arrows on the colour bar where values lie beyond +/-lim (drawn in the end colours)
+        dv = ctx["d"][np.isfinite(ctx["d"])]
+        hi_, lo_ = bool((dv > lim).any()), bool((dv < -lim).any())
+        ext = "both" if (hi_ and lo_) else "max" if hi_ else "min" if lo_ else "neither"
         cb = fig.colorbar(im, cax=fig.add_axes(
-            [cx0, y0c + (0.53 if two else 0.25) * ch, 0.01, (0.42 if two else 0.5) * ch]))
-        cb.set_label(cb_label, color=INK2)
+            [cx0, y0c + (0.53 if two else 0.25) * ch, 0.01, (0.42 if two else 0.5) * ch]), extend=ext)
+        cb.set_label(cb_label + ("; arrows: beyond" if ext != "neither" else ""), color=INK2)
         cb.outline.set_edgecolor(AXIS)
         if two:
             sm = plt.cm.ScalarMappable(cmap=sand, norm=plt.Normalize(*ctx["zlim"]))
@@ -1003,7 +1181,7 @@ def draw_figure(path, ctx):
         if bands:
             yc = np.array([float(r["group"].split(" to ")[0]) + BAND / 2 for r in bands])
             med = np.array([r["median"] for r in bands])
-            nm = np.array([r["nmad"] for r in bands])
+            nm = np.nan_to_num(np.array([r["nmad"] for r in bands], float))   # no bar below 3 values
             few = np.array([r["n"] < MIN_BAND_N for r in bands])
             bx.errorbar(med[~few], yc[~few], xerr=nm[~few], fmt="o", color=INK, ms=5,
                         ecolor=INK2, elinewidth=1.2, capsize=0, zorder=3)
@@ -1044,7 +1222,8 @@ def draw_figure(path, ctx):
 def compare(dem_path, survey_path, survey_type, label, why, name=None, output_dir=".",
             survey_date=None, photo_dates=None, contours=None, camera_eo=None, camera_io=None,
             spread=None, count=None, envelope_source=None, min_cover=0.5, tolerance=1.0,
-            epsg=NOMINAL_EPSG, plot=True):
+            epsg=NOMINAL_EPSG, plot=True, transect_tolerance=TRANSECT_TOLERANCE,
+            transect_split=TRANSECT_SPLIT, transect_min_points=TRANSECT_MIN_POINTS):
     """
     Compares a DEM with a survey and writes the outputs. camera_eo / camera_io: {cam: path}.
     Returns the headline (also written as NAME_comparison.json).
@@ -1162,11 +1341,18 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         print(f"survey            : reading {survey_path} ...")
         sg, sx0, sy0, sc = read_survey(survey_path)
         crs = survey_crs_text(survey_path)
+        vert, vnote = survey_vertical_text(survey_path)
         print(f"survey            : {sg.shape[1]} x {sg.shape[0]} at {sc:g} m"
-              + (f", CRS as stated: {crs}" if crs else ""))
+              + (f", CRS as stated: {crs}" if crs else "") + f"; vertical: {vert or vnote}")
         lines.append(f"survey grid: {sg.shape[1]} x {sg.shape[0]} cells at {sc:g} m; horizontal CRS "
                      f"as stated in the file: {crs or 'not stated'}; compared in the same UTM 19N "
-                     f"metres as the DEM, no shift applied")
+                     f"metres as the DEM, no shift applied (the DEM grid is in the frame of the "
+                     f"calibration's GCPs, which were surveyed in NAD83(2011) / UTM 19N like the "
+                     f"surveys; an EPSG:{epsg} tag on the GeoTIFFs is"
+                     + (" nominal)" if epsg == 32619 else " as given)"))
+        lines.append(f"survey vertical datum: {vert}" if vert else f"survey vertical datum: {vnote}")
+        if vnote:
+            head["vertical_datum_note"] = vnote
         # map extent: the DEM, the cameras if near, padded; the survey is aggregated over it all
         xa, xb, ya, yb = bx0, bx1, by0, by1
         cx, cy = camera_xy
@@ -1190,6 +1376,9 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         cmp_ = has_dem & np.isfinite(sv) & (cov >= min_cover)
         diff = np.where(cmp_, dem - sv, np.nan)
         partial = has_dem & (cov > 0) & (cov < min_cover)
+        # compared, but the survey covers only part of the cell (the lidar's water edge): the
+        # median of the dry part sits up the slope, so these cells read the DEM a little LOW
+        cmp_part = cmp_ & (cov < FULL_COVER)
         none_ = has_dem & (cov == 0)
         n_dem = int(has_dem.sum())
         rr, cc = np.nonzero(has_dem)
@@ -1205,7 +1394,10 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                   f"  DEM cells with a value      : {n_dem}",
                   f"  compared (survey >= {100 * min_cover:.0f}%)    : {int(cmp_.sum())} "
                   f"({100 * cmp_.sum() / max(n_dem, 1):.0f}%)",
-                  f"  survey on part of the cell  : {int(partial.sum())}",
+                  f"    of which partly covered   : {int(cmp_part.sum())} (survey on "
+                  f"{100 * min_cover:.0f}-99% of the cell: its value is the median of the covered, "
+                  f"higher part, so DEM - survey reads a little low there; see BY SURVEY COVER)",
+                  f"  survey on < {100 * min_cover:.0f}% of the cell  : {int(partial.sum())} (not compared)",
                   f"  no survey value at all      : {int(none_.sum())}"]
         if (has_dem & ~cmp_).any():
             zn = dem[has_dem & ~cmp_]
@@ -1216,15 +1408,17 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             lines.append(f"  survey elevation where compared: p2 {np.percentile(zc, 2):+.2f} m "
                          f"(about the survey's seaward edge inside the DEM), median "
                          f"{np.median(zc):+.2f} m, max {zc.max():+.2f} m")
-        lines.append(f"  {'DEM elevation band':>20s} {'cells':>6s} {'compared':>9s} {'share':>6s}")
+        lines.append(f"  {'DEM elevation band':>20s} {'cells':>6s} {'compared':>9s} {'share':>6s} "
+                     f"{'partly covered':>15s}")
         zb = np.floor(dem / BAND) * BAND
         cov_rows = []
         for lo in sorted(set(zb[has_dem].tolist())):
             m = has_dem & (zb == lo)
             lines.append(f"  {band_name(lo):>20s} {int(m.sum()):>6d} {int((m & cmp_).sum()):>9d} "
-                         f"{100 * (m & cmp_).sum() / m.sum():>5.0f}%")
+                         f"{100 * (m & cmp_).sum() / m.sum():>5.0f}% {int((m & cmp_part).sum()):>15d}")
             cov_rows.append({"band": band_name(lo), "dem_cells": int(m.sum()),
-                             "compared": int((m & cmp_).sum())})
+                             "compared": int((m & cmp_).sum()),
+                             "compared_partial_cover": int((m & cmp_part).sum())})
         lines.append(f"  {'camera':>20s} {'cells':>6s} {'compared':>9s} {'share':>6s}")
         for c in sorted(set(cam_all.tolist())):
             m = has_dem & (cam_grid == c)
@@ -1234,12 +1428,18 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         zref = sv[cmp_]
         cam_v = cam_grid[cmp_]
         dist_v = dist_grid[cmp_]
-        rows = standard_groups(d, zref, cam_v, dist_v)
-        rep = repeatability_groups(np.where(cmp_, diff, np.nan),
-                                   grids.get("spread"), grids.get("count"))
-        rows += group_rows(np.where(cmp_, diff, np.nan), rep)
+        part_v = cmp_part[cmp_]
+        rows = standard_groups(d, zref, cam_v, dist_v,
+                               extra=[("survey_cover", "full", ~part_v),
+                                      ("survey_cover", f"{100 * min_cover:.0f}-99%", part_v)])
+        rep_g = repeatability_groups(np.where(cmp_, diff, np.nan),
+                                     grids.get("spread"), grids.get("count"))
+        rows += group_rows(np.where(cmp_, diff, np.nan), rep_g)
         what = "cells"
+        full = stats(diff[cmp_ & ~cmp_part])
         head.update({"dem_cells": n_dem, "dem_cells_compared": int(cmp_.sum()),
+                     "dem_cells_compared_partial_cover": int(cmp_part.sum()),
+                     "full_cover": {k: full[k] for k in STAT_KEYS},
                      "dem_cells_partial_survey": int(partial.sum()),
                      "dem_cells_no_survey": int(none_.sum()), "coverage_by_band": cov_rows,
                      "survey_crs": crs, "survey_on_grid": how})
@@ -1376,15 +1576,55 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     table(lines, "BY DISTANCE FROM THE CAMERAS", [r for r in rows if r["group_type"] == "distance"], what)
     table(lines, "BY DESCRIPTION", [r for r in rows if r["group_type"] == "description"], what)
     table(lines, "BY CODE", [r for r in rows if r["group_type"] == "code"], what)
+    table(lines, "BY SURVEY COVER OF THE CELL (partly covered cells read a little low: their survey value "
+                 "is the median of the dry, higher part)",
+          [r for r in rows if r["group_type"] == "survey_cover"], what)
     table(lines, "BY THE DEM'S OWN SPREAD (16-84 percentile of its frames)",
           [r for r in rows if r["group_type"] == "dem_spread"], what)
     table(lines, "BY THE DEM'S FRAMES PER CELL", [r for r in rows if r["group_type"] == "dem_frames"], what)
 
     # -- waterlines against the survey
     wl_rows = []
+    wl_frames_csv = None
     if cont is not None and len(cont["E"]):
-        dw = waterlines_vs_survey(cont, survey_type, wl_grid, pts, tolerance)
-        okw = np.isfinite(dw)
+        transects = []
+        if survey_type == "points" and sum(is_transect(x) for x in pts["desc"]) >= 3:
+            from compare_rtk import load_transects
+            try:
+                transects = load_transects(survey_path, transect_split)
+            except (KeyError, ValueError) as exc:          # not an Emlid file after all
+                lines.append(f"  (transects not read: {exc})")
+        if transects:
+            # compare_rtk.py's check: one value per frame, the RTK interpolated along the profile
+            per, okw = waterlines_on_transects(cont, transects, transect_tolerance, transect_min_points)
+            dw = per["d"]
+            wl_cont = per
+            unit = "frames"
+            n_other = sum(not is_transect(x) for x in pts["desc"])
+            how_w = (f"compare_rtk.py's transect check: {len(transects)} RTK transects (consecutive "
+                     f"'Transect' points, split at gaps > {transect_split:g} m); a waterline point "
+                     f"counts within {transect_tolerance:g} m of a transect and inside its surveyed "
+                     f"stretch (never extrapolated), the RTK interpolated along the profile; ONE value "
+                     f"per frame with >= {transect_min_points} points (their median)"
+                     + (f"; the {n_other} other points (wrack lines etc.: the swash limit, not the "
+                        f"sand) are not used for the waterlines" if n_other else ""))
+            method = "frames on RTK transects (compare_rtk.py)"
+        else:
+            dists = []
+            dw = waterlines_vs_survey(cont, survey_type, wl_grid, pts, tolerance, dist_out=dists)
+            okw = np.isfinite(dw)
+            wl_cont = cont
+            unit = "points"
+            if survey_type == "dsm":
+                how_w = "the survey sampled bilinearly at each waterline point"
+                method = "waterline points on the DSM"
+            else:
+                md = float(np.median(dists)) if dists else float("nan")
+                how_w = (f"the nearest survey point within {tolerance:g} m of each waterline point, one "
+                         f"value per frame and survey point (a frame's points share one water level); "
+                         f"NOT slope-corrected: the pairs lie a median {fv(md, '{:.2f}')} m apart, and "
+                         f"1 m along a 1:10 beach face is 0.1 m of elevation")
+                method = f"nearest point within {tolerance:g} m, not slope-corrected"
         nb, nt = int((cont["beach"] & okw).sum()), int((~cont["beach"] & okw).sum())
         if nb and not nt:
             setup_mode = "setup-corrected"
@@ -1397,31 +1637,42 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             setup_mode = "setup on some rows only"
             col = (f"beach_elevation_navd88 for {nb} points, tide_elevation_navd88 (no setup) for "
                    f"{nt}")
-        wl_rows = waterline_rows(cont, dw)
-        how_w = ("the survey sampled bilinearly at each waterline point" if survey_type == "dsm" else
-                 f"the nearest survey point within {tolerance:g} m of each waterline point, one "
-                 f"value per frame and survey point (a frame's points share one water level)")
+        wl_rows = waterline_rows(wl_cont, dw)
         lines += ["", "WATERLINES vs SURVEY (waterline elevation - survey; positive = waterline "
                       "elevation too high)",
-                  f"  {contours}: {len(cont['E'])} points, {int(okw.sum())} on the survey; "
-                  f"{how_w}", f"  elevation used: {col}"]
-        lines.append(f"  {'day camera':>16s} {'frames':>6s} {'points':>7s} {'median':>7s} "
+                  f"  {contours}: {len(cont['E'])} points, {int(okw.sum())} used"]
+        lines += ["  " + ln for ln in textwrap.wrap(how_w, 100)]
+        lines.append(f"  elevation used: {col}")
+        lines.append(f"  {'day camera':>16s} {'frames':>6s} {unit:>7s} {'median':>7s} "
                      f"{'NMAD':>6s} {'RMSE':>6s} {'20cm':>6s}")
         for r in wl_rows:
             lines.append(f"  {r['group']:>16s} {r['frames']:>6d} {r['n']:>7d} {r['median']:>+7.3f} "
-                         f"{r['nmad']:>6.3f} {r['rmse']:>6.3f} {100 * r['within_0.20']:>5.0f}%")
+                         f"{fv(r['nmad'], '{:.3f}'):>6s} {r['rmse']:>6.3f} {100 * r['within_0.20']:>5.0f}%"
+                         + ("  (few)" if r["n"] < MIN_BAND_N else ""))
         head["waterlines"] = {"file": str(contours), "points": int(len(cont["E"])),
                               "points_on_survey": int(okw.sum()), "elevation_used": col,
-                              "setup": setup_mode,
-                              "method": how_w}
+                              "setup": setup_mode, "method": method, "how": how_w, "unit": unit}
+        if transects:
+            wl_frames_csv = out / f"{name}_waterline_frames.csv"
+            with open(wl_frames_csv, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["frame", "camera", "day", "points_on_transects", "waterline_minus_rtk_m"])
+                for k in range(len(dw)):
+                    w.writerow([per["frame"][k], per["cam"][k], per["day"][k], per["points"][k],
+                                f"{dw[k]:+.4f}"])
+            files["waterline_frames_csv"] = str(wl_frames_csv)
         if wl_rows:
             head["waterlines"].update({k: wl_rows[0][k] for k in STAT_KEYS})
             head["waterlines"]["frames"] = wl_rows[0]["frames"]
+            few_w = wl_rows[0]["n"] < MIN_BAND_N
             print(f"waterlines        : waterline - survey median {wl_rows[0]['median']:+.3f} m, "
-                  f"NMAD {wl_rows[0]['nmad']:.3f} m ({wl_rows[0]['n']} points, "
-                  f"{wl_rows[0]['frames']} frames); {col.split(' (')[0]}")
+                  f"NMAD {fv(wl_rows[0]['nmad'], '{:.3f} m')} ({wl_rows[0]['n']} {unit}"
+                  + ("" if unit == "frames" else f", {wl_rows[0]['frames']} frames")
+                  + f"{'; TOO FEW: not an estimate' if few_w else ''}); "
+                  f"{method}; {col.split(' (')[0]}")
         else:
-            print("waterlines        : no waterline point on the survey")
+            head["waterlines"].update({"n": 0, "frames": 0})
+            print(f"waterlines        : no waterline on the survey ({method})")
 
     # -- write
     txt = out / f"{name}_comparison.txt"
@@ -1449,26 +1700,34 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                + (" -- too few for a robust estimate" if 0 < s_all["n"] < MIN_BAND_N else "")]
         if s_all["n"]:
             box += [f"  median {s_all['median']:+.3f} m    mean {s_all['mean']:+.3f} m",
-                    f"  NMAD   {s_all['nmad']:.3f} m    RMSE {s_all['rmse']:.3f} m",
-                    f"  p5 / p95  {s_all['p5']:+.2f} / {s_all['p95']:+.2f} m",
+                    f"  NMAD   {fv(s_all['nmad'], '{:.3f} m')}    RMSE {s_all['rmse']:.3f} m",
+                    f"  p5 / p95  {fv(s_all['p5'], '{:+.2f}')} / {fv(s_all['p95'], '{:+.2f}')} m",
                     f"  within ±0.10 / 0.20 / 0.50 m:  {100 * s_all['within_0.10']:.0f}% / "
                     f"{100 * s_all['within_0.20']:.0f}% / {100 * s_all['within_0.50']:.0f}%"]
         if survey_type == "dsm":
             rest = head["dem_cells"] - head["dem_cells_compared"]
             box.append(f"  DEM cells with survey: {head['dem_cells_compared']} of {head['dem_cells']}"
                        + (f" ({rest} without: no survey value there)" if rest else ""))
+            fc = head.get("full_cover") or {}
+            if head.get("dem_cells_compared_partial_cover"):
+                box.append(f"  of which partly covered: {head['dem_cells_compared_partial_cover']}; fully "
+                           f"covered only: median {fv(fc.get('median'), '{:+.3f}')} m (n {fc.get('n')})")
         else:
             box.append(f"  points on the DEM: {head['points_compared']} of {head['points']} "
                        f"({head['points_outside_dem']} outside it)")
         camr = [r for r in rows if r["group_type"] == "camera"]
         for r in camr:
-            box.append(f"  {r['group']:>7s}: median {r['median']:+.3f} m, NMAD {r['nmad']:.3f} m, "
+            box.append(f"  {r['group']:>7s}: median {r['median']:+.3f} m, NMAD {fv(r['nmad'], '{:.3f} m')}, "
                        f"n {r['n']}")
         if wl_rows:
             w0 = wl_rows[0]
+            wu = head["waterlines"]["unit"]
             box += ["", f"waterlines − survey: median {w0['median']:+.3f} m, NMAD "
-                        f"{w0['nmad']:.3f} m", f"  ({w0['n']} points, {w0['frames']} frames; "
-                        f"{head['waterlines']['setup']})"]
+                        f"{fv(w0['nmad'], '{:.3f} m')}",
+                    (f"  ({w0['n']} frames, one value each; {head['waterlines']['points_on_survey']} line "
+                     f"points on the transects" if wu == "frames" else f"  ({w0['n']} {wu}, {w0['frames']} frames")
+                    + ("; TOO FEW: not an estimate" if w0["n"] < MIN_BAND_N else "") + ")",
+                    f"  {head['waterlines']['method']}; {head['waterlines']['setup']}"]
         box += ["", "\n".join(textwrap.wrap(gap_text, 78))]
         ctx = dict(map_ctx, title=f"{name}: DEM − survey ({survey_type})", label=label,
                    why=why, warn_lines=warn_lines, lim=lim, dem=dem, xll=xll, ytop=ytop, cell=cell,
@@ -1482,7 +1741,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     head["files"] = files
     js = out / f"{name}_comparison.json"
     files["json"] = str(js)
-    js.write_text(json.dumps(head, indent=1, default=lambda o: None if o is None else str(o)))
+    js.write_text(json.dumps(clean_json(head), indent=1, allow_nan=False,
+                             default=lambda o: None if o is None else str(o)))
     print(f"wrote {js}")
     print(f"done              : {time.time() - t0:.1f} s")
     return head
@@ -1519,7 +1779,17 @@ def main():
     ap.add_argument("--min-cover", type=float, default=0.5,
                     help="share of a DEM cell the survey must cover to be compared (default 0.5)")
     ap.add_argument("--tolerance", type=float, default=1.0,
-                    help="point surveys: max distance (m) from a waterline point to a survey point")
+                    help="isolated survey points (no transects): max distance (m) from a waterline point "
+                         "to a survey point (not slope-corrected)")
+    ap.add_argument("--transect-tolerance", type=float, default=TRANSECT_TOLERANCE,
+                    help=f"RTK transects: max distance (m) of a waterline point from a transect line "
+                         f"(default {TRANSECT_TOLERANCE:g}, as compare_rtk.py)")
+    ap.add_argument("--transect-split", type=float, default=TRANSECT_SPLIT,
+                    help=f"RTK transects: a gap between consecutive points that starts a new transect, m "
+                         f"(default {TRANSECT_SPLIT:g})")
+    ap.add_argument("--transect-min-points", type=int, default=TRANSECT_MIN_POINTS,
+                    help=f"RTK transects: waterline points a frame needs on them to count "
+                         f"(default {TRANSECT_MIN_POINTS})")
     ap.add_argument("--epsg", type=int, default=NOMINAL_EPSG,
                     help="horizontal EPSG written into the difference GeoTIFF (default 32619)")
     ap.add_argument("--no-plot", action="store_true")
@@ -1538,7 +1808,9 @@ def main():
             contours=args.contours, camera_eo=parse_cam_specs(args.camera_eo, "--camera-eo"),
             camera_io=parse_cam_specs(args.camera_io, "--camera-io"), spread=args.spread,
             count=args.count, envelope_source=args.envelope_source, min_cover=args.min_cover,
-            tolerance=args.tolerance, epsg=args.epsg, plot=not args.no_plot)
+            tolerance=args.tolerance, epsg=args.epsg, plot=not args.no_plot,
+            transect_tolerance=args.transect_tolerance, transect_split=args.transect_split,
+            transect_min_points=args.transect_min_points)
     return 0
 
 

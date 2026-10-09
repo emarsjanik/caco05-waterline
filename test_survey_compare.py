@@ -203,6 +203,19 @@ def test_dsm_offset(d):
           "figure and json written")
     js = json.loads((out / "synth_dsm_comparison.json").read_text())
     check(js["label"] == "INDEPENDENT" and abs(js["median"] - OFFSET) < 0.005, "json headline")
+    # cells the lidar covers only partly (its water edge) are counted, and the fully covered ones
+    # alone give the exact offset
+    check(js["dem_cells_compared_partial_cover"] > 0 and abs(js["full_cover"]["median"] - OFFSET) < 2e-4
+          and js["full_cover"]["n"] + js["dem_cells_compared_partial_cover"] == js["dem_cells_compared"],
+          f"{js['dem_cells_compared_partial_cover']} partly covered cells counted; full cover only: "
+          f"{js['full_cover']['median']:+.4f}")
+    check("partly covered" in txt and any(r["group_type"] == "survey_cover" for r in rows),
+          "partial cover in the coverage table and as a group")
+    # the synthetic lidar states no vertical datum (as the 2025 YSMP files): said so
+    check("geoid model unknown" in (js.get("vertical_datum_note") or ""), "no vertical key: NAVD88 assumed, said so")
+    lid2 = Path(d) / "lidar_navd88.tif"
+    write_geotiff(lid2, np.zeros((4, 4)), X0, Y0, 1.0, 6348, "test", vertical_epsg=5703)
+    check(sc.survey_vertical_text(lid2) == ("EPSG:5703 (NAVD88 height)", ""), "a vertical key 5703 is read")
     # the CLI end to end
     rc = os.system(f"{sys.executable} {HERE / 'survey_compare.py'} --dem {dem_p} --survey {lid} "
                    f"--name cli --output-dir {out} --label CROSS-VALIDATED --why 'cli test' "
@@ -333,6 +346,62 @@ def test_label_checks(d):
     check(o == 0 and abs(m - 2.0) < 1e-9 and "inside" in t, "inside the window, 2 days after its middle")
 
 
+def test_transects(d):
+    print("waterlines on RTK transects: one value per frame, the RTK interpolated along the profile")
+    dem_p, dem = make_dem(d)
+    rtk = Path(d) / "rtk_transects.csv"
+    cs = "NAD83(2011) / UTM zone 19N + NAVD88(GEOID18) height"
+    # three cross-shore transects 30 m apart (alongshore = N), points every 4 m; a wrack line
+    with open(rtk, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["Name", "Code", "Easting", "Northing", "Elevation", "Description", "CS name"])
+        k = 0
+        for n0 in (Y0 + 30, Y0 + 60, Y0 + 90):
+            for e in np.arange(X0 + 4, X0 + 60, 4.0):
+                k += 1
+                w.writerow([str(k), "T", f"{e:.3f}", f"{n0:.3f}", f"{beach(e, n0):.4f}", "Transect", cs])
+        for n in np.arange(Y0 + 20, Y0 + 100, 10.0):
+            k += 1
+            w.writerow([str(k), "W", f"{X0 + 10:.3f}", f"{n:.3f}", f"{beach(X0 + 10, n) + 0.5:.4f}",
+                        "High water wrack", cs])
+    # 12 frames: each an alongshore line at its own elevation, 0.15 m LOW (its elevation below
+    # the beach where it lies), points every 0.5 m; plus one frame that misses the transects
+    cp = Path(d) / "contours_rtk.csv"
+    with open(cp, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["source_file", "camera", "capture_time_utc", "tide_elevation_navd88",
+                    "beach_elevation_navd88", "easting_utm19", "northing_utm19"])
+        for k in range(13):
+            z_line = 1.0 + 0.1 * k
+            e = X0 + (3.0 - z_line) / 0.05                  # where the beach is at z_line
+            ns = np.arange(Y0 + 5, Y0 + 115, 0.5) if k < 12 else np.arange(Y0 + 200, Y0 + 210, 0.5)
+            for n in ns:
+                w.writerow([f"f{k}", "c1", "2026-09-29T15:00:00+00:00", f"{z_line - 0.4:.4f}",
+                            f"{z_line - 0.15:.4f}", f"{e:.3f}", f"{n:.3f}"])
+    out = Path(d) / "out_rtk"
+    h, log = quiet(sc.compare, str(dem_p), str(rtk), "points", "CIRCULAR", "transect test", name="synth_tr",
+                   output_dir=str(out), contours=str(cp), photo_dates=("2026-09-29", "2026-09-29"))
+    wl = h["waterlines"]
+    check(wl["method"].startswith("frames on RTK transects") and wl["n"] == 12 and wl["frames"] == 12,
+          f"12 frames on the transects, one value each (n {wl['n']}); the frame off them not counted")
+    check(abs(wl["median"] + 0.15) < 1e-3 and wl["nmad"] < 1e-3, f"waterline - RTK = -0.15 exactly ({wl['median']:+.4f})")
+    check("wrack" in wl["how"] and (out / "synth_tr_waterline_frames.csv").exists(),
+          "wrack points not used for the waterlines; per-frame values written")
+    # isolated points (no transects): nearest point, not slope-corrected, and said so
+    gen = Path(d) / "isolated.csv"
+    gen.write_text("E,N,Z\n" + "".join(f"{X0 + 30:.3f},{Y0 + n:.3f},{beach(X0 + 30, 0):.4f}\n"
+                                         for n in (20, 50, 80)))
+    h2, _ = quiet(sc.compare, str(dem_p), str(gen), "points", "INDEPENDENT", "iso", name="synth_iso",
+                  output_dir=str(out), contours=str(cp), plot=False)
+    check("NOT slope-corrected" in h2["waterlines"]["how"], "isolated points: matched to the nearest line point, "
+          "NOT slope-corrected (said)")
+    # few values: no NMAD, valid JSON (no NaN)
+    s1 = sc.stats(np.array([0.3]))
+    check(s1["n"] == 1 and np.isnan(s1["nmad"]) and np.isnan(s1["p5"]), "one value: NMAD and p5/p95 not given")
+    raw = (out / "synth_iso_comparison.json").read_text()
+    check("NaN" not in raw and json.loads(raw) is not None, "the json holds no NaN (null instead)")
+
+
 def test_no_overlap(d):
     print("no overlap")
     dem_p, dem = make_dem(d)
@@ -376,6 +445,7 @@ def main():
         test_dsm_offset(d)
         test_points(d)
         test_label_checks(d)
+        test_transects(d)
         test_no_overlap(d)
         test_py38()
     finally:

@@ -14,8 +14,16 @@ Products go to `/mnt/I2Rgus_Data/survey_products/<date>/` (`--output-root`),
 about 0.3 GB per two-camera week once the detector's debug images are removed
 (they are, unless `--keep-detector-debug`: ~2 GB more).
 Each step is skipped when its outputs exist, are newer than its inputs and
-were made with the same settings; `--force` rebuilds, `--steps compare`
-(etc.) runs only some steps. Every skip is printed.
+were made with the same settings, the same scripts (sha256) and the same
+upstream builds; `--force` rebuilds, `--steps compare` (etc.) runs only some
+steps. Every skip is printed. A rebuilt step makes everything after it
+stale: a stale filtered file, DEM or comparison is never used or reported
+as current (the README then says NO CURRENT COMPARISON).
+
+Status and exit code: `complete`, exit 0; `partial`, exit 1: a step (a
+comparison included) failed; `partial`, exit 3: a camera contributed nothing,
+or the outputs on disk are not one build; a disabled date exits 2. With `--all` the worst code
+is returned and the summary table has a status column.
 
 ## survey_dates.csv: one row per (date, camera)
 
@@ -45,7 +53,10 @@ folder, the waterline folder and its calibration folder, the repository's
 | 2025-01-23 | enabled | c1+c2 CACO03, 18-23 Jan (24 Jan left out: re-set that day) | CACO03_<cam>_20250123_EO (GCPs, not the lidar) | ADCP | Jan 2025 lidar | INDEPENDENT (envelope from the Mar lidar) |
 | 2025-03-06 | enabled | c2 only, CACO04, 3-9 Mar | CACO04_c2_20250219_EO | ADCP (ends 10 Mar 15:00) | Mar 2025 lidar | INDEPENDENT (envelope from the Jan lidar) |
 | 2025-03-19 | **skipped** (user's request) | none on the NUC within 7 days | - | no ADCP | - | - |
-| 2026-09-27 | enabled | c1+c2 CACO05, 24-30 Sep, the live archive | CACO05_<cam>_20251113_EO-CV | GNSS-R / live waves | RTK check shots of 29 Sep | **CIRCULAR with C = 0.037** (see below) |
+| 2026-09-29 | enabled | c1+c2 CACO05, 26 Sep - 2 Oct (centred on the survey day; leaves out most of the 25-26 Sep storm), the live archive | CACO05_<cam>_20251113_EO-CV | GNSS-R / live waves | RTK check shots of 29 Sep | **CIRCULAR with C = 0.037** (see below) |
+
+The live date was first called 27 Sep; the user confirmed that its survey is
+the 29 Sep RTK, so the product is dated 2026-09-29.
 
 ## surveys.csv: one row per survey to compare with
 
@@ -58,6 +69,7 @@ folder, the waterline folder and its calibration folder, the repository's
 | `survey_date` | when it was surveyed (the time gap to the photos is reported) |
 | `label` | how independent the comparison is, before the script's own checks (below) |
 | `why` | the reason, printed next to the label everywhere |
+| `label_override_reason` | optional. Empty = every downgrade applies. A downgrade from a rule that can misfire (a point survey on the calibration's day may be its GCPs; a points survey of the date a setup coefficient was fitted on may be those shots; survey_compare.py's name and date checks) is NOT applied when a reason is written here, e.g. `FIXTURE points sampled from the lidar, not the calibration's GCPs`; the reason and the downgrade it overruled are printed next to the label. A downgrade from what the chain actually did (the envelope, a fitted pointing, a setup coefficient fitted to the same file) cannot be overruled |
 
 ## Labels
 
@@ -74,32 +86,73 @@ actually ran and can only make the label worse, saying why:
 * a search envelope placed with this survey -> PARTLY-CIRCULAR;
 * a camera pointing fitted to a survey (`fit_eo_to_survey.py`, `*_lidar_EO.yaml`) -> CIRCULAR;
 * a GCP survey on the calibration's own day -> PARTLY-CIRCULAR;
-* **a setup coefficient fitted to this survey -> CIRCULAR.** C = 0.037
-  (`waterline_timex_cron.sh`) is the median per-frame C of the waterlines
-  lying on the 2026-09-29 RTK transects, so the 2026-09-27 comparison with
-  those shots cannot test the setup (nor the overall level it sets) and is
-  labelled CIRCULAR, whatever the table says. Its spread and its dependence
-  on elevation still say something.
-  Note that the fit is not exact either: it took the RTK elevation where each
+* a point survey made on the calibration's own day -> PARTLY-CIRCULAR, whatever
+  the file is called (it may be the GCPs the calibration was solved from);
+* **a setup coefficient fitted to this survey -> CIRCULAR.** The survey is
+  recognised by its content (sha256), not its file name, so a renamed copy is
+  still caught; a points survey of the same date as the fit's is treated as
+  possibly the same shots. C = 0.037 (`waterline_timex_cron.sh`, the station's
+  C, used by default) is the median per-frame C of the waterlines lying on the
+  2026-09-29 RTK transects, so the 2026-09-29 comparison with those shots
+  cannot test the setup (nor the overall level it sets): it is CIRCULAR for as
+  long as C = 0.037 is used. Its spread and its dependence on elevation still
+  say something. **An independent 2026 check needs another survey** that
+  fitted nothing, e.g. a calm low-tide RTK across the intertidal.
+* the setup coefficient is read from the waterlines the DEM was built with
+  (the detection stamps, checked against the setup the rows imply), never from
+  the command line of a later `--steps compare`. A `--setup-coef` other than a
+  known fit is refused unless `--setup-fitted-to` says where it came from: the
+  survey file it was fitted to (comparisons with that survey become CIRCULAR)
+  or `'none:<how>'`, e.g. `'none:repeat crossings, dem_from_contours.py
+  --fit-setup on 2025-01-18..23'`. A C of unknown origin is never INDEPENDENT.
+
+The setup itself is not exact either (the station's C is not changed here;
+each README states the bias):
+* **under-correction.** C = 0.037 was fitted with the RTK elevation where each
   line lay WITHOUT setup, but a line given the setup is re-projected landward
   onto higher beach, which closes only part of the gap. `compare_rtk.py` on
   the 18 frames of 29 Sep - 5 Oct lying on the transects gives RTK - waterline
   +0.33 m without setup and still +0.13 m with C = 0.037 (median setup applied
-  0.26 m; Oct 2026): about half the applied setup is still missing, so every
-  product made with C = 0.037 may read low by roughly 0.5 x its setup (each
-  README gives the figure for its date). The synthetic test beach shows the
-  same geometry: a line mapped onto the still-water plane reads low by about
-  0.65-0.7 x the setup, not the whole setup. A C refitted with the lines
-  re-projected would be the cure; that is the cron's setting, not this script's. For an independent check,
-  build the date with a C fitted elsewhere (e.g. from repeat crossings,
-  `dem_from_contours.py --fit-setup` on contours without setup, which gave
-  0.03-0.04): `--setup-coef 0.035`; the RTK comparison is then labelled as
-  the table says. The 2025 lidar comparisons are not affected: C was not
-  fitted to them.
+  0.26 m; Oct 2026): the 2026 lines still read ~0.13 m low on the RTK, about
+  half the applied setup. Every product made with C = 0.037 may read low by
+  roughly 0.5 x its setup (each README gives the figure for its date). The
+  synthetic test beach shows the same geometry: a line mapped onto the
+  still-water plane reads low by about 0.65-0.7 x the setup.
+* **still-water reference (2025 dates).** C was fitted with each line at the
+  GNSS-R water level. The GNSS-R footprint is the surf zone (`gnssr_qc.py`,
+  `gnssir_reflection_audit.py`), where breaking waves raise the mean level:
+  GNSS-R already contains part of the setup, and C carries only the rest. The
+  2025 dates use the ADCP at 21 m depth (or the Chatham harbour transfer),
+  which see no setup: their lines are expected to read LOW by the share of
+  the setup the GNSS-R sees, and ~0.02 m HIGH from the mean levels (GNSS-R sits
+  ~0.02 m below Chatham; the ADCP datum assumes Marconi = Chatham). On the
+  station, `historical_forcing.py` measures that share from the 2026 record
+  (GNSS-R spline, `archive/gauge_8447435.csv`, `archive/waves_marconi.csv`)
+  and the README gives it in metres. To take the question out, fit C in the
+  date's own frame: build with `--setup-coef 0`, run `dem_from_contours.py
+  --fit-setup` on `waterlines/contour_points_ground.csv` (repeat crossings, no
+  survey), then rebuild with `--setup-coef <C> --setup-fitted-to 'none:repeat
+  crossings, <window>'`; the lidar comparison stays INDEPENDENT.
+* **wave currency.** C was fitted with ADCP-currency Hs and NDBC 44008 peak
+  periods; the 2025 dates use the ADCP's periods (or WIS converted to them):
+  `historical_forcing.py` states the expected setup bias in metres.
+* frames with no wave record (no setup) are left out of the waterlines when
+  C > 0 (listed in `waterlines/no_setup_frames.csv` and counted in the README):
+  kept, they would read about one setup low.
 
-`survey_compare.py` checks again (calibration notes, the envelope, the
-`provenance.json` next to the DEM) and prints its own downgrade warning
-when the label looks too good.
+Coordinates: the grids are in the frame of the calibration's GCPs and of the
+surveys, NAD83(2011) / UTM 19N (EPSG:6348). The GeoTIFFs are tagged
+EPSG:32619 (WGS 84 / UTM 19N) as asked: a nominal tag (WGS 84 differs by
+~1-1.5 m here; nothing is transformed). `--geotiff-epsg 6348` writes the true
+code. The 2025 lidar files state no vertical datum: NAVD88 is assumed (the
+geoid model is unknown; GEOID12B and GEOID18 differ by a few cm here).
+
+`survey_compare.py`'s own checks (calibration notes, the envelope, the
+`provenance.json` next to the DEM) run before the comparison, and the
+headline label is the worst of all of them, with every reason. On RTK
+transects the waterlines are compared as `compare_rtk.py` does (one value
+per frame, the RTK interpolated along the transect); isolated points
+(GCPs) are matched to the nearest line point, not slope-corrected.
 
 ## When the October GCP file arrives
 

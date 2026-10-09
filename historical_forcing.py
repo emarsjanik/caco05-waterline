@@ -73,6 +73,23 @@ HOW: WAVES, AND THE "CURRENCY" OF THE SETUP COEFFICIENT
   * The Tp currency difference cannot be removed (44008 had no data in
     the ADCP winter): the report gives the ADCP/WIS peak-period ratio
     (WIS standing in for 44008) and the setup bias in metres it implies.
+  * C's STILL-WATER REFERENCE is not this period's either. C was fitted
+    with each line at the GNSS-R level, and the GNSS-R footprint is the
+    surf zone (gnssr_qc.py; gnssir_reflection_audit.py: reflections
+    70-210 m out, the waterline 55-90 m), where breaking waves raise the
+    mean level: GNSS-R already holds part of the setup and C only the
+    rest. The ADCP (21 m depth) and the Chatham harbour gauge see none, so
+    every frame here is expected LOW by the share of the setup GNSS-R
+    sees, and ~0.02 m HIGH from the mean levels (GNSS-R ~0.02 m below
+    Chatham after its +0.349 m datum fix, OPUS +/-0.061 m; the ADCP datum
+    assumes Marconi = Chatham). When the 2026 record is on the computer
+    (the GNSS-R spline, archive/gauge_8447435.csv, archive/waves_marconi
+    .csv; --gnssr-spline/--gauge-archive/--waves-archive) the report
+    measures that share: (GNSS-R - its Chatham transfer) regressed on
+    sqrt(Hs*L0), slope / C, in metres for typical waves (the wave-
+    independent part sits in the transfer's offset and is not seen).
+    Otherwise it says it was not measured. A --setup-coef other than
+    0.037 is reported as of unknown currency and reference.
 
 MEASURED ON THE REAL RECORDS (Oct 2024 - Mar 2025 files, Oct 2026):
   linear   a 1.403, lag -72 min, b -0.033: week-out CV RMS 0.166 m (daytime
@@ -1044,18 +1061,28 @@ def strip_private(d):
     return d
 
 
-def currency_note(fits, coef):
-    """The Hs/Tp currency statement and the setup bias it implies."""
-    lines = [
-        f"Setup coefficient C = {coef} (waterline_timex_cron.sh, fitted 8 Oct 2026 on 29 Sep - 5 Oct",
-        "2026 frames) was fitted with offshore_hs_m = waves_marconi.csv hs_best: camera wave models",
-        "trained on THIS ADCP's wh_4061 blended with buoys converted to THIS ADCP's wh_4061",
-        "(buoy_transfer.py). Its Hs currency is therefore ADCP Hs at 21 m off Marconi: the ADCP",
-        "hours below need no conversion, and every other source is converted to it here.",
-        "Its Tp is waves_marconi.csv tp_s = the RAW peak period of NDBC 44008 (open Atlantic).",
-        "44008 had no data in the ADCP winter, so the ADCP and 44008 periods cannot be compared",
-        "directly. The WIS hindcast (open ocean east of Marconi) stands in for it:",
-    ]
+def currency_note(fits, coef, swr=None):
+    """The Hs/Tp currency statement, the still-water reference of C, and the setup bias the
+    period currency implies."""
+    if abs(coef - SETUP_COEF) < 1e-9:
+        lines = [
+            f"Setup coefficient C = {coef} (waterline_timex_cron.sh, fitted 8 Oct 2026 on 29 Sep - 5 Oct",
+            "2026 frames) was fitted with offshore_hs_m = waves_marconi.csv hs_best: camera wave models",
+            "trained on THIS ADCP's wh_4061 blended with buoys converted to THIS ADCP's wh_4061",
+            "(buoy_transfer.py). Its Hs currency is therefore ADCP Hs at 21 m off Marconi: the ADCP",
+            "hours below need no conversion, and every other source is converted to it here.",
+            "Its Tp is waves_marconi.csv tp_s = the RAW peak period of NDBC 44008 (open Atlantic).",
+            "44008 had no data in the ADCP winter, so the ADCP and 44008 periods cannot be compared",
+            "directly. The WIS hindcast (open ocean east of Marconi) stands in for it:",
+        ]
+    else:
+        lines = [
+            f"Setup coefficient C = {coef} was given by the caller: where and in which wave currency it",
+            f"was fitted is not known here. The statements below assume it was fitted like the live",
+            f"C = {SETUP_COEF} (ADCP-currency Hs, NDBC 44008 peak periods, lines at the GNSS-R level).",
+            "The WIS hindcast stands in for 44008:",
+        ]
+    lines_ref = still_water_lines(coef, swr)
     bias = None
     w = fits.get("wis")
     if w and "_cv" in w:
@@ -1069,7 +1096,92 @@ def currency_note(fits, coef):
             lines.append("     that much higher than the live currency would put them (not corrected).")
     else:
         lines.append("  (no WIS overlap given: the Tp currency bias could not be estimated)")
-    return lines, bias
+    return lines + [""] + lines_ref, bias
+
+
+def still_water_lines(coef, swr):
+    """C's still-water reference (GNSS-R) against this period's (ADCP / Chatham), in words."""
+    L = ["STILL-WATER REFERENCE OF C. C was fitted with each line at the GNSS-R water level",
+         "(tide_elevation_navd88 of the live rows). The GNSS-R footprint at Marconi is the surf zone",
+         "(gnssr_qc.py; gnssir_reflection_audit.py: reflections 70-210 m from the antenna, the",
+         "waterline 55-90 m seaward), where breaking waves raise the mean level: GNSS-R already",
+         "contains part of the setup, and C carries only the rest. The ADCP (21 m depth) and the",
+         "Chatham harbour gauge see no setup. Expected, for every frame of this period:",
+         "  * LOW by the share of the setup the GNSS-R sees (the part C does not carry);",
+         "  * about 0.02 m HIGH from the mean levels: GNSS-R sits ~0.02 m below Chatham after its",
+         "    +0.349 m datum fix (OPUS +/-0.061 m), while the ADCP datum assumes Marconi = Chatham."]
+    if swr and swr.get("quantified"):
+        L.append(f"  Measured on the GNSS-R record ({swr['how']}):")
+        L.append(f"    GNSS-R - Chatham transfer = {swr['k']:+.4f} (+/- {swr['k_se']:.4f}) x sqrt(Hs*L0) "
+                 f"{swr['c']:+.3f} m, n {swr['n']}, r {swr['r']:.2f}")
+        L.append(f"    -> GNSS-R sees {swr['share']:.2f} of the setup (k / C), ~{swr['typical_m']:.2f} m in "
+                 f"typical waves (median sqrt(Hs*L0) {swr['typical_x']:.1f} m); the mean part sits in the")
+        L.append("       transfer's offset and is not seen by this regression.")
+    else:
+        L.append("  Not measured here: " + ((swr or {}).get("note") or "no GNSS-R record given") + ".")
+        L.append("  On the station: historical_forcing.py measures it from the GNSS-R spline,")
+        L.append("  archive/gauge_8447435.csv and archive/waves_marconi.csv when they are there.")
+    return L
+
+
+def setup_share_fit(resid, x):
+    """Least squares resid = k*x + c. -> dict(k, k_se, c, n, r) (None if too few)."""
+    resid, x = np.asarray(resid, float), np.asarray(x, float)
+    ok = np.isfinite(resid) & np.isfinite(x)
+    if ok.sum() < 30 or np.ptp(x[ok]) <= 0:
+        return None
+    A = np.column_stack([x[ok], np.ones(ok.sum())])
+    (k, c), *_ = np.linalg.lstsq(A, resid[ok], rcond=None)
+    e = resid[ok] - A @ np.array([k, c])
+    dof = max(int(ok.sum()) - 2, 1)
+    cov = np.linalg.inv(A.T @ A) * float(e @ e) / dof
+    return {"k": float(k), "k_se": float(np.sqrt(cov[0, 0])), "c": float(c), "n": int(ok.sum()),
+            "r": float(np.corrcoef(x[ok], resid[ok])[0, 1])}
+
+
+def gnssr_setup_share(coef, spline=None, gauge_csv=None, waves_csv=None):
+    """
+    How much of the wave setup the GNSS-R level already contains: regress (GNSS-R - Chatham
+    transfer) on sqrt(Hs*L0) over the GNSS-R record (marconi_water_level.WaterLevel: the QC'd
+    spline and its own Chatham transfer; waves archive/waves_marconi.csv hs_best, tp_s). The
+    slope k, divided by C, is the share of the setup the GNSS-R sees (wave-dependent part only:
+    the mean part is absorbed by the transfer's offset). -> dict (quantified False + note when
+    the files are not on this computer).
+    """
+    try:
+        from marconi_water_level import WaterLevel, GNSSR_SPLINE, GAUGE_CSV
+    except Exception as exc:
+        return {"quantified": False, "note": f"marconi_water_level.py not importable ({exc})"}
+    spline = spline or GNSSR_SPLINE
+    gauge_csv = gauge_csv or GAUGE_CSV
+    waves_csv = waves_csv or str(HERE / "archive" / "waves_marconi.csv")
+    missing = [str(p) for p in (spline, gauge_csv, waves_csv) if not Path(p).exists()]
+    if missing:
+        return {"quantified": False, "note": "needs " + ", ".join(missing) + " (not on this computer)",
+                "inputs": [str(spline), str(gauge_csv), str(waves_csv)]}
+    try:
+        wl = WaterLevel(spline=str(spline), gauge_csv=str(gauge_csv))
+        if wl.s_ep is None or wl.g_ep is None:
+            return {"quantified": False, "note": f"GNSS-R or gauge unreadable ({wl.gps_note})"}
+        t = wl.s_ep
+        resid = wl.s_lv - wl._chatham(t)
+        w = pd.read_csv(waves_csv)
+        w = w.dropna(subset=["epoch", "hs_best", "tp_s"]).sort_values("epoch")
+        we, hs, tp = w["epoch"].to_numpy(float), w["hs_best"].to_numpy(float), w["tp_s"].to_numpy(float)
+        i = np.clip(np.searchsorted(we, t), 1, len(we) - 1)
+        j = np.where(np.abs(we[i - 1] - t) < np.abs(we[i] - t), i - 1, i)
+        near = np.abs(we[j] - t) <= 3600
+        x = np.where(near, np.sqrt(np.clip(hs[j], 0, None) * G * tp[j] ** 2 / (2 * np.pi)), np.nan)
+        f = setup_share_fit(resid, x)
+    except Exception as exc:                       # a cross-check, never a blocker
+        return {"quantified": False, "note": f"failed: {exc}"}
+    if not f:
+        return {"quantified": False, "note": "too few GNSS-R readings with waves"}
+    xt = float(np.nanmedian(x))
+    f.update(quantified=True, share=f["k"] / coef if coef else None, typical_x=xt, typical_m=f["k"] * xt,
+             how=f"{pd.to_datetime(t[0], unit='s'):%Y-%m-%d} .. {pd.to_datetime(t[-1], unit='s'):%Y-%m-%d}, "
+                 f"{wl.describe()}", inputs=[str(spline), str(gauge_csv), str(waves_csv)])
+    return f
 
 
 def write_report(path, args_echo, wl_info, wv_info, fits, wl_df, wv_df, cur_lines):
@@ -1299,11 +1411,20 @@ def make_figure(path, t0, t1, wl_plot, wl_df, wv_df, wl_info, wv_info, gauge):
             with np.errstate(invalid="ignore", divide="ignore"):
                 ssig = su * np.sqrt((wv_df["hs_sigma_m"].to_numpy(float) / (2 * wv_df["wvht_m"].to_numpy(float))) ** 2
                                     + (wv_df["tp_sigma_s"].to_numpy(float) / wv_df["dpd_s"].to_numpy(float)) ** 2)
+        def band_note(col):
+            """The title's uncertainty clause: only when a band is drawn, in plain words."""
+            if not len(wv_df):
+                return ""
+            s = wv_df[col].to_numpy(float)
+            if np.nanmax(np.where(np.isfinite(s), s, 0)) > 0:
+                return " (shaded: \u00b11 sigma of the conversion)"
+            return " (measured by the ADCP: no conversion uncertainty)"
         for ax, key, ylab, title in (
-                (axes[2], "wvht_m", "Hs (m, ADCP-equivalent)", "Wave height used (+/- hs_sigma_m)"),
-                (axes[3], "dpd_s", "Tp (s, ADCP-equivalent)", "Peak period used (+/- tp_sigma_s)"),
+                (axes[2], "wvht_m", "Hs (m, ADCP-equivalent)", "Wave height used" + band_note("hs_sigma_m")),
+                (axes[3], "dpd_s", "Tp (s, ADCP-equivalent)", "Peak period used" + band_note("tp_sigma_s")),
                 (axes[4], "setup", "Setup (m)",
-                 f"Wave setup C*sqrt(Hs*L0), C = {wv_info['setup_coef']}, added to the water level per frame")):
+                 f"Wave setup C*sqrt(Hs*L0) added to each frame, C = {wv_info['setup_coef']}"
+                 + band_note("hs_sigma_m"))):
             shade_day(ax)
             for s in srcs:
                 m = (wv_df["source"] == s).to_numpy()
@@ -1360,7 +1481,8 @@ def parse_day(text, what):
 
 def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None, wis=None, ndbc=None,
                   fit_start=None, fit_end=None, max_gap_minutes=60.0, method="auto",
-                  setup_coef=SETUP_COEF, plot=True, download=True):
+                  setup_coef=SETUP_COEF, plot=True, download=True, gnssr_spline=None, gauge_archive=None,
+                  waves_archive=None):
     """Writes water_level.csv, waves.csv, forcing_report.txt, forcing.png and forcing.json
     for start..end (whole UTC days, end inclusive) into out_dir. Returns the forcing.json
     content plus 'water_level_csv' and 'waves_csv'. Raises ForcingError on unusable input.
@@ -1498,7 +1620,13 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
                                                         - setup_m(a["hs"], s["tp"], setup_coef)))
     combo = combine_sources(fits, setup_coef)
     wv_df, wv_uncov = waves(t0, t1, adcp_w, sources, fits, combo, max_gap_s)
-    cur_lines, bias = currency_note(fits, setup_coef)
+    swr = gnssr_setup_share(setup_coef, gnssr_spline, gauge_archive, waves_archive) if setup_coef else None
+    if swr and swr.get("quantified"):
+        say("GNSS-R setup", f"GNSS-R sees {swr['share']:.2f} of the setup (k {swr['k']:+.4f}, n {swr['n']}): "
+            f"~{swr['typical_m']:.2f} m that this period's frames lack")
+    elif swr:
+        say("GNSS-R setup", "share of the setup in the GNSS-R level not measured: " + swr["note"])
+    cur_lines, bias = currency_note(fits, setup_coef, swr)
     if "hs_blend_cv" in combo:
         say("  combined", f"Hs {'+'.join(combo['sources'])} CV RMS {combo['hs_blend_cv']['rms_m']:.3f} m, "
             f"Tp from {combo['tp_order'][0]} -> setup CV RMS {combo['setup_blend_cv']['rms_m']:.3f} m, bias "
@@ -1510,7 +1638,12 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
                "hs_currency": "ADCP wh_4061 (Signature 1000, 21 m off Marconi) = the currency of hs_best, "
                               "on which C was fitted",
                "tp_currency": "ADCP wp_peak; C was fitted with NDBC 44008 raw peak period (tp_s)",
-               "tp_currency_setup_bias_m": None if bias is None else round(bias, 4)}
+               "tp_currency_setup_bias_m": None if bias is None else round(bias, 4),
+               "still_water_reference": dict(
+                   swr or {}, c_fitted_with="GNSS-R (surf-zone footprint: contains part of the setup)",
+                   this_period="ADCP at 21 m / Chatham harbour transfer (no setup)",
+                   expected="LOW by the share of setup GNSS-R sees; ~0.02 m HIGH from the datum "
+                            "(GNSS-R ~0.02 m below Chatham, OPUS +/-0.061 m)")}
     used = set(wv_df["source"]) if len(wv_df) else set()
     notes = []
     if any("wis" in u for u in used) and fits.get("wis", {}).get("overlap_hours"):
@@ -1604,12 +1737,19 @@ def main():
     ap.add_argument("--no-plot", action="store_true")
     ap.add_argument("--no-download", action="store_true",
                     help="never download the Chatham record from NOAA (default: only when needed and missing)")
+    ap.add_argument("--gnssr-spline", default=None,
+                    help="GNSS-R spline for the setup-share check (default marconi_water_level.py's)")
+    ap.add_argument("--gauge-archive", default=None,
+                    help="Chatham archive for that check (default archive/gauge_8447435.csv)")
+    ap.add_argument("--waves-archive", default=None,
+                    help="waves for that check (default archive/waves_marconi.csv)")
     a = ap.parse_args()
     try:
         build_forcing(a.start, a.end, a.output_dir, adcp=a.adcp, adcp_navd88=a.adcp_navd88, chatham=a.chatham,
                       wis=a.wis, ndbc=a.ndbc, fit_start=a.fit_start, fit_end=a.fit_end,
                       max_gap_minutes=a.max_gap_minutes, method=a.method, setup_coef=a.setup_coef,
-                      plot=not a.no_plot, download=not a.no_download)
+                      plot=not a.no_plot, download=not a.no_download, gnssr_spline=a.gnssr_spline,
+                      gauge_archive=a.gauge_archive, waves_archive=a.waves_archive)
     except ForcingError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2

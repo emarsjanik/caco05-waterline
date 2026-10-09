@@ -241,6 +241,8 @@ def test_end_to_end(fx, out):
     rep = (Path(out) / "forcing_report.txt").read_text()
     check("e2e: report names the datum caveat and the C currency",
           "ASSUMES Marconi's mean level equals Chatham's" in rep and "currency" in rep)
+    check("e2e: report and forcing.json state C's still-water reference (GNSS-R, surf zone)",
+          "STILL-WATER REFERENCE OF C" in rep and "c_fitted_with" in js["waves"]["still_water_reference"])
 
     # downstream readers
     import extract_elevation_contours as eec
@@ -312,6 +314,51 @@ def test_partial_and_errors(fx, out):
           and "Traceback" not in p.stderr, f"rc {p.returncode}: {p.stderr.strip()[:120]}")
 
 
+def test_still_water_share(out):
+    """C's still-water reference: a synthetic GNSS-R record holding a KNOWN share (0.5) of the setup
+    must give that share back; without the files the share is said to be not measured; the
+    report text names the reference for the station's C and calls another C of unknown origin."""
+    from datetime import datetime, timezone
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    rng = np.random.RandomState(3)
+    share, coef = 0.5, hf.SETUP_COEF
+    t0 = datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp()
+    w = 2 * np.pi / (12.4206 * 3600)
+
+    def gauge(t):
+        return 0.55 * np.cos(w * t) + 0.08 * np.cos(2 * w * t + 0.3) + 0.02 * np.sin(t / 86400 / 3)
+    g_ep = np.arange(t0, t0 + 40 * 86400, 360.0)
+    pd.DataFrame({"epoch": g_ep.astype(int), "level_navd88": np.round(gauge(g_ep), 4)}).to_csv(
+        out / "gauge.csv", index=False)
+    h_ep = np.arange(t0, t0 + 40 * 86400, 3600.0)
+    hs = 0.6 + 0.9 * (1 + np.sin(h_ep / 86400 / 2.3)) + rng.uniform(0, 0.3, len(h_ep))
+    tp = 7 + 2.5 * (1 + np.sin(h_ep / 86400 / 3.1 + 1))
+    pd.DataFrame({"epoch": h_ep.astype(int), "hs_best": np.round(hs, 2), "tp_s": np.round(tp, 1)}).to_csv(
+        out / "waves.csv", index=False)
+    s_ep = np.arange(t0, t0 + 40 * 86400, 900.0)
+    x = np.sqrt(np.interp(s_ep, h_ep, hs) * hf.G * np.interp(s_ep, h_ep, tp) ** 2 / (2 * np.pi))
+    lv = 1.24 * gauge(s_ep + 48 * 60) - 0.10 + share * coef * x + rng.normal(0, 0.02, len(s_ep))
+    with open(out / "spline.txt", "w") as f:
+        f.write("% synthetic gnssrefl spline\n")
+        for e, v in zip(s_ep, lv):
+            d = pd.Timestamp(e, unit="s")
+            f.write(f"60000.0 10.0 {d.year} {d.month} {d.day} {d.hour} {d.minute} {d.second} {v:.4f}\n")
+    r, _ = quiet(lambda: hf.gnssr_setup_share(coef, out / "spline.txt", out / "gauge.csv", out / "waves.csv"))
+    check("still water: GNSS-R share of the setup recovered", r.get("quantified") and abs(r["share"] - share) < 0.05,
+          f"share {r.get('share')}, typical {r.get('typical_m')} m")
+    r2 = hf.gnssr_setup_share(coef, out / "missing.txt", out / "gauge.csv", out / "waves.csv")
+    check("still water: not measured without the files, and said why",
+          not r2["quantified"] and "missing.txt" in r2["note"], r2["note"][:100])
+    lines, _ = hf.currency_note({}, coef, r)
+    text = "\n".join(lines)
+    check("still water: the report names GNSS-R, the surf zone and the measured share",
+          "GNSS-R" in text and "surf zone" in text and "LOW by the share" in text and "0.02 m HIGH" in text
+          and f"{r['share']:.2f}" in text)
+    lines, _ = hf.currency_note({}, 0.05, None)
+    check("still water: another C is of unknown origin", "not known here" in "\n".join(lines))
+
+
 def test_download_fallback(fx, out):
     """No Chatham file anywhere: the record is fetched (stand-in fetch) only because the period needs it."""
     import compare_gnssr_to_gauge as cg
@@ -378,6 +425,7 @@ def main():
     test_adcp_only(fx, work / "adcp_only")
     test_partial_and_errors(fx, work / "errors")
     test_download_fallback(fx, work / "download")
+    test_still_water_share(work / "still_water")
     n_fail = sum(1 for _, ok in RESULTS if not ok)
     print(f"\n{len(RESULTS) - n_fail}/{len(RESULTS)} checks passed in "
           f"{(pd.Timestamp.now() - t).total_seconds():.0f} s" + (f"; {n_fail} FAILED" if n_fail else ""))
