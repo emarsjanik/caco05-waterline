@@ -174,7 +174,8 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
     print(f"{'change, ' + str(n_both) + ' cells':<24}: median {np.median(d):+.3f} m, "
           f"mean {np.mean(d):+.3f} m, p10 {np.percentile(d, 10):+.3f}, p90 {np.percentile(d, 90):+.3f}")
     print(f"level of detection      : median {np.median(lod[both]):.3f} m (95%, floor {min_lod} m)")
-    ero, acc = sig & (diff < 0), sig & (diff > 0)
+    with np.errstate(invalid="ignore"):          # NaN outside the overlap
+        ero, acc = sig & (diff < 0), sig & (diff > 0)
     area = cell * cell
     print(f"significant erosion     : {int(ero.sum())} cells, {ero.sum() * area:.0f} m2, "
           f"{np.nansum(diff[ero]) * area:+.1f} m3")
@@ -208,8 +209,14 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
             fig, axes = plt.subplots(1, 2, figsize=(14, 7), dpi=110)
             for ax, grid, title in ((axes[0], diff, "all overlapping cells"),
                                     (axes[1], sig_diff, "significant change only (95% LoD)")):
+                # interpolation="nearest": one 2 m cell, one block of colour.
+                # matplotlib < 3.9 (the station's 3.3-3.7) defaults to
+                # 'antialiased', which for a strip upsampled less than 3x is a
+                # Hanning filter that spreads the NaN of empty neighbours over
+                # isolated and edge cells: the 7-day maps drew 22 of their 460
+                # significant cells and real 3-5 Oct none of its 52.
                 im = ax.imshow(grid, origin="lower", extent=ext, cmap="RdBu", vmin=-lim, vmax=lim,
-                               aspect="equal")
+                               aspect="equal", interpolation="nearest")
                 ax.set_title(f"{name_b} minus {name_a}: {n_both} cells compared\n{title}",
                              fontsize=10)
                 ax.set_xlabel("easting (m, UTM 19N)"); ax.set_ylabel("northing (m, UTM 19N)")
