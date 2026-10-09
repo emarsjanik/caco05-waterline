@@ -220,8 +220,12 @@ THRESHOLDS, and why:
   --row-noise-px 2. The detector's own row scatter between lines at the
       same water level: c2's bin rows differ by 1.8 px (robust sigma)
       between consecutive slack-water frames of 29 Sep - 5 Oct 2026. The
-      bottom-up pass drops a line only when it lies more than --noise-k
-      times this seaward of the lower lines in the photo (bottom_up()).
+      bottom-up pass and the seaward end drop a line only when it lies more
+      than --noise-k times this seaward of where the other lines put its
+      level in the photo (bottom_up(), seaward_end()).
+  TWIN_M 0.1 m, SEAWARD_RUN 3 (seaward_end()). Slack low water moves less
+      than 0.1 m in an hour, so the frames of one glare or fog lie within
+      0.1 m of each other; a run of up to 3 such strays is judged together.
   Too little data, at any of these steps, means KEEP. The filter only
   removes what the other lines clearly contradict.
 
@@ -2323,8 +2327,9 @@ def build_parser():
                          "(default 4).")
     ap.add_argument("--row-noise-px", type=float, default=2.0,
                     help="The detector's row scatter (px) between lines at the same water level; "
-                         "the bottom-up pass drops a line only when it is more than --noise-k x "
-                         "this seaward of lower water in the photo (default 2).")
+                         "the bottom-up pass and the seaward end drop a line only when it is more "
+                         "than --noise-k x this seaward of where the other lines put its level in "
+                         "the photo (default 2).")
     ap.add_argument("--min-frames", type=float, default=8.0,
                     help="Effective number of lines needed to judge a bin; fewer = keep (default 8).")
     ap.add_argument("--min-z-range", type=float, default=0.5,
