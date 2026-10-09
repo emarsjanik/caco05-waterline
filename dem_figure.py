@@ -74,10 +74,17 @@ WHAT IT SHOWS, AND WHY EACH CHOICE
     and is not drawn.
   * Profiles: 3 or 4 cross-shore profiles at lettered alongshore
     positions (lines on both maps), each the cells within one cell of
-    that position, with the foreshore slope as the least-squares line
-    through the MEASURED cells, given as tan(beta) and 1:N, and how many
-    of the cell lengths between the profile's ends were measured ('8 of
-    10 cells'). The line breaks where no cell was measured, and the cells
+    that position, with the slope over a FIXED band, -0.5 to +0.5 m NAVD88
+    (around mean water; SLOPE_BAND): the least-squares line through the
+    MEASURED cells in that band, given as tan(beta) and 1:N, or 'n/a'
+    unless it has cells 0.2 m or more below and above 0 m. A fit through
+    whatever a profile happens to cover is not comparable between
+    profiles: the beach steepens above 0 m (foreshore ~1:8, terrace ~1:30
+    below), so a chord through a profile with no cells above 0 m read as a
+    beach twice as flat (review, Oct 2026). It is not the foreshore slope of
+    a runup formula either: that is foreshore_slope.py's. Also given: how
+    many of the cell lengths between the profile's ends were measured ('8
+    of 10 cells'). The line breaks where no cell was measured, and the cells
     blanked for spread are open squares on a row below the lines, one
     row per profile -- the panel never draws a clean beach where the map
     above it hatches (it did: the station's 29 Sep - 5 Oct profile in
@@ -154,6 +161,12 @@ MAX_CAMERA_DISTANCE = 3000.0
 # "How to read this page": 10 pt at 1.35 line spacing, and the gap between paragraphs (in).
 NOTE_LINE, NOTE_GAP = 0.19, 0.13
 KEY_ROW = 0.235                       # inches per row of the profiles' key (9.5 pt)
+# Profile slopes are fitted over this fixed elevation band (m NAVD88), so the
+# four are comparable; 'n/a' unless a profile has cells in the band at least
+# SLOPE_BAND_MIN below and above 0 m (a terrace-only fit read as a beach
+# twice as flat).
+SLOPE_BAND = (-0.5, 0.5)
+SLOPE_BAND_MIN = 0.2
 PAGE_RC = {"font.size": 10, "axes.edgecolor": AXIS, "axes.labelcolor": INK2,
            "xtick.color": INK2, "ytick.color": INK2, "text.color": INK,
            "hatch.linewidth": 0.9, "axes.linewidth": 0.8}
@@ -350,7 +363,10 @@ def map_limits(u, v, width_in, height_in, pad=4.0):
     Axis limits that fill a width_in x height_in box, and the cross-shore
     stretch: the largest round factor at which the strip still fits.
     The cross-shore extent is taken between the 0.25 and 99.75
-    percentiles, so a few stray cells cannot shrink the stretch.
+    percentiles, so a few stray cells cannot shrink the stretch; the
+    window then slides to hold every cell when they all fit in it (the
+    real 29 Sep - 5 Oct 2026 7-day DEM lost one measured cell off its edge
+    when the window was centred on the percentiles).
     """
     u_lo, u_hi = u.min() - pad, u.max() + pad
     v_lo, v_hi = np.percentile(v, [0.25, 99.75])
@@ -364,7 +380,14 @@ def map_limits(u, v, width_in, height_in, pad=4.0):
         u_lo, u_hi = u_mid - u_span / 2, u_mid + u_span / 2
         v_span = lv
     v_mid = (v_lo + v_hi) / 2
-    return (u_lo, u_hi), (v_mid - v_span / 2, v_mid + v_span / 2), ex
+    lo, hi = v_mid - v_span / 2, v_mid + v_span / 2
+    a_lo, a_hi = v.min() - pad / 2, v.max() + pad / 2
+    if a_hi - a_lo <= v_span:              # every cell fits: slide the window to hold them
+        if a_lo < lo:
+            lo, hi = a_lo, a_lo + v_span
+        elif a_hi > hi:
+            lo, hi = a_hi - v_span, a_hi
+    return (u_lo, u_hi), (lo, hi), ex
 
 
 def camera_view(cams, frame, Ec, Nc, Zc, core, z_edge):
@@ -528,11 +551,14 @@ def profile_at(uc, vc, z, p, cell, blanked=None):
     gap_before = np.r_[True, np.diff(keys) > 1]
     gap_after = np.r_[np.diff(keys) > 1, True]
     lone = gap_before & gap_after
-    slope, icpt = np.polyfit(v, zz, 1)
+    band = (zz >= SLOPE_BAND[0]) & (zz <= SLOPE_BAND[1])
+    tanb = np.nan
+    if band.sum() >= 3 and zz[band].min() <= -SLOPE_BAND_MIN and zz[band].max() >= SLOPE_BAND_MIN:
+        tanb = -np.polyfit(v[band], zz[band], 1)[0]
     blank_v = np.sort(vc[near & blanked]) if blanked is not None else np.zeros(0)
     return {"v": v, "z": zz, "bv": bv, "bz": bz, "line_v": line_v, "line_z": line_z,
             "lone_v": bv[lone], "lone_z": bz[lone],
-            "tanb": -slope, "icpt": icpt, "n": int(sel.sum()),
+            "tanb": tanb, "n": int(sel.sum()),
             "n_meas": int(keys.size), "n_span": int(keys.max() - keys.min() + 1),
             "gaps": int(cut.size), "blank_v": blank_v}
 
@@ -983,7 +1009,10 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
         f"Maps are drawn as seen from the bluff, sea at the top; cross-shore is "
         f"{stretch_txt}.{cover}",
         f"Profiles: the cells within {cell:g} m of each position, with the slope of the "
-        "least-squares line through the measured ones, and how many of the cells between "
+        f"least-squares line through the measured ones between {minus(SLOPE_BAND[0])} and "
+        f"{minus(SLOPE_BAND[1])} m (n/a where they do not reach both sides of 0 m: the "
+        "beach steepens above 0 m, so slopes over other spans do not compare), and how "
+        "many of the cells between "
         "the profile's ends those are. A line breaks where no cell was measured (a dot: one "
         "measured cell between breaks); □ on a row "
         f"below the lines marks a cell blanked for spread (> {cutoff:g} m), one row per "
@@ -1024,10 +1053,19 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     if interpolated.any():
         handles.append(Patch(facecolor=SAND[2], edgecolor=INK2, hatch="..", lw=0,
                              label="interpolated, not measured"))
-    if views:
+    # a legend entry only for marks the map shows: an edge with a piece on
+    # the map, the camera triangle only when alongshore 0 is on it
+    u_lo, u_hi = min(ulim), max(ulim)
+    edge_on_map = False
+    for vw in views.values():
+        for eu, ev in vw["edges"].values():
+            with np.errstate(invalid="ignore"):
+                edge_on_map |= bool(((eu >= u_lo) & (eu <= u_hi) & (ev >= vlim[0])
+                                     & (ev <= vlim[1])).any())
+    if edge_on_map:
         handles.append(Line2D([], [], color=INK2, lw=1.1, ls=(0, (5, 3)),
                               label="edge of a camera's photo"))
-    if frame["from_camera"]:
+    if frame["from_camera"] and ulim[0] <= 0 <= ulim[1]:
         handles.append(Line2D([], [], color=INK, marker="^", ls="none", ms=9,
                               label=f"{cam_label} (alongshore 0)"))
     if profs:
@@ -1250,16 +1288,21 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
              fontsize=10, color=INK2, va="bottom", ha="right")
 
     cax = fig.add_axes(box(cb_x, y_a, cb_w, map_h))
-    ticks = np.arange(vmin, vmax + 1e-9, 0.5)
-    cb = fig.colorbar(mesh, cax=cax, ticks=ticks)
-    cb.ax.set_yticklabels([minus(t) for t in ticks])
-    cb.outline.set_visible(False)
-    cb.ax.tick_params(labelsize=9.5, length=2)
-    cb.set_label("elevation (m NAVD88)", fontsize=10, color=INK2)
-    for L in drawn_levels:                       # the contour levels, on the scale
-        f = (L - vmin) / (vmax - vmin)
-        cb.ax.plot([0, 1], [f, f], transform=cb.ax.transAxes,
-                   color=level_ink.get(round(L, 2), INK), lw=1.0)
+    if filled.any():
+        ticks = np.arange(vmin, vmax + 1e-9, 0.5)
+        cb = fig.colorbar(mesh, cax=cax, ticks=ticks)
+        cb.ax.set_yticklabels([minus(t) for t in ticks])
+        cb.outline.set_visible(False)
+        cb.ax.tick_params(labelsize=9.5, length=2)
+        cb.set_label("elevation (m NAVD88)", fontsize=10, color=INK2)
+        for L in drawn_levels:                       # the contour levels, on the scale
+            f = (L - vmin) / (vmax - vmin)
+            cb.ax.plot([0, 1], [f, f], transform=cb.ax.transAxes,
+                       color=level_ink.get(round(L, 2), INK), lw=1.0)
+    else:                                # no cell has an elevation: no scale to read
+        cax.axis("off")
+        cax.text(0.0, 0.5, "no elevations", rotation=90, ha="left", va="center",
+                 fontsize=10, color=MUTED, transform=cax.transAxes)
 
     # north arrow, beside the elevation map's title. On the page north is
     # its alongshore and cross-shore components times each axis scale
@@ -1361,8 +1404,12 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     drawn = [(p, pr, L, col) for p, pr, L, col in profs if pr is not None]
     for p, pr, letter, col in drawn:
         ax_c.plot(pr["v"], pr["z"], "o", ms=3, color=col, alpha=0.35, mec="none", zorder=2)
-        slope = (f"tanβ {pr['tanb']:.3f} (1:{1 / pr['tanb']:.0f})" if pr["tanb"] > 0
-                 else "no seaward slope")
+        if not np.isfinite(pr["tanb"]):
+            slope = "tanβ n/a (band not covered)"
+        elif pr["tanb"] > 0:
+            slope = f"tanβ {pr['tanb']:.3f} (1:{1 / pr['tanb']:.0f})"
+        else:
+            slope = "no seaward slope"
         ax_c.plot(pr["line_v"], pr["line_z"], "-", color=col, lw=2, zorder=3,
                   label=f"{letter}  {p:.0f} m:  {slope}, {pr['n_meas']} of {pr['n_span']} cells")
         if pr["lone_v"].size:
@@ -1371,7 +1418,9 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
         key = ax_c.legend(loc="upper left", bbox_to_anchor=(left / W, 1 - y_key / H),
                           bbox_transform=fig.transFigure, borderaxespad=0, borderpad=0,
                           frameon=False, fontsize=9.5, handlelength=1.6,
-                          title="Profiles — alongshore position: foreshore slope, cells measured",
+                          title=("Profiles — alongshore position: slope over "
+                                 f"{minus(SLOPE_BAND[0])}…{minus(SLOPE_BAND[1])} m NAVD88, "
+                                 "cells measured"),
                           title_fontsize=9.5)
         if hasattr(key, "_legend_box"):           # title flush with the entries
             key._legend_box.align = "left"
