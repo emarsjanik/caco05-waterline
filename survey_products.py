@@ -2101,7 +2101,10 @@ def read_ground_points(path, first, last, max_points=150000):
 
 def signed(v, fmt="{:+.1f}"):
     """A signed number with a true minus sign (U+2212): a hyphen vanishes on a busy map."""
-    return fmt.format(v).replace("-", "−")
+    t = fmt.format(v)
+    if t.lstrip("+-").strip("0.") == "":            # 0 shown as 0, not -0.00 / +0.00 (float noise)
+        t = t.lstrip("+-")
+    return t.replace("-", "−")
 
 
 def plan_view_map(plan, src, surveys, args, png):
@@ -4097,8 +4100,8 @@ def summary_figure(rows, path, disabled=()):
     if few_.any() or wl_few[np.isfinite(wl_med)].any():
         handles.append(plt.Line2D([], [], marker="o", ls="", color=SERIES_1, mfc="white", alpha=0.45, ms=7,
                                   label=f"faint: fewer than {FEW_N} compared, not an estimate (no bar below 3)"))
-    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0, -0.42 if len(rs) < 3 else -0.18),
-              fontsize=8, frameon=False, ncol=2)
+    leg = ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0, -0.42 if len(rs) < 3 else -0.18),
+                    fontsize=8, frameon=False, ncol=2)
     for k, (yy, r) in enumerate(zip(y, rs)):
         txt = r["label"] + (f"  (n {r['n']}{', too few' if few_[k] else ''})" if r["n"] is not None else "")
         if r.get("survey_compare_suggests") and r["survey_compare_suggests"] != r["label"]:
@@ -4129,7 +4132,12 @@ def summary_figure(rows, path, disabled=()):
         dd = sorted({(r["date"], r["comparison"].split("(", 1)[-1].rstrip(")")) for r in disabled})
         txt = "Not built, at the user's request: " + "; ".join(
             f"{d} ({textwrap.shorten(w, 60, placeholder='...')})" for d, w in dd)
-        fig.text(0.01, 0.005, "\n".join(textwrap.wrap(txt, 150)), fontsize=8, color=INK2, va="bottom", ha="left")
+        # under the legend, never over it: placed from the legend's drawn extent (the saved figure
+        # grows to hold it, bbox_inches='tight')
+        fig.canvas.draw()
+        bb = leg.get_window_extent().transformed(fig.transFigure.inverted())
+        fig.text(bb.x0, bb.y0 - 0.015, "\n".join(textwrap.wrap(txt, 150)), fontsize=8, color=INK2, va="top",
+                 ha="left")
     fig.savefig(path, dpi=130, facecolor="white", bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)
 
