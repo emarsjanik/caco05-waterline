@@ -250,8 +250,8 @@ THRESHOLDS, and why:
   person to look at.
 
 KNOWN LIMIT -- a camera wrong for MOST lines of a column AND a cut in the
-  window (review, Oct 2026; not a regression: 566eef7 does the same). In c1's
-  right half after a 0.8 m cut, every line above ~0 m left the search
+  window (review, Oct 2026; not a regression: 566eef7 does the same). In
+  c1's right half after a 0.8 m cut, every line above ~0 m left the search
   envelope and was redrawn on the water (the review's env1_ero08): the
   honest lines there span only -0.6..0 m, the wrong ones 0..+1.8 m on the
   same rows. The lowest wrong lines are only 0.6 m out of order -- under the
@@ -260,14 +260,16 @@ KNOWN LIMIT -- a camera wrong for MOST lines of a column AND a cut in the
   order and the bin is 'unclear: kept' (215 of 760 c1 bin-days; 82% of the
   wrong points dropped, against 96% without the cut). Tried, each on the
   review's scenarios: capping the out-of-sample elevation scatter at what
-  2 px of row noise make of the reference (82%); only lines that AGREE with
-  lower water as references for higher layers (86%); the bottom-up verdicts
-  in 'unclear' bins (87-88%, also with only failures 64 px or more seaward
-  counted, or only where the lower lines move 60 px or more per metre).
-  Every one dropped more honest c2 lines on a crenulated shoreline (cusp15
-  3,178 -> 3,447..4,391 points; c2-only 4,881 -> 5,035..7,925), where c2's
-  oblique view folds the high-tide lines behind the horns seaward of lower
-  ones -- the same signature in the photo. Telling the two apart needs the
+  2 px of row noise make of the reference (82%); not letting a side that
+  passes only by that scatter outvote one that confirms (82%); only lines
+  that AGREE with lower water as references for higher layers (86%); the
+  bottom-up verdicts in 'unclear' bins (87-88%, also with only failures
+  64 px or more seaward counted, or only where the lower lines move 60 px
+  or more per metre). Every one dropped more honest c2 lines on a
+  crenulated shoreline (cusp15 3,178 -> 3,379..4,391 points; c2-only
+  4,881 -> 4,995..7,925), where c2's oblique view folds the high-tide lines
+  behind the horns seaward of lower ones -- the same signature in the
+  photo. Telling the two apart needs the
   viewing geometry: from the calibration, how far a waterline can move per
   metre of water in each column (>= 34 px/m in c1, >= 4.7 px/m in c2's far
   field, on the surveyed beach). Not done here. What it costs: the post-cut
