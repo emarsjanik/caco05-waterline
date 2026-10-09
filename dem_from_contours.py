@@ -213,7 +213,8 @@ def build_grid(E, N, Z, cell, min_points, max_spread, frames=None):
                 else float(vals.max() - vals.min())
 
     if max_spread and max_spread > 0:
-        too_noisy = np.isfinite(spread) & (spread > max_spread)
+        with np.errstate(invalid="ignore"):      # NaN spread: no cell (numpy < 1.18 warns)
+            too_noisy = np.isfinite(spread) & (spread > max_spread)
         dem[too_noisy] = np.nan
 
     return (dem.reshape(nrows, ncols), count.reshape(nrows, ncols),
