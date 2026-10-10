@@ -927,6 +927,16 @@ def test_fix3(d):
     check("change of the beach OR a method error" in sp.PER_DAY_ROWS_NOTE and "static synthetic beach"
           in sp.PER_DAY_ROWS_NOTE and "not an error" not in sp.PER_DAY_ROWS_NOTE,
           "per-day rows: a trend may be change OR a method error (the static fixture drifts too)")
+    import survey_compare as sc_
+    cont_ = {"cam": np.array(["c2"] * 4), "day": np.array(["2025-03-05", "2025-03-05", "2025-03-08", "2025-03-08"]),
+             "frame": np.array(["a", "a", "b", "b"]), "Z": np.array([0.3, 0.2, 0.7, 0.5]),
+             "Zt": np.array([0.1, 0.0, 0.1, -0.1])}
+    wr = sc_.waterline_rows(cont_, np.array([0.02, 0.04, -0.10, -0.12]), zref=np.array([-0.1, -0.05, -0.1, -0.05]))
+    dd = {r["group"]: r for r in wr if r["group_type"] == "waterline_day"}
+    check(abs(dd["2025-03-05 c2"]["survey_z_median"] + 0.075) < 1e-9 and abs(dd["2025-03-05 c2"]["setup_median"]
+                                                                         - 0.2) < 1e-9
+          and abs(dd["2025-03-08 c2"]["setup_median"] - 0.6) < 1e-9,
+          "per-day rows carry the survey elevation and the setup they were taken at (to compare days like for like)")
     pe = d / "ev"
     (pe / "forcing").mkdir(parents=True)
     (pe / "waterlines").mkdir()

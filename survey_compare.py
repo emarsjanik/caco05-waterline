@@ -1205,6 +1205,8 @@ def waterline_rows(cont, d, zref=None, spt=None):
     ok = np.isfinite(d)
     rows = []
     zr = np.asarray(zref, float) if zref is not None else None
+    # the setup each value's line was given (beach - still water), where the arrays carry both
+    su = (np.asarray(cont["Z"], float) - np.asarray(cont["Zt"], float)) if ("Z" in cont and "Zt" in cont) else None
 
     def row(gt, g, m):
         r = dict({"group_type": gt, "group": g, "frames": int(len(set(cont["frame"][m].tolist())))}, **stats(d[m]))
@@ -1216,6 +1218,9 @@ def waterline_rows(cont, d, zref=None, spt=None):
         if zr is not None:
             zz = zr[m & np.isfinite(zr)]
             r["survey_z_median"] = float(np.median(zz)) if len(zz) else float("nan")
+        if su is not None:
+            ss = su[m & np.isfinite(su)]
+            r["setup_median"] = float(np.median(ss)) if len(ss) else float("nan")
         return r
     for cam in sorted(set(cont["cam"][ok].tolist())):
         rows.append(row("waterline_camera", cam, ok & (cont["cam"] == cam)))
@@ -2070,9 +2075,10 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         indep = independent_n(all_r[0], unit) if all_r else (0, "frames")
         sp_col = R["spt"] is not None
         z_col = R["zref"] is not None
+        s_col = any(np.isfinite(r.get("setup_median", np.nan)) for r in wl_rows)
         lines.append(f"  {'day camera':>16s} {'frames':>6s} {unit:>7s} " + (f"{'svy pts':>7s} " if sp_col else "")
                      + f"{'median':>7s} {'NMAD':>6s} {'RMSE':>6s} {'20cm':>6s}"
-                     + (f" {'at z':>6s}" if z_col else ""))
+                     + (f" {'at z':>6s}" if z_col else "") + (f" {'setup':>6s}" if s_col else ""))
 
         def wl_line(r):
             k, _ = independent_n(r, unit)
@@ -2081,16 +2087,21 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                     + f"{r['median']:>+7.3f} {fv(r['nmad'], '{:.3f}'):>6s} {r['rmse']:>6.3f} "
                       f"{100 * r['within_0.20']:>5.0f}%"
                     + (f" {fv(r.get('survey_z_median'), '{:+.2f}'):>6s}" if z_col else "")
+                    + (f" {fv(r.get('setup_median'), '{:.2f}'):>6s}" if s_col else "")
                     + ("  (few)" if k < MIN_BAND_N else ""))
         for r in wl_rows:
             if r["group_type"] != "waterline_band":
                 lines.append(wl_line(r))
         if z_col:
-            lines += ["  at z: the median survey elevation (m NAVD88) the row's values were taken at. A step or trend",
-                      "  between the days may be change of the beach OR a method error that depends on the conditions:",
-                      "  the error depends on the elevation, and the tide phase of the hours sampled moves from day to",
-                      "  day (on a static synthetic beach this method drifts by up to ~0.17 m over a week). Compare days",
-                      "  at a similar 'at z' (or within one elevation band below) before calling it change."]
+            lines += ["  at z: the median survey elevation (m NAVD88) the row's values were taken at"
+                      + (";" if s_col else ".")] + (["  setup: the median wave setup (m) the row's lines were given."]
+                                                    if s_col else []) + [
+                      "  A step or trend between the days may be change of the beach OR a method error that depends on",
+                      "  the conditions (the elevation, the waves and setup, the tide phase of the hours sampled, which",
+                      "  moves from day to day): on a static synthetic beach this method's days drift by up to ~0.17 m",
+                      "  over a week, and days at the same 'at z' still differ by up to ~0.13 m. A difference between",
+                      "  days below ~0.15-0.2 m is not by itself evidence of change; compare days at a similar 'at z'",
+                      "  and setup (or within one elevation band below) before calling it change."]
         bands_w = [r for r in wl_rows if r["group_type"] == "waterline_band"]
         if bands_w:
             lines += ["", f"  WATERLINES BY SURVEY ELEVATION ({BAND} m bands of the survey elevation each value was "
@@ -2298,7 +2309,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     cs = out / f"{name}_comparison.csv"
     with open(cs, "w", newline="") as f:
         fields = ["name", "label", "quantity", "group_type", "group", "frames", "survey_points"] + list(STAT_KEYS) + \
-                 ["survey_z_median"]
+                 ["survey_z_median", "setup_median"]
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for r in rows:

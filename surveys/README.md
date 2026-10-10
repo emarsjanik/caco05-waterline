@@ -303,11 +303,14 @@ waterlines - survey show whether the lines moved, but a step or trend there
 may be change of the beach OR a method error that depends on the conditions:
 on the static synthetic fixture (every day rendered from one lidar) the
 per-day medians drift by ~0.09 m over Jan 18-23 and ~0.17 m over Mar 3-9,
-with a ~0.07 m step across the 20 Jan event, because the detector's error
-depends on the elevation and the tide phase of the sampled hours moves from
-day to day. Each row gives the median survey elevation its values were taken
-at ('at z'): compare days at a similar elevation, or within one elevation
-band, before calling a difference change.
+with a ~0.07 m step across the 20 Jan event, and two Mar days at the same
+median elevation differ by ~0.13 m: the error depends on the elevation, the
+waves and setup and the tide phase of the sampled hours, which moves from
+day to day. A difference between days below ~0.15-0.2 m is not by itself
+evidence of change. Each row gives the median survey elevation its values
+were taken at ('at z') and the median setup of its lines: compare days at a
+similar elevation and setup, or within one elevation band, before calling a
+difference change.
 
 Pointing: each camera's sea horizon over the window is compared with where
 its calibration puts it; the constant tilt/roll is printed for every camera

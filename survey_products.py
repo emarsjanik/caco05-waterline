@@ -3957,15 +3957,18 @@ def storm_caveats(plan, args, prov, first_used, last_used):
 # What a step or trend in the per-day rows of waterlines - survey can and cannot say. On the sandbox's
 # synthetic fixture (every day rendered from ONE lidar: a static beach) this method's per-day medians
 # drift by ~0.09 m over Jan 18-23 (+0.01 to -0.08 m) and ~0.17 m over Mar 3-9 (+0.06 to -0.10 m), with a
-# ~0.07 m step across the 20 Jan wave event (survey_build/fixture/README.md, 'By day'): the detector's
-# error depends on the elevation, and the tide phase of the hours sampled moves from day to day.
+# ~0.07 m step across the 20 Jan wave event (survey_build/fixture/README.md, 'By day'); 5 and 8 Mar, both
+# at a median survey elevation of -0.07 m, read +0.023 and -0.103 m (Oct 2026 fixture build): the error
+# depends on the elevation, the waves and setup and the tide phase of the hours sampled, not on one alone.
 PER_DAY_ROWS_NOTE = (
     "The per-day rows of waterlines - survey (compare/*_comparison.txt) show whether the lines moved over the "
     "window, but a step or trend there may be change of the beach OR a method error that depends on the "
-    "conditions: on a static synthetic beach this method's per-day medians drift by up to ~0.17 m over a week "
-    "(Jan -0.09 m, Mar -0.17 m, with a ~0.07 m step across a wave event), because its error depends on the "
-    "elevation and the tide phase of the hours sampled moves from day to day. Compare days at a similar survey "
-    "elevation (the rows' 'at z' column, or the elevation bands) before calling a difference change.")
+    "conditions (the elevation, the waves and setup, the tide phase of the hours sampled, which moves from day to "
+    "day): on a static synthetic beach this method's per-day medians drift by up to ~0.17 m over a week (Jan "
+    "-0.09 m, Mar -0.17 m, with a ~0.07 m step across a wave event), and days at the same median elevation still "
+    "differ by up to ~0.13 m. A difference between days below ~0.15-0.2 m is not by itself evidence of change; "
+    "compare days at a similar survey elevation and setup (the rows' 'at z' and 'setup' columns, or the elevation "
+    "bands) before calling it change.")
 
 
 def frame_epochs(plan):
