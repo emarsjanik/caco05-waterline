@@ -50,7 +50,8 @@ THE PAGE IS ALWAYS THIS RUN'S. The old dem_out_dem.png is removed first
 (unless --no-plot); a window with too few cells, or no points at all,
 gets a short page saying so, with the dates and what the filters left
 out. Exit status: 0 built (page drawn; a short one if too few cells),
-4 no points in the window (short page drawn, no grids written), 3 grids
+4 no points in the window, or every camera-day rejected by the
+--max-day-offset test (short page drawn, no grids written), 3 grids
 written but the page could not be drawn (no PNG), 1 any other failure
 (no PNG). The email attaches the PNG by name, so a stale one would pass
 for current.
@@ -548,7 +549,10 @@ def main():
                          "many metres from the DEM built without that day (e.g. 0.15). "
                          "Catches days whose waterlines are consistently displaced -- a "
                          "different failure from the tide-direction check, which only sees "
-                         "direction. Days with fewer than 30 comparable samples are kept.")
+                         "direction. Days with fewer than 30 comparable samples are kept, and "
+                         "with fewer than 3 testable camera-days every day is kept (the DEM "
+                         "without one day is then the other day alone, so the test cannot tell "
+                         "which is off).")
     ap.add_argument("--max-frame-offset", type=float, default=None,
                     help="Leave out single frames whose samples sit, on median, more than this "
                          "many metres from the DEM built without that frame (e.g. 0.2). Runs "
@@ -736,9 +740,17 @@ def main():
         rejected = set()
         print(f"Day consistency (median offset from the DEM without that day, limit "
               f"+/-{args.max_day_offset} m):")
+        # With fewer than 3 testable camera-days "the DEM without that day" is the
+        # other day alone: two days that differ by more than the limit get equal
+        # and opposite offsets and BOTH would be rejected, leaving no points. The
+        # test cannot tell which day is off, so every day is kept.
+        testable = [k for k, (off, n) in offsets.items() if np.isfinite(off)]
+        too_few_days = len(testable) < 3
         for k, (off, n) in offsets.items():
             if not np.isfinite(off):
                 note = "  (too few comparable samples -- kept)"
+            elif abs(off) > args.max_day_offset and too_few_days:
+                note = "  (off by more than the limit -- kept: fewer than 3 testable days)"
             elif abs(off) > args.max_day_offset:
                 rejected.add(k)
                 note = "  <-- REJECTED"
@@ -746,6 +758,9 @@ def main():
                 note = ""
             off_s = f"{off:+.3f} m" if np.isfinite(off) else "   --   "
             print(f"   {k}   {off_s}   ({n} samples){note}")
+        if too_few_days:
+            print(f"   only {len(testable)} testable camera-day(s): the test cannot tell which day is off; "
+                  f"every day kept")
         rejected_days = set(rejected)
         if rejected:
             frame_key = {f: f"{cam_of[f]} {local_day(epoch[f])}" for f in set(frames)}
@@ -753,6 +768,11 @@ def main():
             E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
             print(f"   left out {len(rejected)} camera-day(s), {int((~keep).sum())} point(s)")
         print()
+        if len(E) == 0:
+            print("No points left: the day-consistency test rejected every camera-day "
+                  f"({', '.join(sorted(rejected))}). Rerun without --max-day-offset or with a wider window.")
+            no_points_page("The day-consistency test rejected every camera-day: nothing to map.", load_stats)
+            sys.exit(4)
 
     dem, count, spread, e0, n0, ncols, nrows = build_grid(
         E, N, Z, args.cell, args.min_points, args.max_spread, frames)
