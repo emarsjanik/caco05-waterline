@@ -50,7 +50,9 @@ HOW, per camera:
      (a least-squares line through its points in the bin, read at the
      bin centre), so lines that cover different parts of a bin are
      compared at the same column. A bin the line does not span is not
-     judged for that line.
+     judged for that line -- but where the line is out of order in some
+     other bin, its pieces in such bins are judged one piece at a time
+     against that bin's fit (step 5, point_drops()).
   2. Window. Each day's lines are judged against all lines from the
      day itself and the 3 days either side, WEIGHTED by closeness in
      time, w = exp(-|dt| / 1 day): the same day weighs ~1, the next
@@ -1276,7 +1278,7 @@ def decide(resid, thresh, p, excused=None):
     return fail, whole, n_judged, n_fail
 
 
-def point_drops(fl, col, row, fail, whole, days, elevs, fits, p, excused=None):
+def point_drops(fl, col, row, fail, whole, days, elevs, fits, p, excused=None, R=None):
     """
     Which points to drop. Whole frames: all of them. Otherwise each point
     in a failing bin, or in a bin next to one, is judged on its OWN row
@@ -1289,6 +1291,28 @@ def point_drops(fl, col, row, fail, whole, days, elevs, fits, p, excused=None):
     dropped for lying out of order the way the time test excused its line
     in that bin (`excused`): a line kept as beach change in one bin is not
     cut back to the bin next door that failed.
+
+    PIECES IN BINS THE LINE DOES NOT SPAN (`R`, the bin rows: NaN where a
+    line has no row). A line has a row only in bins where its points reach
+    both sides of the centre (bin_rows()), so a stray broken into dashes by
+    gaps has no row -- and no verdict -- in the bins its dashes sit in, and
+    those more than a bin from a failing one were never looked at. On the
+    station's real 29 Sep - 5 Oct 2026 contours the c2 strays of 2 Oct
+    16:00-17:00, cut elsewhere, kept 11-point tails at columns 1823-1837,
+    rows 547-553, far out on the water, and the 2 Oct 20:00 line (+1.30 m)
+    25 points out there (until the margin fix of residuals(), the 15:30
+    stray kept 55 points in five dashes too): the short lines on the water
+    at the top right of c2's 7-day map. So a line
+    that fails in at least one bin has its pieces in bins it does not span
+    judged against that bin-day's fit -- each piece as a whole: it goes when
+    its median point is beyond the threshold, so the ragged end of an honest
+    line is not speckled with drops. Real contours: c2 points kept beyond
+    their bin-day's threshold 405 -> 175 (in bins the line does not span
+    285 -> 55), c1 121 -> 67; what is left lies on lines that fail nowhere.
+    Judging every point of a failing line, spanned or not, cost ~2,000
+    honest megacusp points in the review's scenarios; this costs 7-44 in c2
+    (megacusps, spring lows) and 3-52 in c1 (the honest parts of lines with
+    envelope errors), out of 250,000-280,000 per camera.
     """
     drop = whole[fl].copy()
     ok = np.isfinite(col)
@@ -1300,6 +1324,12 @@ def point_drops(fl, col, row, fail, whole, days, elevs, fits, p, excused=None):
     near |= ok & (j - 1 >= 0) & (j - 1 < n_bins) & fail[fl, np.clip(j - 1, 0, n_bins - 1)]
     near |= ok & (j + 1 < n_bins) & fail[fl, np.clip(j + 1, 0, n_bins - 1)]
     near &= ~drop
+    frag = np.zeros(col.shape, bool)
+    if R is not None:
+        # pieces of a line that fails somewhere, in bins it has no row in
+        frag = ok & (j >= 0) & (j < n_bins) & ~np.isfinite(R[fl, jc]) \
+            & fail.any(axis=1)[fl] & ~drop & ~near
+        near |= frag
     cand = np.where(near)[0]
     if cand.size == 0:
         return drop
@@ -1318,6 +1348,13 @@ def point_drops(fl, col, row, fail, whole, days, elevs, fits, p, excused=None):
         if excused is not None:
             e = excused[fl[sel], int(b)]
             out &= ~(((r > 0) & (e > 0)) | ((r < 0) & (e < 0)))
+        pieces = frag[sel]
+        if pieces.any():
+            # a piece goes as a whole: only when its median point is out
+            for f_ in np.unique(fl[sel][pieces]):
+                m = pieces & (fl[sel] == f_)
+                if abs(float(np.median(r[m]))) <= thr:
+                    out[m] = False
         drop[sel[out]] = True
     return drop
 
@@ -1441,7 +1478,7 @@ def run(args):
             print(line)
 
         drop = point_drops(fl, col, row, fail, whole, np.floor(epochs / DAY), elevs, fits, args,
-                           excused)
+                           excused, R)
         n_cam_pts = pts.size
         n_drop = int(drop.sum())
         applied = n_drop <= args.max_drop_fraction * n_cam_pts
