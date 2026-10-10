@@ -67,12 +67,16 @@ GNSSR_SPLINE=/home/argus_user/GNSS/v4.1/products/refl_code/Files/usgs/usgs_splin
 CONTOURS="$BASE/contour_points_timex.csv"
 
 # Waterline consistency (waterline_consistency.py). In one image column
-# the waterline row must move monotonically with water elevation; lines,
-# or parts of lines, that the other lines from the same camera and nearby
-# days clearly contradict (by more than 0.75 m of elevation) are left out
-# of the maps, the ground points and the DEM. On 29 Sep - 5 Oct 2026 C1
-# drew +1 m lines seaward of -0.5 m lines on the right of its frame, and
-# the DEM's southern ~80 m (C1 only) came out blanked for spread.
+# the waterline row must move DOWN the photo as the water rises (nearer
+# the camera); lines, or parts of lines, that the other lines from the
+# same camera and nearby days clearly contradict (by more than 0.75 m of
+# elevation) are left out of the maps, the ground points and the DEM. On
+# 29 Sep - 5 Oct 2026 C1 drew +1 m lines seaward of -0.5 m lines on the
+# right of its frame, and the DEM's southern ~80 m (C1 only) came out
+# blanked for spread. Columns where the rows run AGAINST the water level
+# -- the detector wrong for most lines there, e.g. a search-envelope
+# floor above the high-tide waterline -- are named in a WARNING in this
+# log, and the lines there are judged against the lower-water lines.
 # The unfiltered file is kept as it is; the filtered copy is
 # CONTOURS_QC, the report of every line affected is CONSISTENCY_REPORT,
 # and waterline_consistency_<cam>.png shows the last week's rejections on
@@ -179,31 +183,63 @@ DEM_SERIES="$BASE/archive/dems"
 # shows the water's edge where waves run up to, above still water, so
 # without it the DEM reads low in rough water.
 #
-# C = 0.037, confirmed two independent ways on 29 Sep - 5 Oct 2026:
-#  - against the 2026-09-29 RTK transects: the waterlines lying on them sat
-#    on beach 0.33 m higher than their still-water level; per frame
-#    C = -(line - RTK)/sqrt(Hs*L0) gives median 0.037, 90% 0.028-0.058
-#    (14 frames, 4 days, +0.8 to +1.3 m only: the RTK did not go lower);
-#  - internally, repeat crossings of a cell agree best at C = 0.03-0.04
-#    (dem_from_contours.py --fit-setup on uncorrected contours).
-# That is the Stockdon (2006) setup, 0.35*beta*sqrt(H0*L0), for a ~1:10
-# beach face. About +0.37 m at Hs 1 m, Tp 8 s. Refit (same command, on
-# contours built with SETUP_COEF="") after a low-tide survey, or if the
-# wave source (WAVE_BUOY / USE_MARCONI_WAVES) changes. Turning it on lifts
-# every DEM by that amount, so the first week's dem_change.py map shows a
-# uniform rise, which it flags as a likely calibration shift.
+# C = 0.037, kept after a recheck in Oct 2026. What each fit on the
+# 29 Sep - 5 Oct 2026 waterlines gives:
+#  - the first fit (8 Oct), against the 2026-09-29 RTK transects: per frame
+#    C = -(line - RTK)/sqrt(Hs*L0), each line taken where it lay WITHOUT
+#    setup: median 0.037, 90% 0.028-0.058 (14 frames; every crossing,
+#    so the survey-floor bias below applies to it too);
+#  - repeat crossings of a cell, no survey: dem_from_contours.py --fit-setup
+#    on lines built with C = 0 prints a near-best band (the C whose median
+#    spread is within 5 mm of its best) of +0.006 to +0.034 on the filtered
+#    lines with --max-hs 1.5 (best 0.026, a flat minimum; 0.037 spreads
+#    6 mm more) and +0.026 to +0.040 on the unfiltered rows, also with
+#    --max-hs 1.5 (best 0.030); the same spread with each line re-projected
+#    at still water + setup gives 0.029 (90% ~0.00-0.04); the within-cell
+#    slope of elevation on sqrt(Hs*L0), each line re-projected, gives 0.043
+#    (90% 0.026-0.053);
+#  - the RTK transects stop at their lowest shot, +1.17 to +1.80 m. A line
+#    below that can only read low on them, and one that would read high at
+#    that level lands seaward of the survey and drops out, so a fit over
+#    every crossing is biased by where the survey stops (re-projected, all
+#    crossings: 0.067). Over only lines 0.1-0.2 m or more above the lowest
+#    shots, re-projected: ~0.043-0.046 (day-block 90% ~0.02-0.055).
+# (The re-projected fits, 0.029, 0.043, 0.067 and 0.043-0.046, come from a
+# scratch analysis made in Oct 2026, not from code in this repository.)
+# 0.037 lies inside each 90% interval above that the survey floor does not
+# bias (~0.00-0.04, 0.026-0.053, ~0.02-0.055) and inside the --fit-setup
+# band of the unfiltered rows; the filtered lines' band stops just below
+# it. It is the Stockdon et al. (2006) setup, 0.35*beta_f*sqrt(H0*L0), for
+# a ~1:10 beach face (beta_f ~0.106). The RTK cannot pin C more closely:
+# an RTK survey reaching the low-tide line, on days with different waves,
+# would. Refit (repeat crossings on contours built with SETUP_COEF="") if
+# the wave source (WAVE_BUOY / USE_MARCONI_WAVES) changes, and read what
+# --fit-setup prints: it offers a C to apply only when C = 0 and the C in
+# use (this SETUP_COEF) both lie outside its near-best band and the
+# minimum is not flat. One week's curve is noisy and can sit near 0 (the
+# C = 0 lines of 29 Sep - 2 Oct 2026 alone, filtered, --max-hs 1.5: band
+# -0.020 to +0.010, best -0.004, "not distinguishable from C = 0"), so
+# adopt a C only when it holds over several weeks of different waves.
+# About +0.37 m at Hs 1 m, Tp 8 s; the DEM moves ~0.06 m per 0.01 of C.
+# Changing C changes every DEM, but the
+# week-to-week change rebuilds both weeks with the current setting
+# (dem_change.py --rebuild), so a new C does not show there as change.
+# survey_products.py and historical_forcing.py carry the same C (their
+# SETUP_COEF): change all three together.
 SETUP_COEF="0.037"
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
-# The date the GNSS-R record starts and how many days it covers,
-# remembered from the runs that saw it ("YYYY-MM-DD N"). Contours, ground
-# points, DEM and runup are all rebuilt from the WHOLE archive and drop
-# every frame the spline does not cover, so a spline that suddenly starts
-# later (gnssrefl refitted only part of the record -- what a calendar-year
-# fit did on 2 January) or has lost days in the middle would silently remove
-# those frames. Such a spline is refused and the previous products kept.
-# Delete this file if the record was shortened on purpose.
+# The date the GNSS-R record starts and the MOST days with readings it has
+# had, remembered from the runs that accepted it ("YYYY-MM-DD N"). Contours,
+# ground points, DEM and runup are all rebuilt from the WHOLE archive and
+# drop every frame the spline does not cover, so a spline that suddenly
+# starts later (gnssrefl refitted only part of the record -- what a
+# calendar-year fit did on 2 January) or has lost days in the middle would
+# silently remove those frames. Such a spline is refused and the previous
+# products kept. N is a high-water mark, so a few days lost run after run
+# add up and are refused too. Delete this file if the record was shortened
+# on purpose (it is written again, from that spline, on the next run).
 GNSSR_START_FILE="$BASE/archive/gnssr_record_start.txt"
 GNSSR_MAX_LOST_DAYS=3
 
@@ -338,15 +374,19 @@ elif [ -n "$gnssr_known_first" ] \
     log "       the GNSS side, or delete $GNSSR_START_FILE if this is intended."
 elif [[ "${gnssr_known_ndays:-}" =~ ^[0-9]+$ ]] \
      && [ "$gnssr_ndays" -lt $(( gnssr_known_ndays - GNSSR_MAX_LOST_DAYS )) ]; then
-    log "ERROR: GNSS-R now has readings on $gnssr_ndays days, but the record had $gnssr_known_ndays:"
+    log "ERROR: GNSS-R now has readings on $gnssr_ndays days, but the record has had $gnssr_known_ndays:"
     log "       rebuilding from it would drop the frames of the missing days. Contours,"
     log "       maps, DEM and runup NOT rebuilt; the previous ones are kept. Check"
     log "       daily_gnss.sh on the GNSS side, or delete $GNSSR_START_FILE if intended."
 else
-    # remember the earliest start, and the days covered now
+    # remember the earliest start, and the most days covered (not just
+    # now's, so a slow loss is still measured from the best record)
     keep_first="$gnssr_first"
     [ -n "$gnssr_known_first" ] && [[ "$gnssr_known_first" < "$gnssr_first" ]] && keep_first="$gnssr_known_first"
-    echo "$keep_first $gnssr_ndays" > "$GNSSR_START_FILE"
+    keep_ndays="$gnssr_ndays"
+    [[ "${gnssr_known_ndays:-}" =~ ^[0-9]+$ ]] && [ "$gnssr_known_ndays" -gt "$gnssr_ndays" ] \
+        && keep_ndays="$gnssr_known_ndays"
+    echo "$keep_first $keep_ndays" > "$GNSSR_START_FILE"
     # How far behind is GNSS-R? Last data row, columns 3/4/5 = YYYY MM DD.
     last_row=$(grep -v '^%' "$GNSSR_SPLINE" | tail -1)
     gnssr_last=$(echo "$last_row" | awk '{printf "%04d-%02d-%02d", $3, $4, $5}')
@@ -378,12 +418,13 @@ else
     else
         # 5d. Consistency filter. MAP_CONTOURS is what the maps and
         #     georectification read: the filtered copy when the filter ran
-        #     cleanly, otherwise the unfiltered file. The old filtered copy is
-        #     removed first, so a failed run can never leave last run's file
-        #     looking current.
+        #     cleanly, otherwise the unfiltered file. Last run's filtered copy,
+        #     report and diagnostic plots are removed first, so a failed (or
+        #     disabled) run can never leave them looking current.
         MAP_CONTOURS="$CONTOURS"
+        rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp" "$CONSISTENCY_REPORT" "$CONSISTENCY_REPORT.tmp" \
+            "${CONSISTENCY_PLOT}_c1.png" "${CONSISTENCY_PLOT}_c2.png"
         if [ "$CONSISTENCY_ENABLE" = "1" ]; then
-            rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp"
             qc_out=$(python3 "$BASE/waterline_consistency.py" "$CONTOURS" \
                 --output "$CONTOURS_QC" --report "$CONSISTENCY_REPORT" \
                 --plot "$CONSISTENCY_PLOT" --image-dir "$ARCHIVE_IMG" \
@@ -393,8 +434,15 @@ else
             if [ $qc_rc -eq 0 ] && [ -s "$CONTOURS_QC" ]; then
                 MAP_CONTOURS="$CONTOURS_QC"
                 log "waterline consistency: $(echo "$qc_out" | grep '^CONSISTENCY ' | tail -1 | cut -c13-)"
+                # e.g. rows running AGAINST the water level in a camera's columns
+                # (the detector wrong for most lines there): first line of each
+                # (the full output, WARNING lines included, is in the log just
+                # above; repeated here without the word, so station_status.py
+                # counts each filter warning once)
+                echo "$qc_out" | grep '^WARNING' | while read -r l; do log "  consistency filter: ${l#WARNING: }"; done
             else
-                rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp"
+                rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp" "$CONSISTENCY_REPORT" "$CONSISTENCY_REPORT.tmp" \
+                    "${CONSISTENCY_PLOT}_c1.png" "${CONSISTENCY_PLOT}_c2.png"
                 log "WARNING: waterline consistency filter failed (exit $qc_rc) -- maps, ground points"
                 log "         and DEM use the UNFILTERED $(basename "$CONTOURS"). See above."
             fi
@@ -451,12 +499,21 @@ else
                 hs_arg=""
                 [ -n "$waves_arg" ] && [ -n "$DEM_MAX_HS" ] && hs_arg="--max-hs $DEM_MAX_HS"
                 [ -n "$DEM_MAX_DAY_OFFSET" ] && hs_arg="$hs_arg --max-day-offset $DEM_MAX_DAY_OFFSET"
+                # dem_from_contours.py exit: 0 built, 4 no points in the window or
+                # every camera-day rejected by the day test (a short page says
+                # so), 3 grids written but NO page, 1 other failure. The old page
+                # is removed first, so the email never attaches a stale one.
                 python3 "$BASE/dem_from_contours.py" "$GROUND" "$DEM_STEM" $hs_arg \
                     --cell "$DEM_CELL" \
                     --min-points "$DEM_MIN_POINTS" \
                     --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1
-                if [ $? -eq 0 ]; then
+                dem_rc=$?
+                if [ $dem_rc -eq 0 ]; then
                     log "DEM written: $(basename "$DEM_STEM")_dem.asc (+ spread, count, png)"
+                elif [ $dem_rc -eq 3 ]; then
+                    log "WARNING: DEM grids written but its page was NOT drawn -- no $(basename "$DEM_STEM")_dem.png this run (see above)"
+                elif [ $dem_rc -eq 4 ]; then
+                    log "WARNING: DEM not built: no waterline points left (none in the window, or the day test rejected every camera-day; its page says so; see above)"
                 else
                     log "WARNING: DEM build failed (see above)"
                 fi
@@ -468,10 +525,37 @@ else
                         --cell "$DEM_CELL" \
                         --min-points "$DEM_MIN_POINTS" \
                         --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1
-                    if [ $? -eq 0 ]; then
-                        log "window DEM written: $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_dem.asc (+ dated copy in $DEM_SERIES)"
-                        python3 "$BASE/dem_change.py" --series "$DEM_SERIES" --days "$DEM_WINDOW_DAYS" >> "$LOG" 2>&1 \
+                    win_rc=$?
+                    if [ $win_rc -eq 0 ] || [ $win_rc -eq 3 ]; then
+                        if [ $win_rc -eq 0 ]; then
+                            log "window DEM written: $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_dem.asc (+ dated copy in $DEM_SERIES)"
+                        else
+                            log "WARNING: window DEM grids written but its page was NOT drawn -- no $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_dem.png this run (see above)"
+                        fi
+                        # Week-to-week change. The reference week is rebuilt from the
+                        # CURRENT ground file with this DEM's settings (like for like:
+                        # the archived copies were built by the processing of their
+                        # day); a degenerate one (too few cells, < 0.5 m of relief) is
+                        # skipped for the nearest adequate one, and a change statement
+                        # always says how many cells it rests on.
+                        # The new DEM is the series copy THIS run wrote (named by
+                        # the window's end date, from its _info.json), not whatever
+                        # is newest in the folder: an earlier run's copy can be newer
+                        # when the ground file's last date moves back.
+                        win_end=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("window_end") or "")' \
+                            "${DEM_STEM}_${DEM_WINDOW_DAYS}day_info.json" 2>/dev/null)
+                        new_dem=""
+                        if [ -n "$win_end" ] && [ -f "$DEM_SERIES/dem_${win_end}_${DEM_WINDOW_DAYS}d_dem.asc" ]; then
+                            new_dem="$DEM_SERIES/dem_${win_end}_${DEM_WINDOW_DAYS}d"
+                        fi
+                        python3 "$BASE/dem_change.py" --series "$DEM_SERIES" --days "$DEM_WINDOW_DAYS" \
+                            ${new_dem:+--b "$new_dem"} --rebuild "$GROUND" -- $hs_arg \
+                            --cell "$DEM_CELL" \
+                            --min-points "$DEM_MIN_POINTS" \
+                            --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1 \
                             || log "WARNING: beach-change map failed (see above)"
+                    elif [ $win_rc -eq 4 ]; then
+                        log "WARNING: window DEM not built: no waterline points left in the last ${DEM_WINDOW_DAYS} days (none, or the day test rejected every camera-day; its page says so; see above)"
                     else
                         log "WARNING: window DEM build failed (see above)"
                     fi

@@ -4,34 +4,56 @@ Daily Beach Elevation Map
 ----------------------------
 Takes one day's detected waterlines from contour_points.csv and draws
 them all onto a single background image (by default the ~12:15
-capture), shaded by water elevation.
+capture), shaded by the elevation each line marks on the beach.
+
+WHICH ELEVATION: the one the consistency filter and the DEM use --
+beach_elevation_navd88, the water level plus wave setup, when the
+contour file has it (the cron applies setup, SETUP_COEF), else the
+water level (tide_elevation_navd88), row by row the way
+dem_from_contours.py does. Binned and coloured by the water level alone,
+one 0.1 m bin held lines whose real levels differed by up to ~0.5 m on
+stormy days (setup 0.15-0.88 m a frame in the station archive), the band
+stretched across them, and the colours disagreed with the filter's report
+and the DEM (30-day synthetic station through the cron, Oct 2026: c1's
+7-day bands covered 629k px2 binned by water level, 276k px2 by water
+level + setup; a line coloured +1.05 m here was +1.34 m in the report).
+The colour bar says which elevation it is.
 
 WHAT THE FILLED BANDS MEAN -- read this before interpreting the figure:
-  Lines are grouped into elevation bins (--elevation-bin, 0.10 m). In
+  Lines are grouped into elevation bins (--elevation-bin, 0.10 m; the
+  elevation as above). In
   each image column covered by at least 3 lines of a bin that AGREE,
   the band spans the 16th to 84th percentile of their rows (about
-  +/-1 sigma). A line does not agree in a column when it is alone
-  there: no other line of the bin within 12 px, or 4x the usual
-  spacing of that bin's lines in that column if larger. On a stable
-  beach the lines of one bin should coincide, so:
+  +/-1 sigma). Lines agree in a column when they form a group of at
+  least 3: sorted by row, a group breaks wherever the next line is
+  further than 12 px, or 4x the usual spacing of that bin's lines in
+  that column if larger -- but never further than the rows half a
+  metre of water level moves the line in that column (from all the
+  map's lines). On a stable beach the lines of one bin should
+  coincide, so:
 
       band width  ~=  REPEATABILITY of the measurement at that
                       elevation, NOT a morphological feature.
 
   Over several days the band also takes in real movement of the
-  shoreline at that elevation: lines that moved together are not
-  alone, so they stay in, and the band spans both positions.
+  shoreline at that elevation: lines that moved together form a group
+  of their own, or stay linked to the others, so they stay in, and the
+  band spans both positions.
 
   A stray line -- a detection error, a line out on the water -- is
-  still drawn, but cannot widen the band. Until Oct 2026 the band ran
+  still drawn, but cannot widen the band; nor can two or three strays
+  that happen to lie close to each other. Until Oct 2026 the band ran
   from the lowest to the highest line in the bin (nanmin/nanmax), so
   one stray line turned it into a large translucent rectangle reaching
   that line, with vertical edges where the stray line started and
   stopped, and the picture looked far worse than the data. Where fewer
   than 3 lines agree there is no band: two lines cannot tell which of
-  them is off. The band's edges are smoothed over 15 columns, runs
-  shorter than 20 columns are not drawn, and each run narrows to a
-  point at its ends instead of stopping in a vertical edge.
+  them is off. Gaps of fewer than 20 columns between stretches of band
+  are bridged (no notch where a line or two drop out for a few
+  columns), the edges are smoothed over 15 columns, stretches shorter
+  than 20 columns are not drawn, and each stretch narrows to a point at
+  its ends by at most 2 px per column on each side -- a tall band over
+  a proportionally long stretch -- instead of stopping in a wall.
 
   A wide band means the lines that agree still disagree by that much:
   detection error, wave runup differing between rising and falling
@@ -52,6 +74,7 @@ Usage:
     python3 daily_elevation_map.py <contour_points.csv> <image_dir> <camera> <output.png>
         [--date YYYY-MM-DD] [--background-hour 12] [--background-minute 15]
         [--elevation-bin 0.05] [--line-alpha 0.85] [--fill-alpha 0.30]
+    python3 daily_elevation_map.py --self-test     (the band's shape, band_self_test())
 
 Example:
     python3 daily_elevation_map.py contour_points.csv \\
@@ -59,6 +82,7 @@ Example:
         elevation_map_c1_20260911.png --date 2026-09-11
 """
 
+import os
 import sys
 import csv
 import argparse
@@ -77,16 +101,32 @@ from matplotlib.lines import Line2D
 
 
 ELEVATION_COLUMNS = ("tide_elevation_navd88", "tide_elevation")
+BEACH_COLUMN = "beach_elevation_navd88"       # water level + wave setup (--setup-coef)
+
+
+def carries_setup(text):
+    """True when a setup_correction_m cell holds a wave setup (dem_from_contours.py
+    has the same test): blank is a frame with no wave record, 0 a build with C = 0."""
+    try:
+        return float(text) != 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 def load_contours(path, camera, date_filter=None, only=None):
     """
     Groups contour points by source frame. Returns a dict keyed by
     source_file, each with sorted column/row arrays, the elevation,
-    and the capture time.
+    whether that elevation includes wave setup, and the capture time;
+    and the name of the water-level column.
+
+    The elevation is beach_elevation_navd88 (water level + wave setup)
+    where the file has it and the row's value is not blank, else the
+    water level -- the same choice, row by row, as dem_from_contours.py,
+    georectify.py and waterline_consistency.py make.
     """
     frames = defaultdict(lambda: {"columns": [], "rows": [],
-                                  "elevation": None, "capture": None})
+                                  "elevation": None, "setup": False, "capture": None})
 
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
@@ -107,7 +147,12 @@ def load_contours(path, camera, date_filter=None, only=None):
                 continue
             frames[key]["columns"].append(float(row["pixel_column"]))
             frames[key]["rows"].append(float(row["pixel_row"]))
-            frames[key]["elevation"] = float(row[elev_col])
+            beach = row.get(BEACH_COLUMN)
+            frames[key]["elevation"] = float(beach or row[elev_col])
+            # setup_correction_m is blank for a frame with no wave record
+            # and 0 in a build with C = 0: its beach_elevation_navd88 is then
+            # the water level itself
+            frames[key]["setup"] = bool(beach) and carries_setup(row.get("setup_correction_m"))
             frames[key]["capture"] = capture
 
     for data in frames.values():
@@ -119,21 +164,38 @@ def load_contours(path, camera, date_filter=None, only=None):
 
 
 def agreeing_band(stack, min_lines=3, alone_px=12.0, alone_factor=4.0,
-                  smooth_columns=15, taper_columns=15, min_run=20):
+                  smooth_columns=15, max_edge_slope=2.0, min_run=20,
+                  rows_per_m=None, link_m=0.5):
     """
     Band of the lines that agree, per column of `stack` (lines x columns,
     NaN where a line has no data). Returns (lo, hi, valid).
 
-    A line is left out of the band in a column when it is ALONE there: no
-    other line of the bin within max(`alone_px`, `alone_factor` x the
-    column's median nearest-neighbour distance). A stray line -- out on the
-    water, or on the wrong feature -- is alone, so it can never stretch the
-    band, however few lines the bin holds. Lines that move together, as
-    after real beach change over a multi-day window, are not alone and stay
-    in: the band then shows that movement, as the map's title says. (A
+    Lines agree in a column when they form a GROUP of at least
+    `min_lines`: sorted by row, a group breaks wherever the gap to the next
+    line exceeds the link distance, max(`alone_px`, `alone_factor` x the
+    column's median nearest-neighbour distance), capped at `link_m` (0.5 m)
+    of water level in that column's rows (`rows_per_m`, per column, from all
+    the map's lines; NaN or None: no cap). Smaller groups are left out of
+    the band there. A stray line -- out on the water, or on the wrong
+    feature -- is a group of one, so it can never stretch the band; nor
+    can two strays lying close together (a group of two). Lines that move
+    together, as after real beach change over a multi-day window, are a
+    group of their own, or stay linked to the others: they stay in, and
+    the band then shows that movement, as the map's title says. (A
     median/MAD rule was tried first: with two groups of lines it switched
     between showing both and only the larger one from column to column as
-    lines started and stopped, which drew a blotchy band.)
+    lines started and stopped, which drew a blotchy band. Groups are kept
+    or not on their own size, so nothing switches.)
+
+    WHY groups and the cap: the earlier rule left out only a line with no
+    other line near it. On the station's 7-day c2 map of 29 Sep - 5 Oct
+    2026 two -0.4 m lines out on the water lay 1 px apart, so neither was
+    alone, and the band ran 100 px out from the shore lines to them; in
+    the -0.5 m bin one stray sat 115 px from two shore lines 31 px apart,
+    under 4x their spacing. Together they drew a translucent 'bottle' on
+    the water. 115 px there is ~1-2 m of water level; half a metre is
+    already more than a 0.1 m bin, setup scatter and a week of real
+    change put between neighbouring lines.
 
     The band is the 16th-84th percentile of the remaining rows -- about
     +/-1 sigma -- drawn only where at least `min_lines` remain. The 12 px
@@ -141,9 +203,27 @@ def agreeing_band(stack, min_lines=3, alone_px=12.0, alone_factor=4.0,
     spread of one 0.1 m bin in the near field (10-25 px), so honest lines at
     the edge of a bin are not mistaken for strays.
 
-    Edges are smoothed over `smooth_columns`, runs shorter than `min_run`
-    columns are dropped, and each run narrows to a point over its last
-    `taper_columns`, so the band never ends in a vertical edge.
+    Shape, in this order:
+      * gaps shorter than `min_run` columns between two runs are bridged,
+        the edges joined in straight lines across: where one or two
+        columns drop below `min_lines` (a line starting, a detector gap)
+        the band used to fall to nothing and back, a full-height V-notch
+        (c2, bin +1.4 m on the synthetic week: a 3-column gap in a 239 px
+        band);
+      * edges smoothed over `smooth_columns`;
+      * runs shorter than `min_run` columns dropped;
+      * each edge moves away from the band's core by at most
+        `max_edge_slope` px per column: from a point at each end, so a
+        run narrows to a point with its half-width shrinking by at most
+        2 px per column -- a 240 px band over 60 columns, a 20 px one
+        over 5 -- and inside a run, where a group of lines starts or
+        stops part way along, so the edge eases out instead of stepping.
+        A fixed 15-column taper left tall bands ending in near-vertical
+        walls (80% of the height within 14 columns), and steps where
+        lines joined, which read as translucent rectangles. 2 px per
+        column is several times the waterlines' own slope in the photo
+        (c1 ~0.1, c2 up to ~0.6 px per column), so it bends the band's
+        edges, not the lines it follows.
     """
     import warnings
     n_lines, width = stack.shape
@@ -159,12 +239,35 @@ def agreeing_band(stack, min_lines=3, alone_px=12.0, alone_factor=4.0,
         # all-NaN columns are expected (no line of the bin there)
         warnings.simplefilter("ignore", category=RuntimeWarning)
         typical = np.nanmedian(np.where(np.isfinite(nn), nn, np.nan), axis=0)
-        limit = np.maximum(alone_px, alone_factor * np.nan_to_num(typical, nan=alone_px))
-        kept = np.where(nn <= limit, srt, np.nan)
+        limit = alone_factor * np.nan_to_num(typical, nan=alone_px)
+        if rows_per_m is not None:
+            cap = link_m * np.abs(np.asarray(rows_per_m, dtype=float))
+            limit = np.where(np.isfinite(cap), np.minimum(limit, cap), limit)
+        limit = np.maximum(alone_px, limit)
+        # groups: consecutive sorted rows no further apart than the limit
+        idx = np.broadcast_to(np.arange(n_lines)[:, None], srt.shape)
+        brk = np.ones(srt.shape, bool)
+        if n_lines > 1:
+            brk[1:] = ~(np.diff(srt, axis=0) <= limit)      # a NaN gap breaks too
+        ends = np.ones(srt.shape, bool)
+        ends[:-1] = brk[1:]
+        first = np.maximum.accumulate(np.where(brk, idx, 0), axis=0)
+        last = np.minimum.accumulate(np.where(ends, idx, n_lines - 1)[::-1], axis=0)[::-1]
+        size = last - first + 1
+        kept = np.where(np.isfinite(srt) & (size >= min_lines), srt, np.nan)
         n = np.isfinite(kept).sum(axis=0)
         lo = np.nanpercentile(kept, 16, axis=0)
         hi = np.nanpercentile(kept, 84, axis=0)
     valid = n >= min_lines
+    if valid.any():
+        # bridge short gaps between runs, edges joined straight across
+        edges = np.flatnonzero(np.diff(np.r_[0, valid.astype(int), 0]))
+        for e, s2 in zip(edges[1::2][:-1], edges[::2][1:]):     # gap = columns e .. s2-1
+            if s2 - e < min_run:
+                t = (np.arange(e, s2) - (e - 1)) / float(s2 - (e - 1))
+                lo[e:s2] = lo[e - 1] + t * (lo[s2] - lo[e - 1])
+                hi[e:s2] = hi[e - 1] + t * (hi[s2] - hi[e - 1])
+                valid[e:s2] = True
     if smooth_columns > 1 and valid.any():
         kernel = np.ones(int(smooth_columns))
         weight = np.convolve(valid.astype(float), kernel, mode="same")
@@ -173,17 +276,62 @@ def agreeing_band(stack, min_lines=3, alone_px=12.0, alone_factor=4.0,
             hi = np.convolve(np.where(valid, hi, 0.0), kernel, mode="same") / weight
     if valid.any():
         edges = np.flatnonzero(np.diff(np.r_[0, valid.astype(int), 0]))
-        mid = 0.5 * (lo + hi)
-        half = 0.5 * (hi - lo)
+        lo, hi = lo.copy(), hi.copy()
         for a, b in zip(edges[::2], edges[1::2]):
             if b - a < min_run:
                 valid[a:b] = False
                 continue
-            k = np.arange(b - a)
-            taper = np.clip(np.minimum(k + 1, b - a - k) / float(taper_columns), 0.0, 1.0)
-            half[a:b] *= taper
-        lo, hi = mid - half, mid + half
+            # Each edge may move AWAY from the band's core by at most
+            # max_edge_slope px per column -- from a point just beyond each
+            # end, and from every neighbouring column (a cumulative min/max
+            # of edge +/- slope x distance, each way). Edges only ever move
+            # towards the core: no band is drawn where there was none.
+            x = max_edge_slope * (np.arange(b - a) + 0.5)
+            m0, m1 = 0.5 * (lo[a] + hi[a]), 0.5 * (lo[b - 1] + hi[b - 1])
+            h, l = hi[a:b], lo[a:b]
+            h_lim = np.minimum.reduce([
+                h, m0 + x, m1 + x[::-1],
+                x + np.minimum.accumulate(h - x),
+                (x + np.minimum.accumulate(h[::-1] - x))[::-1]])
+            l_lim = np.maximum.reduce([
+                l, m0 - x, m1 - x[::-1],
+                -x + np.maximum.accumulate(l + x),
+                (-x + np.maximum.accumulate(l[::-1] + x))[::-1]])
+            cross = l_lim > h_lim                     # the line itself moved faster than that
+            c = 0.5 * (l_lim + h_lim)
+            lo[a:b] = np.where(cross, c, l_lim)
+            hi[a:b] = np.where(cross, c, h_lim)
     return lo, hi, valid
+
+
+def rows_per_metre(stack, elevations, min_lines=8, min_range=0.3):
+    """
+    How many rows the waterline moves per metre of water level, in each
+    column: the least-squares slope of row against elevation over all the
+    lines that reach it (NaN where fewer than `min_lines` do, or their
+    elevations span less than `min_range` m). A few strays among the ~100
+    lines of a week barely move it. agreeing_band() uses it to say how far
+    apart, in metres, two lines of one bin are.
+    """
+    ok = np.isfinite(stack)
+    z = np.where(ok, np.asarray(elevations, dtype=float)[:, None], np.nan)
+    n = ok.sum(axis=0)
+    out = np.full(stack.shape[1], np.nan)
+    use = n >= min_lines
+    if not use.any():
+        return out
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        zm = np.nanmean(z[:, use], axis=0)
+        ym = np.nanmean(stack[:, use], axis=0)
+        dz = z[:, use] - zm
+        sxx = np.nansum(dz * dz, axis=0)
+        sxy = np.nansum(dz * (stack[:, use] - ym), axis=0)
+        zr = np.nanmax(z[:, use], axis=0) - np.nanmin(z[:, use], axis=0)
+        b = np.where((sxx > 0) & (zr >= min_range), sxy / np.where(sxx > 0, sxx, 1.0), np.nan)
+    out[use] = np.abs(b)
+    return out
 
 
 def crop_bounds_for(camera, image_height):
@@ -338,6 +486,13 @@ def main():
     parser.add_argument("--dpi", type=int, default=130)
     args = parser.parse_args()
 
+    # The map is always this run's: an earlier map left in place when this run finds no lines
+    # (exit 1 below) would look current.
+    try:
+        os.remove(args.output_png)
+    except OSError:
+        pass
+
     only = None
     if args.frames_list:
         with open(args.frames_list) as fh:
@@ -380,8 +535,12 @@ def main():
         frames = kept
 
     dates_used = sorted({d["capture"][:10] for d in frames.values()})
+    # calendar days of the span, and how many of them have lines: a 7-day window with one
+    # empty day once read '(6 days)'
+    span_days = (date_cls.fromisoformat(dates_used[-1]) - date_cls.fromisoformat(dates_used[0])).days + 1
     date_label = (dates_used[0] if len(dates_used) == 1
-                  else f"{dates_used[0]} to {dates_used[-1]}  ({len(dates_used)} days)")
+                  else f"{dates_used[0]} to {dates_used[-1]}  ({span_days} days"
+                       + (f", {len(dates_used)} with lines)" if len(dates_used) < span_days else ")"))
 
     # The backdrop comes from ONE day -- by default the most recent in
     # range, so accumulated lines are drawn over the latest view of the
@@ -407,8 +566,27 @@ def main():
     height, width = image_rgb.shape[:2]
 
     elevations = np.array([d["elevation"] for d in frames.values()])
+    n_setup = sum(bool(d["setup"]) for d in frames.values())
+    # One wording for the log, the title and the colour bar: when only some
+    # lines carry the wave setup (frames with no wave record), the picture
+    # must say so too, not only the log.
+    if n_setup == len(frames):
+        elev_what = elev_short = "water level + wave setup"
+        elev_bar = "water level + wave setup (m NAVD88)"
+    elif n_setup:
+        elev_what = (f"water level + wave setup ({len(frames) - n_setup} of {len(frames)} "
+                     f"lines: water level only, no wave record)")
+        elev_short = (f"water level + wave setup; {len(frames) - n_setup} of {len(frames)} "
+                      f"lines water level only, no wave record")
+        elev_bar = "water level (+ wave setup where recorded) (m NAVD88)"
+    else:
+        elev_what = elev_short = "water level"
+        elev_bar = "water level (m NAVD88)"
     norm = Normalize(vmin=elevations.min(), vmax=elevations.max())
-    colormap = matplotlib.colormaps[args.colormap]
+    try:
+        colormap = matplotlib.colormaps[args.colormap]      # matplotlib >= 3.5
+    except AttributeError:
+        colormap = plt.get_cmap(args.colormap)              # 3.3 / 3.4 (the station's floor)
 
     # Resample every line onto a common column grid so lines in the
     # same elevation bin can be filled between directly.
@@ -456,6 +634,9 @@ def main():
             continue
         bin_index = int(round(data["elevation"] / args.elevation_bin))
         bins[bin_index].append(key)
+    rows_per_m = rows_per_metre(np.vstack([resampled[k] for k in resampled]),
+                                np.array([frames[k]["elevation"] for k in resampled])) \
+        if resampled else None
 
     # With a week of captures this can be ~120 lines. Drawn at
     # single-day weight they stack into an opaque mass and the
@@ -497,7 +678,7 @@ def main():
 
         if len(keys) >= 3:
             stack = np.vstack([resampled[k] for k in keys])
-            lo, hi, valid = agreeing_band(stack)
+            lo, hi, valid = agreeing_band(stack, rows_per_m=rows_per_m)
             if valid.any():
                 # where= (not indexing) so a gap stays a gap instead of being
                 # bridged by a straight edge across columns with no data.
@@ -518,19 +699,21 @@ def main():
 
     ax.set_title(
         f"{args.camera.upper()}  {date_label}   {len(frames)} waterlines, "
-        f"{elevations.min():+.2f} to {elevations.max():+.2f} m NAVD88\n"
+        f"{elevations.min():+.2f} to {elevations.max():+.2f} m NAVD88 "
+        f"({elev_short})\n"
         f"background: {bg_day} {bg_capture[11:16]} UTC   |   "
         + ("shaded bands = 16-84% spread of the 3+ same-elevation lines that agree "
            "(repeatability, not morphology)"
            if len(dates_used) == 1 else
            f"shaded bands = 16-84% spread of the 3+ lines that agree, per elevation, over "
            f"{len(dates_used)} days (repeatability + real shoreline movement)"),
-        fontsize=9)
+        fontsize=12)        # ~12 px tall when the email shrinks the map to 1400 px
 
     scalar_map = matplotlib.cm.ScalarMappable(cmap=colormap, norm=norm)
     scalar_map.set_array([])
     cbar = fig.colorbar(scalar_map, ax=ax, fraction=0.030, pad=0.015)
-    cbar.set_label("water elevation (m, NAVD88)")
+    cbar.set_label(elev_bar, fontsize=12)
+    cbar.ax.tick_params(labelsize=11)
 
     fig.text(0.01, 0.005, f"lines: {Path(args.contour_csv).name}", fontsize=7, color="0.35",
              ha="left", va="bottom")
@@ -541,7 +724,8 @@ def main():
     print(f"Date range        : {date_label}")
     print(f"Camera            : {args.camera}")
     print(f"Waterlines drawn  : {len(resampled)}")
-    print(f"Elevation range   : {elevations.min():+.3f} to {elevations.max():+.3f} m NAVD88")
+    print(f"Elevation range   : {elevations.min():+.3f} to {elevations.max():+.3f} m NAVD88 "
+          f"({elev_what})")
     print(f"Elevation bins    : {len(bins)}  ({filled_bins} had 3+ agreeing lines somewhere and "
           f"were filled)")
     if bg_score is not None:
@@ -581,5 +765,82 @@ def main():
         print("whose captures span both a rising and a falling tide.")
 
 
+def band_self_test():
+    """
+    python3 daily_elevation_map.py --self-test
+
+    The band's shape on synthetic stacks of one bin's lines (rows; 600
+    columns), each case one way the station's maps went wrong:
+      1. a stray 115 px from two shore lines 31 px apart (0.5 m = 30 px
+         there): no band where only those two agree (the c2 'bottle');
+      2. two strays 1 px apart, 100 px off eight shore lines: the band
+         stays on the shore lines;
+      3. real change, four lines before and four 35 px further after
+         (0.35 m): both groups stay, the band spans both;
+      4. a ~240 px tall band (lines spread evenly): its edges move at
+         most 2 px per column, so it is at 80% of its height no sooner
+         than 0.8 x 240 / 4 = 48 columns from its ends -- no wall;
+      5. three columns where only two of eight lines reach: bridged, no
+         notch.
+    Returns 0 if all pass, 1 otherwise.
+    """
+    rng = np.random.default_rng(1)
+    W = 600
+    cols = np.arange(W)
+    fails = []
+
+    def lines(rows, noise=1.0):
+        return np.array([np.full(W, r) + rng.normal(0, noise, W) for r in rows])
+
+    # 1
+    st = lines([686, 717, 571])
+    lo, hi, ok = agreeing_band(st, rows_per_m=np.full(W, 60.0))
+    print(f"  1. stray + two shore lines: band in {ok.sum()} of {W} columns")
+    if ok.any():
+        fails.append("1: a band where only two lines agree")
+    # 2
+    st = lines([700, 702, 705, 707, 709, 711, 714, 716, 604, 605])
+    lo, hi, ok = agreeing_band(st, rows_per_m=np.full(W, 60.0))
+    top = float(np.nanmin(np.where(ok, lo, np.nan)))
+    print(f"  2. two strays 1 px apart: band top row {top:.0f} (shore lines from 700)")
+    if not ok.any() or top < 690:
+        fails.append(f"2: band reaches the strays (top {top:.0f})")
+    # 3
+    st = lines([700, 703, 705, 708, 735, 738, 740, 743])
+    lo, hi, ok = agreeing_band(st, rows_per_m=np.full(W, 100.0))
+    mid = slice(200, 400)
+    print(f"  3. real change (0.35 m): band {np.nanmean(lo[mid]):.0f}-{np.nanmean(hi[mid]):.0f}")
+    if not ok[mid].all() or np.nanmean(lo[mid]) > 706 or np.nanmean(hi[mid]) < 737:
+        fails.append("3: the band does not span both groups")
+    # 4
+    st = lines(np.linspace(560, 920, 9), noise=0.5)
+    st[:, :50] = np.nan
+    st[:, 550:] = np.nan
+    lo, hi, ok = agreeing_band(st)
+    h = np.where(ok, hi - lo, 0.0)
+    H = h.max()
+    run = np.flatnonzero(ok)
+    to80 = min(int(np.argmax(h[run] >= 0.8 * H)), int(np.argmax(h[run][::-1] >= 0.8 * H)))
+    slope = max(np.abs(np.diff(lo[run])).max(), np.abs(np.diff(hi[run])).max())
+    print(f"  4. {H:.0f} px band: 80% of its height {to80} columns in from its ends, "
+          f"edges move <= {slope:.1f} px/col")
+    if to80 < 0.8 * H / 4.0 - 2 or slope > 2.01:
+        fails.append(f"4: wall at the end (80% in {to80} columns, {slope:.1f} px/col)")
+    # 5
+    st = lines([700, 704, 707, 710, 713, 716, 720, 723])
+    st[2:, 300:303] = np.nan
+    lo, hi, ok = agreeing_band(st)
+    h = np.where(ok, hi - lo, 0.0)
+    dip = h[298:305].min() / np.median(h[100:250])
+    print(f"  5. three columns with two lines: band {'bridged' if ok[300:303].all() else 'BROKEN'}, "
+          f"narrowest {dip:.0%} of its usual height")
+    if not ok[300:303].all() or dip < 0.6:
+        fails.append("5: notch where two of eight lines remain")
+    print("SELF-TEST " + ("PASSED" if not fails else "FAILED: " + "; ".join(fails)))
+    return 0 if not fails else 1
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        sys.exit(band_self_test())
     main()

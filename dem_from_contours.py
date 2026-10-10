@@ -30,34 +30,69 @@ SOURCES OF ERROR, roughly in order of size:
     as of the Nov 2025 calibration. Unverified since.
   * Water level: GNSS-R, a measurement rather than a model.
   * Wave setup: the detected edge sits ABOVE the still-water line by an
-    amount that grows with wave height, but is assigned the still-water
-    elevation -- so the DEM reads LOW where rough-water frames land.
-    Not corrected here; --max-hs leaves those frames out instead, using
-    the offshore wave record (fetch_buoy_waves.py).
+    amount that grows with wave height. When the contours carry
+    beach_elevation_navd88 (water level + C*sqrt(Hs*L0), C from
+    extract_elevation_contours.py --setup-coef; the station's since
+    6 Oct 2026, C = SETUP_COEF of waterline_timex_cron.sh), that is what
+    is gridded, so the setup is included; how well depends on C
+    (--fit-setup checks it against repeat crossings). Without it the edge
+    is given the still-water elevation and the DEM reads LOW where
+    rough-water frames land; --max-hs leaves the roughest frames out,
+    using the offshore wave record (fetch_buoy_waves.py).
 
 Usage:
     python3 dem_from_contours.py contour_points_ground.csv dem_out \\
         [--cell 2.0] [--min-points 3] [--camera c1|c2|both]
         [--max-spread 0.5] [--fill-gaps] [--start-date ...] [--end-date ...]
+
+Writes dem_out_{dem,spread,count}.asc (and _source.asc with
+--interpolate-edge), dem_out_info.json (dates, frames per camera and
+what the filters left out -- what the page needs and the grids do not
+hold) and the page dem_out_dem.png, drawn by dem_figure.py. To redraw
+the page from those files without rebuilding: python3 dem_figure.py dem_out
+
+THE PAGE IS ALWAYS THIS RUN'S. The old dem_out_dem.png is removed first
+(unless --no-plot); a window with too few cells, or no points at all,
+gets a short page saying so, with the dates and what the filters left
+out. Exit status: 0 built (page drawn; a short one if too few cells),
+4 no points in the window, or every camera-day rejected by the
+--max-day-offset test (short page drawn, no grids written), 3 grids
+written but the page could not be drawn (no PNG), 1 any other failure
+(no PNG). The email attaches the PNG by name, so a stale one would pass
+for current.
 """
 
 import sys
 import csv
+import json
 import argparse
 from pathlib import Path
 
 import numpy as np
 
 
-def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, exclude=None):
+def carries_setup(text):
+    """True when a setup_correction_m cell holds a wave setup: blank is a frame with no
+    wave record, 0 a build with C = 0 -- in both the elevation is the water level alone."""
+    try:
+        return float(text) != 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, exclude=None,
+                stats=None):
     """Reads georectified contour points. Rows without ground coordinates are skipped.
-    `exclude`: regular expressions; frames whose source_file matches any are left out."""
+    `exclude`: regular expressions; frames whose source_file matches any are left out.
+    `stats`: a dict to receive the number of frames each filter left out, and the
+    share of points whose elevation includes the wave setup (for the page)."""
     import re
     exclude = [re.compile(x) for x in (exclude or [])]
     excluded = set()
     E, N, Z, cams, dates, frames = [], [], [], [], [], []
     missing_ground = 0
     rough_frames, unknown_hs_frames = set(), set()
+    with_setup = 0
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
         if "easting_utm19" not in (reader.fieldnames or []):
@@ -96,7 +131,9 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             N.append(float(r["northing_utm19"]))
             # Beach elevation = water level + setup when the contours were
             # extracted with --setup-coef; otherwise the water level.
-            Z.append(float(r.get("beach_elevation_navd88") or r["tide_elevation_navd88"]))
+            beach = r.get("beach_elevation_navd88")
+            with_setup += bool(beach) and carries_setup(r.get("setup_correction_m"))
+            Z.append(float(beach or r["tide_elevation_navd88"]))
             cams.append(r["camera"])
             dates.append(day)
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
@@ -105,6 +142,9 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     if max_hs is not None:
         print(f"Wave filter       : {len(rough_frames)} frame(s) left out, offshore Hs > "
               f"{max_hs} m; {len(unknown_hs_frames)} frame(s) with no wave record kept")
+    if stats is not None:
+        stats.update(excluded_frames=len(excluded), rough_frames=len(rough_frames),
+                     setup_share=with_setup / len(Z) if Z else 0.0)
     return (np.array(E), np.array(N), np.array(Z),
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
 
@@ -188,7 +228,8 @@ def build_grid(E, N, Z, cell, min_points, max_spread, frames=None):
                 else float(vals.max() - vals.min())
 
     if max_spread and max_spread > 0:
-        too_noisy = np.isfinite(spread) & (spread > max_spread)
+        with np.errstate(invalid="ignore"):      # NaN spread: no cell (numpy < 1.18 warns)
+            too_noisy = np.isfinite(spread) & (spread > max_spread)
         dem[too_noisy] = np.nan
 
     return (dem.reshape(nrows, ncols), count.reshape(nrows, ncols),
@@ -215,7 +256,8 @@ def load_frame_info(path):
             info[k] = {"epoch": num(r.get("capture_epoch")),
                        "tide": num(r.get("tide_elevation_navd88")),
                        "hs": num(r.get("offshore_hs_m")),
-                       "tp": num(r.get("offshore_tp_s"))}
+                       "tp": num(r.get("offshore_tp_s")),
+                       "setup": num(r.get("setup_correction_m"))}
     return info
 
 
@@ -255,12 +297,97 @@ def median_spread_by_cell(groups, vals, min_frames):
     return float(np.median(spreads)) if spreads else np.nan, len(spreads)
 
 
-def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames):
+# --fit-setup: the C range whose median spread lies within FIT_SETUP_NEAR_M of the best is
+# printed (the near-best band); FIT_SETUP_FLAT_WIDTH or wider is a flat minimum. On one week
+# of lines the curve is noisy at the few-mm level (on the filtered 29 Sep - 5 Oct 2026 C = 0
+# lines, --max-hs 1.5, it wanders 0.248-0.256 m over C 0-0.04), so neither the best C nor the
+# exact band width means much by itself: a C is offered to apply only when C = 0 AND the C in
+# use both lie OUTSIDE the near-best band (each spreads more than FIT_SETUP_NEAR_M above the best
+# and lies outside the band's range) and the band is narrower than FIT_SETUP_FLAT_WIDTH.
+# Otherwise the fit says which of the two it cannot tell apart from its best on this window.
+FIT_SETUP_NEAR_M = 0.005
+FIT_SETUP_FLAT_WIDTH = 0.02
+STATION_CRON = Path(__file__).resolve().parent / "waterline_timex_cron.sh"
+
+
+def carried_setup_coef(info):
+    """The C the contours carry: median of setup_correction_m / sqrt(Hs*L0) over the frames
+    with a non-zero setup; None when no frame carries one (a C = 0 build, or no setup column)."""
+    cs = []
+    for v in info.values():
+        if np.isfinite(v["setup"]) and v["setup"] != 0.0 and v["hs"] > 0 and v["tp"] > 0:
+            cs.append(v["setup"] / np.sqrt(v["hs"] * 9.81 * v["tp"] ** 2 / (2 * np.pi)))
+    return round(float(np.median(cs)), 4) if cs else None
+
+
+def station_setup_coef(path=STATION_CRON):
+    """SETUP_COEF of the station cron beside this script ('' = no setup = 0); None if unreadable."""
+    import re
+    try:
+        for line in Path(path).read_text().splitlines():
+            m = re.match(r'\s*SETUP_COEF=["\']?([0-9.]*)["\']?\s*(#.*)?$', line)
+            if m:
+                return float(m.group(1)) if m.group(1) else 0.0
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def setup_fit_verdict(valid, spread_at, c_use, use_from=""):
+    """
+    The lines --fit-setup prints under its curve. valid: [(C, median spread, cells)] on the
+    search grid; spread_at(C): the median spread at any C (for C = 0 and the C in use, which
+    need not lie on the grid); c_use: the C in use (None or 0: compare with C = 0 only), and
+    use_from where that value came from.
+    """
+    best = min(valid, key=lambda r: r[1])
+    near = [r[0] for r in valid if r[1] <= best[1] + FIT_SETUP_NEAR_M]
+    lo, hi = min(near), max(near)
+    flat = hi - lo >= FIT_SETUP_FLAT_WIDTH
+    out = [f"   C {lo:+.3f} to {hi:+.3f}: median spread within {FIT_SETUP_NEAR_M * 1000:.0f} mm of the "
+           f"best (the near-best band)" + (" -- a FLAT minimum: this fit alone does not pin C" if flat else "")]
+    # a C is told apart from the best only when it lies outside the near-best band: more than 5 mm
+    # above the best AND not between two C that are within it (the curve is noisy at the mm level)
+    s0 = spread_at(0.0)
+    same0 = s0 <= best[1] + FIT_SETUP_NEAR_M or lo <= 0.0 <= hi
+    su = spread_at(c_use) if c_use else None
+    same_use = su is not None and (su <= best[1] + FIT_SETUP_NEAR_M or lo <= c_use <= hi)
+    if c_use:
+        out.append(f"   C in use {c_use}" + (f" ({use_from})" if use_from else "")
+                   + f": median spread {su:.3f} m ({su - best[1]:+.3f} m from the best)")
+    if best[0] in (valid[0][0], valid[-1][0]):
+        out.append("   WARNING: best C is at the edge of the search range -- the data do not constrain it; "
+                   "do not apply.")
+    elif same0 and same_use:
+        out.append(f"   Neither C = 0 nor the C in use ({c_use}) can be told from the best on this window "
+                   f"(both inside the near-best band): this fit gives no reason to change C.")
+    elif same_use:
+        out.append(f"   Not distinguishable from the C in use ({c_use}) on this window (inside the near-best "
+                   f"band): keep it.")
+    elif same0:
+        out.append("   Not distinguishable from C = 0 on this window (inside the near-best band): the data do "
+                   "not favour a positive setup correction here. One week does not pin C: refit over weeks of "
+                   "different waves before changing the C in use.")
+    elif best[0] <= 0:
+        out.append("   The data do not favour a positive setup correction.")
+    elif flat:
+        out.append("   Do not apply on this window alone: refit over weeks of different waves (or keep the "
+                   "C in use).")
+    else:
+        out.append("   Beats C = 0" + (f" and the C in use ({c_use})" if c_use else "")
+                   + f" by more than {FIT_SETUP_NEAR_M * 1000:.0f} mm on this window; check it on other weeks "
+                   "of different waves before adopting it.")
+        out.append(f"   To apply: extract_elevation_contours.py ... --waves ... --setup-coef {best[0]}")
+    return out
+
+
+def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames, coefs=None):
     """
     Finds C in beach elevation = water level + C*sqrt(Hs*L0) that makes
     repeat crossings of each cell agree best (smallest median spread).
     Only frames with both Hs and Tp take part, at every C, so the
-    comparison is like for like.
+    comparison is like for like. coefs: the C values to try (default
+    -0.04 to +0.12 in steps of 0.002).
     """
     tide = np.array([info[f]["tide"] for f in pair_frame])
     hs = np.array([info[f]["hs"] for f in pair_frame])
@@ -268,7 +395,8 @@ def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames):
     phi = np.sqrt(hs * 9.81 * tp ** 2 / (2 * np.pi))
     ok = np.isfinite(phi) & np.isfinite(tide)
     groups = cell_groups(pair_cell[ok])
-    coefs = np.round(np.arange(-0.04, 0.1201, 0.002), 3)
+    if coefs is None:
+        coefs = np.round(np.arange(-0.04, 0.1201, 0.002), 3)
     result = [(c,) + median_spread_by_cell(groups, tide[ok] + c * phi[ok], min_frames)
               for c in coefs]
     return result, int(ok.sum()), len(set(pair_frame[ok]))
@@ -522,7 +650,10 @@ def main():
                          "many metres from the DEM built without that day (e.g. 0.15). "
                          "Catches days whose waterlines are consistently displaced -- a "
                          "different failure from the tide-direction check, which only sees "
-                         "direction. Days with fewer than 30 comparable samples are kept.")
+                         "direction. Days with fewer than 30 comparable samples are kept, and "
+                         "with fewer than 3 testable camera-days every day is kept (the DEM "
+                         "without one day is then the other day alone, so the test cannot tell "
+                         "which is off).")
     ap.add_argument("--max-frame-offset", type=float, default=None,
                     help="Leave out single frames whose samples sit, on median, more than this "
                          "many metres from the DEM built without that frame (e.g. 0.2). Runs "
@@ -533,7 +664,15 @@ def main():
                          "--setup-coef) that makes repeat crossings agree best, from the "
                          "water level and offshore Hs/Tp of each frame. Diagnostic only: the "
                          "DEM is built from whatever correction the contours already carry. "
-                         "Run it on contours WITHOUT a correction applied.")
+                         "Run it on contours WITHOUT a correction applied. It offers a C to "
+                         "apply only when C = 0 and the C in use both lie outside its near-best "
+                         "band (the C whose spread is within 5 mm of its best) and the minimum "
+                         "is not flat.")
+    ap.add_argument("--setup-coef-in-use", type=float, default=None,
+                    help="With --fit-setup: the C in use, compared with the fit's best. "
+                         "Default: the C the contours carry (setup_correction_m / "
+                         "sqrt(Hs*L0)), else SETUP_COEF of waterline_timex_cron.sh beside "
+                         "this script.")
     ap.add_argument("--max-hs", type=float, default=None,
                     help="Leave out frames whose offshore wave height (offshore_hs_m, from "
                          "extract_elevation_contours.py --waves) exceeds this, in metres. In "
@@ -569,24 +708,63 @@ def main():
                     help="Leave out frames whose file name matches this regular expression "
                          "(repeatable), e.g. 'Jan.22.*[.]c2[.]' -- for frames shown by their "
                          "overlays to have followed something other than the water's edge.")
-    ap.add_argument("--no-plot", action="store_true")
+    ap.add_argument("--no-plot", action="store_true",
+                    help="Skip the page (<stem>_dem.png). The grids and <stem>_info.json are "
+                         "still written; 'python3 dem_figure.py <stem>' draws the page later.")
     args = ap.parse_args()
+
+    # The page the daily email attaches. Removed before anything else, so
+    # no failure below -- no points, a crash, a page that cannot be drawn
+    # -- can leave last run's page beside this run's grids looking current.
+    # Every way through main() that is not --no-plot draws a new one.
+    page = Path(str(args.output_stem) + "_dem.png")
+    if not args.no_plot and page.exists():
+        page.unlink()
+
+    def no_points_page(message, stats=None):
+        """Nothing to grid: the short page says so, with the window and filters."""
+        if args.no_plot:
+            return
+        stats = stats or {}
+        info = {"last_days": args.last_days, "window_start": args.start_date,
+                "window_end": args.end_date, "camera": args.camera, "frames": {}, "days": 0,
+                "cell": args.cell, "min_points": args.min_points, "max_spread": args.max_spread,
+                "filters": {"max_hs": args.max_hs, "rough_frames": stats.get("rough_frames", 0),
+                            "excluded_frames": stats.get("excluded_frames", 0)}}
+        try:
+            import dem_figure
+            out = dem_figure.draw_message_page(
+                args.output_stem, None, info, dem_figure.STATION, message,
+                ["No DEM was built this run, so there is no map; the grids on disk, if any, "
+                 "are from an earlier run.",
+                 "Likely causes: the cameras, the detector or the water-level record were down "
+                 "for the window, or the build's filters left out every frame."],
+                cutoff=args.max_spread, min_points=args.min_points, cell=args.cell)
+            print(f"wrote {out}  (no points: short page)")
+        except Exception as exc:
+            print(f"ERROR: the short page was not drawn either: {exc!r}")
 
     if args.last_days:
         end = args.end_date or latest_date(args.contour_csv, args.camera)
         if end is None:
-            print("No georectified points in the file."); sys.exit(1)
+            print("No georectified points in the file.")
+            no_points_page("No waterline points in the file: nothing to map.")
+            sys.exit(4)
         from datetime import date, timedelta
         args.end_date = end
         args.start_date = (date.fromisoformat(end) - timedelta(days=args.last_days - 1)).isoformat()
         print(f"Window            : last {args.last_days} day(s), {args.start_date} to {args.end_date}")
 
+    load_stats = {}
     E, N, Z, cams, dates, frames, missing = load_points(
-        args.contour_csv, args.camera, args.start_date, args.end_date, args.max_hs, args.exclude)
+        args.contour_csv, args.camera, args.start_date, args.end_date, args.max_hs, args.exclude,
+        stats=load_stats)
+    rejected_frames, rejected_days = set(), set()
 
     if len(E) == 0:
         print("No georectified points matched. Check --camera and the date range.")
-        sys.exit(1)
+        no_points_page("No waterline points in the window: nothing to map.", load_stats)
+        sys.exit(4)
 
     print("=" * 74)
     print("INTERTIDAL DEM")
@@ -624,6 +802,7 @@ def main():
               f"{len(bad)} rejected")
         for k in sorted(bad):
             print(f"   {k}   {bad[k]:+.3f} m  <-- REJECTED")
+        rejected_frames = set(bad)
         if bad:
             keep = np.array([f not in bad for f in frames])
             E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
@@ -632,8 +811,19 @@ def main():
         print()
 
     if args.fit_setup:
+        carried = carried_setup_coef(info)
+        if args.setup_coef_in_use is not None:
+            c_use, use_from = args.setup_coef_in_use, "--setup-coef-in-use"
+        elif carried is not None:
+            c_use, use_from = carried, "the contours' setup_correction_m"
+        else:
+            c_use, use_from = station_setup_coef(), "SETUP_COEF of waterline_timex_cron.sh"
+        # the C in use is tried too (0.037 is not on the 0.002 grid), so it can be the best
+        grid = np.round(np.arange(-0.04, 0.1201, 0.002), 3)
+        if c_use and grid[0] < c_use < grid[-1]:
+            grid = np.unique(np.r_[grid, round(c_use, 4)])
         result, n_pairs, n_frames = fit_setup_coefficient(pair_cell, pair_frame, info,
-                                                          args.min_points)
+                                                          args.min_points, coefs=grid)
         valid = [r for r in result if np.isfinite(r[1])]
         if not valid:
             print("Setup fit         : no frames with both Hs and Tp -- run "
@@ -642,20 +832,27 @@ def main():
             base = next(r for r in valid if r[0] == 0.0)
             best = min(valid, key=lambda r: r[1])
             print(f"Setup fit         : {n_frames} frame(s), {n_pairs} cell samples")
+            if carried is not None:
+                print(f"   NOTE: these contours carry a setup (C ~{carried}): each line was placed at "
+                      f"still water + that setup. Fit on contours built with no setup (C = 0).")
             print(f"   C = 0      median spread {base[1]:.3f} m ({base[2]} cells)")
             print(f"   C = {best[0]:<6} median spread {best[1]:.3f} m  <-- best"
                   f"  (implied slope C/0.35 = {best[0] / 0.35:.3f})")
             for c, sp, n in valid:
                 if round(c * 1000) % 20 == 0:
                     print(f"      C {c:+.2f}: {sp:.3f} m")
-            if best[0] in (valid[0][0], valid[-1][0]):
-                print("   WARNING: best C is at the edge of the search range -- the data do "
-                      "not constrain it; do not apply.")
-            elif best[0] <= 0:
-                print("   The data do not favour a positive setup correction.")
-            else:
-                print(f"   To apply: extract_elevation_contours.py ... --waves ... "
-                      f"--setup-coef {best[0]}")
+
+            def spread_at(c):
+                hit = [r[1] for r in valid if abs(r[0] - c) < 1e-9]
+                if hit:
+                    return hit[0]
+                return fit_setup_coefficient(pair_cell, pair_frame, info, args.min_points,
+                                             coefs=[c])[0][0][1]
+            # how sharp the minimum is, and whether C = 0 or the C in use do as well: on one
+            # week of lines the curve is often flat and noisy, and its lowest point alone then
+            # says little about C
+            for line in setup_fit_verdict(valid, spread_at, c_use or None, use_from):
+                print(line)
         print()
 
     if args.max_day_offset:
@@ -670,9 +867,17 @@ def main():
         rejected = set()
         print(f"Day consistency (median offset from the DEM without that day, limit "
               f"+/-{args.max_day_offset} m):")
+        # With fewer than 3 testable camera-days "the DEM without that day" is the
+        # other day alone: two days that differ by more than the limit get equal
+        # and opposite offsets and BOTH would be rejected, leaving no points. The
+        # test cannot tell which day is off, so every day is kept.
+        testable = [k for k, (off, n) in offsets.items() if np.isfinite(off)]
+        too_few_days = len(testable) < 3
         for k, (off, n) in offsets.items():
             if not np.isfinite(off):
                 note = "  (too few comparable samples -- kept)"
+            elif abs(off) > args.max_day_offset and too_few_days:
+                note = "  (off by more than the limit -- kept: fewer than 3 testable days)"
             elif abs(off) > args.max_day_offset:
                 rejected.add(k)
                 note = "  <-- REJECTED"
@@ -680,12 +885,21 @@ def main():
                 note = ""
             off_s = f"{off:+.3f} m" if np.isfinite(off) else "   --   "
             print(f"   {k}   {off_s}   ({n} samples){note}")
+        if too_few_days:
+            print(f"   only {len(testable)} testable camera-day(s): the test cannot tell which day is off; "
+                  f"every day kept")
+        rejected_days = set(rejected)
         if rejected:
             frame_key = {f: f"{cam_of[f]} {local_day(epoch[f])}" for f in set(frames)}
             keep = np.array([frame_key[f] not in rejected for f in frames])
             E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
             print(f"   left out {len(rejected)} camera-day(s), {int((~keep).sum())} point(s)")
         print()
+        if len(E) == 0:
+            print("No points left: the day-consistency test rejected every camera-day "
+                  f"({', '.join(sorted(rejected))}). Rerun without --max-day-offset or with a wider window.")
+            no_points_page("The day-consistency test rejected every camera-day: nothing to map.", load_stats)
+            sys.exit(4)
 
     dem, count, spread, e0, n0, ncols, nrows = build_grid(
         E, N, Z, args.cell, args.min_points, args.max_spread, frames)
@@ -756,6 +970,7 @@ def main():
     print(f"wrote {stem}_spread.asc  (16-84 percentile range, m)")
     print(f"wrote {stem}_count.asc   (samples per cell)")
 
+    sstem = None
     if args.series_dir:
         if not args.last_days:
             print("NOTE: --series-dir needs --last-days (the window defines the date); not saved.")
@@ -767,46 +982,82 @@ def main():
             write_ascii_grid(str(sstem) + "_spread.asc", spread, e0, n0, args.cell)
             write_ascii_grid(str(sstem) + "_count.asc", count.astype(float), e0, n0,
                              args.cell, nodata=0.0)
-            print(f"series            : {sstem}_{{dem,spread,count}}.asc")
+            print(f"series            : {sstem}_{{dem,spread,count}}.asc (+ _info.json)")
 
+    # What the page needs and the grids do not hold: dates, frames, filters.
+    # Written always, so 'python3 dem_figure.py <stem>' can redraw the page
+    # later without a rebuild.
+    page_info = {
+        "first_date": str(min(dates)), "last_date": str(max(dates)),
+        "days": int(len(set(dates))),
+        "last_days": args.last_days,
+        "window_start": args.start_date, "window_end": args.end_date,
+        "camera": args.camera,
+        "frames": {c: int(len(set(frames[cams == c]))) for c in sorted(set(cams))},
+        "points": {c: int((cams == c).sum()) for c in sorted(set(cams))},
+        "cell": args.cell, "min_points": args.min_points, "max_spread": args.max_spread,
+        # share of the points whose elevation includes the wave setup
+        # (beach_elevation_navd88, extract_elevation_contours.py --setup-coef)
+        "setup_share": round(load_stats.get("setup_share", 0.0), 4),
+        # True: this build wrote <stem>_source.asc (and the page may trust
+        # it); False: any _source.asc beside the grids is an older run's.
+        "interpolated": source is not None,
+        "filters": {
+            "max_hs": args.max_hs, "rough_frames": load_stats.get("rough_frames", 0),
+            "excluded_frames": load_stats.get("excluded_frames", 0),
+            "max_frame_offset": args.max_frame_offset,
+            "frames_rejected": len(rejected_frames),
+            "max_day_offset": args.max_day_offset,
+            "camera_days_rejected": sorted(rejected_days),
+        },
+    }
+    with open(str(stem) + "_info.json", "w") as f:
+        json.dump(page_info, f, indent=1)
+    print(f"wrote {stem}_info.json   (dates, frames, filters: for the page)")
+    if sstem is not None:
+        # the dated copy gets its own, so a page redrawn from it (dem_figure.py
+        # <series stem>) credits only the cameras that measured: without it a
+        # c1-only week's page said 'seen by c2' and drew a seam
+        with open(str(sstem) + "_info.json", "w") as f:
+            json.dump(page_info, f, indent=1)
+
+    rc = 0
     if not args.no_plot:
+        # A page that cannot be drawn is a failure the cron must see (exit 3:
+        # grids written, page not), not a note: the email would otherwise
+        # attach whatever page was there before. dem_figure draws a short
+        # page itself when there are too few cells to map.
         try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-            fig, axes = plt.subplots(1, 2, figsize=(16, 7), dpi=110)
-            extent = [e0, e0 + ncols * args.cell, n0, n0 + nrows * args.cell]
-
-            im0 = axes[0].imshow(dem, origin="lower", extent=extent,
-                                 cmap="terrain", aspect="equal")
-            axes[0].set_title(f"Intertidal DEM  ({min(dates)} to {max(dates)})\n"
-                              + (f"{filled} measured + {int((source == 2).sum())} interpolated "
-                                 f"cells at {args.cell} m" if source is not None
-                                 else f"{filled} cells at {args.cell} m"), fontsize=10)
-            plt.colorbar(im0, ax=axes[0], label="elevation (m NAVD88)", shrink=0.8)
-
-            im1 = axes[1].imshow(spread, origin="lower", extent=extent,
-                                 cmap="magma", aspect="equal", vmin=0,
-                                 vmax=args.max_spread if args.max_spread else None)
-            axes[1].set_title("Repeatability\n16-84 percentile elevation range", fontsize=10)
-            plt.colorbar(im1, ax=axes[1], label="spread (m)", shrink=0.8)
-
-            for ax in axes:
-                ax.set_xlabel("easting (m, UTM 19N)")
-                ax.set_ylabel("northing (m, UTM 19N)")
-                ax.ticklabel_format(useOffset=False, style="plain")
-            plt.tight_layout()
-            plt.savefig(str(stem) + "_dem.png", bbox_inches="tight")
-            print(f"wrote {stem}_dem.png")
+            import dem_figure
+            out = dem_figure.draw_page(stem, info=page_info)
+            print(f"wrote {out}")
         except Exception as exc:
-            print(f"(plot skipped: {exc})")
+            import traceback
+            traceback.print_exc()
+            print(f"ERROR: page NOT drawn ({exc!r}); the grids and {stem}_info.json are "
+                  f"written. No {page.name} this run. Redraw: python3 dem_figure.py {stem}")
+            if page.exists():
+                page.unlink()                    # a half-written page is not a page
+            rc = 3
 
     print()
     print("REMINDER: intertidal zone only, between the lowest and highest water")
-    print("levels observed. No data above or below, and none invented. The detected")
-    print("edge sits above still water by the wave setup, which grows with wave height,")
-    print("but is given the still-water elevation -- so the DEM reads LOW where rough-")
-    print("water frames land. Not corrected here; --max-hs leaves those frames out.")
+    print("levels observed. No data above or below, and none invented.")
+    share = load_stats.get("setup_share", 0.0)
+    rough = (f"--max-hs {args.max_hs:g} left out the roughest frames" if args.max_hs is not None
+             else "--max-hs would leave out the roughest frames")
+    if share > 0:
+        print("Elevations include the wave setup (C from extract_elevation_contours.py")
+        print(f"--setup-coef) on {100 * share:.0f}% of the points"
+              + ("." if share >= 0.995 else " (the rest: no wave record, water level only)."))
+        print(f"{rough}, where the setup errs most.")
+    else:
+        print("The detected edge sits above still water by the wave setup, which grows")
+        print("with wave height, but is given the still-water elevation -- so the DEM")
+        print("reads LOW where rough-water frames land. Not corrected here (no setup in")
+        print(f"these contours); {rough}.")
+    if rc:
+        sys.exit(rc)
 
 
 if __name__ == "__main__":

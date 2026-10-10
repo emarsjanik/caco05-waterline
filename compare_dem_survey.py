@@ -152,7 +152,8 @@ def read_survey(path):
             d[d == float(str(nd).strip("\0 "))] = np.nan
         except ValueError:
             pass
-    d[d < -1e30] = np.nan
+    with np.errstate(invalid="ignore"):      # the nodata cells are NaN already (numpy 1.17 warns)
+        d[d < -1e30] = np.nan
     if abs(scale[0] - scale[1]) > 1e-9:
         sys.exit(f"{p}: non-square pixels; export as .asc")
     x0, y0 = tie[3] - tie[0] * scale[0], tie[4] + tie[1] * scale[1]

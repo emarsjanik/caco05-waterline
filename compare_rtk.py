@@ -95,7 +95,9 @@ def main():
     ap.add_argument("--min-points", type=int, default=3,
                     help="Waterline points a frame needs on transects to count (default 3)")
     ap.add_argument("--dem", help="DEM (.asc) to sample at the RTK points")
-    ap.add_argument("--output", default=None, help="Per-frame CSV (default <rtk stem>_frames.csv)")
+    ap.add_argument("--output", default=None,
+                    help="Per-frame CSV (default <rtk stem>_frames.csv in the CURRENT directory, "
+                         "never next to the survey: the survey folder holds inputs only)")
     ap.add_argument("--plot", default=None)
     args = ap.parse_args()
 
@@ -172,7 +174,7 @@ def main():
         a, b, phi, w = waves_vs_datum(off, np.array([r["hs_m"] for r in rows]),
                                       np.array([r["tp_s"] for r in rows]),
                                       np.array([r["tide_navd88"] for r in rows]))
-        out = args.output or str(Path(args.rtk).with_suffix("")) + "_frames.csv"
+        out = args.output or Path(args.rtk).stem + "_frames.csv"
         with open(out, "w", newline="") as f:
             wr = csv.DictWriter(f, fieldnames=list(rows[0]))
             wr.writeheader()
