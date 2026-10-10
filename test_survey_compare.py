@@ -411,6 +411,10 @@ def test_transects(d):
     check(abs(wl["median"] + 0.15) < 1e-3 and wl["nmad"] < 1e-3, f"waterline - RTK = -0.15 exactly ({wl['median']:+.4f})")
     check("wrack" in wl["how"] and (out / "synth_tr_waterline_frames.csv").exists(),
           "wrack points not used for the waterlines; per-frame values written")
+    af = wl.get("above_survey_floor") or {}
+    check(af.get("frames") == 12 and abs(af["median"] + 0.15) < 1e-3 and af.get("frames_below_floor") == 0
+          and "WHERE THE SURVEY STOPS" in (out / "synth_tr_comparison.txt").read_text(),
+          "every line above the transects' lowest shot: the above-floor value equals the headline (-0.15, 12 frames)")
     # WHERE on the beach: the elevations of the line points compared, and by survey elevation
     zu = wl["line_elevation_compared"]
     check(abs(zu["min"] - 0.85) < 1e-6 and abs(zu["max"] - 1.95) < 1e-6 and len(wl["by_elevation"]) >= 2
@@ -453,6 +457,41 @@ def test_transects(d):
     check(s1["n"] == 1 and np.isnan(s1["nmad"]) and np.isnan(s1["p5"]), "one value: NMAD and p5/p95 not given")
     raw = (out / "synth_iso_comparison.json").read_text()
     check("NaN" not in raw and json.loads(raw) is not None, "the json holds no NaN (null instead)")
+
+
+def test_survey_floor(d):
+    print("where the survey stops: lines below a transect's lowest shot can only read low")
+    # one cross-shore transect on the synthetic beach (z = 3 - 0.05 x), surveyed only down to +1.5 m
+    xs = np.arange(0.0, 30.01, 2.0)
+    tr = {"name": "T1 (1-16)", "c": np.array([X0 + 15.0, Y0 + 50.0]), "d": np.array([1.0, 0.0]),
+          "s": xs - 15.0, "z": beach(X0 + xs, 0.0)}
+    check(abs(tr["z"].min() - 1.5) < 1e-9, "the transect's lowest shot is +1.50 m")
+    # 24 frames, lines at +1.0 .. +2.15 m; every other one reads 0.15 m HIGH, the others 0.15 m LOW. Each
+    # line lies where the beach is at its true level (z_line - error): a high reader below ~+1.65 m lands
+    # seaward of the survey and is lost, a low reader stays
+    E, N, Z, F, cam = [], [], [], [], []
+    for k in range(24):
+        z_line = 1.0 + 0.05 * k
+        err = 0.15 if k % 2 else -0.15
+        e = X0 + (3.0 - (z_line - err)) / 0.05
+        for n in np.arange(Y0 + 45, Y0 + 55.01, 0.5):
+            E.append(e); N.append(n); Z.append(z_line); F.append(f"f{k:02d}"); cam.append("c1")
+    cont = {"E": np.array(E), "N": np.array(N), "Z": np.array(Z), "frame": np.array(F, object),
+            "cam": np.array(cam, object), "day": np.array(["2026-09-29"] * len(E), object)}
+    per, used = sc.waterlines_on_transects(cont, [tr])
+    d_all = per["d"]
+    fs = sc.above_floor_summary(per, d_all, [tr])
+    check(np.median(d_all) < -0.1 and (d_all < 0).sum() > (d_all > 0).sum(),
+          f"all frames on the transect: biased LOW by the survey's end (median {np.median(d_all):+.3f})")
+    check(fs["frames"] > 0 and abs(fs["median"]) < 0.151 and np.all(per["plane"][np.isfinite(per["d_cov"])]
+                                                                      >= 1.5 + sc.SURVEY_FLOOR_MARGIN - 1e-9),
+          f"above the floor + {sc.SURVEY_FLOOR_MARGIN} m: high and low readers both kept "
+          f"(median {fs['median']:+.3f}, {fs['frames']} of {fs['frames_all']} frames)")
+    hi = np.isfinite(per["d_cov"])
+    check(abs((per["d_cov"][hi] > 0).sum() - (per["d_cov"][hi] < 0).sum()) <= 1,
+          "above the floor, as many lines read high as low (the planted errors)")
+    check(fs["frames_below_floor"] == int((per["plane"] < 1.5).sum()) and fs["transect_floors_m"] == {"T1 (1-16)": 1.5},
+          f"{fs['frames_below_floor']} frames below the lowest shot counted; the floor is reported")
 
 
 def test_no_overlap(d):
@@ -561,6 +600,7 @@ def main():
         test_points(d)
         test_label_checks(d)
         test_transects(d)
+        test_survey_floor(d)
         test_no_overlap(d)
         test_fix2(d)
         test_py38()

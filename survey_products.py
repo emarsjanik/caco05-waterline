@@ -185,7 +185,11 @@ STEPS = ("forcing", "pointing", "detect", "filter", "dem", "maps", "compare")
 ERAS = ("adcp", "chatham", "live")
 LABELS = ("INDEPENDENT", "CROSS-VALIDATED", "PARTLY-CIRCULAR", "CIRCULAR")   # best -> worst
 
-# Wave setup, as the live station since 6 Oct 2026 (waterline_timex_cron.sh SETUP_COEF).
+# Wave setup, as the live station since 6 Oct 2026 (waterline_timex_cron.sh SETUP_COEF). ONE value
+# for the station and these products: historical_forcing.py's SETUP_COEF and the cron's must equal it
+# (test_survey_products.py checks; a run warns when the cron's differs), and it must be a key of
+# SETUP_FITS (where it was fitted decides which comparisons are CIRCULAR). A new C is changed in all
+# three places and given its own SETUP_FITS entry.
 SETUP_COEF = 0.037
 G = 9.81
 # Where each setup coefficient in use was fitted. A comparison with that
@@ -201,29 +205,39 @@ SETUP_FITS = {
             "survey_sha256": "49cc01bfa7a41f2ebe34a678167e47376cbd4e07d9b6a62e708647ead7b23beb",
             "survey_type": "points", "survey_date": "2026-09-29",
             "still_water": "GNSS-R (tide_elevation_navd88 of the live rows)",
-            "how": "median of the per-frame C = -(waterline - RTK)/sqrt(Hs*L0) of the waterlines "
-                   "lying on the 2026-09-29 RTK transects (14 frames, 29 Sep - 5 Oct 2026, +0.8 to "
-                   "+1.3 m); repeat crossings (dem_from_contours.py --fit-setup) agree best at "
-                   "0.03-0.04 (waterline_timex_cron.sh). The per-frame fit took the RTK elevation where "
-                   "the line lay WITHOUT setup. On the 18 frames of 29 Sep - 5 Oct that lie on the transects "
-                   "both ways, RTK - waterline is +0.33 m without setup and still +0.13 m with C = 0.037: "
-                   "~0.07 m of that because a line given the setup is re-projected landward onto higher "
-                   "beach (~0.3 x the setup, by the slope and the cross-shore distance), ~0.06 m because "
-                   "C = 0.037 is below these 18 frames' own per-frame C (0.046 with no re-projection; the "
-                   "14-frame fit gave 0.037)",
+            "how": "fitted 8 Oct 2026 as the median of the per-frame C = -(waterline - RTK)/sqrt(Hs*L0) of the "
+                   "waterlines lying on the 2026-09-29 RTK transects (14 frames, 29 Sep - 5 Oct 2026; 90% "
+                   "0.028-0.058), each line taken where it lay WITHOUT setup; repeat crossings "
+                   "(dem_from_contours.py --fit-setup, no survey) agree best at 0.03-0.04. Rechecked Oct 2026 with "
+                   "each line re-projected at still water + setup: the transects stop at their lowest shot "
+                   "(+1.2 to +1.7 m), below which a line can only read low and above which a high-reading line "
+                   "drops out, so a fit over every crossing is biased by where the survey stops (0.067 over all "
+                   "crossings); over only the lines at least 0.1-0.2 m above the lowest shots the fit gives "
+                   "~0.043-0.046 (day-block 90% ~0.02-0.055), and the within-cell slope of repeat crossings (no "
+                   "survey, re-projected) 0.043 (0.026-0.053). 0.037 lies inside each of these (not the biased "
+                   "all-crossings value): Stockdon et al. "
+                   "(2006) setup 0.35 x beta_f for a ~1:10 beach face (beta_f ~0.106). The RTK, which stops above "
+                   "the low-tide beach, cannot pin C more closely",
             "wave_currency": "offshore_hs_m = hs_best of archive/waves_marconi.csv (ADCP wh_4061 "
                              "currency), offshore_tp_s = NDBC 44008 peak period",
             # The 29 Sep - 5 Oct 2026 frames on the RTK transects both ways (Oct 2026: survey_products.py
             # --date 2026-09-29 --window 2026-09-29 2026-10-05 on the station's rows, then survey_compare's
-            # transect check of each frame without setup (re-projected at still water), with the setup
-            # added in place, and with it re-projected): medians of waterline - RTK over the 18 frames
-            # (all lines: compare_rtk.py's set), the median setup applied, and per frame
-            # (with - without) / setup ('keep_paired': the share of its setup a line keeps once
-            # re-projected). The consistency-filtered lines (17 of those frames) give 0.317 / 0.113 m and
-            # the same 0.71.
+            # transect check of each frame without setup (re-projected at still water) and with it
+            # re-projected): medians of waterline - RTK over the 18 frames (all lines: compare_rtk.py's
+            # set), the median setup applied, and per frame (with - without) / setup ('keep_paired': the
+            # share of its setup a line keeps once re-projected). These all-crossings medians are biased LOW
+            # by where the survey stops (SURVEY_FLOOR_MARGIN in survey_compare.py). 'above_floor': the
+            # setup refit's adversarial check (Oct 2026), over only the crossings whose line lies at least
+            # 0.1 / 0.2 m above the transect's lowest shot: waterline - RTK at C = 0.037, frames, and the
+            # re-projected C fitted there (day-block 90%); 'c_internal_slope': the within-cell slope of
+            # repeat crossings on sqrt(Hs*L0), re-projected, no survey (frame-bootstrap 90%).
             "rtk_check": {"without_setup_m": 0.333, "with_setup_m": 0.127, "setup_applied_m": 0.257,
-                          "with_setup_in_place_m": 0.058, "keep_paired": 0.71, "c_per_frame_in_place": 0.046,
-                          "frames": 18, "window": "2026-09-29 .. 2026-10-05"}},
+                          "keep_paired": 0.71, "frames": 18, "window": "2026-09-29 .. 2026-10-05",
+                          "above_floor": {"margins_m": (0.1, 0.2), "with_setup_m": (-0.037, -0.028),
+                                          "frames": (10, 7), "c_fit": (0.046, 0.043),
+                                          "c_fit_dayblock90": (0.02, 0.055)},
+                          "c_internal_slope": 0.043, "c_internal_slope90": (0.026, 0.053),
+                          "c_all_crossings": 0.067}},
 }
 
 # Earlier measurements of a date's REAL photos, with the same calibrations, against its survey,
@@ -2026,8 +2040,10 @@ def view_calibration(plan):
 
 # dem_from_contours.py's day test compares each camera-day with the DEM built WITHOUT it. With fewer
 # than 3 camera-days that DEM is the other day alone: two days that differ by more than the limit get
-# equal and opposite offsets and BOTH are rejected, leaving no points (the script then stops with a
-# traceback). With fewer than this many camera-days the test is not run, and the README says so.
+# equal and opposite offsets and BOTH would be rejected, leaving no points. dem_from_contours.py keeps
+# every day itself then (and exits 4, 'no points', if a test ever rejects every camera-day); here the
+# option is not passed at all with fewer than this many camera-days, so the README can say the test
+# was not run, and why.
 DEM_DAY_TEST_MIN = 3
 
 
@@ -2222,8 +2238,9 @@ def dem_failure_reason(log):
                 f"days the test cannot tell which one is off: rerun with --dem-max-day-offset 0 (test off) or a "
                 f"wider --window")
     for ln in lines:
-        if ln.startswith("No georectified points matched"):
-            return "no waterline points in the window (dem_from_contours.py: 'No georectified points matched')"
+        if ln.startswith("No georectified points"):
+            return (f"no waterline points in the window (dem_from_contours.py, exit 4: "
+                    f"'{ln.strip()[:60]}')")
     err = [ln for ln in lines if re.match(r"^(ERROR|[A-Za-z]+Error)\b", ln.strip())]
     return err[-1].strip() if err else "see its log"
 
@@ -3447,8 +3464,9 @@ def prior_check_caveat(plan, pc, fits, forcing, prov=None):
                  f"{'' if med is not None else ', predicted'}), which raises every line; {how_} unless this build's "
                  f"envelope changes the detections ({rng} m over the shares {lo_k}-{hi_k}; {full} m if the whole "
                  f"setup counted; the earlier check's own NMAD, {', '.join(f'{c} {per[c][1]:.2f}' for c in cams)} m, "
-                 f"is the scale of agreement to expect). That expectation already holds the setup's "
-                 f"under-correction listed below: do not subtract it again"
+                 f"is the scale of agreement to expect). That expectation already holds the re-projection (the "
+                 f"share of its setup a line keeps) and any mismatch of C on this date, listed below: do not "
+                 f"subtract them again"
                  + (". It holds the still-water-reference effect listed below too: the earlier check was made on "
                     "lines at the same ADCP still water as this build's, so that effect is inside its numbers. Those "
                     "caveats say why the lines may differ from the lidar, not from this expectation. "
@@ -3512,42 +3530,53 @@ def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
             med = med if med is not None else su.get("median_m")
             keep = rc.get("keep_paired") or 0.7
             own = build_setup_effect(prov, [Path(s_.get("path") or "").stem for s_ in plan.get("surveys") or []])
-            inplace = rc.get("with_setup_in_place_m")
-            reproj = rc["with_setup_m"] - (inplace or 0.0)
             prior = bool(prior_checks(plan))
-            # what the re-projection takes back on THIS date: from this build's own paired C = 0 rise per
-            # camera when there is one; on the live beach and days of the RTK, that RTK's own share; else
-            # a range over the shares measured so far (they differ by date, camera and geometry)
-            if not med:
-                reproj_here = ""
-            elif own and era != "live":
-                reproj_here = (" Here the re-projection alone leaves the lines ~"
-                               + ", ".join(f"{c} {med - e:.2f} m (on {what})" for c, (e, what) in sorted(own.items()))
-                               + f" low (the setup median {med:.2f} m less this build's own paired rise per camera, "
-                                 f"compare/*_comparison.txt), plus whatever C mismatch this date has")
-            elif era == "live":
-                reproj_here = (f" On this beach and these days the re-projection alone leaves this DEM "
-                               f"~{(1 - keep) * med:.2f} m low (~{1 - keep:.1f} x the setup median of {med:.2f} m), "
-                               f"plus the C mismatch")
-            else:
-                reproj_here = (f" The share kept depends on the date, camera and beach ({SHARE_KEPT_RANGE[0]}-"
-                               f"{SHARE_KEPT_RANGE[1]} in the builds so far): the re-projection alone may leave this "
-                               f"DEM ~{(1 - SHARE_KEPT_RANGE[1]) * med:.2f}-{(1 - SHARE_KEPT_RANGE[0]) * med:.2f} m "
-                               f"low ({1 - SHARE_KEPT_RANGE[1]:.1f}-{1 - SHARE_KEPT_RANGE[0]:.1f} x the setup median of "
-                               f"{med:.2f} m), plus whatever C mismatch this date has")
-            cav.append(f"C = {C} under-corrects. On the 2026-09-29 RTK transects ({rc['frames']} frames of "
+            # what a C between the survey-covered fits would change on THIS date: a re-projected line keeps
+            # a share of the extra setup (this build's own paired C = 0 rise per camera when there is one,
+            # else the shares measured so far), at this window's sqrt(Hs L0) (setup median / C)
+            af = rc.get("above_floor") or {}
+            cf = af.get("c_fit")
+            reproj_here = ""
+            if med and cf and C:
+                shares = sorted(min(1.0, max(0.0, e / med)) for c, (e, what) in own.items()) \
+                    if (own and era != "live") else []
+                lo_k, hi_k = (shares[0], shares[-1]) if shares else SHARE_KEPT_RANGE
+                phi = med / C
+                lo_d, hi_d = lo_k * (min(cf) - C) * phi, hi_k * (max(cf) - C) * phi
+                reproj_here = (f" Were C the ~{min(cf):.3f}-{max(cf):.3f} those lines give, the lines here (setup "
+                               f"median {med:.2f} m, sqrt(Hs L0) ~{phi:.1f} m) would sit ~{lo_d:.2f}-{hi_d:.2f} m "
+                               f"higher than with C = {C} ("
+                               + (f"{lo_k:.2f}" if abs(hi_k - lo_k) < 0.005 else f"{lo_k:.2f}-{hi_k:.2f}")
+                               + f" x the extra setup, the share a "
+                               f"re-projected line keeps"
+                               + (": this build's own paired C = 0 rise per camera)" if shares else
+                                  ", as measured in the builds so far)"))
+            cav.append(f"C = {C} is not pinned by the 2026 RTK. On its transects ({rc['frames']} frames of "
                        f"{rc['window']}, the same frames both ways) the lines read {rc['without_setup_m']:.2f} m low "
-                       f"without setup and still {rc['with_setup_m']:.2f} m low with it (median setup applied "
-                       f"{rc['setup_applied_m']:.2f} m). Two causes: (1) a line given the setup is re-projected "
-                       f"landward onto higher beach, which takes back ~{reproj:.2f} m there (each line keeps "
-                       f"~{keep:.2f} x its setup; the rest depends on the beach slope and the cross-shore distance); "
-                       + (f"(2) C = {C} is below those frames' own per-frame C ({rc['c_per_frame_in_place']:.3f} with "
-                          f"no re-projection), ~{inplace:.2f} m (C was fitted on 14 of them, each line taken where it "
-                          f"lay WITHOUT setup)." if inplace is not None else "(2) the rest is a C mismatch on those frames.")
+                       f"without setup and {rc['with_setup_m']:.2f} m low with it (median setup applied "
+                       f"{rc['setup_applied_m']:.2f} m), but both medians are biased LOW by where that survey stops "
+                       f"(the transects end at +1.2 to +1.7 m): a line below a transect's lowest shot can only read "
+                       f"low there, and a line that would read high at that water level lands seaward of the survey "
+                       f"and is not compared."
+                       + (f" Over only the lines at least {af['margins_m'][0]:.1f}-{af['margins_m'][1]:.1f} m above "
+                          f"the lowest shots, the lines with C = {C} read {min(af['with_setup_m']):+.2f} to "
+                          f"{max(af['with_setup_m']):+.2f} m ({min(af['frames'])}-{max(af['frames'])} frames: too "
+                          f"few to be an estimate), and a re-projected fit there gives C ~{min(af['c_fit']):.3f}-"
+                          f"{max(af['c_fit']):.3f} (day-block 90% ~{af['c_fit_dayblock90'][0]:.2f}-"
+                          f"{af['c_fit_dayblock90'][1]:.3f})" if af else "")
+                       + (f"; the within-cell slope of repeat crossings (no survey) gives {rc['c_internal_slope']:.3f} "
+                          f"({rc['c_internal_slope90'][0]:.3f}-{rc['c_internal_slope90'][1]:.3f})"
+                          if rc.get("c_internal_slope") else "")
+                       + f". C = {C} lies inside each of these; a survey reaching the low-tide line on days with "
+                         f"different waves would pin it. A line given the setup is re-projected landward onto higher "
+                         f"beach, so it keeps only part of its setup (~{keep:.2f} x on those frames; the rest depends "
+                         f"on the beach slope and the cross-shore distance)."
                        + reproj_here
-                       + (" -- already inside the EARLIER CHECK expectation above: do not add it to that." if prior
-                          else ".")
-                       + (" That residual was measured in the GNSS-R frame (lines at the GNSS-R level); against the "
+                       + ((f". The EARLIER CHECK expectation above is made with C = {C} and already holds the "
+                           f"re-projection: do not add it to that"
+                           + ("; with such a C that expectation would rise by as much" if reproj_here else "") + ".")
+                          if prior else ".")
+                       + (" The RTK numbers were measured in the GNSS-R frame (lines at the GNSS-R level); against the "
                           "lidar, this date's still-water-reference effect (above) adds to it"
                           + (" (the EARLIER CHECK expectation holds both)." if prior else ".")
                           if era in ("adcp", "chatham") else ""))
@@ -3768,7 +3797,10 @@ def collect_caveats(plan, args, state, forcing, prov):
 
 
 # A setup coefficient fitted to NO survey: repeat crossings of the same DEM cells agree best at C =
-# 0.03-0.04 (dem_from_contours.py --fit-setup on lines without setup; waterline_timex_cron.sh). A
+# 0.03-0.04 (dem_from_contours.py --fit-setup on lines without setup; waterline_timex_cron.sh; its
+# minimum is flat, 0.026-0.03 on the filtered 29 Sep - 5 Oct 2026 lines in the Oct 2026 recheck, and
+# the within-cell slope of elevation on sqrt(Hs*L0), each line re-projected, gives 0.043, 90%
+# 0.026-0.053: the range here is the middle of those, not a tight interval). A
 # constant pointing error moves every frame's line alike, so it does not change how well repeat
 # crossings agree: this C is blind to it, unlike the C fitted to the 2026 RTK (which absorbs any level
 # error at the transects, of the setup or of the pointing). Stockdon et al. (2006): setup = 0.35 x
@@ -3914,7 +3946,16 @@ def pointing_vs_survey(plan, cam, offset, sens, prov, fits):
                        f"cause there: the full offset is unlikely to be pointing, but a part of it, up to ~"
                        f"{f_hi * offset[0]:+.2f}/{f_hi * offset[1]:+.2f} deg tilt/roll, cannot be ruled out; swash "
                        f"and detector bias at the waterline are confounded with it")
-        return head + where + verdict + ". Read the shifts above as what the offset WOULD do if it were all pointing"
+        # the C = 0 lines sit low on the beach: those below where the survey stops can only read low there
+        fl = (wl.get("above_survey_floor") if no_setup else (wl.get("without_setup") or {}).get("above_survey_floor")) or {}
+        floor_txt = ""
+        if fl.get("frames_below_floor"):
+            floor_txt = (f". But {fl['frames_below_floor']} of {fl['frames_all']} of those C = 0 frames lie below "
+                         f"their transect's lowest shot, where a line can only read low (one that would read high "
+                         f"lands seaward of the survey): the lines without setup read low by construction there, so "
+                         f"what is left, and the share of the offset it allows, is OVERSTATED")
+        return (head + where + verdict + floor_txt
+                + ". Read the shifts above as what the offset WOULD do if it were all pointing")
     return None
 
 
@@ -4502,6 +4543,17 @@ def waterline_readme_lines(wl_):
                  f"median {zu['median']:+.2f})"
                  + (f", the window's lines at {za['p5']:+.2f} to {za['p95']:+.2f} m (p5..p95)" if za else "")
                  + ": this check covers only that part of the beach")
+    af = wl_.get("above_survey_floor") or {}
+    if af.get("frames_all"):
+        fl = ", ".join(f"{k.split(' ')[0]} {v:+.2f}" for k, v in (af.get("transect_floors_m") or {}).items())
+        L.append(f"      WHERE THE SURVEY STOPS: the transects end at their lowest shot ({fl} m); a line below that "
+                 f"can only read LOW there and one that would read high lands seaward of the survey, so the value "
+                 f"above is biased LOW by where the survey stops ({af.get('frames_below_floor', 0)} of "
+                 f"{af['frames_all']} frames lie below their transect's lowest shot). Over only the points whose line "
+                 f"lies at least {af.get('margin_m', 0.1):.2f} m above that shot: "
+                 + (f"median {af['median']:+.3f} m on {af['frames']} frames"
+                    + (f" (too few frames: not an estimate)" if af["frames"] < FEW_N else "")
+                    if af.get("frames") else "no frame"))
     be = [b for b in wl_.get("by_elevation") or [] if b.get("n")]
     if len(be) > 1:
         def band(b):
@@ -4554,6 +4606,14 @@ def waterline_readme_lines(wl_):
                         if unp.get("with_setup_only_median") is not None else "")
                      + (f"; {unp['without_setup_only']} have one only at C = 0" if unp.get("without_setup_only") else "")
                      + f". All C = 0 values: median {ws['median']:+.3f} m, n {ws['n']}.")
+        af0 = ws.get("above_survey_floor") or {}
+        if af0.get("frames_all"):
+            L.append(f"        the C = 0 lines sit lower, so more lie below where the survey stops "
+                     f"({af0.get('frames_below_floor', 0)} of {af0['frames_all']} frames) and these C = 0 medians are "
+                     f"biased LOW by more; above the transects' lowest shot + {af0.get('margin_m', 0.1):.2f} m: "
+                     + (f"median {af0['median']:+.3f} m on {af0['frames']} frames"
+                        + (" (too few frames: not an estimate)" if af0["frames"] < FEW_N else "")
+                        if af0.get("frames") else "no frame"))
         L.append(f"        ({ws.get('how')})")
     elif ws.get("n"):                    # a comparison made before the pairing (Oct 2026)
         L.append(f"      without the wave setup (C = 0, a sensitivity): median {ws['median']:+.3f} m"
@@ -5596,6 +5656,14 @@ def summary(args):
                    "waterlines_method": wl.get("method"),
                    "waterlines_elevation_p5_m": num(zu.get("p5")), "waterlines_elevation_p95_m": num(zu.get("p95")),
                    "waterlines_elevation_max_m": num(zu.get("max")),
+                   # transect checks: the same lines over only those above where the survey stops
+                   "waterlines_above_floor_median_m": num((wl.get("above_survey_floor") or {}).get("median"))
+                   if (wl.get("above_survey_floor") or {}).get("frames") else None,
+                   "waterlines_above_floor_frames": (wl.get("above_survey_floor") or {}).get("frames"),
+                   "waterlines_below_floor_frames": (wl.get("above_survey_floor") or {}).get("frames_below_floor"),
+                   "waterlines_floor_frames_all": (wl.get("above_survey_floor") or {}).get("frames_all"),
+                   "c0_below_floor_frames": (ws.get("above_survey_floor") or {}).get("frames_below_floor"),
+                   "c0_floor_frames_all": (ws.get("above_survey_floor") or {}).get("frames_all"),
                    "c0_paired_n": pr.get("n"), "c0_paired_unit": pr.get("unit"),
                    "c0_without_setup_median_m": num(pr.get("without_setup_median")),
                    "c0_with_setup_median_m": num(pr.get("with_setup_median")),
@@ -5743,6 +5811,13 @@ def summary(args):
         if r.get("waterlines_elevation_p5_m") is not None:
             lines.append(f"{'':<11}   lines compared at {r['waterlines_elevation_p5_m']:+.2f} .. "
                          f"{r['waterlines_elevation_p95_m']:+.2f} m only (p5..p95)")
+        if r.get("waterlines_floor_frames_all"):
+            af_n = r.get("waterlines_above_floor_frames") or 0
+            lines.append(f"{'':<11}   where the survey stops: {r.get('waterlines_below_floor_frames') or 0} of "
+                         f"{r['waterlines_floor_frames_all']} frames lie below their transect's lowest shot, where a "
+                         f"line can only read low (the lines median is biased LOW); the lines above it: "
+                         + (f"{r['waterlines_above_floor_median_m']:+.3f} m on {af_n} frames"
+                            + (" (too few: not an estimate)" if af_n < FEW_N else "") if af_n else "none"))
         if r.get("c0_paired_n"):
             cams0 = [k for k in ("c1", "c2") if r.get(f"c0_n_independent_{k}")]
             lines.append(f"{'':<11}   C = 0 sensitivity, the same {r['c0_paired_n']} {r['c0_paired_unit']}"
@@ -5755,6 +5830,8 @@ def summary(args):
                             if r.get("c0_label") and r.get("label") in LABELS
                             and LABELS.index(r["c0_label"]) < LABELS.index(r["label"]) else "")
                          + (f" ({r['c0_dropped']} drop out at C = 0)" if r.get("c0_dropped") else "")
+                         + (f"; at C = 0 {r['c0_below_floor_frames']} of {r['c0_floor_frames_all']} frames lie below "
+                            f"where the survey stops: biased LOW" if r.get("c0_below_floor_frames") else "")
                          + (("; by camera " + ", ".join(
                              f"{k} {r[f'c0_without_setup_median_{k}_m']:+.3f} / {r[f'c0_with_setup_median_{k}_m']:+.3f}"
                              + (" (too few)" if r[f"c0_n_independent_{k}"] < FEW_N else "") for k in cams0))
@@ -5950,10 +6027,15 @@ def summary_figure(rows, path, disabled=(), not_yet=()):
             extra.append("tests the pipeline, not the beach")
         if r.get("waterlines_too_few"):
             extra.append(f"lines: {r['waterlines_n_independent']} {r['waterlines_n_independent_unit']}, too few")
+        if r.get("waterlines_below_floor_frames"):
+            extra.append(f"lines: {r['waterlines_below_floor_frames']} of {r['waterlines_floor_frames_all']} frames below "
+                         f"where the survey stops (read low by construction)")
         if c0_ok[k]:
             extra.append(f"C = 0, the same {r.get('c0_paired_n')} {r.get('c0_paired_unit')}: "
                          f"{r['c0_without_setup_median_m']:+.2f} m, {r['c0_label']}"
-                         + (" (too few)" if r.get("c0_too_few") else ""))
+                         + (" (too few)" if r.get("c0_too_few") else "")
+                         + (f", biased low ({r['c0_below_floor_frames']} of {r['c0_floor_frames_all']} below the "
+                            f"survey's floor)" if r.get("c0_below_floor_frames") else ""))
         if r.get("camera_split"):
             extra.append(f"cameras disagree by more than {CAMERA_SPLIT_M:.1f} m: see the per-camera marks")
         reason += extra
@@ -6122,6 +6204,16 @@ def main():
     srv = read_table(args.surveys, SURVEY_FIELDS)
     say("configuration", f"{args.config} ({len(cfg)} rows), {args.surveys} ({len(srv)} surveys)")
     say("setup coef", f"C = {args.setup_coef}")
+    cron_c = cron_settings(args.live_cron).get("SETUP_COEF")
+    try:
+        cron_c = float(cron_c) if cron_c not in (None, "") else 0.0
+    except ValueError:
+        cron_c = None
+    if cron_c is None or abs(cron_c - SETUP_COEF) > 1e-9:
+        warn(f"the station's cron ({args.live_cron}) has SETUP_COEF {cron_settings(args.live_cron).get('SETUP_COEF')!r}, "
+             f"not this script's default C = {SETUP_COEF}: the live waterlines and these products would carry "
+             f"different setups. Change SETUP_COEF in survey_products.py, historical_forcing.py and the cron "
+             f"together (with a SETUP_FITS entry saying where the new C was fitted)")
     if args.date:
         res = build_date(args.date, cfg, srv, args, steps)
         return EXIT_CODES.get(res, 1)

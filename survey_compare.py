@@ -195,6 +195,14 @@ TIME_GAP_WARN_DAYS = 3
 SYNTHETIC_NOTE = "tests the pipeline, not the beach"
 # Waterlines on RTK transects: compare_rtk.py's defaults.
 TRANSECT_TOLERANCE, TRANSECT_SPLIT, TRANSECT_MIN_POINTS = 2.0, 15.0, 3
+# WHERE THE SURVEY STOPS. A transect ends at its lowest shot; the RTK under any point of it is at or
+# above that shot. A line whose elevation (its plane: water level + setup) lies below it can only read
+# LOW there, and a line that would read HIGH at that water level lands seaward of the survey and is
+# not compared at all: over lines at or below the survey's floor the waterline - RTK median is biased
+# low by construction. Only transect points whose line lies at least this far above the transect's
+# lowest shot give a value that can come out high as well as low (the adversarial check of the setup
+# refit, Oct 2026: 0.1-0.2 m margins gave the same answer).
+SURVEY_FLOOR_MARGIN = 0.10
 FULL_COVER = 0.999               # a DEM cell the survey covers entirely (8 x 8 sub-cells)
 VERTICAL_UNKNOWN = ("vertical datum not stated in the survey file; assumed NAVD88 (geoid model "
                     "unknown; GEOID12B and GEOID18 differ by a few cm here)")
@@ -1153,18 +1161,25 @@ def is_transect(desc):
     return str(desc).strip().lower() == "transect"
 
 
-def waterlines_on_transects(cont, transects, tolerance=TRANSECT_TOLERANCE, min_points=TRANSECT_MIN_POINTS):
+def waterlines_on_transects(cont, transects, tolerance=TRANSECT_TOLERANCE, min_points=TRANSECT_MIN_POINTS,
+                            floor_margin=SURVEY_FLOOR_MARGIN):
     """
     compare_rtk.py's check of the waterlines against RTK transects (transects from
     compare_rtk.load_transects): a waterline point counts if it lies within `tolerance` m of a
     transect line and between its first and last surveyed point; the RTK elevation is
     interpolated along the profile there. ONE value per frame with >= min_points such points:
     the median of waterline - RTK.
-    -> (per-frame dict {d, cam, day, frame, points, z} of arrays (z: the median RTK elevation under
-    the frame's points), per-point mask of the points used).
+    Also, per frame, the same value over only the points whose line lies at least floor_margin
+    above their transect's lowest shot ('d_cov'; NaN with fewer than min_points such points): below
+    that a value can only come out low (SURVEY_FLOOR_MARGIN), so the all-points value is biased low
+    by where the survey stops.
+    -> (per-frame dict {d, cam, day, frame, points, z, plane, floor, d_cov, points_cov} of arrays (z:
+    the median RTK elevation under the frame's points; plane: the median elevation the line was
+    given; floor: the lowest shot of the transect(s) it crossed), per-point mask of the points used).
     """
     n = len(cont["E"])
     zr = np.full(n, np.nan)
+    zfloor = np.full(n, np.nan)
     on = np.zeros(n, bool)
     for t in transects:
         re_, rn = cont["E"] - t["c"][0], cont["N"] - t["c"][1]
@@ -1172,8 +1187,10 @@ def waterlines_on_transects(cont, transects, tolerance=TRANSECT_TOLERANCE, min_p
         lat = np.abs(-re_ * t["d"][1] + rn * t["d"][0])
         m = (lat <= tolerance) & (s >= t["s"][0]) & (s <= t["s"][-1]) & ~on
         zr[m] = np.interp(s[m], t["s"], t["z"])
+        zfloor[m] = float(np.min(t["z"]))
         on |= m
-    fr = {"d": [], "cam": [], "day": [], "frame": [], "points": [], "z": []}
+    fr = {"d": [], "cam": [], "day": [], "frame": [], "points": [], "z": [], "plane": [], "floor": [],
+          "d_cov": [], "points_cov": []}
     used = np.zeros(n, bool)
     idx = np.nonzero(on)[0]
     if len(idx):
@@ -1190,10 +1207,36 @@ def waterlines_on_transects(cont, transects, tolerance=TRANSECT_TOLERANCE, min_p
             fr["frame"].append(cont["frame"][grp[0]])
             fr["points"].append(len(grp))
             fr["z"].append(float(np.median(zr[grp])))
+            zg = np.asarray(cont["Z"][grp], float)
+            cov = grp[zg >= zfloor[grp] + floor_margin]
+            fr["plane"].append(float(np.median(zg)))
+            fr["floor"].append(float(np.min(zfloor[grp])))
+            fr["points_cov"].append(len(cov))
+            fr["d_cov"].append(float(np.median(cont["Z"][cov] - zr[cov])) if len(cov) >= min_points else np.nan)
             used[grp] = True
-    out = {k: np.array(v, dtype=float if k in ("d", "z") else (int if k == "points" else object))
+    out = {k: np.array(v, dtype=float if k in ("d", "z", "plane", "floor", "d_cov")
+                       else (int if k in ("points", "points_cov") else object))
            for k, v in fr.items()}
     return out, used
+
+
+def above_floor_summary(per, d, transects, margin=SURVEY_FLOOR_MARGIN):
+    """The transect check over only the lines that lie above where the survey stops (per-frame 'd_cov'
+    of waterlines_on_transects), next to how many frames the all-points value holds. -> dict"""
+    d = np.asarray(d, float)
+    dc = np.asarray(per.get("d_cov", np.full(len(d), np.nan)), float)
+    ok_all = np.isfinite(d)
+    ok = ok_all & np.isfinite(dc)
+    r = dict(stats(dc[ok]), margin_m=margin, frames_all=int(ok_all.sum()), frames=int(ok.sum()),
+             transect_floors_m={t.get("name", f"T{i + 1}"): round(float(np.min(t["z"])), 3)
+                                for i, t in enumerate(transects)})
+    cams = np.asarray(per.get("cam", []), object)
+    r["by_camera"] = {c: dict({k: v for k, v in stats(dc[ok & (cams == c)]).items() if k in ("n", "median", "nmad")})
+                      for c in sorted(set(cams[ok].tolist()))}
+    plane, floor = np.asarray(per.get("plane", []), float), np.asarray(per.get("floor", []), float)
+    if len(plane) == len(d):
+        r["frames_below_floor"] = int((ok_all & (plane < floor)).sum())
+    return r
 
 
 def waterline_rows(cont, d, zref=None, spt=None):
@@ -2102,6 +2145,27 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                       "  over a week, and days at the same 'at z' still differ by up to ~0.13 m. A difference between",
                       "  days below ~0.15-0.2 m is not by itself evidence of change; compare days at a similar 'at z'",
                       "  and setup (or within one elevation band below) before calling it change."]
+        floor_sum = None
+        if transects and unit == "frames":
+            floor_sum = above_floor_summary(per, dw, transects)
+            fl_txt = ", ".join(f"{k.split(' ')[0]} {v:+.2f}" for k, v in floor_sum["transect_floors_m"].items())
+            few_f = floor_sum["frames"] < MIN_BAND_N
+            lines += ["  " + ln for ln in textwrap.wrap(
+                f"WHERE THE SURVEY STOPS: the transects end at their lowest shot ({fl_txt} m NAVD88). A line "
+                f"lying below a transect's lowest shot can only read LOW on it (the RTK under it is higher), and a "
+                f"line that would read high at that water level lands seaward of the survey and is not compared: "
+                f"the median above is biased LOW by where the survey stops "
+                f"({floor_sum.get('frames_below_floor', 0)} of {floor_sum['frames_all']} frames lie below their "
+                f"transect's lowest shot). Over only the transect points whose line lies at least "
+                f"{floor_sum['margin_m']:.2f} m above that shot (a frame needs {transect_min_points} of them): "
+                + (f"median {floor_sum['median']:+.3f} m, NMAD {fv(floor_sum['nmad'], '{:.3f}')}, "
+                   f"{floor_sum['frames']} frames"
+                   + ("; by camera " + ", ".join(f"{c} {v['median']:+.3f} (n {v['n']})"
+                                                for c, v in floor_sum["by_camera"].items())
+                      if len(floor_sum["by_camera"]) > 1 else "")
+                   + (f" -- TOO FEW (fewer than {MIN_BAND_N} frames): not an estimate" if few_f else "")
+                   if floor_sum["frames"] else "no frame")
+                + ". That value is not biased by the survey's end, but covers only the lines above it.", 100)]
         bands_w = [r for r in wl_rows if r["group_type"] == "waterline_band"]
         if bands_w:
             lines += ["", f"  WATERLINES BY SURVEY ELEVATION ({BAND} m bands of the survey elevation each value was "
@@ -2128,6 +2192,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                                                                       "survey_points") if k in r} for r in bands_w]}
         if sp_col and all_r:
             head["waterlines"]["survey_points"] = all_r[0]["survey_points"]
+        if floor_sum is not None:
+            head["waterlines"]["above_survey_floor"] = floor_sum
         # when and under what waves each camera's compared frames were taken (a camera difference is
         # the cameras' only if they were compared at the same times)
         try:
@@ -2193,10 +2259,13 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             with open(wl_frames_csv, "w", newline="") as f:
                 w = csv.writer(f)
                 w.writerow(["frame", "camera", "day", "points_on_transects", "rtk_elevation_navd88",
-                            "waterline_minus_rtk_m"])
+                            "waterline_minus_rtk_m", "line_elevation_navd88", "transect_lowest_shot_navd88",
+                            "points_above_survey_floor", "waterline_minus_rtk_above_floor_m"])
                 for k in range(len(dw)):
                     w.writerow([per["frame"][k], per["cam"][k], per["day"][k], per["points"][k],
-                                f"{per['z'][k]:+.3f}", f"{dw[k]:+.4f}"])
+                                f"{per['z'][k]:+.3f}", f"{dw[k]:+.4f}", f"{per['plane'][k]:+.3f}",
+                                f"{per['floor'][k]:+.3f}", per["points_cov"][k],
+                                f"{per['d_cov'][k]:+.4f}" if np.isfinite(per["d_cov"][k]) else ""])
             files["waterline_frames_csv"] = str(wl_frames_csv)
         if wl_rows:
             head["waterlines"].update({k: wl_rows[0][k] for k in STAT_KEYS})
@@ -2292,6 +2361,18 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                                         if k in r}
                            for r in wl0_rows if r["group_type"] == "waterline_camera"},
                 paired=paired, unpaired=unp)
+            if transects and unit0 == "frames":
+                # the C = 0 lines sit lower, so more of them fall below where the survey stops
+                fs0 = above_floor_summary(R0["per"], dw0, transects)
+                head["waterlines"]["without_setup"]["above_survey_floor"] = fs0
+                lines += ["  " + ln for ln in textwrap.wrap(
+                    f"WHERE THE SURVEY STOPS, at C = 0: the lines sit lower without the setup, so more of them lie "
+                    f"below the transects' lowest shots ({fs0.get('frames_below_floor', 0)} of {fs0['frames_all']} "
+                    f"frames) and the C = 0 medians above are biased LOW by more. Over only the points whose line "
+                    f"lies at least {fs0['margin_m']:.2f} m above that shot: "
+                    + (f"median {fs0['median']:+.3f} m, {fs0['frames']} frames"
+                       + (f" -- TOO FEW (fewer than {MIN_BAND_N} frames): not an estimate"
+                          if fs0["frames"] < MIN_BAND_N else "") if fs0["frames"] else "no frame") + ".", 100)]
             if wl0_rows:
                 print(f"without setup     : waterline - survey median {wl0_rows[0]['median']:+.3f} m with C = 0 "
                       f"({wl0_rows[0]['n']} {unit0}); paired over {paired['n']} {what_p}: with the setup "
@@ -2368,6 +2449,13 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             zu = hw.get("line_elevation_compared")
             if zu:
                 box.append(f"  line points compared at {zu['p5']:+.2f}..{zu['p95']:+.2f} m only (p5..p95)")
+            af = hw.get("above_survey_floor") or {}
+            if af.get("frames_all"):
+                box.append(f"  where the survey stops: {af.get('frames_below_floor', 0)} of {af['frames_all']} frames lie "
+                           f"below their transect's lowest shot (read low)")
+                box.append(f"    lines >= {af['margin_m']:.2f} m above it: "
+                           + (f"median {af['median']:+.3f} m, {af['frames']} frames"
+                              + (" (few)" if af["frames"] < MIN_BAND_N else "") if af.get("frames") else "none"))
             camw = [r for r in wl_rows if r["group_type"] == "waterline_camera"]
             if len(camw) > 1:
                 box.append("  " + ", ".join(
@@ -2388,6 +2476,10 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                         f"{k} {v['with_setup_median']:+.3f} / {v['without_setup_median']:+.3f} (n {v['n']}"
                         + (f", few {v.get('n_independent_unit')}" if v.get("n_independent", v["n"]) < MIN_BAND_N else "")
                         + ")" for k, v in sorted(pr["by_camera"].items()) if v.get("n")))
+                af0 = ws.get("above_survey_floor") or {}
+                if af0.get("frames_below_floor"):
+                    box.append(f"    at C = 0 {af0['frames_below_floor']} of {af0['frames_all']} frames lie below the "
+                               f"survey's floor: biased low")
             elif hw.get("setup", "").startswith("NO setup"):
                 box.append("  no C = 0 sensitivity: these lines carry no setup")
             fsx = hw.get("frame_set") or {}

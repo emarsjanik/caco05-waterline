@@ -325,11 +325,15 @@ def test_round2(d):
           "... the effect on the most frames is used; one on 3-4 survey points is too few to use")
     check("PARTLY-CIRCULAR: its search envelope was placed with this same Jan 2025 lidar" in c0,
           "... the earlier check carries its own label: PARTLY-CIRCULAR (envelope placed with the same lidar)")
-    under = [c for c in cav if c.startswith("C = 0.037 under-corrects")]
-    check("do not subtract it again" in c0 and under and "already inside the EARLIER CHECK expectation" in under[0]
-          and "~0.07 m" in under[0] and "0.046" in under[0],
-          "... the under-correction (re-projection ~0.07 m + C mismatch, per-frame C 0.046) is said to be inside "
-          "that expectation, never to be counted twice")
+    under = [c for c in cav if c.startswith("C = 0.037 is not pinned by the 2026 RTK")]
+    check("do not subtract them again" in c0 and under and "EARLIER CHECK expectation above is made with C = 0.037 "
+          "and already holds the re-projection" in under[0] and "would sit ~0.03-0.05 m higher than with C = 0.037" in under[0]
+          and "biased LOW by where that survey stops" in under[0] and "C ~0.043-0.046" in under[0]
+          and "-0.04 to -0.03 m (7-10 frames: too few" in under[0] and "0.043 (0.026-0.053)" in under[0]
+          and "under-corrects" not in under[0],
+          "... the 2026 RTK numbers are said to be biased LOW by where that survey stops; above it the lines read "
+          "-0.04..-0.03 m and C ~0.043-0.046, internal 0.043: C = 0.037 is not shown to under-correct; the "
+          "re-projection is inside the expectation, never counted twice")
     check("station computer only" in c0 and "synthetic test fixture" in c0 and "nothing about the real beach" in c0,
           "... and says the real photos are on the station only; a fixture build says nothing about the real beach")
     cav0 = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.0), {}, forcing, {})
@@ -543,13 +547,14 @@ def test_caveats(d):
         text = "\n".join(cav)
         first = "Live era" if era == "live" else "ADCP datum"
         check(first in text, f"{era}: its own era caveat is there")
-        check("under-corrects" in text, f"{era}: the setup under-correction caveat is there too")
+        check("is not pinned by the 2026 RTK" in text and "under-corrects" not in text,
+              f"{era}: the caveat on what the 2026 RTK can say about C is there too")
         check("none on 2026-09-26" in text, f"{era}: the window days without waterlines are listed")
         check(("GNSS-R" in text and "surf zone" in text) == (era == "adcp"),
               f"{era}: C's still-water reference (GNSS-R, surf zone) stated for the ADCP era only")
         check("NOMINAL" in text and "6348" in text, f"{era}: the GeoTIFF CRS tag is said to be nominal")
     cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.05), {}, forcing, {})
-    check(not any("under-corrects" in c for c in cav) and any("WITHOUT saying where" in c for c in cav),
+    check(not any("not pinned by the 2026 RTK" in c for c in cav) and any("WITHOUT saying where" in c for c in cav),
           "a C of unknown origin: no RTK caveat, and said to be of unknown origin")
     cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.05, setup_fitted_to="none:crossings"), {}, forcing, {})
     check(not any("fitted on this beach in Sep-Oct 2026" in c for c in cav),
@@ -1007,6 +1012,15 @@ def test_fix3(d):
           and "the 0-100 m band" in txt and "too few" in txt,
           "pointing vs lens: C = 0 lines minus the repeat-crossing setup leave -0.20..-0.14 m at ~55 m, 34-49% "
           "of the full offset's -0.41 m: a part cannot be ruled out (and the C fitted to the RTK cannot say)")
+    check("OVERSTATED" not in txt, "... no survey-floor note when the build records none")
+    wl_ = prov_["comparisons"][0]["headline"]["waterlines"]
+    wl_["without_setup"]["above_survey_floor"] = {"frames_below_floor": 12, "frames_all": 12, "frames": 0}
+    txt2 = sp.pointing_vs_survey({"date": "2026-09-29", "out": cp}, "c1", (0.90, 0.23), sens, prov_,
+                                 [{"coef": 0.037, "kind": "known"}])
+    check(txt2 and "12 of 12 of those C = 0 frames lie below their transect's lowest shot" in txt2
+          and "OVERSTATED" in txt2,
+          "... C = 0 lines below where the survey stops: what is left (and the share of the offset) is OVERSTATED")
+    del wl_["without_setup"]["above_survey_floor"]
     dsm = {"comparisons": [dict(prov_["comparisons"][0], headline={"waterlines": dict(
         prov_["comparisons"][0]["headline"]["waterlines"], unit="points")})]}
     check(sp.pointing_vs_survey({"date": "2026-09-29", "out": cp}, "c1", (0.90, 0.23), sens, dsm,
@@ -1031,6 +1045,42 @@ def test_fix3(d):
     cv0 = sp.setup_caveats({"surveys": []}, None, {}, {}, [{"coef": 0.0, "kind": "none"}], "live")
     check("0.6-0.8 x the setup" in cv0[0] and "by about the setup" not in cv0[0],
           "C = 0: lines read LOW by roughly 0.6-0.8 x the setup, not 'by about the setup'")
+
+
+def test_dem_two_days(d):
+    print("dem_from_contours.py: two camera-days that disagree are both kept, never a crash")
+    d = Path(d) / "dem2"
+    d.mkdir()
+    g = d / "ground.csv"
+    lines_ = ["source_file,camera,capture_time_utc,capture_epoch,easting_utm19,northing_utm19,"
+              "tide_elevation_navd88,beach_elevation_navd88"]
+    for day, dz in (("2025-03-06", 0.0), ("2025-03-07", 0.3)):        # the second day reads 0.3 m higher
+        for h in (14, 15, 16, 17):
+            t = datetime.fromisoformat(f"{day}T{h:02d}:00:00+00:00")
+            f = f"f{day}_{h}"
+            for i in range(40):
+                e, n = 420000.0 + 2.0 * (i % 8) + 1.0, 4638000.0 + 2.0 * (i // 8) + 1.0
+                z = 1.0 - 0.05 * (e - 420000.0) + dz + 0.01 * (h - 15)
+                lines_.append(f"{f},c2,{t:%Y-%m-%dT%H:%M:%S}+00:00,{int(t.timestamp())},{e:.2f},{n:.2f},{z:.3f},{z:.3f}")
+    g.write_text("\n".join(lines_) + "\n")
+    r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(d / "dem"),
+                        "--max-day-offset", "0.15", "--no-plot"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       universal_newlines=True, cwd=str(d))
+    out = r.stdout
+    check(r.returncode == 0 and (d / "dem_dem.asc").exists() and "REJECTED" not in out
+          and "kept: fewer than 3 testable days" in out and "every day kept" in out,
+          f"two camera-days 0.3 m apart with --max-day-offset 0.15: both kept, DEM built (exit {r.returncode})")
+
+
+def test_one_setup_coef():
+    print("one setup coefficient for the station and the products")
+    import historical_forcing as hf
+    cron = sp.cron_settings(sp.LIVE_CRON).get("SETUP_COEF")
+    check(cron is not None and abs(float(cron) - sp.SETUP_COEF) < 1e-12 and abs(hf.SETUP_COEF - sp.SETUP_COEF) < 1e-12,
+          f"waterline_timex_cron.sh SETUP_COEF {cron}, survey_products {sp.SETUP_COEF}, historical_forcing "
+          f"{hf.SETUP_COEF}: the same C")
+    check(any(abs(k - sp.SETUP_COEF) < 1e-12 for k in sp.SETUP_FITS),
+          "the station's C has a SETUP_FITS entry (where it was fitted: which comparisons are CIRCULAR)")
 
 
 def test_py38():
@@ -1068,6 +1118,8 @@ def main():
         test_fix1(d)
         test_fix2(d)
         test_fix3(d)
+        test_dem_two_days(d)
+        test_one_setup_coef()
         test_py38()
     finally:
         if not args.keep:

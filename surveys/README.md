@@ -27,8 +27,9 @@ dem,maps,compare`. The DEM's day test (a camera-day off the DEM made
 without it by more than 0.15 m is left out) is not run on fewer than 3
 camera-days: there the DEM without one day is the other day alone, two days
 that disagree get equal and opposite offsets and both would be rejected,
-leaving nothing to grid; the README says so, and a DEM that still fails
-says why (from `logs/dem.log`). The photo window and hours and the input
+leaving nothing to grid (`dem_from_contours.py` itself now keeps every day
+then, and exits 4 rather than crash if a test ever rejects them all); the
+README says so, and a DEM that still fails says why (from `logs/dem.log`). The photo window and hours and the input
 files are likewise those of the build: a `--window` or `--utc-hours` is applied only by a run of every
 step from the forcing through the DEM (otherwise, e.g. `--steps compare
 --window ...`, the run keeps the window the outputs were built for and the
@@ -124,9 +125,10 @@ the beach (0.71 per frame on the 2026 RTK; ~0.6 and ~0.8 in the Jan and Mar
 waterline - Jan lidar of about **c1 -0.29 to -0.24 m, c2 +0.02 to +0.07 m**
 over shares of 0.6-0.8 (c1 -0.18, c2 +0.13 m if the whole setup counted). The
 build gives the expectation from its own paired C = 0 sensitivity, per
-camera. It already holds the setup's under-correction (below): it is not to
-be added again. The 0.3 m difference between the cameras, measured over the
-same hours, points at the pointing or the lens model. The README of that date says so, gives the
+camera. It already holds the re-projection and any mismatch of C on this
+date (below): they are not to be added again. The 0.3 m difference between
+the cameras, measured over the same hours, points at the pointing or the lens
+model. The README of that date says so, gives the
 headline per camera, the C = 0 sensitivity (the same lines without the setup)
 and each camera's sea-horizon offset against its calibration.
 
@@ -199,23 +201,30 @@ actually ran and can only make the label worse, saying why:
 
 The setup itself is not exact either (the station's C is not changed here;
 each README states the bias):
-* **under-correction.** On the 18 frames of 29 Sep - 5 Oct lying on the RTK
-  transects both ways, RTK - waterline is +0.33 m without setup and still
-  +0.13 m with C = 0.037 (median setup applied 0.26 m; Oct 2026). Two causes,
-  measured on those same frames (each line without setup re-projected at
-  still water, with the setup added in place, and with it re-projected):
-  (1) a line given the setup is re-projected landward onto higher beach,
-  which takes back ~0.07 m: each line keeps ~0.71 x its setup there (the
-  per-frame median; ~0.3 x is lost, by the beach slope and the cross-shore
-  distance); (2) C = 0.037 is below those frames' own per-frame C (0.046
-  with no re-projection; C was fitted on 14 of them, each line taken where
-  it lay WITHOUT setup): ~0.06 m. The share kept is not one number to carry
-  to other dates: it depends on the slope, the camera and its distance. The
-  paired C = 0 sensitivities of the 2025 builds (real lidar beaches and
-  calibrations, synthetic photos) give ~0.6 for Jan (c1 0.63, c2 0.57) and
-  ~0.8 for Mar; each README gives its own build's per camera, and in metres.
-  The C mismatch belongs to those frames. For 2025-01-23 the earlier-check
-  expectation above already holds both.
+* **what the 2026 RTK can say about C.** On the 18 frames of 29 Sep - 5 Oct
+  lying on the RTK transects both ways, waterline - RTK is -0.33 m without
+  setup and -0.13 m with C = 0.037 (median setup applied 0.26 m; Oct 2026).
+  Both medians are **biased LOW by where that survey stops**: the transects
+  end at their lowest shot (+1.2 to +1.7 m NAVD88); a line below it can only
+  read low there (the RTK under it is higher), and a line that would read high
+  at that water level lands seaward of the survey and is never compared. Over
+  only the lines at least 0.1-0.2 m above the lowest shots the lines with
+  C = 0.037 read -0.04 to -0.03 m (7-10 frames: too few to be an estimate),
+  and a fit with each line re-projected at still water + setup gives C ~0.043-
+  0.046 (day-block 90% ~0.02-0.055); the within-cell slope of repeat
+  crossings (no survey) gives 0.043 (0.026-0.053). 0.037 lies inside each of
+  these, so the station keeps it; the RTK, which stops above the low-tide
+  beach, cannot pin C more closely (a survey reaching the low-tide line on
+  days with different waves would). `survey_compare.py` reports, next to the
+  transect headline, the same check over only the lines above the transects'
+  lowest shots (WHERE THE SURVEY STOPS). A line given the setup is re-projected
+  landward onto higher beach, so it keeps only part of its setup: ~0.71 x per
+  frame on those RTK frames, ~0.6 (c1 0.63, c2 0.57) and ~0.8 in the paired
+  C = 0 sensitivities of the Jan and Mar 2025 builds (real lidar beaches and
+  calibrations, synthetic photos). The share kept is not one number to carry
+  to other dates: it depends on the slope, the camera and its distance; each
+  README gives its own build's per camera, and in metres. For 2025-01-23 the
+  earlier-check expectation above already holds it.
 * **still-water reference (2025 dates).** C was fitted with each line at the
   GNSS-R water level. The GNSS-R footprint is the surf zone (`gnssr_qc.py`,
   `gnssir_reflection_audit.py`), where breaking waves raise the mean level:
@@ -342,8 +351,12 @@ at 200-350 m, where no survey exists). On the 2026 lines up to about half of
 c1's offset and a quarter of c2's cannot be ruled out (5-7 frames per camera,
 too few for an estimate; swash and detector bias at the waterline are
 confounded with it): the full offset is unlikely to be pointing, a part of
-it cannot be ruled out. The README's DEM-shift table says what the offset
-WOULD do if it were all pointing.
+it cannot be ruled out. Even that part is OVERSTATED: every one of those
+C = 0 lines lies below its transect's lowest shot (the survey stops at +1.2
+to +1.7 m), where a line can only read low, so what is left after the setup
+is biased low by where the survey stops (WHERE THE SURVEY STOPS, above). The
+README's DEM-shift table says what the offset WOULD do if it were all
+pointing.
 
 Synthetic inputs: a build from the sandbox test fixture (photos rendered from
 the lidar with the water level and setup planted) is run with `--synthetic
