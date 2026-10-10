@@ -1567,13 +1567,14 @@ def plot_camera(cam, info, data, report, args, out_png):
         cmap = plt.get_cmap("turbo")                # 3.3 / 3.4 (the station's floor)
 
     fig = plt.figure(figsize=(17, 9.6), dpi=110)
-    ax = fig.add_axes([0.01, 0.06, 0.62, 0.86])
+    ax = fig.add_axes([0.01, 0.085, 0.62, 0.835])
     if image is not None:
         ax.imshow(image)
     else:
         ax.set_facecolor("0.85")
     rep = {r["source_file"]: r for r in report if r["camera"] == cam}
     listed = []
+    y_top = 0.0                       # top of the drawing: the photo's top edge
     for f in win_frames:
         sel = fl == f
         if not sel.any():
@@ -1594,12 +1595,16 @@ def plot_camera(cam, info, data, report, args, out_png):
     # Numbers in staggered rows above the lines, spread sideways with a
     # leader to each dropped part, so rejections in one place stay readable.
     # As many rows as the numbers need to sit side by side (at least two),
-    # stacked upwards from 5% of the photo above the highest dropped line --
-    # and, where that would leave the photo, downwards from its top edge
-    # instead: both rows were once clamped to the same height there, and on
-    # the station's c2 week 24 of 29 numbers overlapped another.
+    # stacked upwards from 5% of the photo above the highest dropped line.
+    # Where that would leave the photo (a dropped line near its top edge),
+    # they go BELOW the lowest dropped line instead, stacked downwards: pushed
+    # down from the top edge they sat on the very lines they number (review,
+    # Oct 2026); only where neither fits are they pushed down from the top
+    # edge. (Both rows were once clamped to the same height there, and on the
+    # station's c2 week 24 of 29 numbers overlapped another.)
     if listed:
         top = float(np.nanmin(row[drop & np.isin(fl, listed)]))
+        low = float(np.nanmax(row[drop & np.isin(fl, listed)]))
         anchors = []
         for f in listed:
             sel = (fl == f) & drop
@@ -1612,7 +1617,12 @@ def plot_camera(cam, info, data, report, args, out_png):
         step = 0.035 * height
         ly_first = top - 0.05 * height                      # the row nearest the lines
         if ly_first - (n_tiers - 1) * step < 0.03 * height:
-            ly_first = 0.03 * height + (n_tiers - 1) * step
+            if low + 0.05 * height + (n_tiers - 1) * step <= 0.97 * height:
+                ly_first, step = low + 0.05 * height, -step  # below the lines, downwards
+            elif image is None:                              # no photo: room made above
+                y_top = ly_first - (n_tiers - 1) * step - 0.03 * height
+            else:
+                ly_first = 0.03 * height + (n_tiers - 1) * step
         for tier in range(n_tiers):
             ids = order[tier::n_tiers]
             xs = [anchors[n][0] for n in ids]
@@ -1643,13 +1653,15 @@ def plot_camera(cam, info, data, report, args, out_png):
                     fontweight="bold", ha="center", va="top")
         rev_note = (f"\nred bar: columns where rows ran AGAINST the water level on {n_days} "
                     f"day(s) -- high-tide lines seaward, low-tide lines landward, or beach change")
-    ax.set_xlim(0, width); ax.set_ylim(height, 0); ax.axis("off")
+    ax.set_xlim(0, width); ax.set_ylim(height, y_top); ax.axis("off")
     status = "" if info["applied"] else "   [NOT APPLIED: would drop too much, see log]"
     ax.set_title(f"{cam.upper()}  {first} to {last}: {len(listed)} line(s) with parts dropped as out of "
                  f"order (thick; dashed = whole line){status}\nthin white = kept lines, {bg_note}"
                  f"{rev_note}", fontsize=10)
     sm = matplotlib.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
-    cax = fig.add_axes([0.03, 0.035, 0.25, 0.015])
+    # high enough for its tick labels and its own label below it (at 0.035
+    # the label's lower half was cut off the PNG)
+    cax = fig.add_axes([0.03, 0.058, 0.25, 0.015])
     cb = fig.colorbar(sm, cax=cax, orientation="horizontal")
     cb.set_label(f"{elev_words} of the line (m NAVD88)", fontsize=8)
     cb.ax.tick_params(labelsize=7)
