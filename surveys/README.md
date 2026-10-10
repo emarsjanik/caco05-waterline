@@ -25,11 +25,12 @@ built with, never a later command line's: `--steps compare --dem-cell 1`
 warns that the option is not applied and says to rerun `--steps
 dem,maps,compare`. The DEM's day test (a camera-day off the DEM made
 without it by more than 0.15 m is left out) is not run on fewer than 3
-camera-days: there the DEM without one day is the other day alone, two days
-that disagree get equal and opposite offsets and both would be rejected,
-leaving nothing to grid (`dem_from_contours.py` itself now keeps every day
-then, and exits 4 rather than crash if a test ever rejects them all); the
-README says so, and a DEM that still fails says why (from `logs/dem.log`). The photo window and hours and the input
+camera-days: with fewer than 3 the test cannot tell which day is off
+(`dem_from_contours.py` keeps them all in that case, and exits 4 rather
+than crash if a test ever rejects them all), so the option is not passed;
+every camera-day is kept and any difference between them stays in the DEM's
+spread. The README says so, and a DEM that still fails says why (from
+`logs/dem.log`). The photo window and hours and the input
 files are likewise those of the build: a `--window` or `--utc-hours` is applied only by a run of every
 step from the forcing through the DEM (otherwise, e.g. `--steps compare
 --window ...`, the run keeps the window the outputs were built for and the
@@ -186,7 +187,8 @@ actually ran and can only make the label worse, saying why:
   cannot test the setup (nor the overall level it sets): this rule makes it
   CIRCULAR for as long as C = 0.037 is used (the table row says INDEPENDENT,
   which a build with C = 0, or with a C fitted to other data, keeps: nothing
-  else in its chain used the shots). Its spread still says something, over
+  else in its chain used the shots; build it in its own root, see "a build
+  with C = 0" below). Its spread still says something, over
   the narrow band the transects cover (they start at ~+1.2 m: the waterline
   check covers ~+1.0 to +1.6 m only). **An independent check of the whole
   2026 intertidal needs another survey** that fitted nothing, e.g. a calm
@@ -201,23 +203,31 @@ actually ran and can only make the label worse, saying why:
 
 The setup itself is not exact either (the station's C is not changed here;
 each README states the bias):
-* **what the 2026 RTK can say about C.** On the 18 frames of 29 Sep - 5 Oct
-  lying on the RTK transects both ways, waterline - RTK is -0.33 m without
-  setup and -0.13 m with C = 0.037 (median setup applied 0.26 m; Oct 2026).
-  Both medians are **biased LOW by where that survey stops**: the transects
-  end at their lowest shot (+1.2 to +1.7 m NAVD88); a line below it can only
-  read low there (the RTK under it is higher), and a line that would read high
-  at that water level lands seaward of the survey and is never compared. Over
-  only the lines at least 0.1-0.2 m above the lowest shots the lines with
-  C = 0.037 read -0.04 to -0.03 m (7-10 frames: too few to be an estimate),
-  and a fit with each line re-projected at still water + setup gives C ~0.043-
-  0.046 (day-block 90% ~0.02-0.055); the within-cell slope of repeat
-  crossings (no survey) gives 0.043 (0.026-0.053). 0.037 lies inside each of
-  these, so the station keeps it; the RTK, which stops above the low-tide
-  beach, cannot pin C more closely (a survey reaching the low-tide line on
-  days with different waves would). `survey_compare.py` reports, next to the
-  transect headline, the same check over only the lines above the transects'
-  lowest shots (WHERE THE SURVEY STOPS). A line given the setup is re-projected
+* **what the 2026 RTK can say about C.** The Oct 2026 recheck (the
+  station's rows of 29 Sep - 5 Oct, 18 frames lying on the RTK transects both
+  ways, the filter of that time) found waterline - RTK -0.33 m without setup
+  and -0.13 m with C = 0.037 (median setup applied 0.26 m). Both medians are
+  **biased LOW by where that survey stops**: the transects end at their
+  lowest shot (+1.2 to +1.7 m NAVD88); a line below it can only read low
+  there (the RTK under it is higher), and a line that would read high at that
+  water level lands seaward of the survey and is never compared. Over only
+  the lines at least 0.1-0.2 m above the lowest shots, that recheck (a
+  scratch analysis, not code in this repository; its numbers are held in
+  `SETUP_FITS`) read the lines with C = 0.037 at -0.04 to -0.03 m (7-10
+  frames: too few to be an estimate), and a fit with each line re-projected
+  at still water + setup gave C ~0.043-0.046 (day-block 90% ~0.02-0.055);
+  the within-cell slope of repeat crossings (no survey, the same analysis)
+  gave 0.043 (0.026-0.053). 0.037 lies inside each of these, so the station
+  keeps it; the RTK, which stops above the low-tide beach, cannot pin C more
+  closely (a survey reaching the low-tide line on days with different waves
+  would). Each build measures the same thing on its own frames:
+  `survey_compare.py` reports, next to the transect headline, the check over
+  only the lines at least 0.10 m above the transects' lowest shots (WHERE
+  THE SURVEY STOPS; e.g. -0.069 m on 7 frames in a test build of the 26 Sep -
+  2 Oct window from a copy of the station's rows that starts on 29 Sep: on
+  the station, with 26-28 Sep in, expect another value). Its README gives
+  both and says which is this build's; where they differ, read the build's.
+  A line given the setup is re-projected
   landward onto higher beach, so it keeps only part of its setup: ~0.71 x per
   frame on those RTK frames, ~0.6 (c1 0.63, c2 0.57) and ~0.8 in the paired
   C = 0 sensitivities of the Jan and Mar 2025 builds (real lidar beaches and
@@ -243,10 +253,28 @@ each README states the bias):
   expectation already holds this effect (that check was made on lines at the
   same ADCP still water); the caveat explains why the lines may differ from
   the lidar, not from that expectation. To take the question out, fit C in the
-  date's own frame: build with `--setup-coef 0`, run `dem_from_contours.py
-  --fit-setup` on `waterlines/contour_points_ground.csv` (repeat crossings, no
-  survey), then rebuild with `--setup-coef <C> --setup-fitted-to 'none:repeat
-  crossings, <window>'`; the lidar comparison stays INDEPENDENT.
+  date's own frame, each build in its OWN `--output-root` (in the default
+  root a build with another C replaces the C = 0.037 product of that date,
+  and for the 2025 dates its detection runs again, ~50 min a two-camera
+  week):
+  ```
+  python3 survey_products.py --date 2025-01-23 --setup-coef 0 \
+      --output-root /mnt/I2Rgus_Data/survey_products_c0
+  python3 dem_from_contours.py \
+      /mnt/I2Rgus_Data/survey_products_c0/2025-01-23/waterlines/contour_points_ground_filtered.csv \
+      /tmp/fit_2025-01-23 --fit-setup --max-hs 1.5 --no-plot
+  ```
+  and read the curve it prints (median spread of repeat crossings against
+  C). On one week it is usually flat: on the 29 Sep - 5 Oct 2026 lines it
+  gave 0.024-0.026 (the same spread with each line re-projected: 0.029, 90%
+  ~0.00-0.04), and on the C = 0 lines of 29 Sep - 2 Oct alone -0.004 to
+  +0.008 ("The data do not favour a positive setup correction"). The fit
+  prints the range of C whose spread lies within 5 mm of its best and calls
+  a range 0.02 or wider a FLAT minimum. Adopt a C only if its minimum is
+  clear, with `--setup-coef <C> --setup-fitted-to
+  'none:repeat crossings, <window>' --output-root
+  /mnt/I2Rgus_Data/survey_products_c<C>`; the lidar comparison stays
+  INDEPENDENT. Otherwise keep the station's C.
 * **wave currency.** C was fitted with ADCP-currency Hs and NDBC 44008 peak
   periods; the 2025 dates use the ADCP's periods (or WIS converted to them):
   `historical_forcing.py` states the expected setup bias in metres.
@@ -256,7 +284,21 @@ each README states the bias):
 * **a build with C = 0** (`--setup-coef 0`) writes `setup_correction_m` 0.0 on
   every row: its comparison says "NO setup correction (C = 0)" and has no C = 0
   sensitivity (both sides would be the same lines). This is the build that
-  makes the 2026-09-29 RTK comparison INDEPENDENT.
+  makes the 2026-09-29 RTK comparison INDEPENDENT. Build it in its own root,
+  so the station-C product stays:
+  ```
+  python3 survey_products.py --date 2026-09-29 --setup-coef 0 \
+      --output-root /mnt/I2Rgus_Data/survey_products_c0
+  python3 survey_products.py --summary --output-root /mnt/I2Rgus_Data/survey_products_c0
+  python3 survey_products.py --summary          # the C = 0.037 builds, default root
+  ```
+  Run in the default root it would REPLACE the C = 0.037 product of that
+  date (every step rebuilt, `--summary` then shows only the C = 0 build; the
+  run warns `replacing the C = 0.037 product in ...` before it starts and
+  again at the end), and for a 2025 date it re-runs the detection (~50 min a
+  two-camera week: each line is placed at the elevation its setup gives
+  it). Its numbers are biased too: every C = 0 line on the 2026 transects
+  lies below the survey's lowest shot (WHERE THE SURVEY STOPS).
 * **GNSS-R datum (live dates).** The live water level rests on one survey of
   the antenna (NGS OPUS, GEOID18: +0.349 m, +/-0.061 m, mostly the geoid
   model). It largely cancels against GEOID18 RTK shots, but every absolute
@@ -341,9 +383,14 @@ with C = 0.037, because that C was fitted to the same RTK shots: any level
 error on the transects, of the setup or of the pointing, is absorbed into
 C. The README therefore judges it on what fitted nothing to the RTK: the
 lines WITHOUT setup (C = 0) against the RTK, minus the setup that a C fitted
-to repeat crossings explains (0.03-0.04, `dem_from_contours.py --fit-setup`;
-a constant pointing error moves every frame's line alike and does not show
-there; Stockdon's 0.35 x a ~1:10 beach face expects the same). What is left
+to repeat crossings explains (no survey; a constant pointing error moves
+every frame's line alike and does not show there; Stockdon's 0.35 x a ~1:10
+beach face expects about the same). That C is taken as 0.029-0.043, the two
+re-projected estimates of the Oct 2026 recheck (a scratch analysis, not code
+in this repository): 0.029 for the spread `dem_from_contours.py
+--fit-setup` minimises, a flat minimum (90% ~0.00-0.04; `--fit-setup`
+itself, which does not re-project, gives 0.024-0.026 there), and 0.043
+(0.026-0.053) for the within-cell slope of elevation on sqrt(Hs L0). What is left
 is compared with what the full offset would do at the transects' range from
 each camera (~55 m from c1, ~110-120 m from c2, where the full offsets would
 put the lines ~0.4 and ~0.6 m low: not the metre-level shifts the table gives
@@ -372,7 +419,10 @@ drawn without a new georectification.
 Detection dominates: `detect_original_view.py` runs the detector on the
 whole 2448 x 2048 frame, measured at 22-26 s per photo here (not yet on the
 NUC10i3; its progress lines print the real rate), i.e. **~50 min for a
-two-camera week** of daytime photos. Everything else takes a few minutes. The
+two-camera week** of daytime photos. Everything else takes a few minutes.
+The live date (2026-09-29) runs no detection: it reads the station's
+contour file (~1 min per GB) and takes a few minutes in all (79 s here for
+67 MB of rows). The
 run lowers its own priority (`--nice 10`, the default) and warns when it
 would overlap the station's jobs (waterline cron 12:30, 19:25, 20:55;
 cleanup.sh 19:45, 21:00; owg.sh hourly at :40); a start after ~21:30 local
@@ -388,6 +438,11 @@ cd /mnt/I2Rgus_Data/waterline && git pull
 python3 survey_products.py --date 2025-01-23 --dry-run   # inputs found, labels, run time
 python3 survey_products.py --date 2025-01-23             # then 2025-03-06, 2026-09-29, --summary
 ```
+
+One setup coefficient per output root: a date rebuilt with another
+`--setup-coef` in the same root replaces the product built before (the run
+warns). Give a C = 0 or a refitted C its own `--output-root` (above, "a build
+with C = 0").
 
 The code is tested here under the station's oldest libraries too (Python
 3.8, numpy 1.17.4, matplotlib 3.3.4, pandas 1.1.5). The waterline maps on the

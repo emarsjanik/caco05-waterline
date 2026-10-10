@@ -390,10 +390,11 @@ def read_points(path):
         i_u, i_v = col["pixel_column"], col["pixel_row"]
         i_tide = col["tide_elevation_navd88"]
         i_beach = col.get("beach_elevation_navd88")
+        i_setup = col.get("setup_correction_m")
         i_ep, i_cap = col.get("capture_epoch"), col.get("capture_time_utc")
 
         frame_of = {}
-        names, cams, captures, epochs, elevs, beach_used = [], [], [], [], [], []
+        names, cams, captures, epochs, elevs, beach_used, setup_used = [], [], [], [], [], [], []
         fid, us, vs = array("i"), array("f"), array("f")
         for r in reader:
             key = r[i_src]
@@ -424,6 +425,13 @@ def read_points(path):
                     pass
                 elevs.append(z)
                 beach_used.append(bool(b))
+                # a setup only where setup_correction_m holds one: blank is a frame with
+                # no wave record, 0 a build with C = 0 (water level alone in both)
+                su = r[i_setup] if i_setup is not None and i_setup < len(r) else ""
+                try:
+                    setup_used.append(bool(b) and float(su) != 0.0)
+                except ValueError:
+                    setup_used.append(False)
             fid.append(k)
             try:                     # both or neither: the arrays must stay aligned
                 u_, v_ = float(r[i_u]), float(r[i_v])
@@ -435,7 +443,8 @@ def read_points(path):
                 col=np.frombuffer(us, dtype=np.float32), row=np.frombuffer(vs, dtype=np.float32),
                 names=names, cams=np.array(cams), captures=captures,
                 epochs=np.array(epochs, float), elevs=np.array(elevs, float),
-                beach_used=np.array(beach_used, bool), elev_col=elev_col)
+                beach_used=np.array(beach_used, bool), setup_used=np.array(setup_used, bool),
+                elev_col=elev_col)
 
 
 # ---------------------------------------------------------------------
@@ -1628,9 +1637,11 @@ def plot_camera(cam, info, data, report, args, out_png):
 
     frames, fl, col, row, drop = info["frames"], info["fl"], info["col"], info["row"], info["drop"]
     epochs, elevs = info["epochs"], info["elevs"]
-    # the same words as the elevation maps' colour bar (daily_elevation_map.py)
-    elev_words = ("water level + wave setup" if data["elev_col"] == "beach_elevation_navd88"
-                  else "water level")
+    # the same words as the elevation maps' colour bar (daily_elevation_map.py): the
+    # setup only when the lines carry one (not a C = 0 build, not frames without waves)
+    su = data["setup_used"][np.asarray(frames, int)] if len(frames) else np.zeros(0, bool)
+    elev_words = ("water level + wave setup" if su.size and su.all() else
+                  "water level (+ wave setup where recorded)" if su.any() else "water level")
     last_day = np.floor(np.nanmax(epochs) / DAY)
     in_win = np.floor(epochs / DAY) > last_day - args.plot_days
     win_frames = np.where(in_win)[0]

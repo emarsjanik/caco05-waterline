@@ -66,6 +66,15 @@ from pathlib import Path
 import numpy as np
 
 
+def carries_setup(text):
+    """True when a setup_correction_m cell holds a wave setup: blank is a frame with no
+    wave record, 0 a build with C = 0 -- in both the elevation is the water level alone."""
+    try:
+        return float(text) != 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, exclude=None,
                 stats=None):
     """Reads georectified contour points. Rows without ground coordinates are skipped.
@@ -118,7 +127,7 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             # Beach elevation = water level + setup when the contours were
             # extracted with --setup-coef; otherwise the water level.
             beach = r.get("beach_elevation_navd88")
-            with_setup += bool(beach)
+            with_setup += bool(beach) and carries_setup(r.get("setup_correction_m"))
             Z.append(float(beach or r["tide_elevation_navd88"]))
             cams.append(r["camera"])
             dates.append(day)
@@ -280,6 +289,13 @@ def median_spread_by_cell(groups, vals, min_frames):
         if len(x) >= min_frames:
             spreads.append(np.percentile(x, 84) - np.percentile(x, 16))
     return float(np.median(spreads)) if spreads else np.nan, len(spreads)
+
+
+# --fit-setup: the C range whose median spread lies within FIT_SETUP_NEAR_M of the best is
+# printed; FIT_SETUP_FLAT_WIDTH or wider is a flat minimum (on the filtered 29 Sep - 2 Oct 2026
+# lines without setup the spread changes by under 5 mm from C -0.02 to +0.01).
+FIT_SETUP_NEAR_M = 0.005
+FIT_SETUP_FLAT_WIDTH = 0.02
 
 
 def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames):
@@ -718,11 +734,21 @@ def main():
             for c, sp, n in valid:
                 if round(c * 1000) % 20 == 0:
                     print(f"      C {c:+.2f}: {sp:.3f} m")
+            # how sharp the minimum is: on one week of lines the curve is often flat, and
+            # its lowest point alone then says little about C
+            near = [r[0] for r in valid if r[1] <= best[1] + FIT_SETUP_NEAR_M]
+            flat = max(near) - min(near) >= FIT_SETUP_FLAT_WIDTH
+            print(f"   C {min(near):+.3f} to {max(near):+.3f}: median spread within "
+                  f"{FIT_SETUP_NEAR_M * 1000:.0f} mm of the best"
+                  + (" -- a FLAT minimum: this fit alone does not pin C" if flat else ""))
             if best[0] in (valid[0][0], valid[-1][0]):
                 print("   WARNING: best C is at the edge of the search range -- the data do "
                       "not constrain it; do not apply.")
             elif best[0] <= 0:
                 print("   The data do not favour a positive setup correction.")
+            elif flat:
+                print("   Do not apply on this window alone: refit over weeks of different "
+                      "waves (or keep the C in use).")
             else:
                 print(f"   To apply: extract_elevation_contours.py ... --waves ... "
                       f"--setup-coef {best[0]}")
@@ -915,10 +941,20 @@ def main():
 
     print()
     print("REMINDER: intertidal zone only, between the lowest and highest water")
-    print("levels observed. No data above or below, and none invented. The detected")
-    print("edge sits above still water by the wave setup, which grows with wave height,")
-    print("but is given the still-water elevation -- so the DEM reads LOW where rough-")
-    print("water frames land. Not corrected here; --max-hs leaves those frames out.")
+    print("levels observed. No data above or below, and none invented.")
+    share = load_stats.get("setup_share", 0.0)
+    rough = (f"--max-hs {args.max_hs:g} left out the roughest frames" if args.max_hs is not None
+             else "--max-hs would leave out the roughest frames")
+    if share > 0:
+        print("Elevations include the wave setup (C from extract_elevation_contours.py")
+        print(f"--setup-coef) on {100 * share:.0f}% of the points"
+              + ("." if share >= 0.995 else " (the rest: no wave record, water level only)."))
+        print(f"{rough}, where the setup errs most.")
+    else:
+        print("The detected edge sits above still water by the wave setup, which grows")
+        print("with wave height, but is given the still-water elevation -- so the DEM")
+        print("reads LOW where rough-water frames land. Not corrected here (no setup in")
+        print(f"these contours); {rough}.")
     if rc:
         sys.exit(rc)
 

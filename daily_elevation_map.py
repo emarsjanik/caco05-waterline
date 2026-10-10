@@ -104,6 +104,15 @@ ELEVATION_COLUMNS = ("tide_elevation_navd88", "tide_elevation")
 BEACH_COLUMN = "beach_elevation_navd88"       # water level + wave setup (--setup-coef)
 
 
+def carries_setup(text):
+    """True when a setup_correction_m cell holds a wave setup (dem_from_contours.py
+    has the same test): blank is a frame with no wave record, 0 a build with C = 0."""
+    try:
+        return float(text) != 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 def load_contours(path, camera, date_filter=None, only=None):
     """
     Groups contour points by source frame. Returns a dict keyed by
@@ -140,9 +149,10 @@ def load_contours(path, camera, date_filter=None, only=None):
             frames[key]["rows"].append(float(row["pixel_row"]))
             beach = row.get(BEACH_COLUMN)
             frames[key]["elevation"] = float(beach or row[elev_col])
-            # setup_correction_m is blank for a frame with no wave record:
-            # its beach_elevation_navd88 is then the water level itself
-            frames[key]["setup"] = bool(beach) and bool(row.get("setup_correction_m"))
+            # setup_correction_m is blank for a frame with no wave record
+            # and 0 in a build with C = 0: its beach_elevation_navd88 is then
+            # the water level itself
+            frames[key]["setup"] = bool(beach) and carries_setup(row.get("setup_correction_m"))
             frames[key]["capture"] = capture
 
     for data in frames.values():

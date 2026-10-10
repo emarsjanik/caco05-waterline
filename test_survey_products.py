@@ -885,8 +885,9 @@ def test_fix3(d):
     check(sp.camera_days(plan, a, wf) == ["c2 2025-03-06", "c2 2025-03-07"],
           "camera-days as the DEM's day test sees them (the Hs 2.5 m day left out by its wave filter)")
     why = sp.day_test_off(plan, a, wf)
-    check("only 2 camera-day(s)" in why and "both be rejected" in why,
-          "fewer than 3 camera-days: the day test is not run, and why")
+    check("only 2 camera-day(s)" in why and "cannot tell which day is off" in why and "both be rejected" not in why
+          and "keeps them all" in why,
+          "fewer than 3 camera-days: the day test is not run, and why (dem_from_contours.py would keep them all)")
     check(sp.day_test_off(plan, SimpleNamespace(dem_max_hs=0, dem_max_day_offset=0.15), wf) == ""
           and sp.day_test_off(plan, SimpleNamespace(dem_max_hs=1.5, dem_max_day_offset=0), wf) == "",
           "3 camera-days (no wave filter), or the test off by option: nothing to say")
@@ -1006,12 +1007,14 @@ def test_fix3(d):
     sens = [{"range_m": "0-100", "cells": 300, "shift_m": 4.7, "dem_error_m": -0.41}]
     txt = sp.pointing_vs_survey({"date": "2026-09-29", "out": cp}, "c1", (0.90, 0.23), sens, prov_,
                                 [{"coef": 0.037, "kind": "known"}])
-    check(txt and "absorbed into C" in txt and "repeat crossings" in txt and "-0.20 to -0.14 m" in txt
-          and "raises them by 0.19-0.25 m" in txt
-          and "34-49%" in txt and "cannot be ruled out" in txt and "which the RTK does not show" not in txt
+    check(txt and "absorbed into C" in txt and "repeat crossings" in txt and "-0.21 to -0.12 m" in txt
+          and "raises them by 0.18-0.27 m" in txt and "give C = 0.029-0.043" in txt and "agree best at" not in txt
+          and "outside this repository's code" in txt and "0.024-0.026" in txt
+          and "30-51%" in txt and "cannot be ruled out" in txt and "which the RTK does not show" not in txt
           and "the 0-100 m band" in txt and "too few" in txt,
-          "pointing vs lens: C = 0 lines minus the repeat-crossing setup leave -0.20..-0.14 m at ~55 m, 34-49% "
-          "of the full offset's -0.41 m: a part cannot be ruled out (and the C fitted to the RTK cannot say)")
+          "pointing vs lens: C = 0 lines minus the setup of the repeat-crossing C (0.029-0.043, both estimates, "
+          "said where they come from) leave -0.21..-0.12 m at ~55 m, 30-51% of the full offset's -0.41 m: a part "
+          "cannot be ruled out (and the C fitted to the RTK cannot say)")
     check("OVERSTATED" not in txt, "... no survey-floor note when the build records none")
     wl_ = prov_["comparisons"][0]["headline"]["waterlines"]
     wl_["without_setup"]["above_survey_floor"] = {"frames_below_floor": 12, "frames_all": 12, "frames": 0}
@@ -1072,6 +1075,144 @@ def test_dem_two_days(d):
           f"two camera-days 0.3 m apart with --max-day-offset 0.15: both kept, DEM built (exit {r.returncode})")
 
 
+def test_setup_share(d):
+    print("a C = 0 build carries no setup: the DEM's share, its REMINDER and the maps say so")
+    import daily_elevation_map as dm
+    import dem_from_contours as dc
+    d = Path(d) / "share"
+    d.mkdir()
+    hdr = ("source_file,camera,capture_time_utc,capture_epoch,pixel_column,pixel_row,easting_utm19,northing_utm19,"
+           "tide_elevation_navd88,setup_correction_m,beach_elevation_navd88")
+    res = {}
+    for name, setup in (("c0", "0.0"), ("c037", "0.21"), ("mixed", None)):
+        lines_ = [hdr]
+        for h in range(14, 18):
+            t = datetime(2026, 9, 29, h, tzinfo=timezone.utc)
+            s_ = setup if setup is not None else ("" if h == 14 else "0.21")   # one frame with no wave record
+            for i in range(40):
+                e, n = 420000.0 + 2.0 * (i % 8) + 1.0, 4638000.0 + 2.0 * (i // 8) + 1.0
+                z = 1.0 - 0.05 * (e - 420000.0) + 0.01 * (h - 15)
+                lines_.append(f"f{h},c2,{t:%Y-%m-%dT%H:%M:%S}+00:00,{int(t.timestamp())},{100 + i},{500 + h},"
+                              f"{e:.2f},{n:.2f},{z:.3f},{s_},{z + float(s_ or 0):.3f}")
+        g = d / f"{name}.csv"
+        g.write_text("\n".join(lines_) + "\n")
+        st = {}
+        quiet(dc.load_points, str(g), stats=st)
+        r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(d / name), "--no-plot"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(d))
+        res[name] = (st["setup_share"], r.stdout)
+    check(res["c0"][0] == 0.0 and "no setup in" in res["c0"][1] and "include the wave setup" not in res["c0"][1],
+          "C = 0 (setup_correction_m 0.0 on every row): setup share 0, the REMINDER says the DEM has no setup")
+    check(res["c037"][0] == 1.0 and "include the wave setup" in res["c037"][1] and "reads LOW" not in res["c037"][1],
+          "C > 0 on every row: share 1, the REMINDER says the elevations include the setup (not 'reads LOW')")
+    check(abs(res["mixed"][0] - 0.75) < 1e-9 and "on 75% of the points (the rest: no wave record" in res["mixed"][1],
+          "one frame of four with no wave record: share 0.75, said so")
+    check(not dm.carries_setup("0.0") and not dm.carries_setup("") and not dm.carries_setup(None)
+          and dm.carries_setup("0.2134"), "elevation maps: a 0.0 (C = 0) or blank setup is water level only")
+    import waterline_consistency as wc
+    su = {k: wc.read_points(str(d / f"{k}.csv"))["setup_used"] for k in ("c0", "c037", "mixed")}
+    check(not su["c0"].any() and su["c037"].all() and su["mixed"].sum() == 3 and su["mixed"].size == 4,
+          "consistency diagnostic: its 'wave setup' label follows the lines' setup (none at C = 0, 3 of 4 mixed)")
+
+
+def test_fit_setup_flat(d):
+    print("dem_from_contours.py --fit-setup says when its minimum is flat")
+    d = Path(d) / "fitflat"
+    d.mkdir()
+    out = {}
+    for name, phis in (("sharp", (5.0, 7.0, 9.0, 11.0, 13.0, 15.0)), ("flat", (9.9, 9.95, 10.0, 10.05, 10.1, 10.0))):
+        lines_ = ["source_file,camera,capture_time_utc,capture_epoch,easting_utm19,northing_utm19,"
+                  "tide_elevation_navd88,offshore_hs_m,offshore_tp_s"]
+        for k, phi in enumerate(phis):          # every frame's line at beach 1.0 m = tide + 0.04 sqrt(Hs L0)
+            t = datetime(2026, 9, 29, 12 + k, tzinfo=timezone.utc)
+            hs = (phi / 8.0) ** 2 / (9.81 / (2 * np.pi))
+            for i in range(40):
+                e, n = 420000.0 + 2.0 * (i % 8) + 1.0, 4638000.0 + 2.0 * (i // 8) + 1.0
+                lines_.append(f"f{k},c2,{t:%Y-%m-%dT%H:%M:%S}+00:00,{int(t.timestamp())},{e:.2f},{n:.2f},"
+                              f"{1.0 - 0.04 * phi:.4f},{hs:.4f},8.0")
+        g = d / f"{name}.csv"
+        g.write_text("\n".join(lines_) + "\n")
+        r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(d / name), "--fit-setup",
+                            "--no-plot"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                           cwd=str(d))
+        out[name] = r.stdout
+    check("FLAT" not in out["sharp"] and "--setup-coef 0.04" in out["sharp"],
+          "waves that differ, planted C = 0.04: a sharp minimum at 0.04, 'To apply' given")
+    check("a FLAT minimum: this fit alone does not pin C" in out["flat"] and "To apply" not in out["flat"]
+          and "Do not apply on this window alone" in out["flat"],
+          "nearly the same waves in every frame: the fit says FLAT and does not offer a C to apply")
+
+
+def test_c_change(d):
+    print("another C in the same folder replaces the product, and the docs give each C its own root")
+    d = Path(d) / "cchange"
+    out = d / "root" / "2025-01-23"
+    out.mkdir(parents=True)
+    plan = {"date": "2025-01-23", "era": "adcp", "out": out, "cams": {"c1": {}, "c2": {}}}
+    a0 = SimpleNamespace(setup_coef=0.0, setup_fitted_to=None, output_root=str(d / "root"))
+    check(sp.setup_replace_note(plan, a0, sp.STEPS) is None, "nothing built yet: nothing to replace")
+    sp.write_stamp(out, "merge", {"x": 1}, extra={"setup": {
+        c: {"coef": sp.SETUP_COEF, "fit": sp.fit_sig(sp.setup_fit_info(sp.SETUP_COEF))} for c in ("c1", "c2")}})
+    txt = sp.setup_replace_note(plan, a0, sp.STEPS)
+    check(txt and txt.startswith(f"replacing the C = {sp.SETUP_COEF:g} product in {out}")
+          and f"--output-root {d / 'root_c0'}" in txt and "detection runs again" in txt,
+          "C = 0 over a C = 0.037 build: 'replacing the C = 0.037 product', its own root suggested, detection reruns")
+    check(sp.setup_replace_note(dict(plan, era="live"), a0, sp.STEPS) and
+          "detection runs again" not in sp.setup_replace_note(dict(plan, era="live"), a0, sp.STEPS),
+          "... the live era has no detection to rerun")
+    same = SimpleNamespace(setup_coef=sp.SETUP_COEF, setup_fitted_to=None, output_root=str(d / "root"))
+    check(sp.setup_replace_note(plan, same, sp.STEPS) is None
+          and sp.setup_replace_note(plan, a0, ("compare",)) is None,
+          "the same C, or a run that does not rebuild the waterlines (--steps compare): no warning")
+    # the product README's advice and the fit recipe build another C in its own root
+    sw = sp.still_water_caveat(sp.SETUP_COEF, {}, "adcp")
+    check("OWN --output-root" in sw and "--setup-coef 0 --output-root <root>_c0" in sw and "usually flat" in sw
+          and "adopt a C only if its minimum is clear" in sw and "Otherwise keep the station's C" in sw,
+          "the fit-C recipe: each build in its own root; the --fit-setup curve is usually flat on one week")
+    cav = sp.setup_caveats({"date": "2026-09-29", "out": out, "surveys": [
+        {"name": "rtk", "path": "2026-09-29_Marconi_Checkshots.csv", "survey_type": "points",
+         "survey_date": "2026-09-29"}]}, SimpleNamespace(survey_dirs=[str(HERE / "surveys")], setup_fitted_to=None),
+        {}, {}, [dict(sp.setup_fit_info(sp.SETUP_COEF), cameras=["c1", "c2"])], "live",
+        prov={"comparisons": [{"name": "rtk", "current": True, "headline": {"waterlines": {"above_survey_floor": {
+            "frames_all": 16, "frames": 7, "median": -0.069, "margin_m": 0.1, "frames_below_floor": 6}}}}]})
+    circ = [c for c in cav if c.startswith("rtk: CIRCULAR")]
+    check(circ and "--setup-coef 0 --output-root" in circ[0] and "root_c0" in circ[0]
+          and "would replace this product" in circ[0],
+          "the CIRCULAR caveat: a C = 0 build, with the command and its own root")
+    under = [c for c in cav if c.startswith(f"C = {sp.SETUP_COEF} is not pinned")]
+    check(under and "The Oct 2026 recheck" in under[0] and "not this build's" in under[0]
+          and "outside this repository's code" in under[0]
+          and "THIS BUILD's own check of that kind (rtk" in under[0] and "median -0.069 m on 7 frames" in under[0]
+          and "6 of 16 frames below the lowest shot" in under[0] and "read this build's" in under[0],
+          "the recheck's fixed numbers say where they come from, next to this build's own floor statistic")
+
+
+def test_filter_leaves_nothing_old(d):
+    print("filter step: last build's report and diagnostic plots never sit next to this build's")
+    d = Path(d) / "filt"
+    w = d / "waterlines"
+    w.mkdir(parents=True)
+    # a camera the new run leaves out, a report and a filtered copy from last build, and their .tmp copies
+    old = [w / "consistency_c1.png", w / "consistency_c2.png", w / "consistency_report.csv",
+           w / "consistency_report.csv.tmp", w / "contour_points_ground_filtered.csv",
+           w / "contour_points_ground_filtered.csv.tmp"]
+    for f in old:
+        f.write_text("last build\n")
+    keep = w / "contour_points_ground.csv"
+    keep.write_text("camera,capture_epoch\n")              # no pixel columns: the filter exits 1
+    plan = {"out": d, "first": "2026-09-26", "last": "2026-10-02"}
+    state = {}
+    res, _ = quiet(sp.step_filter, plan, SimpleNamespace(force=False), state)
+    gone = [f.name for f in old if f.exists()]
+    check(res == "failed" and state.get("filter_failed") and not gone and keep.exists(),
+          f"a failed filter run leaves none of last build's report, plots or filtered file (left: {gone})")
+    for f in old[:3]:
+        f.write_text("last build\n")
+    sp.remove_filter_outputs(w, w / "contour_points_ground_filtered.csv")
+    check(not any(f.exists() for f in old) and keep.exists(),
+          "before the filter runs: the old report and every consistency_<cam>.png are removed, the input kept")
+
+
 def test_one_setup_coef():
     print("one setup coefficient for the station and the products")
     import historical_forcing as hf
@@ -1119,6 +1260,10 @@ def main():
         test_fix2(d)
         test_fix3(d)
         test_dem_two_days(d)
+        test_filter_leaves_nothing_old(d)
+        test_setup_share(d)
+        test_c_change(d)
+        test_fit_setup_flat(d)
         test_one_setup_coef()
         test_py38()
     finally:

@@ -190,22 +190,28 @@ DEM_SERIES="$BASE/archive/dems"
 #    setup: median 0.037, 90% 0.028-0.058 (14 frames; every crossing,
 #    so the survey-floor bias below applies to it too);
 #  - repeat crossings of a cell, no survey: dem_from_contours.py --fit-setup
-#    on uncorrected contours agrees best at 0.03-0.04 (a flat minimum); the
-#    within-cell slope of elevation on sqrt(Hs*L0), each line re-projected
-#    at still water + setup, gives 0.043 (90% 0.026-0.053);
+#    on uncorrected contours gives 0.024-0.026, a flat minimum (the same
+#    spread with each line re-projected at still water + setup: 0.029, 90%
+#    ~0.00-0.04); the within-cell slope of elevation on sqrt(Hs*L0), each
+#    line re-projected, gives 0.043 (90% 0.026-0.053);
 #  - the RTK transects stop at their lowest shot, +1.2 to +1.7 m. A line
 #    below that can only read low on them, and one that would read high at
 #    that level lands seaward of the survey and drops out, so a fit over
 #    every crossing is biased by where the survey stops (re-projected, all
 #    crossings: 0.067). Over only lines 0.1-0.2 m or more above the lowest
 #    shots, re-projected: ~0.043-0.046 (day-block 90% ~0.02-0.055).
+# (The re-projected fits, 0.029, 0.043, 0.067 and 0.043-0.046, come from a
+# scratch analysis made in Oct 2026, not from code in this repository.)
 # 0.037 lies inside every interval above that the survey floor does not
 # bias, and is the Stockdon et al. (2006) setup,
 # 0.35*beta_f*sqrt(H0*L0), for a ~1:10 beach face (beta_f ~0.106). The RTK
 # cannot pin C more closely: an RTK survey reaching the low-tide line, on
 # days with different waves, would. Refit (repeat crossings on contours
 # built with SETUP_COEF="") if the wave source (WAVE_BUOY /
-# USE_MARCONI_WAVES) changes. About +0.37 m at Hs 1 m, Tp 8 s; the DEM
+# USE_MARCONI_WAVES) changes, and read the curve --fit-setup prints: on one
+# week it is usually flat and can come out near 0 (-0.004 to +0.008 on
+# 29 Sep - 2 Oct 2026 alone; the fit says FLAT then), so adopt a C only
+# when its minimum is clear over several weeks of different waves. About +0.37 m at Hs 1 m, Tp 8 s; the DEM
 # moves ~0.06 m per 0.01 of C. Changing C changes every DEM, but the
 # week-to-week change rebuilds both weeks with the current setting
 # (dem_change.py --rebuild), so a new C does not show there as change.

@@ -110,7 +110,9 @@ def envelope_from_survey(io, eo, survey, zlo, zhi, max_range, n_cols=40,
     r0 = max(int((y0 - (cy + max_range)) / cell), 0)
     r1 = min(int((y0 - (cy - max_range)) / cell), grid.shape[0])
     sub = grid[r0:r1:2, c0:c1:2]                    # every other cell: 0.5 m is plenty
-    rr, cc = np.nonzero(np.isfinite(sub) & (sub >= zlo) & (sub <= zhi))
+    band = np.isfinite(sub)                         # compared only where finite: no NaN warning on numpy 1.17
+    band[band] = (sub[band] >= zlo) & (sub[band] <= zhi)
+    rr, cc = np.nonzero(band)
     E = x0 + (c0 + 2 * cc + 0.5) * cell
     N = y0 - (r0 + 2 * rr + 0.5) * cell
     Z = sub[rr, cc]
