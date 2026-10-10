@@ -116,9 +116,12 @@ HOW, per camera:
          ground, which roughly makes up for it; half leaves margin. So
          a line out on the water, whose level is too HIGH for how far
          out it lies, counts; a lowest-tide line slightly beyond the
-         others does not. A line whose water is HIGHER than the lowest
+         others does not. The margin is earned by the level difference:
+         none for a line within 5 cm of the lowest line's level (it
+         belongs AT that line, however flat the terrace beyond), all of it
+         from 0.1 m below; a line whose water is HIGHER than the lowest
          line's and yet lies beyond it is out of order already and gets
-         no margin: the average rate (residuals()).
+         none: the average rate (residuals()).
      The most seaward line of a bin is the end of the fit, which cannot
      contradict it: a stray out on the water at the window's LOWEST
      water level became the bottom knot itself, residual 0. So the most
@@ -226,6 +229,10 @@ THRESHOLDS, and why:
   TWIN_M 0.1 m, SEAWARD_RUN 3 (seaward_end()). Slack low water moves less
       than 0.1 m in an hour, so the frames of one glare or fog lie within
       0.1 m of each other; a run of up to 3 such strays is judged together.
+      The same 0.1 m is the level difference over which a line beyond the
+      lowest line earns the flatter terrace's margin (none within 5 cm,
+      residuals()): a level difference within the scatter of one slack
+      water's levels is not one.
   Too little data, at any of these steps, means KEEP. The filter only
   removes what the other lines clearly contradict.
 
@@ -253,8 +260,11 @@ THRESHOLDS, and why:
   is suspect -- e.g. a camera knocked out of aim -- and that is for a
   person to look at.
 
-KNOWN LIMIT -- a camera wrong for MOST lines of a column AND a cut in the
-  window (review, Oct 2026; not a regression: 566eef7 does the same). In
+KNOWN LIMIT -- a camera wrong for MOST lines of a column AND a cut or
+  accretion in the window (review, Oct 2026; not a regression: 566eef7 does
+  the same). It holds for the 7-day windows the survey-date products filter
+  too (survey_products.py): the 2026-09-29 survey's window, 26 Sep - 2 Oct,
+  starts just after the 25-26 Sep storm and is this case. In
   c1's right half after a 0.8 m cut, every line above ~0 m left the search
   envelope and was redrawn on the water (the review's env1_ero08): the
   honest lines there span only -0.6..0 m, the wrong ones 0..+1.8 m on the
@@ -546,6 +556,23 @@ def residuals(fit, z, y, flatten):
         still (0.0041-0.0045 m/px against the true 0.0066): the lowest lines
         are the noisiest, 0.1 m of water-level error moving one 7 m on the
         flat terrace.
+      * The margin is EARNED by the level difference. A flatter terrace
+        stretches the distance between two levels; it does not move a level:
+        a line at the bottom knot's own level belongs at the knot, however
+        flat the bed beyond it. So the margin grows with how far the line's
+        water is below the knot's, from none within the level noise -- half
+        of TWIN_M, 5 cm: the scatter of one slack water's levels -- to the
+        full 1/`flatten` at TWIN_M (0.1 m) and beyond, linearly in between, so
+        the residual never jumps with a centimetre of water level. It used to
+        switch on at the first millimetre below the knot (review, Oct 2026):
+        a c2 stray 3 cm below a line of its own tide and 109 px (25-32 m)
+        beyond it was +0.72 m at half the rate, under the threshold, and was
+        kept whole; one stray at the window's lowest level was kept up to
+        ~160 px out, and runs of 1-3 such strays lost none of their points
+        (now 86-91%). A line clearly lower than every other -- a new spring
+        low on the terrace -- keeps the full margin as before (the review's
+        megacusp week: a -1.13 m line 180 px beyond a -0.73 m one, honest,
+        still passes).
     """
     sgn, ky, kz = fit
     yy = sgn * np.asarray(y, float)
@@ -554,7 +581,10 @@ def residuals(fit, z, y, flatten):
     span = ky[-1] - ky[0]
     slope = (kz[-1] - kz[0]) / span if span > 0 else 0.0
     seaward = yy < ky[0]
-    rate = np.where(z > kz[0], slope, slope / flatten)
+    # the margin earned: none within TWIN_M / 2 below the knot's level, all of
+    # it from TWIN_M below, linear between
+    earned = np.clip((kz[0] - z - 0.5 * TWIN_M) / (0.5 * TWIN_M), 0.0, 1.0)
+    rate = slope / (1.0 + (flatten - 1.0) * earned)
     z_max = kz[0] - (ky[0] - yy) * rate
     r = np.where(seaward, np.maximum(0.0, z - z_max), r)
     landward = yy > ky[-1]
@@ -774,9 +804,14 @@ def seaward_end(z, y, w, keep, r, thr, p):
     15:00, c2: the -0.70 m stray is dropped, but relabelled to -0.89 m, the
     window's lowest, it was kept whole and the 7-day DEM gained 24 m of
     empty cells out on the water). Judged against the others it is beyond
-    their most seaward line, where the elevation must keep falling at no less
-    than half the fit's rate: a line tens of metres out on the water cannot
-    be within centimetres of the lowest water level.
+    their most seaward line, at their lowest line's level -- and a line at
+    the bottom knot's level earns no margin for a flatter terrace beyond it
+    (residuals(): the margin grows with the level difference, from none
+    within 5 cm to all of it at 0.1 m). So a line tens of metres out on the
+    water at the lowest water level is out of order by the full slope of the
+    beach over that distance. (Until Oct 2026 any line a millimetre below the
+    knot got the whole margin, and a stray 3 cm below a line of its own tide
+    and 25-32 m beyond it was +0.72 m against a 0.75 m threshold: kept.)
 
     WHY HOLD BACK: strays come in runs. Glare or fog lasts several frames at
     slack low water (the station's c2 frames of 2 Oct 2026 15:00-16:30 all
@@ -807,6 +842,17 @@ def seaward_end(z, y, w, keep, r, thr, p):
     the next and within the threshold of it, still vouch for one another:
     in that 8-stray week 31% of their points go, as before (the DEM's
     3-frames-per-cell rule kept them out of its cells).
+    The hold costs honest lines something: a slack-water run with fewer than
+    3 others within 8 px is judged without its own members, and where its
+    level is the knot's and it lies beyond the others (megacusps folding the
+    spring lows seaward) it loses a few dozen points (review's spring-tide
+    week: 1,326 -> 1,402 of 292,733 honest c2 points). Holding a line back
+    only when it lies more than the row guard beyond its twin (review, Oct
+    2026) gave about half of those back -- and caught none of a run of three
+    strays 5 px apart (86% of their points -> 0%): a run of strays from one
+    glare sits within a few pixels of itself exactly as an honest slack run
+    does, and only the lines landward of the run tell them apart. Counting
+    the line itself among the lines near it changed nothing in any scenario.
     A stray ABOVE the window's lowest water level but further out than its
     lowest line (review, Oct 2026: 0.3-0.5 m above a spring-low line) is
     out of order with that line; residuals() counts the height difference
@@ -1808,6 +1854,14 @@ def self_test(cal_dir, keep_dir=None):
          overruled an agreeing side, the 19:30 and 20:00 lines were dropped
          whole -- for good, as nothing ever comes before them; the survey-date
          products filter 7-day windows, so every window has such a first day.)
+     10. ONE STRAY 30 m OUT AT THE WINDOW'S LOWEST LEVEL (review, Oct 2026):
+         case 6's c2 lines on the surveyed beach, the lowest-water line of 30
+         Sep - 2 Oct redrawn 30 m out on the water on the right of the photo,
+         3 cm below the lowest other line of its window. With the flatter
+         terrace's margin from the first millimetre below the knot it was
+         under the threshold and kept whole; at least 90% of its points 28 m
+         or more out must be dropped, and less than 0.5% of the honest
+         points.
       9. A RUN OF STRAYS (review, Oct 2026): case 4's c2 lines, two
          consecutive frames at slack low water leaving the waterline on the
          right of the photo for lines 40 m and 36 m out on the water, both at
@@ -2199,6 +2253,8 @@ def self_test(cal_dir, keep_dir=None):
                 if c.size >= 20:
                     frames.append([f"{int(ep)}.c2.rtk", "c2", ep, z, c, rr, None, h])
 
+        base6 = [list(f) for f in frames]           # case 10 starts from the same lines
+
         def window_low(f):
             return min(g[3] for g in frames if abs(g[2] - f[2]) <= 3.5 * DAY and g is not f)
         stray = min((f for f in frames if (f[2] - t_start) / DAY < 3),
@@ -2234,6 +2290,46 @@ def self_test(cal_dir, keep_dir=None):
                             f"water dropped (need 95%)")
         if d_h >= 0.005 * n_h:
             failures.append(f"stray case: {d_h / max(n_h, 1):.2%} of honest points dropped (limit 0.5%)")
+
+        # 10. ONE STRAY ~30 m OUT AT THE WINDOW'S LOWEST LEVEL (review, Oct
+        #     2026): case 6's lines on the surveyed beach, and the lowest-water
+        #     line of 30 Sep - 2 Oct leaves the waterline on the right of the
+        #     photo for a line 30 m out on the water, 3 cm below the lowest
+        #     other line of its window -- the review's -0.60 m stray 25-32 m out,
+        #     109 px beyond a -0.57 m line of the same tide, which got the
+        #     flatter terrace's margin beyond the bottom knot although its level
+        #     was the knot's: +0.6 m, under the threshold, kept whole.
+        c2 = base6
+        one = min((f for f in c2 if 4 <= (f[2] - t_start) / DAY < 7), key=lambda f: f[3])
+        low = min(f[3] for f in c2 if abs(f[2] - one[2]) <= 3.5 * DAY and f is not one)
+
+        def on_water(a):
+            return 30.0 * np.clip((260.0 - a) / 60.0, 0, 1)
+        dev = line("c2", one[3], one[2], beach) - line("c2", one[3], one[2], beach, out=on_water)
+        dc = np.interp(one[4], cols, np.nan_to_num(dev, nan=0.0))
+        one[5] = one[5] - dc
+        one[6] = dc >= (28.0 / 30.0) * np.nanmax(dev)
+        one[3] = low - 0.03
+        frames = [tuple(f) for f in c2]
+        dropped, out, summary, plot_info, args = run_case("stray30", frames)
+        n_h = d_h = 0
+        for fname, cam, ep, z, c, r, far, h in frames:
+            dr = dropped[fname]
+            if far is None:
+                n_h += dr.size; d_h += int(dr.sum())
+            else:
+                got, n_far = int((dr & far).sum()), int(far.sum())
+        print(f"  one stray 30 m out, 3 cm below its window's lowest line ({one[3]:+.2f} m, c2, "
+              f"surveyed beach, {np.nanmax(dev):.0f} px): {got:,} of {n_far:,} points 28-30 m out "
+              f"dropped ({got / max(n_far, 1):.1%}); honest lines {d_h:,} of {n_h:,} "
+              f"({d_h / max(n_h, 1):.2%})")
+        for line_ in summary:
+            print(f"  CONSISTENCY {line_}")
+        if got < 0.9 * n_far:
+            failures.append(f"stray 30 m out: only {got} of {n_far} points dropped (need 90%)")
+        if d_h >= 0.005 * n_h:
+            failures.append(f"stray 30 m out: {d_h / max(n_h, 1):.2%} of honest points dropped "
+                            f"(limit 0.5%)")
 
     # 7. Real erosion on the surveyed beach, mid-record, then neaps (review,
     #    Oct 2026): c1, with its crop and the floor of its search envelope
