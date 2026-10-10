@@ -545,13 +545,21 @@ def main():
 
     elevations = np.array([d["elevation"] for d in frames.values()])
     n_setup = sum(bool(d["setup"]) for d in frames.values())
+    # One wording for the log, the title and the colour bar: when only some
+    # lines carry the wave setup (frames with no wave record), the picture
+    # must say so too, not only the log.
     if n_setup == len(frames):
-        elev_what = "water level + wave setup"
+        elev_what = elev_short = "water level + wave setup"
+        elev_bar = "water level + wave setup (m NAVD88)"
     elif n_setup:
         elev_what = (f"water level + wave setup ({len(frames) - n_setup} of {len(frames)} "
                      f"lines: water level only, no wave record)")
+        elev_short = (f"water level + wave setup; {len(frames) - n_setup} of {len(frames)} "
+                      f"lines water level only, no wave record")
+        elev_bar = "water level (+ wave setup where recorded) (m NAVD88)"
     else:
-        elev_what = "water level"
+        elev_what = elev_short = "water level"
+        elev_bar = "water level (m NAVD88)"
     norm = Normalize(vmin=elevations.min(), vmax=elevations.max())
     try:
         colormap = matplotlib.colormaps[args.colormap]      # matplotlib >= 3.5
@@ -670,19 +678,20 @@ def main():
     ax.set_title(
         f"{args.camera.upper()}  {date_label}   {len(frames)} waterlines, "
         f"{elevations.min():+.2f} to {elevations.max():+.2f} m NAVD88 "
-        f"({'water level + wave setup' if n_setup else 'water level'})\n"
+        f"({elev_short})\n"
         f"background: {bg_day} {bg_capture[11:16]} UTC   |   "
         + ("shaded bands = 16-84% spread of the 3+ same-elevation lines that agree "
            "(repeatability, not morphology)"
            if len(dates_used) == 1 else
            f"shaded bands = 16-84% spread of the 3+ lines that agree, per elevation, over "
            f"{len(dates_used)} days (repeatability + real shoreline movement)"),
-        fontsize=9)
+        fontsize=12)        # ~12 px tall when the email shrinks the map to 1400 px
 
     scalar_map = matplotlib.cm.ScalarMappable(cmap=colormap, norm=norm)
     scalar_map.set_array([])
     cbar = fig.colorbar(scalar_map, ax=ax, fraction=0.030, pad=0.015)
-    cbar.set_label(f"{'water level + wave setup' if n_setup else 'water level'} (m NAVD88)")
+    cbar.set_label(elev_bar, fontsize=12)
+    cbar.ax.tick_params(labelsize=11)
 
     fig.text(0.01, 0.005, f"lines: {Path(args.contour_csv).name}", fontsize=7, color="0.35",
              ha="left", va="bottom")
