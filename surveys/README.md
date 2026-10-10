@@ -51,7 +51,9 @@ are not one build; a disabled date exits 2; exit 4: not started, because
 another build of the same date is running; exit 5: not started, refused by
 the run's own settings (a `--setup-coef` other than the one the date's
 waterlines carry, without `--replace`; a C of unknown origin, without
-`--setup-fitted-to`; `--dry-run` says when a real run would be refused). A
+`--setup-fitted-to`; `--dry-run` says when a real run would be refused); exit
+6: not started, a usage error (an unknown option or a bad value, e.g.
+`--steps`, `--window`, `--utc-hours`, a negative `--setup-coef`), never 2. A
 row with no survey file yet (the October GCPs) is not a missing part. With
 `--all` the code of the worst date is returned, worst by severity, not by
 number: 1 if any date failed, else 5 if any was refused, else 4 if any was
@@ -213,7 +215,7 @@ each README states the bias):
   ways, the filter of that time) found waterline - RTK -0.33 m without setup
   and -0.13 m with C = 0.037 (median setup applied 0.26 m). Both medians are
   **biased LOW by where that survey stops**: the transects end at their
-  lowest shot (+1.2 to +1.7 m NAVD88); a line below it can only read low
+  lowest shot (+1.17 to +1.80 m NAVD88); a line below it can only read low
   there (the RTK under it is higher), and a line that would read high at that
   water level lands seaward of the survey and is never compared. Over only
   the lines at least 0.1-0.2 m above the lowest shots, that recheck (a
@@ -234,7 +236,7 @@ each README states the bias):
   both and says which is this build's; where they differ, read the build's.
   A line given the setup is re-projected
   landward onto higher beach, so it keeps only part of its setup: ~0.71 x per
-  frame on those RTK frames, ~0.6 (c1 0.63, c2 0.57) and ~0.8 in the paired
+  frame on those RTK frames, ~0.6 (c1 0.64, c2 0.59) and ~0.8 in the paired
   C = 0 sensitivities of the Jan and Mar 2025 builds (real lidar beaches and
   calibrations, synthetic photos). The share kept is not one number to carry
   to other dates: it depends on the slope, the camera and its distance; each
@@ -277,10 +279,11 @@ each README states the bias):
   minimum is not flat; otherwise it says which of them it cannot tell from
   its best. One week's curve is noisy: on the C = 0 lines of 29 Sep - 5 Oct
   2026 this recipe printed a band of +0.006 to +0.034 (best 0.026, FLAT;
-  0.037 spreads 6 mm more than the best), the unfiltered rows +0.026 to
-  +0.040 ("not distinguishable from the C in use"), and 29 Sep - 2 Oct alone
-  -0.020 to +0.010 ("not distinguishable from C = 0"); the same spread with
-  each line re-projected gave 0.029 (90% ~0.00-0.04). Adopt a C only if it
+  0.037 spreads 6 mm more than the best), the unfiltered rows, also with
+  `--max-hs 1.5`, +0.026 to +0.040 ("not distinguishable from the C in
+  use"), and 29 Sep - 2 Oct alone -0.020 to +0.010 ("not distinguishable
+  from C = 0"); the same spread with each line re-projected gave 0.029 (90%
+  ~0.00-0.04). Adopt a C only if it
   holds over weeks of different waves, with `--setup-coef <C>
   --setup-fitted-to 'none:repeat crossings, <window>' --output-root
   /mnt/I2Rgus_Data/survey_products_c<C>`; the lidar comparison stays
@@ -412,8 +415,8 @@ c1's offset and a quarter of c2's cannot be ruled out (5-7 frames per camera,
 too few for an estimate; swash and detector bias at the waterline are
 confounded with it): the full offset is unlikely to be pointing, a part of
 it cannot be ruled out. Even that part is OVERSTATED: every one of those
-C = 0 lines lies below its transect's lowest shot (the survey stops at +1.2
-to +1.7 m), where a line can only read low, so what is left after the setup
+C = 0 lines lies below its transect's lowest shot (the survey stops at +1.17
+to +1.80 m), where a line can only read low, so what is left after the setup
 is biased low by where the survey stops (WHERE THE SURVEY STOPS, above). The
 README's DEM-shift table says what the offset WOULD do if it were all
 pointing.
@@ -454,10 +457,15 @@ python3 survey_products.py --date 2025-01-23             # then 2025-03-06, 2026
 
 One setup coefficient per output root: a run that would rebuild a date with
 another `--setup-coef` in the same root is refused (exit 5) and names the
-root that C belongs in; `--replace` overwrites on purpose. Give a C = 0 or a
-refitted C its own `--output-root` (above, "a build with C = 0"). A full
-rebuild with another `--window` or `--utc-hours` replaces the date's product
-(the run says so): build such a recheck in its own `--output-root` too.
+root that C belongs in; `--replace` overwrites on purpose. A root's name says
+only which C it is meant for (a date's first build in a root is never
+refused): when the name gives the root to the very C that was refused there
+(e.g. the default root holding a C = 0 build), the message says which C the
+root holds and names a root beside it, `<root>_c<C>`, never the same root.
+Give a C = 0 or a refitted C its own `--output-root` (above, "a build with
+C = 0"). A full rebuild with another `--window` or `--utc-hours` replaces the
+date's product (the run says so): build such a recheck in its own
+`--output-root` too.
 
 The code is tested here under the station's oldest libraries too (Python
 3.8, numpy 1.17.4, matplotlib 3.3.4, pandas 1.1.5). The waterline maps on the

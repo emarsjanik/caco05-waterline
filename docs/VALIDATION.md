@@ -35,15 +35,24 @@ bash -n waterline_timex_cron.sh && echo "cron syntax OK"
 python3 waterline_consistency.py --self-test     # ends "SELF-TEST PASSED" (90-110 s here)
 python3 dem_figure.py --self-test                # ends "SELF-TEST PASSED"
 python3 daily_elevation_map.py --self-test       # ends "SELF-TEST PASSED"
-python3 test_survey_products.py                  # ends "all survey_products tests passed"
+python3 test_survey_products.py                  # ends "all survey_products tests passed" (see below)
 python3 test_survey_compare.py                   # ends "all survey_compare tests passed"
-python3 test_historical_forcing.py               # ends "66/66 checks passed"
+python3 test_historical_forcing.py               # ends "67/67 checks passed"
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
 `view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file
 is unchanged by this PR, and the survey products use only its `ground_to_pixel`, which
 does not need scipy.
+
+Two checks of `test_survey_products.py` (the RTK file renamed, and re-exported under another
+date, must still be CIRCULAR) need the real `2026-09-29_Marconi_Checkshots.csv`. The test
+looks for it as the survey products do (the name `surveys/surveys.csv` gives, in the station's
+survey folders: `Chelsea_calibration`, `waterline`, `waterline/calibration`, the repo's
+`calibration` and `surveys`; `--survey-dirs <folder>` adds one) and confirms it by its
+sha256. If it is not found, the two checks print `skip` and the last line reads
+`all survey_products tests passed (2 skipped: ...; the real RTK file was not found)`: put the
+file in one of those folders, or pass `--survey-dirs`, to run them.
 
 After the next cron run (12:30, 19:25 or 20:55 local):
 
@@ -89,7 +98,7 @@ the others, so a stray out on the water cannot become the end of the fit.
 | Stray 30 m out, 3 cm below the window's lowest line | [SYNTH] self-test | 204 of 204 dropped; honest 0 of 73,356 | same | same |
 | Megacusps (15 m every 140 m) | [SYNTH] self-test | 3,823 of 117,424 honest points dropped (3.26%; the test's limit is 5%) | same | same |
 | Whole cron on a synthetic 24-day station (571 frames, 1.28 M points, 31 wrong c1 lines and 3 c2 strays planted) | [SYNTH] cron harness (scratch, not shipped) | all 31 wrong c1 lines hit: 20,214 of ~21.2k defect points dropped; all 3 c2 strays hit: 1,366 of 1,704; 0 honest points dropped | not in the repo | - |
-| Real 29 Sep - 5 Oct 2026 contours (393,668 points, 198 lines), setup C = 0.037 added as the cron adds it, before (main `af8e1bd`) and after (this PR) | [REAL] | **main**: c1 22 lines dropped, 19 trimmed, 44,768 of 269,694 points (16.6%); c2 2 dropped, 24 trimmed, 7,122 of 123,974 (5.7%). **this PR**: c1 20 dropped, 17 trimmed, 41,738 (15.5%), 12 lines kept as beach change; c2 2 dropped, 28 trimmed, 8,163 (6.6%), 6 kept as beach change | `python3 waterline_consistency.py <contours> --output qc.csv --report rep.csv --plot wc --image-dir <photos> --plot-days 7` | the cron log line `waterline consistency: c1: ... ; c2: ...` |
+| Real 29 Sep - 5 Oct 2026 contours (393,668 points, 198 lines), setup C = 0.037 added as the cron adds it, before (main `af8e1bd`) and after (this PR) | [REAL] | **main**: c1 22 lines dropped, 19 trimmed, 44,768 of 269,694 points (16.6%); c2 2 dropped, 24 trimmed, 7,122 of 123,974 (5.7%). **this PR**: c1 20 dropped, 17 trimmed, 41,738 (15.5%), 12 lines kept as beach change; c2 2 dropped, 28 trimmed, 8,163 (6.6%), 6 kept as beach change | `python3 waterline_consistency.py <contours with the setup columns, section 5> --output qc.csv --report rep.csv --plot wc --image-dir <photos> --plot-days 7` | the cron log line `waterline consistency: c1: ... ; c2: ...` |
 | Station log before this PR | [REAL] station log, 8-9 Oct 2026, reported by the owner | c1 drops ~10.8% of its points, mostly high-tide frames placed out on the water (residual +1.4 to +4 m) | - | compare with the log line after the pull |
 
 What changes in the log: the summary line now also counts `N line(s) out of order with one
@@ -102,9 +111,18 @@ against the water level gets one `consistency filter: ... REVERSED ...` WARNING 
 * After a cut, a line that sits wrongly LANDWARD in columns the later lines do not reach
   (c1's high tides fall below its search-envelope floor) is kept as "beach change" until a
   later line reaches its level there.
-* [REAL] 175 c2 and 67 c1 points that their bin's fit puts beyond the threshold are still
-  kept: they sit on lines that fail in no bin. Three short dashes remain on the real c2
-  7-day map of 29 Sep - 5 Oct (the PR's after figure).
+* [SCRATCH] Some points that their bin-day's fit puts beyond its threshold are still kept.
+  The waterline track's count (a scratch script, not in this repository, no longer at hand)
+  on the real **still-water** contours (`tide_elevation_navd88`, no setup) found 175 c2 and
+  67 c1 such points, on lines that fail in no bin; it was not made on the setup-added
+  contours of the table above. A re-count with a wider definition (every kept point of a
+  judged bin-day whose residual against that fit exceeds the fit's threshold, the time
+  test's excused direction aside; a scratch script built on `waterline_consistency.run`)
+  gives on the setup-added contours c2 509 of 115,811 kept points (0.44%) and c1 225 of
+  227,956 (0.10%), 209 and 110 of them on lines that fail in some other bin; on the
+  still-water contours it gives 530 and 229, so the count depends on the definition.
+  [REAL] Three short dashes remain on the real c2 7-day map of 29 Sep - 5 Oct (the PR's
+  after figure).
 * [REAL] The 2 Oct 11:30-14:30 c2 line ends this PR drops are judged wrong from the
   contours alone (25-50 px seaward of the 3 Oct lines at the same level); no photo of 2 Oct
   was available to confirm. On the NUC: look at `waterline_consistency_c2.png` for a week
@@ -136,7 +154,7 @@ themselves change only through the filter.
 | what | data | number | reproduce here | check on the NUC |
 |---|---|---|---|---|
 | Page orientation (sea away from the cameras, NNW to the left) on five shapes, including a flat strip | [SYNTH] self-test | seaward direction within 0.0-0.2 deg of the truth (limits 1-10 deg); the flat strip, which the old rule turned 180 deg, now 0.0 deg off | `python3 dem_figure.py --self-test` | same |
-| Orientation of 16 pages (an independent reviewer's check), including the archived real 27 Sep 2026 DEM that was upside down | [REAL] + [SYNTH] | correct signs on all 16; 27 Sep 2026: corr(page x, NNW) +1.000 -> -1.000 | scratch review script | look at the page: sea at the top, cameras at alongshore 0 on the right |
+| Orientation of 16 pages (an independent reviewer's check), including the archived real 27 Sep 2026 DEM that was upside down | [SCRATCH] (real archived DEMs and synthetic pages, through a review script not in this repository) | correct signs on all 16; 27 Sep 2026: corr(page x, NNW) +1.000 -> -1.000 | scratch review script | look at the page: sea at the top, cameras at alongshore 0 on the right |
 | Real 7-day DEM, 29 Sep - 5 Oct 2026, main vs this PR, cron settings (2 m cells, >= 3 frames, spread <= 0.5 m, Hs <= 1.5 m, day offset 0.15 m) | [REAL] | main 1,577 cells filled of 2,081 crossed; this PR 1,552 of 2,025 (90 blanked for spread, 383 crossed by < 3 frames); median spread 0.249 m both; on the 1,546 common cells the difference is median 0.000 m, 27 cells over 0.05 m, largest 0.20 m | `python3 dem_from_contours.py <ground.csv> dem_intertidal_7day --max-hs 1.5 --max-day-offset 0.15 --last-days 7 --series-dir series --cell 2.0 --min-points 3 --max-spread 0.5` | the cron's `dem_intertidal_7day_dem.png` and `_info.json` |
 | Foreshore slope on the real page, profiles A-D, over -0.5 to +0.5 m NAVD88 | [REAL] | tan(beta) 0.105, 0.089, 0.125, 0.104 (1:8 to 1:11) | same build | the page's profile legend |
 | The page's REMINDER | [REAL] | main printed "the DEM reads LOW ... Not corrected here" although the contours carry the setup since 6 Oct; this PR prints "Elevations include the wave setup ... on 100% of the points" | same | the cron log after `DEM written` |
@@ -174,9 +192,9 @@ reference window" instead of drawing one.
 ### 2.5 GNSS-R record guard
 
 **Claim.** `archive/gnssr_record_start.txt` ("YYYY-MM-DD N") now keeps N as the **most** days
-with readings any accepted spline has had. A spline that starts later than the record, or
-has lost more than 3 days against that best, is refused and the previous products are kept.
-Deleting the file accepts a shortening made on purpose.
+with readings any accepted spline has had. A spline that starts more than a day later than
+the record, or has lost more than 3 days against that best, is refused and the previous
+products are kept. Deleting the file accepts a shortening made on purpose.
 
 | what | data | number | reproduce here | check on the NUC |
 |---|---|---|---|---|
@@ -225,7 +243,7 @@ water level and waves from the ADCP; C fitted in 2026 to other data.
 | Same lines without setup (C = 0 sensitivity) | [SYNTH] | -0.204 m (c1 -0.215, c2 -0.193) | same |
 | Fixture's expected answers (from its README) | [SYNTH] | detector with setup: lines c1 -0.035, c2 -0.028 m; DEM -0.034 m. The build lands within 0.01 m of them | - |
 | Earlier check of the REAL photos (pointing_fix_figure.py, same GCP calibrations, NO setup, unfiltered) | [REAL], run on the NUC before this PR; itself PARTLY-CIRCULAR (its envelope came from this lidar) | printed "lidar - water level at the waterline" c1 +0.46 m (NMAD 0.19), c2 +0.15 m (NMAD 0.23), i.e. **waterline - lidar c1 -0.46, c2 -0.15 m: the lines read LOW** | held in `survey_products.py` PRIOR_CHECKS |
-| Forcing for the window | [REAL] ADCP | setup median 0.291 m (daytime 0.281), range 0.147-0.708 m at C = 0.037 | `historical_forcing.py --start 2025-01-16 --end 2025-01-24 --output-dir <dir>` |
+| Forcing for the window | [REAL] ADCP | setup median 0.291 m (daytime 0.281), range 0.147-0.708 m at C = 0.037 | `historical_forcing.py --start 2025-01-18 --end 2025-01-23 --output-dir <dir>` (the build's window; line `Setup in window` of `forcing_report.txt`) |
 
 **[NUC] What to expect from the real photos.** With C = 0.037 each line keeps 0.6-0.8 of its
 ~0.28 m setup once re-projected, so, unless the new search envelope changes the detections,
@@ -306,8 +324,9 @@ would give one (section 6).
 | what | data | number | reproduce |
 |---|---|---|---|
 | 2024-10-23 (GCP file not on the NUC yet) and 2025-03-19 (no photos, no ADCP) refused | config | exit 2: "Not built. To build it anyway: --force-disabled" | `python3 survey_products.py --date 2024-10-23` |
-| Another C in a root that holds a build | [SYNTH] tests + a real refresh over a C = 0 root | refused, exit 5, nothing changed; the message names the root that C belongs in (`<root>_c<C>`); `--replace` overwrites on purpose | `test_survey_products.py` |
+| Another C in a root that holds a build | [SYNTH] tests + refreshes over copies of the real C = 0 and C = 0.037 2026 builds | refused, exit 5, nothing changed, no lock left; the message names the root that C belongs in (`<root>_c<C>`, the base root for the station's C); a root whose name gives it to the refused C although it holds another (a root without suffix holding a C = 0 build; a `..._c0` root holding C = 0.037) is said to hold that other C, and the run is given a root beside it (`<root>_c<C>`), never the same root; the same in the dry run, the compare-step warning, the CIRCULAR caveat and the end-of-run REPLACED line; `--replace` overwrites on purpose | `test_survey_products.py` |
 | A `--setup-coef` of unknown origin | tests | exit 5, nothing written, unless `--setup-fitted-to` says where it was fitted | same |
+| A usage error (unknown option; a bad `--steps`, `--window` or `--utc-hours`; a negative `--setup-coef`) | tests | exit 6, nothing written: never 2, which means a disabled date | same |
 | Two builds of one date at once | tests | the second exits 4 and names the build holding the lock | same |
 | `--all` exit code | tests | the worst by severity: failed (1) > refused (5) > busy (4) > partial (3) > 0 | same |
 | Rerun on unchanged inputs | [SYNTH] + [REAL] | every step skipped, numbers identical (every date rerun several times on the final code) | rerun the same command |
@@ -374,7 +393,7 @@ plane a pixel is projected onto. A higher plane moves the georectified point lan
 the camera ray, onto higher beach. So a line gains only part of its setup in the DEM: the
 fixture gives the error of a no-setup line as `-setup * (1 - beta / tan(ray depression))`,
 about -0.65 x setup there. Measured shares kept: ~0.71 per frame on the 2026 RTK frames
-[REAL], 0.6 (c1 0.63, c2 0.57) and 0.8 in the Jan and Mar 2025 fixture builds [SYNTH],
+[REAL], 0.6 (c1 0.64, c2 0.59) and 0.8 in the Jan and Mar 2025 fixture builds [SYNTH],
 0.64-0.75 for most frames in the refit [SCRATCH]. **DEM sensitivity: 0.057 m per 0.01 in C**
 on the real 29 Sep - 5 Oct DEM [SCRATCH]; DEM(C = 0) is 0.22 m below DEM(0.037).
 
@@ -443,10 +462,13 @@ changes with storms. The 2025 beach faces differed from the Sep-Oct 2026 one (ta
 * 18-23 Jan 2025: 0.125-0.135 (1:7-1:8), where Stockdon's form would scale C to ~0.044-0.047;
 * 3-9 Mar 2025: 0.067-0.075 (1:13-1:15), i.e. C ~0.024-0.026.
 
-If the real C follows the slope, 0.037 leaves the January lines ~0.03-0.04 m low and lifts the
-March lines ~0.05-0.06 m too high (difference in C x the window's median sqrt(Hs L0), 7.8 m in
-January and 6.2 m in March, x the share kept). These are estimates, not measurements. They add
-to the ADCP still-water effect above. The real builds on the NUC are the test.
+If the real C follows the slope, 0.037 leaves the January lines ~0.03-0.05 m low and lifts the
+March lines ~0.05-0.07 m too high: the difference in C (January 0.0068-0.0103, March -0.0136
+to -0.0108) x the window's daytime median sqrt(Hs L0) (daytime setup median / 0.037: 0.281 m ->
+7.6 m in January, 0.228 m -> 6.2 m in March; the builds' READMEs use the same) x the share kept
+in that month's build (0.6 in January, 0.8 in March; at 0.8 January would be ~0.04-0.06 m).
+These are estimates, not measurements. They add to the ADCP still-water effect above. The
+real builds on the NUC are the test.
 
 The re-projecting fits exist only as scratch scripts; `dem_from_contours.py --fit-setup` does
 not re-project and is in principle biased low by roughly the re-projection factor.
@@ -502,7 +524,9 @@ only if it holds over several weeks of different waves; then change it in all th
 * **Value** [REAL], fitted on the ADCP overlap: harmonic transfer, 13 constituents, M2 ratio
   1.481, Marconi leads by 70 min, residual x 0.85; leave-one-week-out RMS 0.076 m,
   extrapolation RMS 0.085 m (used as `sigma_m`). The linear alternative
-  (Marconi = 1.403 x Chatham(t - 72 min) - 0.033 m) scored 0.166 / 0.174 m and is not used.
+  (Marconi = 1.403 x Chatham(t + 72 min) - 0.033 m, i.e. Marconi leads by 72 min; the code's
+  `lag` is -72 min in `Marconi(t) = a x Chatham(t - lag) + b`) scored 0.166 / 0.174 m and is
+  not used.
 * **Live station** (`marconi_water_level.py`, for the OWG products, not the waterlines):
   refitted to GNSS-R over the last 30 days on every run; default (1.24, -48 min, -0.10 m,
   sigma 0.13 m) only without GPS overlap.
@@ -527,13 +551,15 @@ only if it holds over several weeks of different waves; then change it in all th
   2025-11-04 values, c2 moved 3.1 m and turned -3.1 deg.
 * **Why the source of the pointing matters.** A pointing fitted to the lidar
   (`fit_eo_to_survey.py`) keeps the camera position fixed, so it absorbed the 24 Jan move as
-  ~+22.7 deg of pan for c1 (+21.9 deg for c2) [REAL]. With the February 2025 pointing applied
-  to January (what had been used before), the Jan 18-23 lines read "lidar - water level"
-  +1.78 m (c1, spread 0.39 m) and +3.31 m (c2, spread 0.76 m); with the GCP calibration of
-  23 Jan, +0.46 / +0.15 m (spread 0.19 / 0.23 m) [REAL, station runs before this PR, no
-  setup]. The products therefore use the station's GCP calibration of each period and never a
-  lidar-fitted pointing (a survey-fitted or carried pointing makes the comparison CIRCULAR,
-  by rule).
+  ~22 deg of pan (`calibration/README.md`, `project_survey.py`) where the calibrations have a
+  ~15 deg turn and a 5.6-5.8 m move [REAL]. With the February 2025 pointing applied to January
+  (what had been used before), the Jan 18-23 lines read "lidar - water level" +1.78 m (c1) and
+  +3.31 m (c2) [REAL, station runs before this PR; no file in this repository holds these
+  two]; with the GCP calibration of 23 Jan, +0.46 / +0.15 m (NMAD 0.19 / 0.23 m) [REAL,
+  pointing_fix_figure.py on the NUC before this PR, no setup; held in `survey_products.py`
+  PRIOR_CHECKS]. The products therefore use the station's GCP calibration of each period and
+  never a lidar-fitted pointing (a survey-fitted or carried pointing makes the comparison
+  CIRCULAR, by rule).
 * **Sea-horizon check.** Each build compares each camera's sea horizon with where its
   calibration puts it (`estimate_eo_rotation.horizon_rows`, full Earth-curvature dip with
   refraction k = 0.13; until Oct 2026 it held half the dip and read +0.06-0.07 deg on a perfect
@@ -593,7 +619,17 @@ only if it holds over several weeks of different waves; then change it in all th
 
 The before/after figures of the PR were made from the real rows of 29 Sep - 5 Oct 2026, with
 the setup added as the cron adds it, with main (`af8e1bd`, in a git worktree) and with this
-branch, the same commands for both:
+branch, the same commands for both.
+
+**The setup columns first.** `contours.csv` must carry `setup_correction_m` and
+`beach_elevation_navd88`, as `extract_elevation_contours.py --setup-coef 0.037 --waves ...`
+writes them on the station: per row, setup = `round(0.037 x sqrt(Hs x 9.81 x Tp^2 / (2 pi)), 4)`
+and beach = `round(tide_elevation_navd88 + setup, 4)`; where Hs or Tp is missing the setup is
+blank and beach = tide. The sandbox copy of the rows (`contour_points_timex.csv` rows from
+before the setup went live) had no such columns; they were added with a scratch script (not in
+this repository) that applies exactly that formula and rounding, so it matches the station's
+columns to 0.1 mm (393,668 rows, setup 0.171-0.489 m). On the NUC use the station's `contour_points_timex.csv` when its rows of the week carry
+`beach_elevation_navd88`; otherwise add the two columns as above. Then:
 
 ```
 python3 waterline_consistency.py contours.csv --output contour_points_timex_qc.csv \
@@ -619,7 +655,7 @@ copy of today's pictures made before the pull (section 1).
 
 * **The real 2025 numbers.** Only the NUC has the real January and March 2025 photos. The
   sandbox numbers for those dates are synthetic and test the pipeline only.
-* **An unbiased 2026 level.** The 2026 RTK stops at +1.2 to +1.8 m; every C = 0 line, and some
+* **An unbiased 2026 level.** The 2026 RTK stops at +1.17 to +1.80 m; every C = 0 line, and some
   C = 0.037 lines, lie below it. A calm, spring-low-tide RTK survey reaching the low-tide line,
   on two or more days with different waves, would give an INDEPENDENT level check of the whole
   intertidal and pin C and any level offset separately.
@@ -631,8 +667,12 @@ copy of today's pictures made before the pull (section 1).
 * **Reviews.** The waterline work had three review rounds (the last: all lenses "ship"), the
   survey products three verification and three fix rounds, the combined branch two review
   rounds (interactions; operator and documents) and two fix rounds, and the setup refit an
-  adversarial check that found the survey-floor bias. The last fix round (`3c03f0e`) was
-  checked by its own tests and the full check list, not by a further independent review.
+  adversarial check that found the survey-floor bias. After the PR was opened, a final
+  verification (a review of `3c03f0e` and a fact-check of this file against the data) found
+  one wrong refusal advice (a root whose name does not say which C it holds), a backwards time
+  shift in the printed Chatham formula, and wrong or untraceable numbers and tags in this file;
+  they were fixed in the commit after `b54c255`. That last fix round was checked by its own
+  tests, the full check list and re-runs on the real data, not by a further independent review.
 
 ## References
 

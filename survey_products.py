@@ -107,10 +107,14 @@ the mark if even that cannot be written: the previous build's numbers are
 never presented as current. --summary re-checks every comparison against
 the stamps on disk. One build of a date at a time: a build holds
 <date>/.build.lock while it runs; a second one refuses to start (exit 4).
+A usage error (an unknown option or a bad value) exits 6, never 2.
 ONE C PER ROOT: a run that would rebuild a date's waterlines with a C other
 than the one they carry (it would overwrite that product) is refused, exit
 5, and told the root that C belongs in (the default root for the station's
-C, <default root>_c<C> for any other); --replace overwrites on purpose. A
+C, <default root>_c<C> for any other; a root whose name gives it to that
+very C although it holds another, e.g. a default root whose first build
+used --setup-coef 0, is said to hold the other C, and the run is given a
+root beside it, <root>_c<C>); --replace overwrites on purpose. A
 --setup-coef of unknown origin without --setup-fitted-to is refused, exit 5
 (a --dry-run says so). --all returns the code of its worst date by
 severity: 1 if any date failed, else 5 if any was refused, else 4 if any
@@ -222,10 +226,11 @@ SETUP_FITS = {
                    "0.028-0.058), each line taken where it lay WITHOUT setup; repeat crossings (no survey): "
                    "dem_from_contours.py --fit-setup on those lines built with C = 0 prints a near-best band (C "
                    "within 5 mm of its best spread) of +0.006 to +0.034 (filtered, --max-hs 1.5; a flat minimum) "
-                   "and +0.026 to +0.040 on the unfiltered rows (the same spread with each line re-projected: "
-                   "0.029, 90% ~0.00-0.04), so on one week it does not pin C by itself. Rechecked Oct 2026 with "
+                   "and +0.026 to +0.040 on the unfiltered rows, also with --max-hs 1.5 (the same spread with each "
+                   "line re-projected: 0.029, 90% ~0.00-0.04), so on one week it does not pin C by itself. "
+                   "Rechecked Oct 2026 with "
                    "each line re-projected at still water + setup: the transects stop at their lowest shot "
-                   "(+1.2 to +1.7 m), below which a line can only read low and above which a high-reading line "
+                   "(+1.17 to +1.80 m), below which a line can only read low and above which a high-reading line "
                    "drops out, so a fit over every crossing is biased by where the survey stops (0.067 over all "
                    "crossings); over only the lines at least 0.1-0.2 m above the lowest shots the fit gives "
                    "~0.043-0.046 (day-block 90% ~0.02-0.055), and the within-cell slope of repeat crossings (no "
@@ -2757,44 +2762,79 @@ def setup_fit_known(coef):
     return any(abs(k - float(coef or 0.0)) < 1e-9 for k in SETUP_FITS)
 
 
-def replaced_setup(plan, args, steps):
-    """The C(s) of the waterlines on disk when this run would rebuild them with another C in the
-    same folder (e.g. '0.037'), else None."""
+def replaced_coefs(plan, args, steps):
+    """The C(s) of the waterlines on disk, sorted, when this run would rebuild them with another C in
+    the same folder (e.g. [0.037]), else None."""
     if "detect" not in steps or not plan.get("out") or not read_stamp(plan["out"], "merge"):
         return None
     fits, _ = setup_in_use(plan, args)
     built = sorted({round(float(f["coef"]), 6) for f in fits if f.get("coef") is not None})
     if not built or built == [round(float(args.setup_coef or 0.0), 6)]:
         return None
-    return " / ".join(f"{c:g}" for c in built)
+    return built
 
 
-def root_for_c(root, coef):
+def root_for_c(root, coef, held=None):
     """The output root a build with this C belongs in: the C = SETUP_COEF products in the base root
     (the default /mnt/I2Rgus_Data/survey_products), any other C in <base root>_c<C> (e.g. ..._c0).
     The base is this root without a '_c<number>' suffix, so the advice from a ..._c0 root points
-    back at the station-C root, never at ..._c0_c0.037."""
+    back at the station-C root, never at ..._c0_c0.037.
+    held: the C(s) this root's waterlines carry. A name says only which C a root is MEANT for (a date's
+    first build is never refused: a root without suffix may hold C = 0, a ..._c0 root C = 0.037). When
+    the name gives this very root to coef although it holds another C, the root given is one beside
+    it, <root>_c<C>, never the root that refused the run; root_name_note says what this root holds."""
     root = Path(root)
     base = re.sub(r"_c\d+(\.\d+)?$", "", root.name) or root.name
     want = round(float(coef or 0.0), 6)
-    return root.parent / (base if abs(want - SETUP_COEF) < 1e-9 else f"{base}_c{want:g}")
+    alt = root.parent / (base if abs(want - SETUP_COEF) < 1e-9 else f"{base}_c{want:g}")
+    if alt == root and any(abs(round(float(h), 6) - want) > 1e-9 for h in (held or ())):
+        alt = root.parent / f"{root.name}_c{want:g}"
+    return alt
+
+
+def root_name_note(root, coef, held, how=None):
+    """When the name of this root gives it to C = coef but its waterlines carry another C: what it holds,
+    where that C belongs and how to free the root for coef. -> text, or '' when the name does not
+    give this root to coef or the root holds coef. how: how it came to hold that C (default: a first
+    build, which is never refused)."""
+    root = Path(root)
+    want = round(float(coef or 0.0), 6)
+    held = sorted({round(float(h), 6) for h in (held or ())})
+    if not held or held == [want] or root_for_c(root, want) != root:
+        return ""
+    hs = " / ".join(f"{h:g}" for h in held)
+    if how is None:
+        how = "a date's first build in a root is never refused, whatever its C"
+        if root_for_c(root, SETUP_COEF) == root:          # a root meant for the station's C
+            how += f", e.g. --setup-coef {held[0]:g} without --output-root builds into the default root"
+    text = f"the name of {root} gives it to C = {want:g}, but it holds the C = {hs} product ({how})"
+    if len(held) == 1:
+        home = root_for_c(root, held[0])
+        text += (f". To keep this root for C = {want:g}: build C = {hs} again in its own root (--setup-coef {hs} "
+                 f"--output-root {home}), then rerun here with --replace")
+    return text
 
 
 def setup_replace_note(plan, args, steps):
     """A run that would build a C other than the one the waterlines on disk carry, into the SAME
-    folder: what it would replace, what reruns, and the root that C belongs in. -> text or None.
+    folder: what it would replace, what reruns, and the root that C belongs in (never this root:
+    root_for_c with what it holds). -> text or None.
     Such a run is refused unless it passes --replace (build_date)."""
-    old = replaced_setup(plan, args, steps)
-    if old is None:
+    built = replaced_coefs(plan, args, steps)
+    if built is None:
         return None
+    old = " / ".join(f"{c:g}" for c in built)
     want = round(float(args.setup_coef or 0.0), 6)
     root = Path(args.output_root)
-    alt = root_for_c(root, want)
+    alt = root_for_c(root, want, built)
     text = (f"the C = {old} product in {plan['out']} would be REPLACED: this run builds C = {want:g} into the same "
             f"folder (waterlines, filter, DEM, maps and comparisons rebuilt, the C = {old} ones overwritten, and "
             f"--summary on {root} then shows only the C = {want:g} build). Build each C in its own root: "
             f"--output-root {alt} for C = {want:g} (then --summary --output-root on each root); give --replace "
             f"only to replace this product on purpose.")
+    misnamed = root_name_note(root, want, built)
+    if misnamed:
+        text += f" NOTE: {misnamed}."
     if plan.get("era") != "live":
         text += (f" For this date the photo detection runs again (~{SEC_PER_PHOTO_DETECT:.0f} s a photo, ~50 min "
                  f"a two-camera week): each line is placed at the elevation its setup gives it.")
@@ -3043,11 +3083,12 @@ def step_compare(plan, args, state):
     fits, fits_from = setup_in_use(plan, args)
     used = {round(float(f["coef"]), 6) for f in fits}
     if fits_from.startswith("the waterlines") and used != {round(float(args.setup_coef), 6)}:
+        misnamed = root_name_note(args.output_root, args.setup_coef, used)
         warn(f"this run's --setup-coef {args.setup_coef} is NOT what the waterlines were built with "
              f"(C = {', '.join(str(c) for c in sorted(used))}): the label, README and provenance use the C that "
              f"built them. To apply {args.setup_coef}, build it from the detection (all steps) in its own "
-             f"--output-root ({root_for_c(args.output_root, args.setup_coef)}): in this root it would replace "
-             f"this product (refused without --replace)")
+             f"--output-root ({root_for_c(args.output_root, args.setup_coef, used)}): in this root it would replace "
+             f"this product (refused without --replace)" + (f". NOTE: {misnamed}" if misnamed else ""))
     dd = dem_settings_differ(dem_settings_built(out), dem_settings_requested(args))
     if dd:
         warn(f"this run's DEM options are NOT what the DEM on disk was built with ({dd}): the comparison, README "
@@ -3586,6 +3627,7 @@ def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
     """Caveats about the setup coefficient actually used, its origin and its reference frame."""
     cav = []
     wv = (forcing or {}).get("waves", {})
+    held = [f["coef"] for f in fits if f.get("coef") is not None]     # what this build's folder holds
     for f in fits:
         C = f["coef"]
         cams = f" (cameras {', '.join(f['cameras'])})" if len(fits) > 1 else ""
@@ -3620,11 +3662,13 @@ def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
                        f"the survey covers (WHERE, under the comparison). A build with C = 0 (or a C fitted to other "
                        f"data, --setup-fitted-to) compares INDEPENDENTLY; build it in its own folder, e.g. "
                        f"survey_products.py --date {plan['date']} --setup-coef 0 --output-root "
-                       f"{root_for_c(plan['out'].parent, 0.0)} (in this folder it would "
+                       f"{root_for_c(plan['out'].parent, 0.0, held)} (in this folder it would "
                        f"replace this product, so it is refused there without --replace), and read it with --summary "
-                       f"--output-root on that root. An independent "
-                       f"check of the whole intertidal needs another survey that fitted nothing, e.g. a calm, "
-                       f"low-tide RTK across it.")
+                       f"--output-root on that root"
+                       + (f" (NOTE: {root_name_note(plan['out'].parent, 0.0, held)})"
+                          if root_name_note(plan['out'].parent, 0.0, held) else "")
+                       + ". An independent check of the whole intertidal needs another survey that fitted nothing, "
+                         "e.g. a calm, low-tide RTK across it.")
         fit = SETUP_FITS.get(C) if f.get("kind") == "known" else None
         rc = (fit or {}).get("rtk_check")
         if rc:
@@ -3675,7 +3719,7 @@ def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
                        f"lines {rc['without_setup_m']:.2f} m low "
                        f"without setup and {rc['with_setup_m']:.2f} m low with it (median setup applied "
                        f"{rc['setup_applied_m']:.2f} m), but both medians are biased LOW by where that survey stops "
-                       f"(the transects end at +1.2 to +1.7 m): a line below a transect's lowest shot can only read "
+                       f"(the transects end at +1.17 to +1.80 m): a line below a transect's lowest shot can only read "
                        f"low there, and a line that would read high at that water level lands seaward of the survey "
                        f"and is not compared."
                        + (f" Over only the lines at least {af['margins_m'][0]:.1f}-{af['margins_m'][1]:.1f} m above "
@@ -5213,7 +5257,7 @@ def build_date(date, cfg, surveys, args, steps):
             return "refused"
         if rep:
             warn(rep + " (--replace given)")
-            state["replaced_c"] = replaced_setup(plan, args, steps)
+            state["replaced_c"] = replaced_coefs(plan, args, steps)
         rep_w = window_replace_note(plan, args, steps)
         if rep_w:
             warn(rep_w)
@@ -5358,9 +5402,15 @@ def run_date(plan, args, steps, state):
             say(c["name"], f"{c['label']}: {c['status']}")
     # what an operator must not miss, again at the end
     if state.get("replaced_c"):
-        warn(f"this run REPLACED the C = {state['replaced_c']} product in {plan['out']} with a C = "
-             f"{float(args.setup_coef or 0.0):g} build (--replace; another C goes in its own --output-root, "
-             f"{root_for_c(args.output_root, args.setup_coef)})")
+        gone = state["replaced_c"]
+        now = round(float(args.setup_coef or 0.0), 6)
+        gone_t = " / ".join(f"{c:g}" for c in gone)
+        keep = (f"a C = {gone_t} build goes in its own --output-root, {root_for_c(args.output_root, gone[0], [now])}"
+                if len(gone) == 1 else "another C goes in its own --output-root")
+        misnamed = (root_name_note(args.output_root, gone[0], [now], how="this run's --replace put it there")
+                    if len(gone) == 1 else "")
+        warn(f"this run REPLACED the C = {gone_t} product in {plan['out']} with a C = {now:g} build (--replace; "
+             f"{keep})" + (f". NOTE: {misnamed}" if misnamed else ""))
     if state.get("replaced_window"):
         warn(f"this run REPLACED the product built for another window/hours in {plan['out']} (a recheck with "
              f"another window goes in its own --output-root)")
@@ -6258,8 +6308,17 @@ def summary_figure(rows, path, disabled=(), not_yet=()):
     plt.close(fig)
 
 
+class UsageParser(argparse.ArgumentParser):
+    """argparse with this script's own exit code for a usage error (an unknown option, a bad value):
+    EXIT_CODES['usage'] (6), not argparse's 2, which here means a disabled date."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_CODES["usage"], f"{self.prog}: error: {message} (NOTHING built)\n")
+
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap = UsageParser(description=__doc__.split("\n")[1])
     what = ap.add_mutually_exclusive_group(required=True)
     what.add_argument("--date", help="survey date to build, YYYY-MM-DD (a date in --config)")
     what.add_argument("--all", action="store_true", help="every enabled date")
@@ -6349,12 +6408,6 @@ def main():
         signal.signal(signal.SIGTERM, _terminated)
     except (ValueError, OSError):
         pass
-    if args.nice and not args.dry_run:
-        try:
-            level = os.nice(int(args.nice))
-            say("priority", f"niceness {level} (--nice {args.nice}: the station's cron keeps priority)")
-        except (OSError, AttributeError) as exc:
-            warn(f"--nice {args.nice} not applied: {exc}")
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
     bad = [s for s in steps if s not in STEPS]
     if bad:
@@ -6376,7 +6429,7 @@ def main():
     if args.setup_coef < 0:
         ap.error("--setup-coef must be >= 0")
     if args.setup_coef and not setup_fit_known(args.setup_coef) and not args.setup_fitted_to and not args.dry_run:
-        # refused with exit 5 ('refused'), not argparse's 2, which means a disabled date here
+        # refused with exit 5 ('refused'): the option is valid, the run's settings are what is refused
         print(f"{ap.prog}: error: --setup-coef {args.setup_coef}: where was this C fitted? Give --setup-fitted-to "
               f"<survey file> (the survey it was fitted to) or --setup-fitted-to 'none:<how>' (fitted to no "
               f"survey). A C of unknown origin could be fitted to the very survey it is compared with. NOTHING "
@@ -6384,6 +6437,12 @@ def main():
         return EXIT_CODES["refused"]
     if args.setup_fitted_to and setup_fit_known(args.setup_coef):
         warn(f"--setup-fitted-to ignored: C = {args.setup_coef} is a known fit (SETUP_FITS)")
+    if args.nice and not args.dry_run:
+        try:
+            level = os.nice(int(args.nice))
+            say("priority", f"niceness {level} (--nice {args.nice}: the station's cron keeps priority)")
+        except (OSError, AttributeError) as exc:
+            warn(f"--nice {args.nice} not applied: {exc}")
     if args.gnssr_spline is None:
         from marconi_water_level import GNSSR_SPLINE, GAUGE_CSV
         args.gnssr_spline = GNSSR_SPLINE
@@ -6421,12 +6480,16 @@ def main():
     return worst_exit(results.values())
 
 
-# Exit codes: 0 built (or dry run), 1 a step failed, 2 the date is disabled, 3 built but PARTIAL
-# (a camera contributed nothing, a part is missing: a camera's pointing check or photo map, or the
-# outputs on disk are not one build), 4 not started: another build of the date is running, 5 not
-# started: refused by the run's own settings (a C other than the one the date's waterlines carry,
-# without --replace; a --setup-coef of unknown origin, without --setup-fitted-to).
-EXIT_CODES = {"built": 0, "dry-run": 0, "disabled": 2, "failed": 1, "partial": 3, "busy": 4, "refused": 5}
+# Exit codes: 0 built (or dry run), 1 a step failed (or a configuration table cannot be read), 2 the
+# date is disabled, 3 built but PARTIAL (a camera contributed nothing, a part is missing: a camera's
+# pointing check or photo map, or the outputs on disk are not one build), 4 not started: another build
+# of the date is running, 5 not started: refused by the run's own settings (a C other than the one the
+# date's waterlines carry, without --replace; a --setup-coef of unknown origin, without
+# --setup-fitted-to), 6 not started: a usage error (an unknown option or a bad value, e.g. --steps,
+# --window, --utc-hours, a negative --setup-coef; UsageParser), so a caller can tell it from a
+# disabled date.
+EXIT_CODES = {"built": 0, "dry-run": 0, "disabled": 2, "failed": 1, "partial": 3, "busy": 4, "refused": 5,
+              "usage": 6}
 # --all returns the code of its WORST date by severity, not the largest number: a failed date (1)
 # outranks one refused (5) or not started because another build held it (4), which outrank a partial
 # one (3). Disabled dates (2) are skipped by --all and do not count.
@@ -6434,7 +6497,8 @@ SEVERITY = ("failed", "refused", "busy", "partial")
 
 
 def worst_exit(results):
-    """Exit code of an --all run: the most severe per-date result (failed > busy > partial > built)."""
+    """Exit code of an --all run: the most severe per-date result
+    (failed > refused > busy > partial > built)."""
     res = [r for r in results if r != "disabled"]
     unknown = [r for r in res if r not in EXIT_CODES]
     if unknown:

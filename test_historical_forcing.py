@@ -148,6 +148,10 @@ def test_linear_recovery(fx):
     check("linear: b recovered", abs(lt.b - B_TRUE) < 0.01, f"{lt.b:+.4f} vs {B_TRUE:+.2f}")
     check("linear: fit RMS at the noise level", lt.rms_fit < 2 * A_TRUE * NOISE_M,
           f"{lt.rms_fit:.4f} m (noise x a = {A_TRUE * NOISE_M:.4f})")
+    # the printed formula has the sign of the model: lag -54 min = Chatham(t + 54 min), Marconi leads
+    d = lt.describe()
+    check("linear: describe() prints the shift the model uses",
+          f"Chatham(t {-LAG_TRUE_MIN:+d} min)" in d and f"Marconi leads by {-LAG_TRUE_MIN:d} min" in d, d)
 
 
 def test_harmonic_recovery(fx):

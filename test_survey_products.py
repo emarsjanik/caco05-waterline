@@ -63,6 +63,31 @@ def check(cond, msg):
     print(f"  ok  {msg}")
 
 
+# where the real 2026-09-29 RTK file is looked for: the station's survey folders, as survey_products
+# looks (main() adds --survey-dirs); checks that need it are skipped, and counted, when it is not found
+RTK_DIRS = list(sp.DEFAULT_SURVEY_DIRS)
+SKIPPED = []
+
+
+def real_rtk():
+    """The real RTK file the station's C was fitted to, found as survey_products finds it (the path
+    surveys.csv gives, looked for in the survey folders) and confirmed by its sha256; else None."""
+    fit = sp.SETUP_FITS[sp.SETUP_COEF]
+    rows = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    names = [r["path"] for r in rows if Path(r.get("path") or "").stem == fit["survey_stem"]]
+    for n in names or [fit["survey_stem"] + ".csv"]:
+        for f in sp.resolve_file(n, RTK_DIRS):
+            if f.is_file() and sp.sha256(f) == fit["survey_sha256"]:
+                return f
+    return None
+
+
+def skip(what):
+    SKIPPED.append(what)
+    print(f"  skip  {what} (the real RTK file {sp.SETUP_FITS[sp.SETUP_COEF]['survey_stem']}.csv is not in "
+          f"{', '.join(RTK_DIRS)}; --survey-dirs adds folders)")
+
+
 def photo_name(t, station, cam):
     e = calendar.timegm(t.timetuple())
     return f"{e}.{t:%a.%b.%d_%H_%M_%S}.GMT.{t.year}.{station}.{cam}.timex.jpg"
@@ -215,14 +240,13 @@ def test_labels(d):
     check(lab == "INDEPENDENT", "RTK with a C declared fitted to no survey (--setup-fitted-to none:...): INDEPENDENT")
     # the RTK file under another name is recognised by its content
     real = Path(d) / "rtk_copy.csv"
-    rtk_src = Path("/tmp/claude-0/-home-user-caco05-waterline/1e668ac9-7b7a-5204-b62b-1a0cde16501d/scratchpad/"
-                   "survey_inputs/2026-09-29_Marconi_Checkshots.csv")
-    if rtk_src.exists():
-        shutil.copy(rtk_src, real)
+    rtk_src = real_rtk()
+    if rtk_src:
+        shutil.copy(str(rtk_src), str(real))
         lab, why = sp.honest_label(dict(rtk, survey_date=""), p, args, real)
         check(lab == "CIRCULAR" and "same content" in why[0], "the RTK shots renamed (rtk_copy.csv): still CIRCULAR, by sha256")
     else:
-        print("  skip  renamed-RTK check (the real RTK file is not on this computer)")
+        skip("renamed-RTK check")
     other = Path(d) / "another_rtk.csv"
     other.write_text("Name,Easting,Northing,Elevation,Description\n1,420100,4638400,1.2,Transect\n")
     v = sp.Verdict(rtk)
@@ -382,9 +406,8 @@ def test_round2(d):
     check(b.dem_cell == 2.0 and b.dem_max_hs == 1.5 and b.geotiff_epsg == 32619 and later.dem_cell == 1.0,
           "the 'rebuild everything' line takes the DEM settings the DEM was built with, not this run's")
     # a re-export of the RTK the station's C was fitted to, entered under another date: same shots
-    rtk_src = Path("/tmp/claude-0/-home-user-caco05-waterline/1e668ac9-7b7a-5204-b62b-1a0cde16501d/scratchpad/"
-                   "survey_inputs/2026-09-29_Marconi_Checkshots.csv")
-    if rtk_src.exists():
+    rtk_src = real_rtk()
+    if rtk_src:
         lines = rtk_src.read_text().splitlines()
         lines[1] = lines[1].replace(",", ", ", 1)
         rex = d / "rtk_reexport.csv"
@@ -396,7 +419,7 @@ def test_round2(d):
         check(lab == "CIRCULAR" and "re-exported" in why[0], "a byte-changed re-export under another date: CIRCULAR "
                                                                "by its coordinates")
     else:
-        print("  skip  re-exported-RTK check (the real RTK file is not on this computer)")
+        skip("re-exported-RTK check")
 
 
 def test_setup_in_use(d):
@@ -1188,11 +1211,65 @@ def test_c_change(d):
         c: {"coef": 0.0, "fit": sp.fit_sig(sp.setup_fit_info(0.0))} for c in ("c1", "c2")}})
     a37 = SimpleNamespace(setup_coef=sp.SETUP_COEF, setup_fitted_to=None, output_root=str(d / "root_c0"))
     t37 = sp.setup_replace_note(dict(plan, date="2026-09-29", era="live", out=out_c0), a37, sp.STEPS)
-    check(t37 and f"--output-root {d / 'root'} for C = {sp.SETUP_COEF:g}" in t37 and "root_c0_c" not in t37,
+    check(t37 and f"--output-root {d / 'root'} for C = {sp.SETUP_COEF:g}" in t37 and "root_c0_c" not in t37
+          and "NOTE" not in t37,
           "a refresh without --setup-coef over a C = 0 root: the station-C product's root is the base root")
+    # a root whose name does not say what it holds: the advice never points back at the root that refused
+    check(sp.root_for_c(r, sp.SETUP_COEF, [0.0]) == Path(str(r) + "_c0.037")
+          and sp.root_for_c(Path(str(r) + "_c0"), 0, [sp.SETUP_COEF]) == Path(str(r) + "_c0_c0")
+          and sp.root_for_c(Path(str(r) + "_c0"), sp.SETUP_COEF, [0.0]) == r
+          and sp.root_for_c(r, 0, [sp.SETUP_COEF]) == Path(str(r) + "_c0"),
+          "root for a C, given what the root holds: a root named for that C but holding another -> a root "
+          "beside it; a root named for what it holds -> the name rule as before")
+    out_p = d / "plain" / "2026-09-29"                       # no suffix, its first build used --setup-coef 0
+    out_p.mkdir(parents=True)
+    sp.write_stamp(out_p, "merge", {"x": 1}, extra={"setup": {
+        c: {"coef": 0.0, "fit": sp.fit_sig(sp.setup_fit_info(0.0))} for c in ("c1", "c2")}})
+    ap_ = SimpleNamespace(setup_coef=sp.SETUP_COEF, setup_fitted_to=None, output_root=str(d / "plain"))
+    tp = sp.setup_replace_note(dict(plan, date="2026-09-29", era="live", out=out_p), ap_, sp.STEPS)
+    check(tp and f"--output-root {d / 'plain_c0.037'} for C = {sp.SETUP_COEF:g}" in tp
+          and f"--output-root {d / 'plain'} for" not in tp
+          and f"the name of {d / 'plain'} gives it to C = {sp.SETUP_COEF:g}, but it holds the C = 0 product" in tp
+          and f"--setup-coef 0 --output-root {d / 'plain_c0'}), then rerun here with --replace" in tp,
+          "a root without suffix holding C = 0, default C: refused, a root beside it named (not the same root), "
+          "and what it holds and how to free it")
+    out_m = d / "misplaced_c0" / "2026-09-29"                # a ..._c0 root holding C = 0.037
+    out_m.mkdir(parents=True)
+    sp.write_stamp(out_m, "merge", {"x": 1}, extra={"setup": {
+        c: {"coef": sp.SETUP_COEF, "fit": sp.fit_sig(sp.setup_fit_info(sp.SETUP_COEF))} for c in ("c1", "c2")}})
+    am_ = SimpleNamespace(setup_coef=0.0, setup_fitted_to=None, output_root=str(d / "misplaced_c0"))
+    tm = sp.setup_replace_note(dict(plan, date="2026-09-29", era="live", out=out_m), am_, sp.STEPS)
+    check(tm and f"--output-root {d / 'misplaced_c0_c0'} for C = 0" in tm
+          and f"--output-root {d / 'misplaced_c0'} for" not in tm
+          and f"but it holds the C = {sp.SETUP_COEF:g} product" in tm
+          and f"--output-root {d / 'misplaced'}), then rerun here with --replace" in tm,
+          "a ..._c0 root holding C = 0.037, --setup-coef 0: a root beside it, and where its C = 0.037 belongs")
+    cav_m = sp.setup_caveats({"date": "2026-09-29", "out": out_m, "surveys": [
+        {"name": "rtk", "path": "2026-09-29_Marconi_Checkshots.csv", "survey_type": "points",
+         "survey_date": "2026-09-29"}]}, SimpleNamespace(survey_dirs=[str(HERE / "surveys")], setup_fitted_to=None),
+        {}, {}, [dict(sp.setup_fit_info(sp.SETUP_COEF), cameras=["c1", "c2"])], "live")
+    circ_m = [c for c in cav_m if c.startswith("rtk: CIRCULAR")]
+    check(circ_m and f"--setup-coef 0 --output-root {d / 'misplaced_c0_c0'}" in circ_m[0]
+          and f"but it holds the C = {sp.SETUP_COEF:g} product" in circ_m[0],
+          "the CIRCULAR caveat in a ..._c0 root holding C = 0.037: the C = 0 build goes beside it, not here")
+    check(sp.root_name_note(d / "plain", 0.0, [sp.SETUP_COEF]) == ""
+          and sp.root_name_note(d / "root_c0", sp.SETUP_COEF, [0.0]) == ""
+          and sp.root_name_note(d / "plain", sp.SETUP_COEF, [sp.SETUP_COEF]) == "",
+          "no note where the name gives the root to what it holds, or the root holds the C asked for")
     # exit codes: refused is 5 (not 2, a disabled date), and ranks after failed in --all
     check(sp.EXIT_CODES["refused"] == 5 and sp.worst_exit(["built", "refused", "busy", "partial"]) == 5
           and sp.worst_exit(["refused", "failed"]) == 1, "refused: exit 5; --all: failed > refused > busy > partial")
+    # a usage error has its own code (6), never 2 (a disabled date) and never a date result's
+    codes = {k: v for k, v in sp.EXIT_CODES.items() if k != "usage"}
+    check(sp.EXIT_CODES["usage"] == 6 and 6 not in codes.values(), "usage error: exit 6, used by no date result")
+    for bad_args in (["--date", "2025-01-23", "--steps", "bogus"], ["--date", "2025-01-23", "--setup-coef", "-1"],
+                     ["--date", "2025-01-23", "--window", "2025-01-23", "2025-01-18"],
+                     ["--date", "2025-01-23", "--utc-hours", "x"], ["--no-such-option"]):
+        r_ = subprocess.run([sys.executable, str(HERE / "survey_products.py")] + bad_args
+                            + ["--output-root", str(d / "usage")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            universal_newlines=True, cwd=str(d))
+        check(r_.returncode == 6 and "NOTHING built" in r_.stdout and not (d / "usage").exists(),
+              f"usage error {' '.join(bad_args)}: exit 6, nothing written (rc {r_.returncode})")
     r_ = subprocess.run([sys.executable, str(HERE / "survey_products.py"), "--date", "2025-01-23", "--setup-coef",
                          "0.05", "--output-root", str(d / "unk")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         universal_newlines=True, cwd=str(d))
@@ -1298,7 +1375,10 @@ def test_py38():
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--keep", default=None, help="write the outputs here and keep them")
+    ap.add_argument("--survey-dirs", nargs="+", default=[],
+                    help="more folders to look for the real 2026-09-29 RTK file in (after the station's)")
     args = ap.parse_args()
+    RTK_DIRS.extend(args.survey_dirs)
     d = args.keep or tempfile.mkdtemp(prefix="survey_products_test_")
     Path(d).mkdir(parents=True, exist_ok=True)
     try:
@@ -1327,7 +1407,8 @@ def main():
     finally:
         if not args.keep:
             shutil.rmtree(d, ignore_errors=True)
-    print("all survey_products tests passed")
+    print("all survey_products tests passed"
+          + (f" ({len(SKIPPED)} skipped: {', '.join(SKIPPED)}; the real RTK file was not found)" if SKIPPED else ""))
     return 0
 
 

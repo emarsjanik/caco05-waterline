@@ -423,8 +423,12 @@ class LinearTransfer:
                 "formula": "Marconi(t) = a * Chatham(t - lag) + b"}
 
     def describe(self):
-        return (f"Marconi = {self.a:.3f} x Chatham(t {self.lag_min:+.0f} min) {self.b:+.3f} m "
-                f"(fit RMS {self.rms_fit:.3f} m, {self.n} h)")
+        # Marconi(t) = a * Chatham(t - lag): a negative lag reads Chatham LATER, i.e. Marconi leads
+        shift = -self.lag_min + 0.0
+        who = (f"Marconi leads by {shift:.0f} min" if shift > 0 else
+               f"Marconi lags by {-shift:.0f} min" if shift < 0 else "no time shift")
+        return (f"Marconi = {self.a:.3f} x Chatham(t {shift:+.0f} min) {self.b:+.3f} m ({who}; "
+                f"fit RMS {self.rms_fit:.3f} m, {self.n} h)")
 
 
 def resolvable(span_hours, names=PRIORITY):

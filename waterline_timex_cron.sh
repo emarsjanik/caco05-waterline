@@ -193,11 +193,12 @@ DEM_SERIES="$BASE/archive/dems"
 #    on lines built with C = 0 prints a near-best band (the C whose median
 #    spread is within 5 mm of its best) of +0.006 to +0.034 on the filtered
 #    lines with --max-hs 1.5 (best 0.026, a flat minimum; 0.037 spreads
-#    6 mm more) and +0.026 to +0.040 on the unfiltered rows (best 0.030);
-#    the same spread with each line re-projected at still water + setup
-#    gives 0.029 (90% ~0.00-0.04); the within-cell slope of elevation on
-#    sqrt(Hs*L0), each line re-projected, gives 0.043 (90% 0.026-0.053);
-#  - the RTK transects stop at their lowest shot, +1.2 to +1.7 m. A line
+#    6 mm more) and +0.026 to +0.040 on the unfiltered rows, also with
+#    --max-hs 1.5 (best 0.030); the same spread with each line re-projected
+#    at still water + setup gives 0.029 (90% ~0.00-0.04); the within-cell
+#    slope of elevation on sqrt(Hs*L0), each line re-projected, gives 0.043
+#    (90% 0.026-0.053);
+#  - the RTK transects stop at their lowest shot, +1.17 to +1.80 m. A line
 #    below that can only read low on them, and one that would read high at
 #    that level lands seaward of the survey and drops out, so a fit over
 #    every crossing is biased by where the survey stops (re-projected, all
