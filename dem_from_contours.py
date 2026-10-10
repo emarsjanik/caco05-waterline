@@ -823,6 +823,7 @@ def main():
     print(f"wrote {stem}_spread.asc  (16-84 percentile range, m)")
     print(f"wrote {stem}_count.asc   (samples per cell)")
 
+    sstem = None
     if args.series_dir:
         if not args.last_days:
             print("NOTE: --series-dir needs --last-days (the window defines the date); not saved.")
@@ -834,7 +835,7 @@ def main():
             write_ascii_grid(str(sstem) + "_spread.asc", spread, e0, n0, args.cell)
             write_ascii_grid(str(sstem) + "_count.asc", count.astype(float), e0, n0,
                              args.cell, nodata=0.0)
-            print(f"series            : {sstem}_{{dem,spread,count}}.asc")
+            print(f"series            : {sstem}_{{dem,spread,count}}.asc (+ _info.json)")
 
     # What the page needs and the grids do not hold: dates, frames, filters.
     # Written always, so 'python3 dem_figure.py <stem>' can redraw the page
@@ -866,6 +867,12 @@ def main():
     with open(str(stem) + "_info.json", "w") as f:
         json.dump(page_info, f, indent=1)
     print(f"wrote {stem}_info.json   (dates, frames, filters: for the page)")
+    if sstem is not None:
+        # the dated copy gets its own, so a page redrawn from it (dem_figure.py
+        # <series stem>) credits only the cameras that measured: without it a
+        # c1-only week's page said 'seen by c2' and drew a seam
+        with open(str(sstem) + "_info.json", "w") as f:
+            json.dump(page_info, f, indent=1)
 
     rc = 0
     if not args.no_plot:

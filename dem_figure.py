@@ -305,6 +305,19 @@ def beach_frame(E, N, Z, camera_xy, shore_normal=None):
     the calibration places the DEM at this station. The sign rules below
     (s downhill, a towards most of the strip) apply whichever way the axes
     were found.
+
+    WHICH WAY IS SEAWARD along s: downhill, when the cells fall along s at
+    1:200 (MIN_PLANE_SLOPE) or more. A flatter DEM -- one water level's
+    lines, a storm week, an outage with a day of frames -- has no downhill
+    to read: the sign of its fitted slope is noise, and it once turned the
+    page round. The station's archived 7-day DEM of 27 Sep 2026 (144
+    cells, all +0.58 to +0.64 m, slope 0.0003) came out with the sea at the
+    BOTTOM under a note saying 'sea at the top', its cross-shore axis
+    reading -57 to -75 m 'seaward of the camera' and its north arrow
+    pointing down (review, Oct 2026). Without a slope the cameras say it:
+    they stand on the bluff, landward of every beach cell they see, so
+    seaward is the side of s away from them. Only with no slope and no
+    camera does the faint slope's sign decide.
     """
     ec, nc = E.mean(), N.mean()
     evals, vecs = np.linalg.eigh(np.cov(np.stack([E - ec, N - nc])))
@@ -328,12 +341,24 @@ def beach_frame(E, N, Z, camera_xy, shore_normal=None):
         s = np.asarray(shore_normal, float) / np.hypot(*shore_normal)
         a = np.array([-s[1], s[0]])
         oriented_by = "station"
+    # Which way along s is seaward: downhill where the cells show a slope;
+    # where they do not, the side away from the cameras on the bluff.
+    slope_s = np.nan
     if ok.sum() >= 10:
         v = (E[ok] - ec) * s[0] + (N[ok] - nc) * s[1]
-        if np.polyfit(v, Z[ok], 1)[0] > 0:
+        slope_s = np.polyfit(v, Z[ok], 1)[0]
+    if np.isfinite(slope_s) and abs(slope_s) >= MIN_PLANE_SLOPE:
+        seaward_by = "slope"
+        if slope_s > 0:
             s = -s
-    elif camera_xy is not None and ((ec - camera_xy[0]) * s[0] + (nc - camera_xy[1]) * s[1]) < 0:
-        s = -s
+    elif camera_xy is not None:
+        seaward_by = "camera"
+        if (ec - camera_xy[0]) * s[0] + (nc - camera_xy[1]) * s[1] < 0:
+            s = -s
+    else:
+        seaward_by = "faint slope" if np.isfinite(slope_s) else "none"
+        if np.isfinite(slope_s) and slope_s > 0:
+            s = -s                              # no camera: the faint slope is all there is
     origin = np.array(camera_xy if camera_xy is not None else (ec, nc), float)
     u = (E - origin[0]) * a[0] + (N - origin[1]) * a[1]
     if np.median(u) < 0:
@@ -344,7 +369,8 @@ def beach_frame(E, N, Z, camera_xy, shore_normal=None):
         origin = origin + a * u.min() + s * v.min()
     flip_x = (a[0] * s[1] - a[1] * s[0]) < 0
     return {"a": a, "s": s, "origin": origin, "flip_x": bool(flip_x),
-            "from_camera": camera_xy is not None, "oriented_by": oriented_by}
+            "from_camera": camera_xy is not None, "oriented_by": oriented_by,
+            "seaward_by": seaward_by}
 
 
 def to_uv(frame, E, N):
@@ -365,10 +391,11 @@ def map_limits(u, v, width_in, height_in, pad=4.0):
     The cross-shore extent is taken between the 0.25 and 99.75
     percentiles, so a few stray cells cannot shrink the stretch much; the
     window then slides to hold every cell when they all fit in it, and
-    the stretch goes down ONE round step if that makes them fit (the real
-    29 Sep - 5 Oct 2026 7-day DEM lost one measured cell off its edge at
-    x2.5, centred on the percentiles; it is drawn at x2). A cell further
-    out than that stays off the page.
+    the stretch goes down one round step -- or two -- if that makes them
+    fit (the real 29 Sep - 5 Oct 2026 7-day DEM lost one measured cell off
+    its edge at x2.5, centred on the percentiles; it is drawn at x2). A cell
+    further out than that stays off the page, and the caller says how many
+    (draw_page: NOTE).
     """
     u_lo, u_hi = u.min() - pad, u.max() + pad
     v_lo, v_hi = np.percentile(v, [0.25, 99.75])
@@ -377,10 +404,11 @@ def map_limits(u, v, width_in, height_in, pad=4.0):
     bound = (height_in / width_in) * lu / lv
     ex = max([x for x in NICE_EXAGGERATION if x <= bound] or [1])
     a_lo, a_hi = v.min() - pad / 4, v.max() + pad / 4     # every cell, half a 2 m cell each side
-    lower = [x for x in NICE_EXAGGERATION if x < ex]
-    if a_hi - a_lo > lu * (height_in / width_in) / ex and lower \
-            and a_hi - a_lo <= lu * (height_in / width_in) / lower[-1]:
-        ex = lower[-1]                    # one step flatter holds every cell
+    lower = [x for x in NICE_EXAGGERATION if x < ex][-2:]
+    if a_hi - a_lo > lu * (height_in / width_in) / ex:
+        fits = [x for x in lower if a_hi - a_lo <= lu * (height_in / width_in) / x]
+        if fits:
+            ex = fits[-1]                 # one or two steps flatter holds every cell
     v_span = lu * (height_in / width_in) / ex
     if v_span < lv:                    # wider than long even at 1:1 -- widen alongshore
         u_mid, u_span = (u_lo + u_hi) / 2, lv * ex * width_in / height_in
@@ -508,7 +536,8 @@ def pick_profiles(uc, vc, z, cell, n, stretches=()):
         lo_p, hi_p = mid - 0.3 * (b - a), mid + 0.3 * (b - a)
         for p in np.arange(np.ceil(lo_p), hi_p + 1e-9, cell / 2):
             sel = ok & (np.abs(uc - p) <= cell)
-            if sel.sum() < 5 or np.ptp(vc[sel]) < 2 * cell:
+            # profile_at() draws no profile with less than 0.2 m of elevation
+            if sel.sum() < 5 or np.ptp(vc[sel]) < 2 * cell or np.ptp(z[sel]) < 0.2:
                 continue
             slope, icpt = np.polyfit(vc[sel], z[sel], 1)
             rms = np.sqrt(np.mean((z[sel] - (icpt + slope * vc[sel])) ** 2))
@@ -682,7 +711,7 @@ def title_lines(info, cells, station, cutoff, min_points, cell):
         else:
             when = date_range_text(info["first_date"], info["last_date"])
         if info.get("last_days"):
-            span = f"last {info['last_days']} days"
+            span = "last day" if info["last_days"] == 1 else f"last {info['last_days']} days"
         elif info.get("window_start") or info.get("window_end"):
             span = "selected dates"
         else:
@@ -955,6 +984,10 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
         print("NOTE: the DEM is not clearly longer alongshore than across; the page's axes "
               + ("follow its downhill slope" if frame["oriented_by"] == "slope"
                  else f"follow the station's shore normal ({SHORE_NORMAL_DEG:g} deg)"))
+    if frame["seaward_by"] != "slope":
+        print("NOTE: the DEM falls less than 1:200 across the beach (one water level?); seaward is "
+              + ("the side away from the cameras" if frame["seaward_by"] == "camera"
+                 else "taken from its faint slope -- no camera to say which side is the sea"))
     frame.update(e0=e0, n0=n0, cell=cell)
     uc, vc = to_uv(frame, Ec, Nc)
     uk, vk = to_uv(frame, Ek, Nk)
@@ -986,10 +1019,23 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     # ---- how to read it: composed here, so the page is tall enough for it -----
     ulim, vlim, ex = map_limits(uc[core], vc[core], map_w, map_h)
     xlim = (ulim[1], ulim[0]) if frame["flip_x"] else ulim
+    off_page = core & ((uc < ulim[0]) | (uc > ulim[1]) | (vc < vlim[0]) | (vc > vlim[1]))
+    if off_page.any():
+        print(f"NOTE: {int(off_page.sum())} cell(s) with {min_points} or more frames lie off the "
+              f"maps (cross-shore stretch x{ex:g}; further out than two flatter steps can hold) "
+              f"-- {int((off_page & filled).sum())} of them with an elevation")
     stretch_txt = (f"stretched ×{ex:g}, so slopes look {ex:g} times steeper there than "
                    "they are" if ex > 1 else "drawn to scale")
     cover = ""
-    if len(stretches) == 2:
+    if not framed and stretches:
+        # no <stem>_info.json (a series copy from before they had one): which
+        # camera's lines made the cells is not known, only whose photo covers
+        # them -- a c1-only week was once credited to c2 and given a seam
+        names = " and ".join(f"{c}'s" for c, _, _ in stretches)
+        cover = (f" The bar under the elevation map shows the beach in {names} photo"
+                 f"{'s' if len(stretches) > 1 else ''}; which camera's lines made the cells "
+                 "is not recorded (no <stem>_info.json).")
+    elif len(stretches) == 2:
         (ca, a0, a1), (cb_, b0, b1) = stretches
         cover = (f" {ca} alone measured the {a1 - a0:.0f} m {compass(-frame['a'])} of the "
                  f"seam, {cb_} the {b1 - b0:.0f} m {compass(frame['a'])} of it; the seam is "
@@ -1041,11 +1087,23 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     if len(profiles) > MAX_PROFILES:
         print(f"NOTE: {len(profiles)} profiles asked for; the first {MAX_PROFILES} drawn "
               f"(the most whose colours stay distinct)")
-    profs = []
-    for i, p in enumerate(profiles[:MAX_PROFILES]):
-        profs.append((p, profile_at(uc.ravel(), vc.ravel(), zc.ravel(), p, cell,
-                                    blanked=blanked.ravel()),
-                      chr(ord("A") + i), PROFILE_COLOURS[i]))
+    # A position with no profile to draw (fewer than 4 measured cells, or
+    # less than 0.2 m of elevation along it: profile_at()) is not marked on
+    # the maps either -- a lettered line on the maps with nothing for it in
+    # the panel, its letter counted in the legend ('profile A-D') and the
+    # panel's title, was the result (review, Oct 2026) -- and the rest are
+    # lettered in order.
+    profs, none_at = [], []
+    for p in profiles[:MAX_PROFILES]:
+        pr = profile_at(uc.ravel(), vc.ravel(), zc.ravel(), p, cell, blanked=blanked.ravel())
+        if pr is None:
+            none_at.append(p)
+            continue
+        profs.append((p, pr, chr(ord("A") + len(profs)), PROFILE_COLOURS[len(profs)]))
+    if none_at:
+        print("NOTE: no profile at " + ", ".join(f"{p:g} m" for p in none_at)
+              + " (fewer than 4 measured cells, or less than 0.2 m of elevation along it): "
+                "not drawn")
 
     cam_names = sorted(views) or sorted(cams)
     cam_label = ("cameras " + " + ".join(cam_names)) if len(cam_names) > 1 else \
@@ -1344,7 +1402,8 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
             out.append(form.format(cam=cam, n=f"{n:,}" if n else ""))
         return out
 
-    forms = ["seen by {cam} · {n} frames", "{cam} · {n} frames", "seen by {cam}", "{cam}"]
+    forms = (["seen by {cam} · {n} frames", "{cam} · {n} frames", "seen by {cam}", "{cam}"]
+             if framed else ["in {cam}'s photo", "{cam}'s photo", "{cam}"])
     room = [(min(b, ulim[1]) - max(a, ulim[0])) * px_per_m - 0.3 * dpi for _, a, b in stretches]
     labs = next((ls for ls in map(cov_labels, forms)
                  if all(width_px(f" {t} ", 10.5) <= r for t, r in zip(ls, room))),
@@ -1358,7 +1417,8 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
                     va="center", fontsize=10.5, color=INK,
                     bbox=dict(boxstyle="square,pad=0.2", fc="white", ec="none"))
     if seam is not None:
-        ax_cov.annotate(f"seam, {seam:.0f} m", (seam, 0.45), xytext=(0, -12),
+        ax_cov.annotate(f"{'seam' if framed else 'photos meet'}, {seam:.0f} m", (seam, 0.45),
+                        xytext=(0, -12),
                         textcoords="offset points", ha="center", va="top", fontsize=9.5,
                         color=INK2)
     if not views:
@@ -1379,11 +1439,18 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     ax_b.set_xlabel(("alongshore distance from the camera (m), increasing towards "
                      if frame["from_camera"] else "alongshore distance (m), increasing towards ")
                     + compass(frame["a"]), fontsize=10)
-    fig.text(left / W, 1 - (y_b - 0.12) / H,
-             "Repeatability: 16–84 percentile spread of the frames in each cell (m)",
+    title_b = "Repeatability: 16–84 percentile spread of the frames in each cell (m)"
+    fig.text(left / W, 1 - (y_b - 0.12) / H, title_b,
              fontsize=12, fontweight="bold", color=INK, va="bottom")
+    # The caption shares the title's line, right-aligned: the longest wording
+    # that leaves a gap after the title (the full one touched it at 0.5 m and
+    # ran into it for a longer --max-spread such as 0.0005)
+    room_b = map_w * dpi - width_px(title_b, 12, "bold") - 0.3 * dpi
+    caps = [f"cells above {cutoff:g} m (--max-spread) are blanked in the elevation map",
+            f"cells above {cutoff:g} m are blanked in the elevation map",
+            f"> {cutoff:g} m: blanked in the elevation map"]
     fig.text((left + map_w) / W, 1 - (y_b - 0.12) / H,
-             f"cells above {cutoff:g} m (--max-spread) are blanked in the elevation map",
+             next((c for c in caps if width_px(c, 10) <= room_b), caps[-1]),
              fontsize=10, color=INK2, va="bottom", ha="right")
     cbx = fig.add_axes(box(cb_x, y_b, cb_w, map_h))
     scb = fig.colorbar(smesh, cax=cbx, extend="max", ticks=np.linspace(0, cutoff, 6))
@@ -1444,7 +1511,7 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
             y = z_lo - (i + 0.6) * row_h
             ax_c.plot(bvs, np.full(bvs.size, y), "s", ms=5.5, mfc="white", mec=col, mew=1.3,
                       zorder=4, clip_on=False)
-            ax_c.text(x0 + 0.4, y, letter, ha="left", va="center", fontsize=8.5,
+            ax_c.text(x0 + 0.4, y, letter, ha="left", va="center", fontsize=9.5,
                       fontweight="bold", color=col)
         z_sep = z_lo
         if rows:
@@ -1523,6 +1590,12 @@ def frame_self_test():
          E-W' (review: 86 deg off): by its slope, within 10 deg.
       4. a round patch with every cell blanked (no slope to read): the
          station's shore normal.
+      5. a FLAT strip at one level, 300 m x 8 m, 50-58 m seaward, z +0.6 m
+         RISING 1 mm per metre seaward (1:1000, as the scatter of one water
+         level's lines can tilt it) with 1 cm of scatter -- the station's
+         archived 7-day DEM of 27 Sep 2026 (144 cells, +0.58 to +0.64 m),
+         whose faint rise put the sea at the bottom of the page: by its
+         shape, within 3 deg, seaward from the camera.
     Returns 0 if all pass, 1 otherwise.
     """
     rng = np.random.default_rng(3)
@@ -1531,9 +1604,10 @@ def frame_self_test():
     t_cs = np.array([np.sin(np.radians(75.8)), np.cos(np.radians(75.8))])
     normal = np.array([np.sin(np.radians(SHORE_NORMAL_DEG)), np.cos(np.radians(SHORE_NORMAL_DEG))])
 
-    def cells(a_rng, s_rng, blank=False, en=None):
+    def cells(a_rng, s_rng, blank=False, en=None, flat=None):
         """Unique 2 m cell centres covering the shore-frame box a_rng x s_rng
-        (m from the camera), or the E/N box `en`; z on the 1:10 plane."""
+        (m from the camera), or the E/N box `en`; z on the 1:10 plane, or at
+        the level `flat` (rising 1 mm per metre seaward)."""
         if en is None:
             A, S = np.meshgrid(np.arange(*a_rng, 0.5), np.arange(*s_rng, 0.5))
             E = cam[0] + A.ravel() * t_al[0] + S.ravel() * t_cs[0]
@@ -1543,24 +1617,29 @@ def frame_self_test():
         key = np.unique(np.stack([np.floor(E / 2), np.floor(N / 2)], axis=1), axis=0)
         Ec, Nc = key[:, 0] * 2 + 1, key[:, 1] * 2 + 1
         v = (Ec - cam[0]) * t_cs[0] + (Nc - cam[1]) * t_cs[1]
-        Z = 2.5 - 0.1 * v + rng.normal(0, 0.02, Ec.size)
+        if flat is None:
+            Z = 2.5 - 0.1 * v + rng.normal(0, 0.02, Ec.size)
+        else:
+            Z = flat + 0.001 * (v - v.mean()) + rng.normal(0, 0.01, Ec.size)
         return Ec, Nc, (np.full(Ec.size, np.nan) if blank else Z)
 
     c_ew = cam + 40 * t_cs                        # E-W strip centred 40 m seaward
-    cases = [("7-day strip 400 x 30 m", cells((-80, 320), (15, 45)), 3.0, "shape"),
-             ("c1 near field 10-30 m x 30 m", cells((10, 30), (15, 45)), 10.0, "slope"),
+    cases = [("7-day strip 400 x 30 m", cells((-80, 320), (15, 45)), 3.0, "shape", "slope"),
+             ("c1 near field 10-30 m x 30 m", cells((10, 30), (15, 45)), 10.0, "slope", "slope"),
              ("E-W strip 40 x 10 m",
-              cells(None, None, en=(c_ew[0] - 20, c_ew[0] + 20, c_ew[1] - 5, c_ew[1] + 5)), 10.0, "slope"),
-             ("round patch, all blanked", cells((40, 60), (20, 40), blank=True), 1.0, "station")]
+              cells(None, None, en=(c_ew[0] - 20, c_ew[0] + 20, c_ew[1] - 5, c_ew[1] + 5)), 10.0, "slope",
+              "slope"),
+             ("round patch, all blanked", cells((40, 60), (20, 40), blank=True), 1.0, "station", "camera"),
+             ("flat strip at +0.6 m, 300 x 8 m", cells((0, 300), (50, 58), flat=0.6), 3.0, "shape", "camera")]
     failures = []
-    for name, (E, N, Z), tol, rule in cases:
+    for name, (E, N, Z), tol, rule, sea_rule in cases:
         f = beach_frame(E, N, Z, cam, shore_normal=normal)
         bearing = np.degrees(np.arctan2(f["s"][0], f["s"][1])) % 360
         off = abs((bearing - SHORE_NORMAL_DEG + 180) % 360 - 180)
         _, v = to_uv(f, E, N)
-        ok = off <= tol and f["oriented_by"] == rule and np.median(v) > 0
-        print(f"  {name:30s}: {len(E):4d} cells, seaward {bearing:5.1f} deg ({off:4.1f} off, limit {tol:g}), "
-              f"by {f['oriented_by']}{'' if ok else '  <-- FAIL'}")
+        ok = off <= tol and f["oriented_by"] == rule and f["seaward_by"] == sea_rule and np.median(v) > 0
+        print(f"  {name:32s}: {len(E):4d} cells, seaward {bearing:5.1f} deg ({off:4.1f} off, limit {tol:g}), "
+              f"axes by {f['oriented_by']}, seaward by {f['seaward_by']}{'' if ok else '  <-- FAIL'}")
         if not ok:
             failures.append(name)
     print("SELF-TEST " + ("PASSED" if not failures else "FAILED: " + ", ".join(failures)))
