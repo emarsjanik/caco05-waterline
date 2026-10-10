@@ -702,6 +702,140 @@ def test_fix1(d):
     check("TOO FEW" not in t, "16 frames on RTK transects: an estimate")
 
 
+def test_fix2(d):
+    print("one build at a time, the window and inputs of the build, map reasons, still water, waves, summary")
+    d = Path(d) / "fix2"
+    d.mkdir()
+    a = cfg_args(output_root=str(d), photo_roots=["/nowhere"], adcp=None, adcp_navd88=None, chatham=None, wis=None,
+                 ndbc=None, live_contours="/x/contour_points_timex.csv", setup_fitted_to=None,
+                 geotiff_epsg=sp.GEOTIFF_EPSG, gnssr_spline=None, gauge_csv=None, live_cron=str(sp.LIVE_CRON),
+                 pointing_log_dir=str(HERE / "archive"), pointing_frames=3, pointing_fail=sp.POINT_FAIL_DEG,
+                 dem_cell=sp.DEM_CELL, dem_min_points=sp.DEM_MIN_POINTS, dem_max_spread=sp.DEM_MAX_SPREAD,
+                 dem_max_hs=sp.DEM_MAX_HS, dem_max_day_offset=sp.DEM_MAX_DAY_OFFSET, keep_moved_days=False,
+                 no_download=False)
+    # -- the lock: a second build of the same date is refused while the first runs; a lock left by a
+    # build that is no longer running is taken over, and said so
+    out = d / "2026-09-29"
+    out.mkdir()
+    ok1, _ = sp.take_lock(out, a, "2026-09-29")
+    ok2, why2 = sp.take_lock(out, a, "2026-09-29")      # this process is alive and is a survey_products build
+    check(ok1 and not ok2 and "RUNNING" in why2, "a second build of the date is refused while the first runs")
+    sp.release_lock(out)
+    check(not (out / sp.LOCK_NAME).exists(), "the lock is released at the end")
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    (out / sp.LOCK_NAME).write_text('{"pid": %d, "host": "%s", "since_utc": "x", "command": "y"}'
+                                    % (dead.pid, sp.host_name()))
+    ok3, note3 = sp.take_lock(out, a, "2026-09-29")
+    check(ok3 and "not running" in note3, "a lock left by a build that died is taken over, and said so")
+    sp.release_lock(out)
+    (out / sp.LOCK_NAME).write_text('{"pid": 1, "host": "another-computer", "since_utc": "x", "command": "y"}')
+    ok4, why4 = sp.take_lock(out, a, "2026-09-29")
+    check(not ok4 and "another computer" in why4, "a lock held on another computer is not taken over")
+    (out / sp.LOCK_NAME).unlink()
+    # -- the window: a --steps compare --window run does not apply the window; the plan keeps the built one
+    cams = {c: {"first": "2026-09-30", "last": "2026-10-01", "hours": (0.0, 24.0), "hours_text": "0-24",
+                "table_first": "2026-09-26", "table_last": "2026-10-02", "table_hours_text": "0-24"}
+            for c in ("c1", "c2")}
+    plan = {"date": "2026-09-29", "era": "live", "out": out, "first": "2026-09-30", "last": "2026-10-01",
+            "cams": cams, "surveys": []}
+    sp.write_stamp(out, "archive_rows", {"src": "/station/contour_points_timex.csv",
+                                        "cams": {c: ["2026-09-26", "2026-10-02", [0.0, 24.0], "CACO05"]
+                                                 for c in ("c1", "c2")}})
+    st = {"not_applied": []}
+    a2 = cfg_args(**dict(vars(a), window=["2026-09-30", "2026-10-01"]))
+    quiet(sp.keep_built_window, plan, a2, ["compare"], st)
+    check(plan["first"] == "2026-09-26" and plan["last"] == "2026-10-02" and cams["c1"]["first"] == "2026-09-26"
+          and a2.window is None and st["not_applied"] and "NOT applied" in st["not_applied"][0],
+          "--steps compare --window: NOT applied; the plan, README and rebuild line keep the built window")
+    plan2 = dict(plan, first="2026-09-30", last="2026-10-01",
+                 cams={c: dict(v, first="2026-09-30", last="2026-10-01") for c, v in cams.items()})
+    st2 = {"not_applied": []}
+    quiet(sp.keep_built_window, plan2, a2, list(sp.STEPS), st2)
+    check(plan2["first"] == "2026-09-30" and not st2["not_applied"], "... a run of every step applies it")
+    # -- the inputs of the build: a --live-contours whose step failed is not the build's
+    b = sp.built_args(cfg_args(**dict(vars(a), live_contours="/nonexistent.csv")), plan)
+    na = sp.inputs_not_applied(plan, cfg_args(**dict(vars(a), live_contours="/nonexistent.csv")))
+    check(b.live_contours == "/station/contour_points_timex.csv" and na and "/nonexistent.csv" in na[0],
+          "a failed --live-contours: the rebuild line names the file the outputs came from, and says it")
+    # -- why a photo map is missing: the maps step's own record
+    (out / "maps").mkdir()
+    (out / "maps" / sp.MAP_STATUS).write_text('{"c2": {"drawn": false, "kind": "script failed", "why": '
+                                              '"daily_elevation_map.py FAILED (exit 1; see logs/map_c2.log); the photos '
+                                              'were found (70 in waterlines/c2/src)"}}')
+    check("FAILED (exit 1" in sp.map_missing_reason(plan, {}, "c2")
+          and "photo roots" in sp.map_missing_reason(plan, {}, "c1"),
+          "a missing photo map says why: the script failed (with its log), or no photo was found")
+    # -- the still-water reference: +0.02 - s x (setup - its mean), not 'LOW by the share'
+    wv = {"still_water_reference": {"quantified": True, "share": 0.4, "k": 0.0148, "typical_x": 7.0,
+                                    "typical_m": 0.1036, "how": "2026-07-09 .. 2026-10-06"},
+          "setup_in_window": {"daytime_median_m": 0.28}}
+    t = sp.still_water_caveat(0.037, wv, "adcp")
+    check("+0.02 m - s x (its setup - the mean setup" in t and "already in the datum chain" in t
+          and "+0.02 - (0.40 x 0.28 - 0.10) = +0.01 m" in t and "lack" not in t,
+          "still water: the mean part of the GNSS-R share is in the datum chain; this window +0.01 m")
+    pc = dict(sp.PRIOR_CHECKS[0], cameras=["c1", "c2"])
+    t = sp.prior_check_caveat({"era": "adcp"}, pc, [{"coef": 0.037}],
+                              {"waves": {"setup_in_window": {"daytime_median_m": 0.28}}})
+    check("comes on top" not in t and "holds the still-water-reference effect" in t,
+          "the earlier check's expectation already holds the still-water effect (ADCP-frame lines)")
+    # -- high waves in the window from the date's own forcing
+    fdir = out / "forcing"
+    fdir.mkdir()
+    with open(fdir / "waves.csv", "w") as f:
+        f.write("time_utc,epoch,wvht_m,dpd_s,source\n")
+        for h in range(0, 24 * 6):
+            ep = 1737158400 + h * 3600                 # 2025-01-18 00:00 UTC on
+            hs = 2.8 if 50 <= h <= 60 else 1.0          # 20 Jan 02:00-12:00
+            f.write(f"x,{ep},{hs},9,adcp\n")
+    pj = dict(plan, era="adcp", first="2025-01-18", last="2025-01-23", date="2025-01-23",
+              surveys=[{"name": "jan_lidar", "survey_type": "dsm", "survey_date": "2025-01-23"}])
+    ev = sp.wave_events(fdir, "2025-01-18", "2025-01-23")
+    cav = sp.wave_event_caveats(pj, {"frames_per_day": {"c1": {"2025-01-18": 9, "2025-01-19": 9, "2025-01-21": 9,
+                                                               "2025-01-23": 9}}}, "2025-01-18", "2025-01-23")
+    check(len(ev) == 1 and abs(ev[0]["peak"] - 2.8) < 1e-9 and len(cav) == 1 and "HIGH WAVES" in cav[0]
+          and "2025-01-18, 2025-01-19 before it" in cav[0] and "2025-01-21, 2025-01-23 after it" in cav[0]
+          and "the survey (2025-01-23) is after it" in cav[0] and "per-day rows" in cav[0],
+          "a high-wave event in the window: the frame days before and after it, the survey after it")
+    check(not sp.wave_event_caveats(dict(pj, first="2025-01-22", last="2025-01-23"), {}, "2025-01-22", "2025-01-23"),
+          "... and no caveat for a window without one")
+    # -- the summary: the reason of a C = 0 INDEPENDENT row comes from the build, wrapped at phrases
+    prov = {"setup": {"coef": 0.0, "fits": [{"coef": 0.0, "kind": "none"}]}}
+    cc = {"label": "INDEPENDENT", "label_reasons": [], "why": "RTK check shots of 29 Sep 2026 (the user first called "
+          "the date 27 Sep): not used by the calibration (GCPs of 13 Nov 2025), the search envelope or the water "
+          "level (GNSS-R). INDEPENDENT only for a build whose ..."}
+    r = sp.summary_reason(cc, prov)
+    check(r.startswith("C = 0: no setup, nothing fitted to this survey; RTK check shots of 29 Sep 2026: not used by")
+          and "INDEPENDENT only" not in r and sp.setup_short(prov) == "C = 0: no wave setup",
+          "summary: a C = 0 INDEPENDENT row says why from the build (C = 0), then the table's first sentence")
+    w = sp.wrap_phrases(r, 60, 2)
+    check(len(w) == 2 and w[-1].endswith("...") and all(len(x) <= 60 for x in w)
+          and " ".join(w).replace(" ...", "") in r.replace("\n", " "),
+          "the figure's reason: two lines, cut at a phrase boundary, never mid-word")
+    # -- paired C = 0 numbers on few frames are marked
+    wl = {"n": 16, "median": -0.127, "nmad": 0.098, "rmse": 0.19, "unit": "frames", "n_independent": 16,
+          "n_independent_unit": "frames", "method": "frames on RTK transects",
+          "without_setup": {"n": 12, "median": -0.33, "how": "re-projected",
+                            "paired": {"n": 12, "unit": "frames", "n_independent": 12, "n_independent_unit": "frames",
+                                       "without_setup_median": -0.33, "with_setup_median": -0.108,
+                                       "setup_effect_median": 0.175,
+                                       "by_camera": {"c1": {"n": 7, "n_independent": 7, "n_independent_unit": "frames",
+                                                            "without_setup_median": -0.389, "with_setup_median": -0.113},
+                                                     "c2": {"n": 5, "n_independent": 5, "n_independent_unit": "frames",
+                                                            "without_setup_median": -0.272,
+                                                            "with_setup_median": -0.102}}}}}
+    txt = "\n".join(sp.waterline_readme_lines(wl))
+    check("(n 7, too few frames)" in txt and "(n 5, too few frames)" in txt and "TOO FEW" not in txt.split("by camera c1")[0],
+          "the C = 0 sensitivity marks each camera's few frames (12 overall: an estimate)")
+    # -- synthetic inputs: a marker file in a photo root
+    root = d / "roots"
+    root.mkdir()
+    (root / sp.SYNTHETIC_MARKER).write_text("rendered test photos\n")
+    check(sp.run_synthetic(cfg_args(photo_roots=[str(root)], synthetic=None)) == "rendered test photos"
+          and sp.run_synthetic(cfg_args(photo_roots=["/nowhere"], synthetic=None)) is None,
+          "a SYNTHETIC_FIXTURE file in a photo root marks the build synthetic")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
@@ -735,6 +869,7 @@ def main():
         test_stamps(d)
         test_round2(d)
         test_fix1(d)
+        test_fix2(d)
         test_py38()
     finally:
         if not args.keep:

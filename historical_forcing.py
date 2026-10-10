@@ -78,17 +78,21 @@ HOW: WAVES, AND THE "CURRENCY" OF THE SETUP COEFFICIENT
     surf zone (gnssr_qc.py; gnssir_reflection_audit.py: reflections
     70-210 m out, the waterline 55-90 m), where breaking waves raise the
     mean level: GNSS-R already holds part of the setup and C only the
-    rest. The ADCP (21 m depth) and the Chatham harbour gauge see none, so
-    every frame here is expected LOW by the share of the setup GNSS-R
-    sees, and ~0.02 m HIGH from the mean levels (GNSS-R ~0.02 m below
-    Chatham after its +0.349 m datum fix, OPUS +/-0.061 m; the ADCP datum
-    assumes Marconi = Chatham). When the 2026 record is on the computer
-    (the GNSS-R spline, archive/gauge_8447435.csv, archive/waves_marconi
-    .csv; --gnssr-spline/--gauge-archive/--waves-archive) the report
-    measures that share: (GNSS-R - its Chatham transfer) regressed on
-    sqrt(Hs*L0), slope / C, in metres for typical waves (the wave-
-    independent part sits in the transfer's offset and is not seen).
-    Otherwise it says it was not measured. A --setup-coef other than
+    rest. The ADCP (21 m depth) and the Chatham harbour gauge see none.
+    The MEAN part of that share is already in the datum chain: GNSS-R
+    sits ~0.02 m below Chatham after its +0.349 m datum fix (OPUS
+    +/-0.061 m), a comparison of mean levels that holds the GNSS-R's mean
+    setup share, and the ADCP datum assumes Marconi = Chatham. So every
+    frame here is expected at about +0.02 m - share x (its setup - the
+    mean setup of that comparison period): ~0.02 m HIGH in average waves,
+    LOW only by the share of the setup above that average. When the 2026
+    record is on the computer (the GNSS-R spline, archive/gauge_8447435
+    .csv, archive/waves_marconi.csv; --gnssr-spline/--gauge-archive/
+    --waves-archive) the report measures that share: (GNSS-R - its
+    Chatham transfer) regressed on sqrt(Hs*L0), slope / C, a wave-
+    dependent effect (the mean part sits in the transfer's offset and the
+    datum chain, and is not seen by the regression). Otherwise it says it
+    was not measured. A --setup-coef other than
     0.037 is reported as of unknown currency and reference.
 
 MEASURED ON THE REAL RECORDS (Oct 2024 - Mar 2025 files, Oct 2026):
@@ -1110,17 +1114,21 @@ def still_water_lines(coef, swr):
          "(gnssr_qc.py; gnssir_reflection_audit.py: reflections 70-210 m from the antenna, the",
          "waterline 55-90 m seaward), where breaking waves raise the mean level: GNSS-R already",
          "contains part of the setup, and C carries only the rest. The ADCP (21 m depth) and the",
-         "Chatham harbour gauge see no setup. Expected, for every frame of this period:",
-         "  * LOW by the share of the setup the GNSS-R sees (the part C does not carry);",
-         "  * about 0.02 m HIGH from the mean levels: GNSS-R sits ~0.02 m below Chatham after its",
-         "    +0.349 m datum fix (OPUS +/-0.061 m), while the ADCP datum assumes Marconi = Chatham."]
+         "Chatham harbour gauge see no setup. The MEAN part of the GNSS-R's share is already in",
+         "the datum chain: GNSS-R sits ~0.02 m below Chatham after its +0.349 m datum fix (OPUS",
+         "+/-0.061 m), a comparison of mean levels that holds that mean share, and the ADCP datum",
+         "assumes Marconi = Chatham. Expected, for every frame of this period, against the frame C",
+         "was fitted in: about +0.02 m - share x (its setup - the mean setup of the GNSS-R/Chatham",
+         "comparison period), i.e. ~0.02 m HIGH in average waves and LOW only by the share of the",
+         "setup above that average (the wave-dependent part)."]
     if swr and swr.get("quantified"):
         L.append(f"  Measured on the GNSS-R record ({swr['how']}):")
         L.append(f"    GNSS-R - Chatham transfer = {swr['k']:+.4f} (+/- {swr['k_se']:.4f}) x sqrt(Hs*L0) "
                  f"{swr['c']:+.3f} m, n {swr['n']}, r {swr['r']:.2f}")
-        L.append(f"    -> GNSS-R sees {swr['share']:.2f} of the setup (k / C), ~{swr['typical_m']:.2f} m in "
-                 f"typical waves (median sqrt(Hs*L0) {swr['typical_x']:.1f} m); the mean part sits in the")
-        L.append("       transfer's offset and is not seen by this regression.")
+        L.append(f"    -> GNSS-R sees {swr['share']:.2f} of the setup (k / C): a wave-dependent effect,")
+        L.append(f"       k x (sqrt(Hs*L0) - its 2026 median {swr['typical_x']:.1f} m); at that median the GNSS-R")
+        L.append(f"       holds ~{swr['typical_m']:.2f} m of setup, the mean part, which sits in the transfer's offset")
+        L.append("       and the datum chain (not seen by this regression, not missing from this period's frames).")
     else:
         L.append("  Not measured here: " + ((swr or {}).get("note") or "no GNSS-R record given") + ".")
         L.append("  On the station: historical_forcing.py measures it from the GNSS-R spline,")
@@ -1653,8 +1661,9 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
     wv_df, wv_uncov = waves(t0, t1, adcp_w, sources, fits, combo, max_gap_s)
     swr = gnssr_setup_share(setup_coef, gnssr_spline, gauge_archive, waves_archive) if setup_coef else None
     if swr and swr.get("quantified"):
-        say("GNSS-R setup", f"GNSS-R sees {swr['share']:.2f} of the setup (k {swr['k']:+.4f}, n {swr['n']}): "
-            f"~{swr['typical_m']:.2f} m that this period's frames lack")
+        say("GNSS-R setup", f"GNSS-R sees {swr['share']:.2f} of the setup (k {swr['k']:+.4f}, n {swr['n']}): a "
+            f"wave-dependent effect, k x (sqrt(Hs*L0) - {swr['typical_x']:.1f} m); its mean part "
+            f"(~{swr['typical_m']:.2f} m) is in the datum chain")
     elif swr:
         say("GNSS-R setup", "share of the setup in the GNSS-R level not measured: " + swr["note"])
     cur_lines, bias = currency_note(fits, setup_coef, swr)
@@ -1673,8 +1682,9 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
                "still_water_reference": dict(
                    swr or {}, c_fitted_with="GNSS-R (surf-zone footprint: contains part of the setup)",
                    this_period="ADCP at 21 m / Chatham harbour transfer (no setup)",
-                   expected="LOW by the share of setup GNSS-R sees; ~0.02 m HIGH from the datum "
-                            "(GNSS-R ~0.02 m below Chatham, OPUS +/-0.061 m)")}
+                   expected="about +0.02 m - share x (setup - the mean setup of the GNSS-R/Chatham comparison "
+                            "period): the mean part of the share is in the datum chain (GNSS-R ~0.02 m below "
+                            "Chatham in the mean, OPUS +/-0.061 m); only the wave-dependent part shows")}
     used = set(wv_df["source"]) if len(wv_df) else set()
     notes = []
     if any("wis" in u for u in used) and fits.get("wis", {}).get("overlap_hours"):

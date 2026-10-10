@@ -191,6 +191,7 @@ NOMINAL_EPSG = 32619             # as asc_to_geotiff.py writes the DEM
 MIN_BAND_N = 10                  # fewer values than this in a group: flagged as few
 MIN_SPREAD_N = 3                 # fewer than this: no NMAD / p5 / p95 (one value has NMAD 0)
 TIME_GAP_WARN_DAYS = 3
+SYNTHETIC_NOTE = "tests the pipeline, not the beach"
 # Waterlines on RTK transects: compare_rtk.py's defaults.
 TRANSECT_TOLERANCE, TRANSECT_SPLIT, TRANSECT_MIN_POINTS = 2.0, 15.0, 3
 FULL_COVER = 0.999               # a DEM cell the survey covers entirely (8 x 8 sub-cells)
@@ -378,9 +379,12 @@ def read_points(path):
 
 
 def read_contours(path, first=None, last=None):
-    """Georectified waterline points -> dict of arrays; rows without ground coordinates skipped."""
+    """Georectified waterline points -> dict of arrays; rows without ground coordinates skipped.
+    'beach' is True where the elevation used INCLUDES a wave setup: a non-zero setup_correction_m
+    (a C = 0 build writes 0.0 there and a beach elevation equal to the still water: that is no
+    setup), or, in a file without that column, a beach elevation that differs from the still water."""
     E, N, Z, cam, day, frame, used_beach = [], [], [], [], [], [], []
-    ZT, U, V = [], [], []
+    ZT, U, V, HS, EP = [], [], [], [], []
     with open(path, newline="") as f:
         rd = csv.reader(f)
         head = next(rd)
@@ -389,8 +393,10 @@ def read_contours(path, first=None, last=None):
             sys.exit(f"{path}: no easting_utm19 column (run georectify.py first)")
         ie, inn = ix["easting_utm19"], ix["northing_utm19"]
         it, ib = ix.get("tide_elevation_navd88"), ix.get("beach_elevation_navd88")
+        isu = ix.get("setup_correction_m")
         ic, itime, isrc = ix.get("camera"), ix.get("capture_time_utc"), ix.get("source_file")
         iu, iv = ix.get("pixel_column"), ix.get("pixel_row")
+        ihs, iep = ix.get("offshore_hs_m"), ix.get("capture_epoch")
         for r in rd:
             if len(r) <= max(ie, inn) or not r[ie]:
                 continue
@@ -402,19 +408,88 @@ def read_contours(path, first=None, last=None):
             z = zb if zb is not None else zt
             if z is None:
                 continue
+            if zb is None:
+                with_setup = False
+            elif isu is not None:
+                su = _num(r[isu]) if isu < len(r) else None
+                with_setup = su is not None and su != 0.0
+            else:
+                with_setup = zt is None or abs(zb - zt) > 1e-6
             E.append(float(r[ie])); N.append(float(r[inn])); Z.append(z)
-            used_beach.append(zb is not None)
+            used_beach.append(with_setup)
             ZT.append(zt if zt is not None else np.nan)
             U.append(_num(r[iu]) if iu is not None and iu < len(r) else None)
             V.append(_num(r[iv]) if iv is not None and iv < len(r) else None)
+            HS.append(_num(r[ihs]) if ihs is not None and ihs < len(r) else None)
+            EP.append(_num(r[iep]) if iep is not None and iep < len(r) else None)
             cam.append(r[ic] if ic is not None else "?"); day.append(d)
             frame.append(r[isrc] if isrc is not None else d)
+    nan = lambda xs: np.array([np.nan if x is None else x for x in xs], float)  # noqa: E731
     return {"E": np.array(E), "N": np.array(N), "Z": np.array(Z), "cam": np.array(cam),
             "day": np.array(day), "frame": np.array(frame), "beach": np.array(used_beach, bool),
-            "Zt": np.array(ZT, float), "U": np.array([np.nan if u is None else u for u in U], float),
-            "V": np.array([np.nan if v is None else v for v in V], float),
+            "Zt": np.array(ZT, float), "U": nan(U), "V": nan(V), "hs": nan(HS), "epoch": nan(EP),
             # each point's index: the same point with and without the setup is paired by it
-            "row": np.arange(len(E)), "has_beach_column": ib is not None}
+            "row": np.arange(len(E)), "has_beach_column": ib is not None,
+            "has_setup_column": isu is not None}
+
+
+POINT_KEYS = ("E", "N", "Z", "cam", "day", "frame", "beach", "Zt", "U", "V", "hs", "epoch", "row")
+
+
+def subset_contours(c, m):
+    """The waterline points of mask m (a dict like read_contours')."""
+    out = dict(c)
+    for k in POINT_KEYS:
+        if k in c:
+            out[k] = c[k][m]
+    return out
+
+
+def dem_frame_selection(cont, info):
+    """
+    Which waterline points belong to frames the DEM gridded, from the DEM's own STEM_info.json
+    (dem_from_contours.py): its wave filter (a frame with offshore Hs > max_hs is left out; one
+    with no wave record is kept, as there) and the camera-days its day-consistency check rejected
+    (local days, as it counts them). Its date window is applied when the lines are read.
+    -> (mask over the points or None, {reason: [frames left out]}, note).
+    """
+    if not info:
+        return None, {}, ("the DEM's info file (STEM_info.json) was not found: every frame in the window is "
+                          "compared, including any the DEM left out")
+    filt = info.get("filters") or {}
+    keep = np.ones(len(cont["E"]), bool)
+    why = {}
+    mx = filt.get("max_hs")
+    if mx is not None:
+        rough = np.isfinite(cont["hs"]) & (cont["hs"] > float(mx))
+        if rough.any():
+            why[f"offshore Hs > {float(mx):g} m"] = sorted(set(cont["frame"][rough].tolist()))
+        keep &= ~rough
+    rej = set(filt.get("camera_days_rejected") or [])
+    if rej:
+        from dem_from_contours import local_day
+        key_of = {}
+        for f_, c_, e_ in zip(cont["frame"].tolist(), cont["cam"].tolist(), cont["epoch"].tolist()):
+            if f_ not in key_of:
+                key_of[f_] = f"{c_} {local_day(e_)}" if np.isfinite(e_) else None
+        bad = np.array([key_of[f_] in rej for f_ in cont["frame"].tolist()], bool) & keep
+        if bad.any():
+            why[f"camera-days off the rest by > {filt.get('max_day_offset')} m"] = \
+                sorted(set(cont["frame"][bad].tolist()))
+        keep &= ~bad
+    notes = []
+    other = int(filt.get("excluded_frames") or 0) + int(filt.get("frames_rejected") or 0)
+    if other:
+        notes.append(f"the DEM also left out {other} frame(s) by name or by a frame-offset test: not "
+                     f"reproduced here, so they are still compared")
+    kept = {}
+    for f_, c_ in set(zip(cont["frame"][keep].tolist(), cont["cam"][keep].tolist())):
+        kept[c_] = kept.get(c_, 0) + 1
+    dem_n = {k: int(v) for k, v in (info.get("frames") or {}).items()}
+    if dem_n and kept != dem_n:
+        notes.append(f"frames kept here per camera {dict(sorted(kept.items()))}, the DEM's own count "
+                     f"{dict(sorted(dem_n.items()))}: not the same set")
+    return keep, why, "; ".join(notes)
 
 
 def without_setup(cont, cams):
@@ -444,7 +519,7 @@ def without_setup(cont, cams):
         moved += int(ok.sum())
     c0["E"], c0["N"] = E, N
     good = np.isfinite(E) & np.isfinite(N) & np.isfinite(c0["Z"])
-    for k in ("E", "N", "Z", "cam", "day", "frame", "beach", "Zt", "U", "V", "row"):
+    for k in POINT_KEYS:
         if k in c0:
             c0[k] = c0[k][good]
     if moved and not kept:
@@ -1356,12 +1431,14 @@ def draw_figure(path, ctx):
         ax.set_xlabel("Easting (m, UTM 19N)")
         ax.set_ylabel("Northing (m, UTM 19N)")
         ax.ticklabel_format(useOffset=False, style="plain")
-        ax.xaxis.set_major_locator(MaxNLocator(3))
         ax.set_title(ctx["map_title"], loc="left", fontsize=10.5, color=INK)
         # colour bars beside the map: the difference on top, the DEM elevation (points) below
         two = ctx["survey_type"] == "points"
         ax.apply_aspect()
         pos = ax.get_position()                  # the map's real box (equal aspect)
+        # easting labels (6 digits) need ~0.75 in each: a narrow map (the live beach, a long N-S
+        # strip) gets 2 of them, else 3, so they never run into each other
+        ax.xaxis.set_major_locator(MaxNLocator(2 if pos.width * W < 2.4 else 3))
         # the legend under the map at a fixed distance, clear of the axis label
         fig.legend(handles=handles, loc="upper left", fontsize=8.5, frameon=False,
                    bbox_to_anchor=(pos.x0 - 0.01, pos.y0 - 0.055), borderaxespad=0.0)
@@ -1465,10 +1542,12 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             survey_date=None, photo_dates=None, contours=None, camera_eo=None, camera_io=None,
             spread=None, count=None, envelope_source=None, min_cover=0.5, tolerance=1.0,
             epsg=NOMINAL_EPSG, plot=True, transect_tolerance=TRANSECT_TOLERANCE,
-            transect_split=TRANSECT_SPLIT, transect_min_points=TRANSECT_MIN_POINTS, eo_dirs=None):
+            transect_split=TRANSECT_SPLIT, transect_min_points=TRANSECT_MIN_POINTS, eo_dirs=None,
+            synthetic=None):
     """
     Compares a DEM with a survey and writes the outputs. camera_eo / camera_io: {cam: path};
-    eo_dirs: folders where the files an EO's notes name (a carried correction's fit) are looked for.
+    eo_dirs: folders where the files an EO's notes name (a carried correction's fit) are looked for;
+    synthetic: a note when the DEM was built from SYNTHETIC test photos (printed on every output).
     Returns the headline (also written as NAME_comparison.json).
     """
     t0 = time.time()
@@ -1496,17 +1575,18 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                 print(f"DEM {key:14s}: {p}")
             else:
                 print(f"NOTE: {p} is not on the DEM's grid: not used")
-    if not photo_dates:
-        info_p = Path(stem + "_info.json")
-        if info_p.exists():
-            try:
-                info = json.loads(info_p.read_text())
-                if info.get("first_date") and info.get("last_date"):
-                    photo_dates = (info["first_date"], info["last_date"])
-                    print(f"photo dates       : {photo_dates[0]} to {photo_dates[1]} "
-                          f"(from {info_p.name})")
-            except (OSError, ValueError):
-                pass
+    # the DEM's own record of what it gridded (dem_from_contours.py): its days, and the frames its
+    # wave and day filters left out, so the waterline statistics describe the same frames
+    dem_info = None
+    info_p = Path(stem + "_info.json")
+    if info_p.exists():
+        try:
+            dem_info = json.loads(info_p.read_text())
+        except (OSError, ValueError):
+            dem_info = None
+    if not photo_dates and dem_info and dem_info.get("first_date") and dem_info.get("last_date"):
+        photo_dates = (dem_info["first_date"], dem_info["last_date"])
+        print(f"photo dates       : {photo_dates[0]} to {photo_dates[1]} (from {info_p.name})")
 
     cams = load_cameras(camera_eo or {}, camera_io or {}) if camera_eo else {}
     for cam, c in sorted(cams.items()):
@@ -1519,11 +1599,23 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         camera_xy, camera_source = TOWER_EN, "live tower position"
 
     cont = None
+    cont_out, out_why, sel_note = None, {}, ""
     if contours:
         print(f"waterlines        : reading {contours} ...")
         cont = read_contours(contours, *(photo_dates or (None, None)))
         print(f"waterlines        : {len(cont['E'])} georectified points"
               + (f" {photo_dates[0]} to {photo_dates[1]}" if photo_dates else ""))
+        # the statistics are those of the frames the DEM gridded; the frames it left out (high waves,
+        # rejected camera-days: the largest setups, where C and the still water err most) are
+        # reported apart, so the lines and the DEM are judged on the same frames
+        sel, out_why, sel_note = dem_frame_selection(cont, dem_info)
+        if sel is not None and not sel.all():
+            cont_out = subset_contours(cont, ~sel)
+            cont = subset_contours(cont, sel)
+            print(f"waterlines        : {len(set(cont_out['frame'].tolist()))} frame(s) the DEM left out are "
+                  f"compared apart (" + "; ".join(f"{k}: {len(v)}" for k, v in out_why.items()) + ")")
+        if sel_note:
+            print(f"NOTE: {sel_note}")
     cell_cam = cell_majority_camera(cont, xll, ytop, cell, nrows, ncols) \
         if (cont is not None and len(cont["E"]) and not cams) else None
 
@@ -1550,6 +1642,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
 
     lines = [f"SURVEY COMPARISON: {name}", "=" * (19 + len(name)),
              f"LABEL      : {label}", f"WHY        : {why}"]
+    if synthetic:
+        lines[2:2] = [f"SYNTHETIC FIXTURE: {SYNTHETIC_NOTE} ({synthetic})"]
     if worst != label:
         lines += warn_lines
     else:
@@ -1571,7 +1665,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             "dem": str(dem_path), "survey_date": survey_date,
             "photo_dates": list(photo_dates) if photo_dates else None,
             "days_outside_photo_window": outside, "days_from_photo_window_middle": from_mid,
-            "time_gap": gap_text, "sign": "DEM - survey (positive = DEM too high)"}
+            "time_gap": gap_text, "sign": "DEM - survey (positive = DEM too high)",
+            "synthetic": synthetic or None}
 
     if not np.isfinite(dem).any():
         sys.exit(f"{dem_path}: no cell has a value -- nothing to compare")
@@ -1812,7 +1907,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     else:
         hl = f"no {what} to compare -- the DEM and the survey do not overlap"
         print(f"HEADLINE          : {hl}")
-    lines[4:4] = ["", f"HEADLINE   : DEM - survey {hl}",
+    k_hl = 5 if synthetic else 4
+    lines[k_hl:k_hl] = ["", f"HEADLINE   : DEM - survey {hl}",
                   "             positive = DEM too HIGH; NMAD = 1.4826 x median |d - median| "
                   "(robust sd)", ""]
     table(lines, "OVERALL", [r for r in rows if r["group_type"] == "overall"], what)
@@ -1884,18 +1980,23 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         R = lines_vs_survey(cont)
         dw, okw, wl_cont, unit, how_w, method = R["d"], R["used"], R["per"], R["unit"], R["how"], R["method"]
         per = wl_cont
+        # setup-corrected = the elevation includes a NON-ZERO setup (read_contours): a C = 0 build
+        # writes setup_correction_m 0.0 and a beach elevation equal to the still water
         nb, nt = int((cont["beach"] & okw).sum()), int((~cont["beach"] & okw).sum())
         if nb and not nt:
             setup_mode = "setup-corrected"
             col = "beach_elevation_navd88 (still water + wave setup)"
         elif nt and not nb:
-            setup_mode = "NO setup correction"
-            col = ("tide_elevation_navd88 (still water only: no setup correction, so lines marked "
-                   "by the swash read LOW by about the setup)")
+            setup_mode = ("NO setup correction (C = 0)" if cont.get("has_setup_column") else
+                          "NO setup correction")
+            col = (("the still-water level only: setup_correction_m is 0 (or blank) on every row, C = 0"
+                    if cont.get("has_setup_column") else "tide_elevation_navd88 (still water only")
+                   + ": no setup correction, so lines marked by the swash read LOW by about the setup"
+                   + ("" if cont.get("has_setup_column") else ")"))
         else:
             setup_mode = "setup on some rows only"
-            col = (f"beach_elevation_navd88 for {nb} points, tide_elevation_navd88 (no setup) for "
-                   f"{nt}")
+            col = (f"still water + a non-zero wave setup for {nb} points, the still water only (no setup) "
+                   f"for {nt}")
         wl_rows = waterline_rows(wl_cont, dw, R["zref"], R["spt"])
         # where on the beach the check is: the elevations of the line points compared, against
         # those of every line point in the window (an RTK that starts at +1.2 m checks the upper
@@ -1953,6 +2054,58 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                                                                       "survey_points") if k in r} for r in bands_w]}
         if sp_col and all_r:
             head["waterlines"]["survey_points"] = all_r[0]["survey_points"]
+        # the frames: those the DEM gridded (the statistics above), those it left out (apart), and all
+        if dem_info is not None:
+            fs = {"dem_frames": int(len(set(cont["frame"].tolist()))),
+                  "left_out_frames": int(len(set(cont_out["frame"].tolist()))) if cont_out is not None else 0,
+                  "left_out_why": {k: len(v) for k, v in out_why.items()}, "note": sel_note or None}
+            why_txt = "; ".join(f"{v} with {k}" for k, v in fs["left_out_why"].items())
+            lines.append(f"  FRAMES: the statistics above are on the {fs['dem_frames']} frames the DEM gridded "
+                         f"(its own filters, from {info_p.name})"
+                         + (f"; it left out {fs['left_out_frames']} frame(s) ({why_txt}), compared apart below"
+                            if fs["left_out_frames"] else "; it left out none of the window's frames")
+                         + (f". NOTE: {sel_note}" if sel_note else ""))
+            if cont_out is not None and len(cont_out["E"]):
+                Rx = lines_vs_survey(cont_out)
+                dx = np.asarray(Rx["d"], float)
+                okx = np.isfinite(dx)
+
+                def frame_stats(dv, frames_, spts):
+                    st_ = stats(dv)
+                    st_["frames"] = int(len(set(np.asarray(frames_).tolist())))
+                    if spts is not None:
+                        st_["survey_points"] = int(len(set(np.asarray(spts)[np.asarray(spts) >= 0].tolist())))
+                    k_, u_ = independent_n(st_, unit)
+                    st_.update(n_independent=int(k_), n_independent_unit=u_)
+                    return st_
+                okw_v = np.isfinite(dw)
+                fr_w = np.asarray(R["per"]["frame"])[okw_v]
+                fr_x = np.asarray(Rx["per"]["frame"])[okx]
+                sp_w = np.asarray(R["spt"])[okw_v] if R["spt"] is not None else None
+                sp_x = np.asarray(Rx["spt"])[okx] if Rx["spt"] is not None else None
+                if okx.any():
+                    sx = frame_stats(dx[okx], fr_x, sp_x)
+                    sa = frame_stats(np.concatenate([dw[okw_v], dx[okx]]), np.concatenate([fr_w, fr_x]),
+                                     None if sp_w is None else np.concatenate([sp_w, sp_x]))
+                    fs["left_out_on_survey"] = {k: sx.get(k) for k in STAT_KEYS + ("frames", "survey_points",
+                                                                                  "n_independent",
+                                                                                  "n_independent_unit")
+                                                if k in sx}
+                    fs["all_frames"] = {k: sa.get(k) for k in STAT_KEYS + ("frames", "survey_points", "n_independent",
+                                                                          "n_independent_unit") if k in sa}
+
+                    def one(st_):
+                        return (f"median {st_['median']:+.3f} m, NMAD {fv(st_['nmad'], '{:.3f}')}, n {st_['n']} "
+                                f"{unit}" + ("" if unit == "frames" else f", {st_['frames']} frames")
+                                + (f", {st_['survey_points']} survey points" if st_.get("survey_points") is not None
+                                   else "")
+                                + (f" (few: {st_['n_independent']} {st_['n_independent_unit']})"
+                                   if st_["n_independent"] < MIN_BAND_N else ""))
+                    lines.append(f"  the frames the DEM left out, on the survey: {one(sx)}")
+                    lines.append(f"  every frame of the window (the DEM's and those): {one(sa)}")
+                else:
+                    lines.append("  none of the frames the DEM left out lies on the survey")
+            head["waterlines"]["frame_set"] = fs
         if transects:
             wl_frames_csv = out / f"{name}_waterline_frames.csv"
             with open(wl_frames_csv, "w", newline="") as f:
@@ -2003,13 +2156,23 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                         "beach that was dry at flight time)" if survey_type == "dsm" else
                         f"placed at still water, the line moves more than {tolerance:g} m from the survey point")
 
+            fr_p = np.asarray(R["per"]["frame"])[i1] if len(i1) else np.array([], object)
+            sp_p = np.asarray(R["spt"])[i1] if (R["spt"] is not None and len(i1)) else None
+
             def pstats(m=None):
                 m = np.ones(len(i1), bool) if m is None else m
                 if not m.any():
                     return {"n": 0}
                 a, b = dw[i1][m], dw0[i0][m]
-                return {"n": int(m.sum()), "with_setup_median": float(np.median(a)),
-                        "without_setup_median": float(np.median(b)), "setup_effect_median": float(np.median(a - b))}
+                r_ = {"n": int(m.sum()), "with_setup_median": float(np.median(a)),
+                      "without_setup_median": float(np.median(b)), "setup_effect_median": float(np.median(a - b)),
+                      "frames": int(len(set(fr_p[m].tolist())))}
+                if sp_p is not None:
+                    r_["survey_points"] = int(len(set(sp_p[m].tolist())))
+                # what the paired statistic rests on (frames, or the distinct survey points), judged for 'too few'
+                k_, u_ = independent_n(r_, unit)
+                r_.update(n_independent=int(k_), n_independent_unit=u_)
+                return r_
             paired = pstats()
             paired["by_camera"] = {c: pstats(cam_p == c) for c in sorted(set(cam_p.tolist()))}
             paired["unit"] = what_p
@@ -2024,12 +2187,16 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                     continue
                 p_ = paired if r["group"] == "all" else paired["by_camera"].get(r["group"], {"n": 0})
                 k_, _ = independent_n(r, unit0)
+                kp_ = p_.get("n_independent", p_["n"])
                 lines.append(f"  {r['group']:>16s} {r['frames']:>6d} {r['n']:>7d} {r['median']:>+7.3f} "
                              f"{fv(r['nmad'], '{:.3f}'):>6s} | {p_['n']:>7d} "
                              f"{fv(p_.get('with_setup_median'), '{:+.3f}'):>10s} "
                              f"{fv(p_.get('without_setup_median'), '{:+.3f}'):>7s} "
                              f"{fv(p_.get('setup_effect_median'), '{:+.3f}'):>7s}"
-                             + ("  (few)" if k_ < MIN_BAND_N else ""))
+                             + (f"  (few: {k_} {independent_n(r, unit0)[1]}" if k_ < MIN_BAND_N else "")
+                             + ((", paired " if k_ < MIN_BAND_N else "  (few: paired ")
+                                + f"{kp_} {p_.get('n_independent_unit', 'values')}" if kp_ < MIN_BAND_N else "")
+                             + (")" if (k_ < MIN_BAND_N or kp_ < MIN_BAND_N) else ""))
             lines += ["  " + ln for ln in textwrap.wrap(
                 f"paired = the same {what_p} with and without the setup: 'with setup' and 'C = 0' are their "
                 f"medians, 'effect' the median of each one's difference. The left columns are all the C = 0 "
@@ -2049,7 +2216,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                       f"{fv(paired.get('with_setup_median'), '{:+.3f}')}, C = 0 "
                       f"{fv(paired.get('without_setup_median'), '{:+.3f}')} m; " + ", ".join(
                           f"{c} {fv(v.get('with_setup_median'), '{:+.3f}')} / {fv(v.get('without_setup_median'), '{:+.3f}')}"
-                          f" (n {v['n']})" for c, v in paired["by_camera"].items())
+                          f" (n {v['n']}{', few' if v.get('n_independent', v['n']) < MIN_BAND_N else ''})"
+                          for c, v in paired["by_camera"].items())
                       + f"; {len(only_w)} with the setup only, {len(only_0)} at C = 0 only")
 
     # -- write
@@ -2126,15 +2294,30 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             ws = hw.get("without_setup") or {}
             pr = ws.get("paired") or {}
             if ws.get("n") and pr.get("n"):
-                box.append(f"  C = 0 sensitivity, the same {pr['n']} {pr.get('unit', wu)} both ways:")
+                kp = pr.get("n_independent", pr["n"])
+                box.append(f"  C = 0 sensitivity, the same {pr['n']} {pr.get('unit', wu)} both ways"
+                           + (f" ({kp} {pr.get('n_independent_unit')}: TOO FEW)" if kp < MIN_BAND_N else "") + ":")
                 box.append(f"    with the setup {pr['with_setup_median']:+.3f} m, without {pr['without_setup_median']:+.3f} m"
                            + (f"; {ws['unpaired']['with_setup_only']} drop out at C = 0"
                               if (ws.get("unpaired") or {}).get("with_setup_only") else ""))
                 if len(pr.get("by_camera") or {}) > 1:
-                    box.append("    " + ", ".join(f"{k} {v['with_setup_median']:+.3f} / {v['without_setup_median']:+.3f}"
-                                                  f" (n {v['n']})" for k, v in sorted(pr["by_camera"].items()) if v.get("n")))
+                    box.append("    " + ", ".join(
+                        f"{k} {v['with_setup_median']:+.3f} / {v['without_setup_median']:+.3f} (n {v['n']}"
+                        + (f", few {v.get('n_independent_unit')}" if v.get("n_independent", v["n"]) < MIN_BAND_N else "")
+                        + ")" for k, v in sorted(pr["by_camera"].items()) if v.get("n")))
+            elif hw.get("setup", "").startswith("NO setup"):
+                box.append("  no C = 0 sensitivity: these lines carry no setup")
+            fsx = hw.get("frame_set") or {}
+            if fsx.get("left_out_frames"):
+                lo = fsx.get("left_out_on_survey") or {}
+                box.append(f"  {fsx['dem_frames']} frames the DEM gridded; {fsx['left_out_frames']} it left out ("
+                           + ", ".join(f"{v} {k}" for k, v in (fsx.get("left_out_why") or {}).items()) + ")"
+                           + (f": {lo['median']:+.3f} m on the survey (n {lo['n']})" if lo.get("n") else ""))
         box += ["", "\n".join(textwrap.wrap(gap_text, 78))]
-        ctx = dict(map_ctx, title=f"{name}: DEM − survey ({survey_type})", label=label,
+        if synthetic:
+            box[0:0] = [f"SYNTHETIC FIXTURE: {SYNTHETIC_NOTE}", ""]
+        ctx = dict(map_ctx, title=(f"SYNTHETIC FIXTURE ({SYNTHETIC_NOTE}) — " if synthetic else "")
+                   + f"{name}: DEM − survey ({survey_type})", label=label,
                    why=why, warn_lines=warn_lines, lim=lim, dem=dem, xll=xll, ytop=ytop, cell=cell,
                    survey_type=survey_type, camera_xy=camera_xy, camera_source=camera_source,
                    seam=SEAM_NORTHING if (not cams and cell_cam is None) else None,
@@ -2200,6 +2383,9 @@ def main():
                          "*_corr_EO.yaml came from); default: the EO's own folder and calibration/")
     ap.add_argument("--epsg", type=int, default=NOMINAL_EPSG,
                     help="horizontal EPSG written into the difference GeoTIFF (default 32619)")
+    ap.add_argument("--synthetic", default=None, metavar="NOTE",
+                    help="the DEM was built from SYNTHETIC test photos (e.g. the test fixture): every output "
+                         "says so ('SYNTHETIC FIXTURE: tests the pipeline, not the beach') with this note")
     ap.add_argument("--no-plot", action="store_true")
     args = ap.parse_args()
 
@@ -2218,7 +2404,7 @@ def main():
             count=args.count, envelope_source=args.envelope_source, min_cover=args.min_cover,
             tolerance=args.tolerance, epsg=args.epsg, plot=not args.no_plot,
             transect_tolerance=args.transect_tolerance, transect_split=args.transect_split,
-            transect_min_points=args.transect_min_points, eo_dirs=args.eo_dirs)
+            transect_min_points=args.transect_min_points, eo_dirs=args.eo_dirs, synthetic=args.synthetic)
     return 0
 
 

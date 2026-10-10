@@ -366,7 +366,8 @@ def test_still_water_share(out):
     lines, _ = hf.currency_note({}, coef, r)
     text = "\n".join(lines)
     check("still water: the report names GNSS-R, the surf zone and the measured share",
-          "GNSS-R" in text and "surf zone" in text and "LOW by the share" in text and "0.02 m HIGH" in text
+          "GNSS-R" in text and "surf zone" in text and "share x (its setup - the mean setup" in text
+          and "0.02 m HIGH in average waves" in text and "datum chain" in text and "lack" not in text
           and f"{r['share']:.2f}" in text)
     lines, _ = hf.currency_note({}, 0.05, None)
     check("still water: another C is of unknown origin", "not known here" in "\n".join(lines))

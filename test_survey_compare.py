@@ -190,7 +190,8 @@ def test_dsm_offset(d):
     c2 = [r for r in rows if r["quantity"] == "waterline_minus_survey" and r["group"] == "c2"][0]
     check(abs(float(c1["median"]) - 0.10) < 0.005 and abs(float(c2["median"]) + 0.30) < 0.005,
           "waterlines: c1 (setup column) +0.10, c2 (tide only) -0.30")
-    check("beach_elevation_navd88 for" in wl["elevation_used"], "mixed setup columns reported")
+    check("a non-zero wave setup for" in wl["elevation_used"] and wl["setup"] == "setup on some rows only",
+          "mixed setup columns reported")
     ws = wl.get("without_setup") or {}
     check(abs(ws["by_camera"]["c1"]["median"] + 0.30) < 0.005 and abs(wl["by_camera"]["c1"]["median"] - 0.10) < 0.005
           and "overstates" in ws["how"],
@@ -473,6 +474,68 @@ def test_no_overlap(d):
     check(h2["n"] == 0 and h2["points_outside_dem"] == 1, "point survey off the DEM: n = 0, listed")
 
 
+def test_fix2(d):
+    print("C = 0 lines are not 'setup-corrected'; the lines are judged on the DEM's own frames")
+    dem_p, dem = make_dem(d)
+    lid = make_lidar(d, water_below=1.0)
+    out = Path(d) / "out_fix2"
+    # a C = 0 build writes setup_correction_m 0.0 and a beach elevation equal to the still water
+    cp = Path(d) / "contours_c0.csv"
+    rng = np.random.default_rng(3)
+    head = ["source_file", "camera", "capture_time_utc", "capture_epoch", "tide_elevation_navd88",
+            "offshore_hs_m", "offshore_tp_s", "setup_correction_m", "beach_elevation_navd88",
+            "easting_utm19", "northing_utm19"]
+    with open(cp, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(head)
+        for k in range(30):
+            cam = "c1" if k % 2 else "c2"
+            day = 18 + k % 6
+            ep = 1737158400 + (day - 18) * 86400 + 54000 + k * 60
+            hs = 2.2 if k < 6 else 0.8                  # the first 6 frames: rough, the DEM leaves them out
+            off = 0.5 if k < 6 else -0.1                # ... and they read 0.5 m high
+            E = rng.uniform(X0 + 5, X0 + 35, 40)
+            N = rng.uniform(Y0 + 10, Y0 + 110, 40)
+            for e, n in zip(E, N):
+                z = beach(e, n) + off
+                w.writerow([f"f{k:02d}", cam, f"2025-01-{day:02d}T15:00:00+00:00", ep, f"{z:.4f}", hs, 8.0, "0.0",
+                            f"{z:.4f}", f"{e:.3f}", f"{n:.3f}"])
+    c = sc.read_contours(str(cp))
+    check(not c["beach"].any() and c["has_setup_column"],
+          "read_contours: setup_correction_m 0.0 (beach = still water) is NO setup")
+    # the DEM's own record: frames with Hs > 1.5 m left out
+    info = {"first_date": "2025-01-18", "last_date": "2025-01-23", "frames": {"c1": 12, "c2": 12},
+            "filters": {"max_hs": 1.5, "rough_frames": 6, "excluded_frames": 0, "frames_rejected": 0,
+                        "max_day_offset": 0.15, "camera_days_rejected": []}}
+    sel, why, note = sc.dem_frame_selection(c, info)
+    check(sel is not None and len(why["offshore Hs > 1.5 m"]) == 6 and note == "",
+          "dem_frame_selection: the 6 rough frames are the DEM's left-out ones; its frame count matches")
+    Path(str(dem_p).replace("_dem.asc", "_info.json")).write_text(json.dumps(info))
+    h, log = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "test", name="c0", output_dir=str(out),
+                   survey_date="2025-01-23", photo_dates=("2025-01-18", "2025-01-23"), contours=str(cp))
+    wl = h["waterlines"]
+    txt = (out / "c0_comparison.txt").read_text()
+    check(wl["setup"] == "NO setup correction (C = 0)" and "without_setup" not in wl
+          and "SENSITIVITY" not in txt and "still-water level only" in wl["elevation_used"],
+          "a C = 0 build: 'NO setup correction (C = 0)', no C = 0 sensitivity of identical sides")
+    fs = wl["frame_set"]
+    check(abs(wl["median"] + 0.1) < 0.01 and fs["dem_frames"] == 24 and fs["left_out_frames"] == 6
+          and abs(fs["left_out_on_survey"]["median"] - 0.5) < 0.01
+          and fs["all_frames"]["frames"] == 30 and "FRAMES: the statistics above are on the 24 frames" in txt,
+          "the headline is the DEM's 24 frames (-0.10); the 6 it left out (+0.50) are reported apart, and all 30")
+    # an info file that does not match the frames is said so
+    info2 = dict(info, frames={"c1": 15, "c2": 12})
+    _, _, note2 = sc.dem_frame_selection(c, info2)
+    check("not the same set" in note2, "a frame count that differs from the DEM's own is said")
+    # a camera-day the DEM's day check rejected (its local day, as dem_from_contours.py counts it)
+    info3 = dict(info, filters=dict(info["filters"], camera_days_rejected=["c1 2025-01-19"]))
+    sel3, why3, _ = sc.dem_frame_selection(c, info3)
+    k3 = [k for k in why3 if k.startswith("camera-days")]
+    check(k3 and why3[k3[0]] == ["f07", "f13", "f19", "f25"] and int((~sel3).sum()) == 10 * 40,
+          "a rejected camera-day (c1 2025-01-19 local) leaves out its 4 frames (the rough one counted once)")
+    Path(str(dem_p).replace("_dem.asc", "_info.json")).unlink()
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
@@ -499,6 +562,7 @@ def main():
         test_label_checks(d)
         test_transects(d)
         test_no_overlap(d)
+        test_fix2(d)
         test_py38()
     finally:
         if not args.keep:

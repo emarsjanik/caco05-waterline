@@ -23,7 +23,14 @@ coefficient and the DEM settings (cell, minimum frames, spread, Hs and
 day-offset limits, GeoTIFF EPSG) reported are those the outputs on disk were
 built with, never a later command line's: `--steps compare --dem-cell 1`
 warns that the option is not applied and says to rerun `--steps
-dem,maps,compare`.
+dem,maps,compare`. The same holds for the photo window and hours and the
+input files: a `--window` or `--utc-hours` is applied only by a run of every
+step from the forcing through the DEM (otherwise, e.g. `--steps compare
+--window ...`, the run keeps the window the outputs were built for and the
+README says `NOT APPLIED`), and an input file (`--live-contours`, the
+forcing files, `--photo-roots`) whose step failed or did not run is reported
+the same way; the "rebuild everything" line always names the window, hours
+and files the outputs on disk came from (their build stamps).
 
 Status and exit code: `complete`, exit 0; `partial`, exit 1: a step (a
 comparison included) failed; `partial`, exit 3: a camera contributed nothing,
@@ -31,9 +38,20 @@ a part is missing (a camera's pointing check or its waterline map on the
 photos: no photo of the window found, e.g. a wrong `--photo-roots`; or a
 survey whose file `surveys.csv` names was not found, e.g. a misnamed lidar or a
 wrong `--survey-dirs`, or has no current comparison), or the outputs on disk
-are not one build; a disabled date exits 2. A row with no survey file yet
+are not one build; a disabled date exits 2; exit 4: not started, because
+another build of the same date is running. A row with no survey file yet
 (the October GCPs) is not a missing part. With `--all` the worst code is
-returned and the summary table has a status column.
+returned and the summary table has a status column. A missing waterline map
+on the photos says why: no photo of the window found (the photo roots), or
+`daily_elevation_map.py` failed (its exit code and log).
+
+One build of a date at a time: a build holds `<date>/.build.lock` (created
+atomically, with its pid, computer and command) while it runs. A second build
+of the same date, e.g. started from another SSH session or by `--all` while a
+`--date` run is going, refuses to start and says which build holds it (the
+two would share every work file and mark each other failed). A lock left by
+a build that is no longer running (killed, power cut) is taken over, and said
+so.
 
 A build first marks the product `in progress` (provenance.json, and a
 `BUILD IN PROGRESS / INTERRUPTED` banner over the previous README) and
@@ -189,14 +207,21 @@ each README states the bias):
 * **still-water reference (2025 dates).** C was fitted with each line at the
   GNSS-R water level. The GNSS-R footprint is the surf zone (`gnssr_qc.py`,
   `gnssir_reflection_audit.py`), where breaking waves raise the mean level:
-  GNSS-R already contains part of the setup, and C carries only the rest. The
+  GNSS-R contains a share s of the setup, and C carries only the rest. The
   2025 dates use the ADCP at 21 m depth (or the Chatham harbour transfer),
-  which see no setup: their lines are expected to read LOW by the share of
-  the setup the GNSS-R sees, and ~0.02 m HIGH from the mean levels (GNSS-R sits
-  ~0.02 m below Chatham; the ADCP datum assumes Marconi = Chatham). On the
-  station, `historical_forcing.py` measures that share from the 2026 record
-  (GNSS-R spline, `archive/gauge_8447435.csv`, `archive/waves_marconi.csv`)
-  and the README gives it in metres. To take the question out, fit C in the
+  which see no setup. The MEAN part of the GNSS-R's share is already in the
+  datum chain: GNSS-R sits ~0.02 m below Chatham after its +0.349 m datum fix
+  (a comparison of mean levels, which holds that mean share), and the ADCP
+  datum is tied to Chatham's mean. So a 2025 frame is expected at about
+  **+0.02 m - s x (its setup - the mean setup of the GNSS-R/Chatham comparison
+  period)**: ~0.02 m HIGH in average waves, LOW only by the share of the setup
+  above that average. On the station, `historical_forcing.py` measures s from
+  the 2026 record (GNSS-R spline, `archive/gauge_8447435.csv`,
+  `archive/waves_marconi.csv`; a wave-dependent effect) and the README gives
+  the window's expected effect in metres. For 2025-01-23 the earlier-check
+  expectation already holds this effect (that check was made on lines at the
+  same ADCP still water); the caveat explains why the lines may differ from
+  the lidar, not from that expectation. To take the question out, fit C in the
   date's own frame: build with `--setup-coef 0`, run `dem_from_contours.py
   --fit-setup` on `waterlines/contour_points_ground.csv` (repeat crossings, no
   survey), then rebuild with `--setup-coef <C> --setup-fitted-to 'none:repeat
@@ -207,6 +232,14 @@ each README states the bias):
 * frames with no wave record (no setup) are left out of the waterlines when
   C > 0 (listed in `waterlines/no_setup_frames.csv` and counted in the README):
   kept, they would read about one setup low.
+* **a build with C = 0** (`--setup-coef 0`) writes `setup_correction_m` 0.0 on
+  every row: its comparison says "NO setup correction (C = 0)" and has no C = 0
+  sensitivity (both sides would be the same lines). This is the build that
+  makes the 2026-09-29 RTK comparison INDEPENDENT.
+* **GNSS-R datum (live dates).** The live water level rests on one survey of
+  the antenna (NGS OPUS, GEOID18: +0.349 m, +/-0.061 m, mostly the geoid
+  model). It largely cancels against GEOID18 RTK shots, but every absolute
+  NAVD88 height of a live DEM shares it.
 
 Coordinates: the grids are in the frame of the calibration's GCPs, ASSUMED
 to be that of the surveys, NAD83(2011) / UTM 19N (EPSG:6348): the GCP files
@@ -232,9 +265,25 @@ range), and, when the lines carry a setup, again WITHOUT it (C = 0: each line
 at its still-water level, re-projected with the calibration as a C = 0 build
 would place it) as a sensitivity, read on the SAME frames (points) both ways:
 lines at still water move seaward and some leave the survey; those are
-counted. `--summary` gives each camera's median too (a pooled median near
-zero can hide two cameras off in opposite directions: more than 0.1 m apart
-is flagged) and the C = 0 sensitivity.
+counted. The line statistics are those of the frames the DEM gridded (its
+own wave and day filters, read from `dem/<date>_info.json`); the frames it
+left out (offshore Hs > 1.5 m: the largest setups, where C and the still
+water err most) are compared apart and counted, with the statistic of all
+frames next to them. `--summary` gives each camera's median too (a pooled
+median near zero can hide two cameras off in opposite directions: more than
+0.1 m apart is flagged), with what each rests on (frames or distinct survey
+points, 'too few' below 10), the C = 0 sensitivity (marked the same way), the
+setup coefficient of each build and, for a label the table gave, why from the
+build (e.g. "C = 0: no setup, nothing fitted to this survey"). Dates enabled
+in the configuration with no product yet are listed as such.
+
+Beach change: besides the storms measured on the station (the 25-26 Sep 2026
+storm), each README looks at the date's own forcing: a span of the window with
+offshore Hs >= 2.0 m gets a HIGH WAVES caveat naming the frame days before
+and after it, where the survey lies, and the days the DEM left out entirely
+for their waves (2025-01-23: Hs 2.9 m on 20 Jan, between the early frames and
+the lidar flight). The per-day rows of waterlines - survey show whether the
+beach moved.
 
 Pointing: each camera's sea horizon over the window is compared with where
 its calibration puts it; the constant tilt/roll is printed for every camera
@@ -247,7 +296,24 @@ standard refraction (k = 0.13): a perfectly calibrated camera reads 0.00 deg
 read +0.06-0.07 deg on a perfect camera (so the earlier "c2 ~0.4 deg off" is
 ~0.33 deg). On the synthetic test fixture the horizon is an artefact of the
 rendering (not a curved sea): the offsets a fixture build reports are not
-camera offsets.
+camera offsets. Each README says where the calibration puts the horizon: on
+the live CACO05 20251113 calibrations it falls at the top edge of the frame
+(c1: rows ~140 to 1, then off the frame), where the lens model is
+extrapolated far beyond its GCPs, and the real 2026 photos read 34-41 px
+(~0.6-0.9 deg) off. That is most likely a lens-model error at the frame
+edge, not a camera offset: with the same calibrations the RTK transects
+(~100 m from the cameras) read within 0.13-0.33 m, which the setup accounts
+for, not the metre-level DEM shifts such a tilt would cause. The README's
+DEM-shift table says what the offset WOULD do if it were the pointing.
+
+Synthetic inputs: a build from the sandbox test fixture (photos rendered from
+the lidar with the water level and setup planted) is run with `--synthetic
+<note>` (or a file named `SYNTHETIC_FIXTURE` in a photo root): its README,
+comparison pages and summary rows then say "SYNTHETIC FIXTURE: tests the
+pipeline, not the beach". The live photo maps (`waterlines/<cam>/src`) are
+linked again by each run's maps step from the photo roots of that run, so a
+photo that turns up later (a corrected `--photo-roots`, a mount back) is
+drawn without a new georectification.
 
 ## Run time on the NUC
 
