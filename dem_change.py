@@ -56,11 +56,34 @@ was real and not uniform: median -0.12 m over 354 cells. So:
     back to --lookback (7) days.
     Without --rebuild the archived DEMs are used, nearest adequate one
     first. A degenerate NEW DEM gets no change statement at all.
+  * The NEW DEM is the one this run built: the cron passes it with --b
+    (the series copy named by the window's end date). Taking the newest
+    file in the folder instead could pick a copy an earlier run left
+    there -- when the ground file's last date moves back (the GNSS-R spline
+    losing its last partial day, which the cron's guard accepts) -- built
+    from an older ground file, while the reference was rebuilt from
+    today's and then overlapped the new window by a day.
+
+A CHANGE INSIDE THE NEW WINDOW SHOWS ONLY IN PART. Each cell is the
+median of the crossings of its window. When an event -- a storm cut, a
+week of building -- falls inside the newer window, that window pools
+crossings from before and after it, so its cells sit between the old
+and the new beach, and the map shows only part of the change until the
+window has passed the event (7 days later for a 7-day window). The same
+cells' spread grows meanwhile (dem_figure.py's spread map).
+
+THE MAP. Cells compared and stable are near-white (the centre of the
+diverging scale); cells not compared -- outside either DEM, or under
+--min-count crossings in one -- are the grey of the panel; in the
+'significant only' panel a compared cell whose change is within its
+level of detection is light grey, so 'no significant change' is not
+mistaken for 'not compared'.
 
 Usage:
     python3 dem_change.py --a archive/dems/dem_2026-09-14_7d --b archive/dems/dem_2026-09-21_7d
     python3 dem_change.py --series archive/dems --days 7     (newest vs one week earlier)
-    python3 dem_change.py --series archive/dems --days 7 --rebuild contour_points_ground.csv \
+    python3 dem_change.py --series archive/dems --days 7 --b archive/dems/dem_2026-10-05_7d \
+        --rebuild contour_points_ground.csv \
         -- --cell 2 --min-points 3 --max-spread 0.5 --max-hs 2.5   (the cron's: like for like)
 
 Outputs, next to B (or in --output-dir): change_<A>_to_<B>_diff.asc
@@ -80,6 +103,8 @@ from datetime import date, timedelta
 import numpy as np
 
 SERIES_RE = re.compile(r"^dem_(\d{4}-\d{2}-\d{2})_(\d+)d_dem\.asc$")
+NOT_COMPARED = "#c9c8c3"        # panel face: cells not compared
+NOT_SIGNIFICANT = "#ebeae6"     # compared, |change| within the level of detection
 
 
 def read_grid(path):
@@ -204,11 +229,22 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
             import matplotlib
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
+            from matplotlib.colors import ListedColormap
+            from matplotlib.patches import Patch
             ext = [x0, x0 + diff.shape[1] * cell, y0, y0 + diff.shape[0] * cell]
             lim = max(0.1, float(np.nanpercentile(np.abs(d), 98)))
             fig, axes = plt.subplots(1, 2, figsize=(14, 7), dpi=110)
             for ax, grid, title in ((axes[0], diff, "all overlapping cells"),
                                     (axes[1], sig_diff, "significant change only (95% LoD)")):
+                # RdBu's centre is near-white: on a white panel a stable cell
+                # looked like a cell not compared. The panel is grey (not
+                # compared); in the significant-only panel the compared cells
+                # within their level of detection are a lighter grey.
+                ax.set_facecolor(NOT_COMPARED)
+                if grid is sig_diff:
+                    ax.imshow(np.where(both & ~sig, 1.0, np.nan), origin="lower", extent=ext,
+                              cmap=ListedColormap([NOT_SIGNIFICANT]), vmin=0, vmax=1,
+                              aspect="equal", interpolation="nearest")
                 # interpolation="nearest": one 2 m cell, one block of colour.
                 # matplotlib < 3.9 (the station's 3.3-3.7) defaults to
                 # 'antialiased', which for a strip upsampled less than 3x is a
@@ -222,11 +258,21 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
                 ax.set_xlabel("easting (m, UTM 19N)"); ax.set_ylabel("northing (m, UTM 19N)")
                 ax.ticklabel_format(useOffset=False, style="plain")
                 plt.colorbar(im, ax=ax, shrink=0.8, label="elevation change (m); blue = accretion")
+                keys = [Patch(facecolor=NOT_COMPARED, edgecolor="0.4", lw=0.5, label="not compared")]
+                if grid is sig_diff:
+                    keys.append(Patch(facecolor=NOT_SIGNIFICANT, edgecolor="0.4", lw=0.5,
+                                      label="compared, within the level of detection"))
+                # under the panel, off the cells
+                ax.legend(handles=keys, loc="upper center", bbox_to_anchor=(0.5, -0.09),
+                          fontsize=8, frameon=False)
             plt.tight_layout()
-            if ref_note:
-                import textwrap
-                fig.text(0.02, 0.0, "\n".join(textwrap.wrap(f"Reference: {ref_note}", 150)),
-                         fontsize=9, va="top", ha="left")
+            import textwrap
+            caveat = (f"A change during {name_b}'s window shows only in part: that window pools "
+                      "crossings from before and after it, so its cells sit between the old and "
+                      "the new beach until the window has passed the event.")
+            fig.text(0.02, -0.07, "\n".join(textwrap.wrap(
+                (f"Reference: {ref_note}  " if ref_note else "") + caveat, 150)),
+                fontsize=9, va="top", ha="left")
             plt.savefig(f"{out}.png", bbox_inches="tight")
             print(f"wrote {out}.png")
         except Exception as exc:
@@ -348,9 +394,10 @@ def rebuild_reference(ground, new_end, days, build_args, tmp, lookback, min_coun
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--a", help="Older DEM stem (without _dem.asc)")
-    ap.add_argument("--b", help="Newer DEM stem")
+    ap.add_argument("--b", help="Newer DEM stem. With --series: the dated series DEM this run "
+                                "built (default: the newest in the folder).")
     ap.add_argument("--series", help="Folder of dem_<date>_<N>d_* files: compare the newest "
-                                     "with the newest one at least --days earlier.")
+                                     "(or --b) with the newest one at least --days earlier.")
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--min-lod", type=float, default=0.05,
                     help="Floor on the level of detection, m (default 0.05).")
@@ -392,14 +439,27 @@ def main():
     if not found:
         print(f"No {args.days}-day DEMs in {args.series} yet."); return
     b_end, b = found[-1]
+    if args.b:
+        # the DEM this run built (the cron's), not whatever is newest in the folder
+        m = SERIES_RE.match(Path(args.b + "_dem.asc").name)
+        if not (m and int(m.group(2)) == args.days and Path(args.b + "_dem.asc").exists()):
+            sys.exit(f"--b {args.b}: not a dated {args.days}-day series DEM "
+                     f"(dem_<YYYY-MM-DD>_{args.days}d_dem.asc)")
+        b_end, b = date.fromisoformat(m.group(1)), args.b
+        newer = [s_ for d_, s_ in found if d_ > b_end]
+        found = [(d_, s_) for d_, s_ in found if d_ <= b_end]
+        if newer:
+            print(f"NOTE: {len(newer)} series DEM(s) newer than {Path(b).name} in {args.series} "
+                  f"(left by an earlier run); compared: {Path(b).name}, the one given")
     why = degenerate(b, *adequacy)
     if why:
-        print(f"Newest {args.days}-day DEM {Path(b).name} is degenerate -- {why}. No change "
-              "statement this run.")
+        print(f"{'New' if args.b else 'Newest'} {args.days}-day DEM {Path(b).name} is degenerate "
+              f"-- {why}. No change statement this run.")
         return
 
     if args.rebuild:
-        tmp = tempfile.mkdtemp(prefix="dem_change_ref_")
+        # on the data disk, beside the series, not the system temp dir
+        tmp = tempfile.mkdtemp(prefix="dem_change_ref_", dir=str(Path(args.series).resolve().parent))
         try:
             ref = rebuild_reference(args.rebuild, b_end, args.days, build_args, tmp,
                                     args.lookback, *adequacy)

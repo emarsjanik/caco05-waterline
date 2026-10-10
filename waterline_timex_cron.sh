@@ -406,7 +406,10 @@ else
                 log "waterline consistency: $(echo "$qc_out" | grep '^CONSISTENCY ' | tail -1 | cut -c13-)"
                 # e.g. rows running AGAINST the water level in a camera's columns
                 # (the detector wrong for most lines there): first line of each
-                echo "$qc_out" | grep '^WARNING' | while read -r l; do log "  $l"; done
+                # (the full output, WARNING lines included, is in the log just
+                # above; repeated here without the word, so station_status.py
+                # counts each filter warning once)
+                echo "$qc_out" | grep '^WARNING' | while read -r l; do log "  consistency filter: ${l#WARNING: }"; done
             else
                 rm -f "$CONTOURS_QC" "$CONTOURS_QC.tmp" "$CONSISTENCY_REPORT" "$CONSISTENCY_REPORT.tmp" \
                     "${CONSISTENCY_PLOT}_c1.png" "${CONSISTENCY_PLOT}_c2.png"
@@ -505,8 +508,18 @@ else
                         # day); a degenerate one (too few cells, < 0.5 m of relief) is
                         # skipped for the nearest adequate one, and a change statement
                         # always says how many cells it rests on.
+                        # The new DEM is the series copy THIS run wrote (named by
+                        # the window's end date, from its _info.json), not whatever
+                        # is newest in the folder: an earlier run's copy can be newer
+                        # when the ground file's last date moves back.
+                        win_end=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("window_end") or "")' \
+                            "${DEM_STEM}_${DEM_WINDOW_DAYS}day_info.json" 2>/dev/null)
+                        new_dem=""
+                        if [ -n "$win_end" ] && [ -f "$DEM_SERIES/dem_${win_end}_${DEM_WINDOW_DAYS}d_dem.asc" ]; then
+                            new_dem="$DEM_SERIES/dem_${win_end}_${DEM_WINDOW_DAYS}d"
+                        fi
                         python3 "$BASE/dem_change.py" --series "$DEM_SERIES" --days "$DEM_WINDOW_DAYS" \
-                            --rebuild "$GROUND" -- $hs_arg \
+                            ${new_dem:+--b "$new_dem"} --rebuild "$GROUND" -- $hs_arg \
                             --cell "$DEM_CELL" \
                             --min-points "$DEM_MIN_POINTS" \
                             --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1 \
