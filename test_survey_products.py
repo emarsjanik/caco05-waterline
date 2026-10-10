@@ -312,6 +312,17 @@ def test_round2(d):
     check("c1 ~-0.28 m (-0.46 +0.176, on 40 frames)" in c0b and "c2 ~+0.01 m (-0.15 +0.160, on 30 frames)" in c0b
           and "c1 +0.176 m (0.63 x the setup median)" in c0b,
           "... with this build's own paired effect per camera: c1 -0.46 + 0.176 ~ -0.28, c2 -0.15 + 0.160 ~ +0.01")
+    # a second survey's effect on a handful of points never replaces it (nor is used alone)
+    few_pts = {"current": True, "survey_path": "2025-01-23_points_xyz.csv", "headline": {"waterlines": {
+        "without_setup": {"paired": {"by_camera": {
+            "c1": {"n": 13, "setup_effect_median": 0.28, "n_independent": 3, "n_independent_unit": "survey points"},
+            "c2": {"n": 13, "setup_effect_median": 0.28, "n_independent": 4,
+                   "n_independent_unit": "survey points"}}}}}}}
+    eff2 = sp.build_setup_effect({"comparisons": prov_["comparisons"] + [few_pts]},
+                                 [janf.stem, "2025-01-23_points_xyz"])
+    check(eff2 == {"c1": (0.176, "40 frames"), "c2": (0.16, "30 frames")}
+          and sp.build_setup_effect({"comparisons": [few_pts]}, ["2025-01-23_points_xyz"]) == {},
+          "... the effect on the most frames is used; one on 3-4 survey points is too few to use")
     check("PARTLY-CIRCULAR: its search envelope was placed with this same Jan 2025 lidar" in c0,
           "... the earlier check carries its own label: PARTLY-CIRCULAR (envelope placed with the same lidar)")
     under = [c for c in cav if c.startswith("C = 0.037 under-corrects")]

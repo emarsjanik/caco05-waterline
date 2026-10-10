@@ -3369,20 +3369,26 @@ def prior_checks(plan):
     return out
 
 
-def build_setup_effect(prov, survey_stem):
-    """This build's own paired C = 0 sensitivity on a survey: per camera, the median rise the setup gave
-    the lines once re-projected (with - without, the same frames or points), from the comparison on
-    disk. -> {camera: (effect m, what it rests on)} ({} when there is none)."""
-    out = {}
+def build_setup_effect(prov, survey_stems):
+    """This build's own paired C = 0 sensitivity: per camera, the median rise the setup gave the lines
+    once re-projected (with - without, the same frames or points), from the current comparison(s) with
+    the given survey stem(s) on disk. A camera's value rests on at least FEW_N frames or survey points
+    (else it is not used); of several surveys, the one with the most is used. -> {camera: (effect m,
+    what it rests on)} ({} when there is none)."""
+    if isinstance(survey_stems, str):
+        survey_stems = [survey_stems]
+    best = {}
     for c in (prov or {}).get("comparisons") or []:
-        if not c.get("current") or Path(c.get("survey_path") or "").stem != survey_stem:
+        if not c.get("current") or Path(c.get("survey_path") or "").stem not in survey_stems:
             continue
         pr = ((((c.get("headline") or {}).get("waterlines") or {}).get("without_setup") or {}).get("paired") or {})
         for cam, v in (pr.get("by_camera") or {}).items():
-            if v.get("setup_effect_median") is not None and v.get("n"):
-                k, what = independent_count(v)
-                out[cam] = (float(v["setup_effect_median"]), f"{k} {what}")
-    return out
+            if v.get("setup_effect_median") is None or not v.get("n"):
+                continue
+            k, what = independent_count(v)
+            if k >= FEW_N and k > best.get(cam, (None, -1))[1]:
+                best[cam] = (float(v["setup_effect_median"]), k, what)
+    return {cam: (e, f"{k} {what}") for cam, (e, k, what) in best.items()}
 
 
 def prior_check_caveat(plan, pc, fits, forcing, prov=None):
@@ -3505,9 +3511,7 @@ def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
             med = su.get("daytime_median_m") if era != "live" else None
             med = med if med is not None else su.get("median_m")
             keep = rc.get("keep_paired") or 0.7
-            own = {}
-            for s_ in plan.get("surveys") or []:
-                own.update(build_setup_effect(prov, Path(s_.get("path") or "").stem))
+            own = build_setup_effect(prov, [Path(s_.get("path") or "").stem for s_ in plan.get("surveys") or []])
             inplace = rc.get("with_setup_in_place_m")
             reproj = rc["with_setup_m"] - (inplace or 0.0)
             prior = bool(prior_checks(plan))
@@ -3518,7 +3522,7 @@ def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
                 reproj_here = ""
             elif own and era != "live":
                 reproj_here = (" Here the re-projection alone leaves the lines ~"
-                               + ", ".join(f"{c} {med - e:.2f} m" for c, (e, _) in sorted(own.items()))
+                               + ", ".join(f"{c} {med - e:.2f} m (on {what})" for c, (e, what) in sorted(own.items()))
                                + f" low (the setup median {med:.2f} m less this build's own paired rise per camera, "
                                  f"compare/*_comparison.txt), plus whatever C mismatch this date has")
             elif era == "live":
