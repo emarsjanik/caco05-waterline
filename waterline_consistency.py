@@ -152,10 +152,14 @@ HOW, per camera:
      or one does and the other cannot say (too few lines there: the
      lines of its own tide judge instead). A line LANDWARD of the beach
      before it is not dropped on the past alone: with nothing after it to
-     judge (the last tide of the record) it is kept until there is -- a
-     storm cuts a beach in hours, it builds back over days, and the errors
-     seen here lie seaward. A line on the wrong feature contradicts the
-     lines before and after it alike.
+     judge (the last tide of the record, or later lines that never reach
+     its level in those columns) it is kept until there is -- a storm cuts
+     a beach in hours, it builds back over days, and the errors seen here
+     lie seaward. A line on the wrong feature contradicts the lines before
+     and after it alike. KNOWN LIMIT: a landward glitch after a cut, in
+     columns the later lines do not reach (c1's high tides below its
+     envelope floor), stays kept as 'beach change' for as long as no later
+     line reaches its level there, not only until the next run.
 
 THRESHOLDS, and why:
   --max-residual 0.75 m. The errors seen were ~1.5 m out of order (a
@@ -924,8 +928,14 @@ def time_test(t, z, y, ref, cand, sign, p):
     cut are landward of everything before it; the beach builds back seaward over
     days to weeks, and the errors seen on this station lie seaward (c1's
     envelope floor, c2's lines on the water), so a seaward failure the past
-    alone confirms still goes. A line kept this way is judged again in the
-    next run, when lines after it exist. (Review's cut in the last hours of
+    alone confirms still goes. A line kept this way is judged again only
+    when later lines reach its level in those columns: lines after it that
+    stay below its level there (c1 after a cut, whose high tides fall below
+    its envelope floor), or put it only 0.375-1.0 x their threshold out of
+    order, cannot judge it, and it stays kept however many days of them
+    follow (review, Oct 2026: two c1 landward glitches 2-3 days after a
+    0.8 m cut kept, 84-92 points each; the same leniency keeps honest
+    wave-shifted lines). (Review's cut in the last hours of
     the record, 0.8 m on 5 Oct 11:00-14:00: the version before dropped 7
     honest c1 lines whole that evening and 4 still the next day; none now.)
     Returns a mask over `cand`: True = confirmed (drop), False = excused.
@@ -1548,10 +1558,12 @@ def run(args):
         if not applied:
             msg = (f"{cam}: NOT APPLIED -- would drop {n_drop:,} of {n_cam_pts:,} points "
                    f"(> {args.max_drop_fraction:.0%}), passed through unfiltered")
+            # the first line is complete on its own: the cron logs it again by itself
             print(f"WARNING: camera {cam}: the filter would drop {100.0 * n_drop / n_cam_pts:.0f}% "
-                  f"of its points, more than --max-drop-fraction {args.max_drop_fraction:g}. That")
-            print("         is not a few bad detections; the reference itself is suspect (camera")
-            print("         moved? detector failing?). Passed through UNFILTERED -- look at the report.")
+                  f"of its points, more than --max-drop-fraction {args.max_drop_fraction:g}: passed "
+                  f"through UNFILTERED (camera moved? detector failing?).")
+            print("         That is not a few bad detections; the reference itself is suspect.")
+            print("         Look at the report.")
         print(f"  {msg}")
         summary.append(msg)
         plot_info[cam] = dict(frames=frames, fl=fl, col=col, row=row, drop=drop, whole=whole,
@@ -1653,8 +1665,6 @@ def plot_camera(cam, info, data, report, args, out_png):
     ax = fig.add_axes([0.01, 0.085, 0.62, 0.835])
     if image is not None:
         ax.imshow(image)
-    else:
-        ax.set_facecolor("0.85")
     rep = {r["source_file"]: r for r in report if r["camera"] == cam}
     listed = []
     y_top = 0.0                       # top of the drawing: the photo's top edge
@@ -1736,6 +1746,11 @@ def plot_camera(cam, info, data, report, args, out_png):
                     fontweight="bold", ha="center", va="top")
         rev_note = (f"\nred bar: columns where rows ran AGAINST the water level on {n_days} "
                     f"day(s) -- high-tide lines seaward, low-tide lines landward, or beach change")
+    if image is None:
+        # no photo: a grey ground drawn as a patch (a face colour would go with axis('off')), so the
+        # white kept lines and leaders stay visible
+        from matplotlib.patches import Rectangle
+        ax.add_patch(Rectangle((0, y_top), width, height - y_top, color="0.55", zorder=0, lw=0))
     ax.set_xlim(0, width); ax.set_ylim(height, y_top); ax.axis("off")
     status = "" if info["applied"] else "   [NOT APPLIED: would drop too much, see log]"
     ax.set_title(f"{cam.upper()}  {first} to {last}: {len(listed)} line(s) with parts dropped as out of "

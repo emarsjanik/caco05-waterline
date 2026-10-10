@@ -515,6 +515,9 @@ def pick_profiles(uc, vc, z, cell, n, stretches=()):
     if ok.sum() < 10:
         return []
     lo, hi = np.percentile(uc[ok], [1, 99])
+    # on a small patch, fewer picks: each takes the cells within one cell width of it, so picks
+    # closer than ~3 cells share most of their cells and draw near-identical lines
+    n = max(1, min(n, int((hi - lo) // (3 * cell))))
     parts = [(max(a, lo), min(b, hi)) for _, a, b in stretches if min(b, hi) - max(a, lo) > 4 * cell]
     if not parts or len(parts) > n:
         parts = [(lo, hi)]

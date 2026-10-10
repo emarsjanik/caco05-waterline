@@ -82,6 +82,7 @@ Example:
         elevation_map_c1_20260911.png --date 2026-09-11
 """
 
+import os
 import sys
 import csv
 import argparse
@@ -475,6 +476,13 @@ def main():
     parser.add_argument("--dpi", type=int, default=130)
     args = parser.parse_args()
 
+    # The map is always this run's: an earlier map left in place when this run finds no lines
+    # (exit 1 below) would look current.
+    try:
+        os.remove(args.output_png)
+    except OSError:
+        pass
+
     only = None
     if args.frames_list:
         with open(args.frames_list) as fh:
@@ -517,8 +525,12 @@ def main():
         frames = kept
 
     dates_used = sorted({d["capture"][:10] for d in frames.values()})
+    # calendar days of the span, and how many of them have lines: a 7-day window with one
+    # empty day once read '(6 days)'
+    span_days = (date_cls.fromisoformat(dates_used[-1]) - date_cls.fromisoformat(dates_used[0])).days + 1
     date_label = (dates_used[0] if len(dates_used) == 1
-                  else f"{dates_used[0]} to {dates_used[-1]}  ({len(dates_used)} days)")
+                  else f"{dates_used[0]} to {dates_used[-1]}  ({span_days} days"
+                       + (f", {len(dates_used)} with lines)" if len(dates_used) < span_days else ")"))
 
     # The backdrop comes from ONE day -- by default the most recent in
     # range, so accumulated lines are drawn over the latest view of the

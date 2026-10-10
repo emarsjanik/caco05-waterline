@@ -183,19 +183,34 @@ DEM_SERIES="$BASE/archive/dems"
 # shows the water's edge where waves run up to, above still water, so
 # without it the DEM reads low in rough water.
 #
-# C = 0.037, confirmed two independent ways on 29 Sep - 5 Oct 2026:
-#  - against the 2026-09-29 RTK transects: the waterlines lying on them sat
-#    on beach 0.33 m higher than their still-water level; per frame
-#    C = -(line - RTK)/sqrt(Hs*L0) gives median 0.037, 90% 0.028-0.058
-#    (14 frames, 4 days, +0.8 to +1.3 m only: the RTK did not go lower);
-#  - internally, repeat crossings of a cell agree best at C = 0.03-0.04
-#    (dem_from_contours.py --fit-setup on uncorrected contours).
-# That is the Stockdon (2006) setup, 0.35*beta*sqrt(H0*L0), for a ~1:10
-# beach face. About +0.37 m at Hs 1 m, Tp 8 s. Refit (same command, on
-# contours built with SETUP_COEF="") after a low-tide survey, or if the
-# wave source (WAVE_BUOY / USE_MARCONI_WAVES) changes. Turning it on lifts
-# every DEM by that amount, so the first week's dem_change.py map shows a
-# uniform rise, which it flags as a likely calibration shift.
+# C = 0.037, kept after a recheck in Oct 2026. What each fit on the
+# 29 Sep - 5 Oct 2026 waterlines gives:
+#  - the first fit (8 Oct), against the 2026-09-29 RTK transects: per frame
+#    C = -(line - RTK)/sqrt(Hs*L0), each line taken where it lay WITHOUT
+#    setup: median 0.037, 90% 0.028-0.058 (14 frames; every crossing,
+#    so the survey-floor bias below applies to it too);
+#  - repeat crossings of a cell, no survey: dem_from_contours.py --fit-setup
+#    on uncorrected contours agrees best at 0.03-0.04 (a flat minimum); the
+#    within-cell slope of elevation on sqrt(Hs*L0), each line re-projected
+#    at still water + setup, gives 0.043 (90% 0.026-0.053);
+#  - the RTK transects stop at their lowest shot, +1.2 to +1.7 m. A line
+#    below that can only read low on them, and one that would read high at
+#    that level lands seaward of the survey and drops out, so a fit over
+#    every crossing is biased by where the survey stops (re-projected, all
+#    crossings: 0.067). Over only lines 0.1-0.2 m or more above the lowest
+#    shots, re-projected: ~0.043-0.046 (day-block 90% ~0.02-0.055).
+# 0.037 lies inside every interval above that the survey floor does not
+# bias, and is the Stockdon et al. (2006) setup,
+# 0.35*beta_f*sqrt(H0*L0), for a ~1:10 beach face (beta_f ~0.106). The RTK
+# cannot pin C more closely: an RTK survey reaching the low-tide line, on
+# days with different waves, would. Refit (repeat crossings on contours
+# built with SETUP_COEF="") if the wave source (WAVE_BUOY /
+# USE_MARCONI_WAVES) changes. About +0.37 m at Hs 1 m, Tp 8 s; the DEM
+# moves ~0.06 m per 0.01 of C. Changing C changes every DEM, but the
+# week-to-week change rebuilds both weeks with the current setting
+# (dem_change.py --rebuild), so a new C does not show there as change.
+# survey_products.py and historical_forcing.py carry the same C (their
+# SETUP_COEF): change all three together.
 SETUP_COEF="0.037"
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
@@ -469,10 +484,10 @@ else
                 hs_arg=""
                 [ -n "$waves_arg" ] && [ -n "$DEM_MAX_HS" ] && hs_arg="--max-hs $DEM_MAX_HS"
                 [ -n "$DEM_MAX_DAY_OFFSET" ] && hs_arg="$hs_arg --max-day-offset $DEM_MAX_DAY_OFFSET"
-                # dem_from_contours.py exit: 0 built, 4 no points in the window (a
-                # short page says so), 3 grids written but NO page, 1 other
-                # failure. The old page is removed first, so the email never
-                # attaches a stale one.
+                # dem_from_contours.py exit: 0 built, 4 no points in the window or
+                # every camera-day rejected by the day test (a short page says
+                # so), 3 grids written but NO page, 1 other failure. The old page
+                # is removed first, so the email never attaches a stale one.
                 python3 "$BASE/dem_from_contours.py" "$GROUND" "$DEM_STEM" $hs_arg \
                     --cell "$DEM_CELL" \
                     --min-points "$DEM_MIN_POINTS" \
@@ -483,7 +498,7 @@ else
                 elif [ $dem_rc -eq 3 ]; then
                     log "WARNING: DEM grids written but its page was NOT drawn -- no $(basename "$DEM_STEM")_dem.png this run (see above)"
                 elif [ $dem_rc -eq 4 ]; then
-                    log "WARNING: DEM not built: no waterline points (its page says so; see above)"
+                    log "WARNING: DEM not built: no waterline points left (none in the window, or the day test rejected every camera-day; its page says so; see above)"
                 else
                     log "WARNING: DEM build failed (see above)"
                 fi
@@ -525,7 +540,7 @@ else
                             --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1 \
                             || log "WARNING: beach-change map failed (see above)"
                     elif [ $win_rc -eq 4 ]; then
-                        log "WARNING: window DEM not built: no waterline points in the last ${DEM_WINDOW_DAYS} days (its page says so; see above)"
+                        log "WARNING: window DEM not built: no waterline points left in the last ${DEM_WINDOW_DAYS} days (none, or the day test rejected every camera-day; its page says so; see above)"
                     else
                         log "WARNING: window DEM build failed (see above)"
                     fi

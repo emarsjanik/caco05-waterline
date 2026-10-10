@@ -257,6 +257,9 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
                              fontsize=10)
                 ax.set_xlabel("easting (m, UTM 19N)"); ax.set_ylabel("northing (m, UTM 19N)")
                 ax.ticklabel_format(useOffset=False, style="plain")
+                # 6-digit eastings ran into each other under the narrow panels
+                from matplotlib.ticker import MaxNLocator
+                ax.xaxis.set_major_locator(MaxNLocator(3))
                 plt.colorbar(im, ax=ax, shrink=0.8, label="elevation change (m); blue = accretion")
                 keys = [Patch(facecolor=NOT_COMPARED, edgecolor="0.4", lw=0.5, label="not compared")]
                 if grid is sig_diff:
@@ -270,6 +273,11 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
             caveat = (f"A change during {name_b}'s window shows only in part: that window pools "
                       "crossings from before and after it, so its cells sit between the old and "
                       "the new beach until the window has passed the event.")
+            if n_both < min_uniform_cells:
+                # the log's NOTE, on the figure too: a few strongly coloured cells look like a result
+                caveat = (f"ONLY {n_both} CELL(S) COMPARED (fewer than {min_uniform_cells}): too few to say "
+                          "whether the change was uniform or where the beach moved; the numbers rest on "
+                          f"those {n_both} cell(s) alone. " + caveat)
             fig.text(0.02, -0.07, "\n".join(textwrap.wrap(
                 (f"Reference: {ref_note}  " if ref_note else "") + caveat, 150)),
                 fontsize=9, va="top", ha="left")
@@ -458,8 +466,19 @@ def main():
         return
 
     if args.rebuild:
-        # on the data disk, beside the series, not the system temp dir
-        tmp = tempfile.mkdtemp(prefix="dem_change_ref_", dir=str(Path(args.series).resolve().parent))
+        # on the data disk, beside the series, not the system temp dir. A run killed (SIGTERM)
+        # while rebuilding leaves its folder (~180 MB on the station): any older than a day is
+        # removed first (the cron's lock keeps two runs from sharing the folder).
+        parent = Path(args.series).resolve().parent
+        import time
+        for old in parent.glob("dem_change_ref_*"):
+            try:
+                if old.is_dir() and time.time() - old.stat().st_mtime > 86400:
+                    shutil.rmtree(str(old), ignore_errors=True)
+                    print(f"removed {old.name}, left by an interrupted run")
+            except OSError:
+                pass
+        tmp = tempfile.mkdtemp(prefix="dem_change_ref_", dir=str(parent))
         try:
             ref = rebuild_reference(args.rebuild, b_end, args.days, build_args, tmp,
                                     args.lookback, *adequacy)
