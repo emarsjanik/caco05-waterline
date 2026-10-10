@@ -190,10 +190,13 @@ DEM_SERIES="$BASE/archive/dems"
 #    setup: median 0.037, 90% 0.028-0.058 (14 frames; every crossing,
 #    so the survey-floor bias below applies to it too);
 #  - repeat crossings of a cell, no survey: dem_from_contours.py --fit-setup
-#    on uncorrected contours gives 0.024-0.026, a flat minimum (the same
-#    spread with each line re-projected at still water + setup: 0.029, 90%
-#    ~0.00-0.04); the within-cell slope of elevation on sqrt(Hs*L0), each
-#    line re-projected, gives 0.043 (90% 0.026-0.053);
+#    on lines built with C = 0 prints a near-best band (the C whose median
+#    spread is within 5 mm of its best) of +0.006 to +0.034 on the filtered
+#    lines with --max-hs 1.5 (best 0.026, a flat minimum; 0.037 spreads
+#    6 mm more) and +0.026 to +0.040 on the unfiltered rows (best 0.030);
+#    the same spread with each line re-projected at still water + setup
+#    gives 0.029 (90% ~0.00-0.04); the within-cell slope of elevation on
+#    sqrt(Hs*L0), each line re-projected, gives 0.043 (90% 0.026-0.053);
 #  - the RTK transects stop at their lowest shot, +1.2 to +1.7 m. A line
 #    below that can only read low on them, and one that would read high at
 #    that level lands seaward of the survey and drops out, so a fit over
@@ -202,17 +205,22 @@ DEM_SERIES="$BASE/archive/dems"
 #    shots, re-projected: ~0.043-0.046 (day-block 90% ~0.02-0.055).
 # (The re-projected fits, 0.029, 0.043, 0.067 and 0.043-0.046, come from a
 # scratch analysis made in Oct 2026, not from code in this repository.)
-# 0.037 lies inside every interval above that the survey floor does not
-# bias, and is the Stockdon et al. (2006) setup,
-# 0.35*beta_f*sqrt(H0*L0), for a ~1:10 beach face (beta_f ~0.106). The RTK
-# cannot pin C more closely: an RTK survey reaching the low-tide line, on
-# days with different waves, would. Refit (repeat crossings on contours
-# built with SETUP_COEF="") if the wave source (WAVE_BUOY /
-# USE_MARCONI_WAVES) changes, and read the curve --fit-setup prints: on one
-# week it is usually flat and can come out near 0 (-0.004 to +0.008 on
-# 29 Sep - 2 Oct 2026 alone; the fit says FLAT then), so adopt a C only
-# when its minimum is clear over several weeks of different waves. About +0.37 m at Hs 1 m, Tp 8 s; the DEM
-# moves ~0.06 m per 0.01 of C. Changing C changes every DEM, but the
+# 0.037 lies inside each 90% interval above that the survey floor does not
+# bias (~0.00-0.04, 0.026-0.053, ~0.02-0.055) and inside the --fit-setup
+# band of the unfiltered rows; the filtered lines' band stops just below
+# it. It is the Stockdon et al. (2006) setup, 0.35*beta_f*sqrt(H0*L0), for
+# a ~1:10 beach face (beta_f ~0.106). The RTK cannot pin C more closely:
+# an RTK survey reaching the low-tide line, on days with different waves,
+# would. Refit (repeat crossings on contours built with SETUP_COEF="") if
+# the wave source (WAVE_BUOY / USE_MARCONI_WAVES) changes, and read what
+# --fit-setup prints: it offers a C to apply only when C = 0 and the C in
+# use (this SETUP_COEF) both lie outside its near-best band and the
+# minimum is not flat. One week's curve is noisy and can sit near 0 (the
+# C = 0 lines of 29 Sep - 2 Oct 2026 alone, filtered, --max-hs 1.5: band
+# -0.020 to +0.010, best -0.004, "not distinguishable from C = 0"), so
+# adopt a C only when it holds over several weeks of different waves.
+# About +0.37 m at Hs 1 m, Tp 8 s; the DEM moves ~0.06 m per 0.01 of C.
+# Changing C changes every DEM, but the
 # week-to-week change rebuilds both weeks with the current setting
 # (dem_change.py --rebuild), so a new C does not show there as change.
 # survey_products.py and historical_forcing.py carry the same C (their

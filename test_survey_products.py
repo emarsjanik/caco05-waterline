@@ -1009,7 +1009,7 @@ def test_fix3(d):
                                 [{"coef": 0.037, "kind": "known"}])
     check(txt and "absorbed into C" in txt and "repeat crossings" in txt and "-0.21 to -0.12 m" in txt
           and "raises them by 0.18-0.27 m" in txt and "give C = 0.029-0.043" in txt and "agree best at" not in txt
-          and "outside this repository's code" in txt and "0.024-0.026" in txt
+          and "outside this repository's code" in txt and "+0.006 to +0.034" in txt and "0.024-0.026" not in txt
           and "30-51%" in txt and "cannot be ruled out" in txt and "which the RTK does not show" not in txt
           and "the 0-100 m band" in txt and "too few" in txt,
           "pointing vs lens: C = 0 lines minus the setup of the repeat-crossing C (0.029-0.043, both estimates, "
@@ -1116,35 +1116,51 @@ def test_setup_share(d):
 
 
 def test_fit_setup_flat(d):
-    print("dem_from_contours.py --fit-setup says when its minimum is flat")
+    print("dem_from_contours.py --fit-setup offers a C only when it beats C = 0 and the C in use")
     d = Path(d) / "fitflat"
     d.mkdir()
     out = {}
-    for name, phis in (("sharp", (5.0, 7.0, 9.0, 11.0, 13.0, 15.0)), ("flat", (9.9, 9.95, 10.0, 10.05, 10.1, 10.0))):
+    wide, same = (5.0, 7.0, 9.0, 11.0, 13.0, 15.0), (9.9, 9.95, 10.0, 10.05, 10.1, 10.0)
+    # (name, sqrt(Hs L0) per frame, planted C, --setup-coef-in-use, setup_correction_m carried with this C)
+    cases = (("sharp", wide, 0.04, ["--setup-coef-in-use", "0.02"], None),
+             ("in_use", wide, 0.037, ["--setup-coef-in-use", "0.037"], None),
+             ("zero", wide, 0.0, ["--setup-coef-in-use", "0.037"], None),
+             ("flat", same, 0.04, ["--setup-coef-in-use", "0.08"], None),
+             ("carried", wide, 0.04, [], 0.06))
+    for name, phis, c_true, extra, carried in cases:
         lines_ = ["source_file,camera,capture_time_utc,capture_epoch,easting_utm19,northing_utm19,"
-                  "tide_elevation_navd88,offshore_hs_m,offshore_tp_s"]
-        for k, phi in enumerate(phis):          # every frame's line at beach 1.0 m = tide + 0.04 sqrt(Hs L0)
+                  "tide_elevation_navd88,offshore_hs_m,offshore_tp_s" + (",setup_correction_m" if carried else "")]
+        for k, phi in enumerate(phis):          # every frame's line at beach 1.0 m = tide + C sqrt(Hs L0)
             t = datetime(2026, 9, 29, 12 + k, tzinfo=timezone.utc)
             hs = (phi / 8.0) ** 2 / (9.81 / (2 * np.pi))
             for i in range(40):
                 e, n = 420000.0 + 2.0 * (i % 8) + 1.0, 4638000.0 + 2.0 * (i // 8) + 1.0
                 lines_.append(f"f{k},c2,{t:%Y-%m-%dT%H:%M:%S}+00:00,{int(t.timestamp())},{e:.2f},{n:.2f},"
-                              f"{1.0 - 0.04 * phi:.4f},{hs:.4f},8.0")
+                              f"{1.0 - c_true * phi:.4f},{hs:.4f},8.0" + (f",{carried * phi:.4f}" if carried else ""))
         g = d / f"{name}.csv"
         g.write_text("\n".join(lines_) + "\n")
         r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(d / name), "--fit-setup",
-                            "--no-plot"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
-                           cwd=str(d))
+                            "--no-plot"] + extra, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           universal_newlines=True, cwd=str(d))
         out[name] = r.stdout
-    check("FLAT" not in out["sharp"] and "--setup-coef 0.04" in out["sharp"],
-          "waves that differ, planted C = 0.04: a sharp minimum at 0.04, 'To apply' given")
-    check("a FLAT minimum: this fit alone does not pin C" in out["flat"] and "To apply" not in out["flat"]
-          and "Do not apply on this window alone" in out["flat"],
+    check("FLAT" not in out["sharp"] and "--setup-coef 0.04" in out["sharp"]
+          and "Beats C = 0 and the C in use (0.02)" in out["sharp"],
+          "waves that differ, planted C = 0.04, C in use 0.02: a sharp minimum at 0.04 that beats both, 'To apply' "
+          "given")
+    check("Not distinguishable from the C in use (0.037)" in out["in_use"] and "To apply" not in out["in_use"],
+          "planted C = the C in use: within the near-best band, no other C offered")
+    check("Not distinguishable from C = 0" in out["zero"] and "To apply" not in out["zero"],
+          "planted C = 0: C = 0 within the near-best band, no C offered")
+    check("a FLAT minimum: this fit alone does not pin C" in out["flat"] and "To apply" not in out["flat"],
           "nearly the same waves in every frame: the fit says FLAT and does not offer a C to apply")
+    check("these contours carry a setup (C ~0.06)" in out["carried"]
+          and "C in use 0.06 (the contours' setup_correction_m)" in out["carried"]
+          and "--setup-coef 0.04" in out["carried"],
+          "contours that carry a setup: said so, and the C they carry is the C in use compared with")
 
 
 def test_c_change(d):
-    print("another C in the same folder replaces the product, and the docs give each C its own root")
+    print("another C in the same folder is refused without --replace, and the docs give each C its own root")
     d = Path(d) / "cchange"
     out = d / "root" / "2025-01-23"
     out.mkdir(parents=True)
@@ -1154,9 +1170,49 @@ def test_c_change(d):
     sp.write_stamp(out, "merge", {"x": 1}, extra={"setup": {
         c: {"coef": sp.SETUP_COEF, "fit": sp.fit_sig(sp.setup_fit_info(sp.SETUP_COEF))} for c in ("c1", "c2")}})
     txt = sp.setup_replace_note(plan, a0, sp.STEPS)
-    check(txt and txt.startswith(f"replacing the C = {sp.SETUP_COEF:g} product in {out}")
-          and f"--output-root {d / 'root_c0'}" in txt and "detection runs again" in txt,
-          "C = 0 over a C = 0.037 build: 'replacing the C = 0.037 product', its own root suggested, detection reruns")
+    check(txt and txt.startswith(f"the C = {sp.SETUP_COEF:g} product in {out} would be REPLACED")
+          and f"--output-root {d / 'root_c0'} for C = 0" in txt and "detection runs again" in txt
+          and "--replace" in txt,
+          "C = 0 over a C = 0.037 build: 'would be REPLACED', its own root named, detection reruns, --replace to force")
+    # the root a C belongs in: the base root for the station's C, <base>_c<C> otherwise -- also from a _c root
+    r = Path("/mnt/I2Rgus_Data/survey_products")
+    check(sp.root_for_c(r, 0) == Path(str(r) + "_c0") and sp.root_for_c(r, sp.SETUP_COEF) == r
+          and sp.root_for_c(Path(str(r) + "_c0"), sp.SETUP_COEF) == r
+          and sp.root_for_c(Path(str(r) + "_c0"), 0.05) == Path(str(r) + "_c0.05")
+          and sp.root_for_c(Path(str(r) + "_c0.034"), 0) == Path(str(r) + "_c0"),
+          "root for a C: survey_products -> _c0; survey_products_c0 + the station's C -> survey_products (never "
+          "survey_products_c0_c0.037)")
+    out_c0 = d / "root_c0" / "2026-09-29"
+    out_c0.mkdir(parents=True)
+    sp.write_stamp(out_c0, "merge", {"x": 1}, extra={"setup": {
+        c: {"coef": 0.0, "fit": sp.fit_sig(sp.setup_fit_info(0.0))} for c in ("c1", "c2")}})
+    a37 = SimpleNamespace(setup_coef=sp.SETUP_COEF, setup_fitted_to=None, output_root=str(d / "root_c0"))
+    t37 = sp.setup_replace_note(dict(plan, date="2026-09-29", era="live", out=out_c0), a37, sp.STEPS)
+    check(t37 and f"--output-root {d / 'root'} for C = {sp.SETUP_COEF:g}" in t37 and "root_c0_c" not in t37,
+          "a refresh without --setup-coef over a C = 0 root: the station-C product's root is the base root")
+    # exit codes: refused is 5 (not 2, a disabled date), and ranks after failed in --all
+    check(sp.EXIT_CODES["refused"] == 5 and sp.worst_exit(["built", "refused", "busy", "partial"]) == 5
+          and sp.worst_exit(["refused", "failed"]) == 1, "refused: exit 5; --all: failed > refused > busy > partial")
+    r_ = subprocess.run([sys.executable, str(HERE / "survey_products.py"), "--date", "2025-01-23", "--setup-coef",
+                         "0.05", "--output-root", str(d / "unk")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        universal_newlines=True, cwd=str(d))
+    check(r_.returncode == 5 and "where was this C fitted" in r_.stdout and not (d / "unk").exists(),
+          f"a C of unknown origin is refused with exit 5 (not argparse's 2), nothing written (rc {r_.returncode})")
+    # a full rebuild with another window in the same root: says it replaces, names a recheck root
+    st = d / "root_w" / "2025-01-23"
+    st.mkdir(parents=True)
+    sp.write_stamp(st, "detect_c1", {"cmd": "detect_original_view.py --start-date 2025-01-18 --end-date 2025-01-23 "
+                                            "--utc-hours 13.5-18"})
+    pw = {"date": "2025-01-23", "era": "adcp", "out": st, "first": "2025-01-20", "last": "2025-01-23",
+          "cams": {"c1": {"first": "2025-01-20", "last": "2025-01-23", "hours": (13.5, 18.0),
+                          "hours_text": "13.5-18"}}}
+    aw = SimpleNamespace(output_root=str(d / "root_w"))
+    tw = sp.window_replace_note(pw, aw, sp.STEPS)
+    check(tw and tw.startswith(f"replacing the product in {st} built for another window/hours")
+          and "c1 window 2025-01-20 .. 2025-01-23 (built: 2025-01-18 .. 2025-01-23)" in tw
+          and str(d / "root_w_recheck") in tw and sp.window_replace_note(pw, aw, ("compare",)) is None,
+          "another window, all steps: 'replacing the product ... built for another window', a recheck root named; "
+          "--steps compare keeps the built window (no note)")
     check(sp.setup_replace_note(dict(plan, era="live"), a0, sp.STEPS) and
           "detection runs again" not in sp.setup_replace_note(dict(plan, era="live"), a0, sp.STEPS),
           "... the live era has no detection to rerun")
@@ -1166,9 +1222,11 @@ def test_c_change(d):
           "the same C, or a run that does not rebuild the waterlines (--steps compare): no warning")
     # the product README's advice and the fit recipe build another C in its own root
     sw = sp.still_water_caveat(sp.SETUP_COEF, {}, "adcp")
-    check("OWN --output-root" in sw and "--setup-coef 0 --output-root <root>_c0" in sw and "usually flat" in sw
-          and "adopt a C only if its minimum is clear" in sw and "Otherwise keep the station's C" in sw,
-          "the fit-C recipe: each build in its own root; the --fit-setup curve is usually flat on one week")
+    check("OWN --output-root" in sw and "--setup-coef 0 --output-root <root>_c0" in sw and "curve is noisy" in sw
+          and "both lie outside its near-best band" in sw and "+0.006 to +0.034" in sw
+          and "-0.004 to +0.008" not in sw and "Otherwise keep the station's C" in sw,
+          "the fit-C recipe: each build in its own root; --fit-setup offers a C only outside its near-best band, "
+          "with the bands it printed")
     cav = sp.setup_caveats({"date": "2026-09-29", "out": out, "surveys": [
         {"name": "rtk", "path": "2026-09-29_Marconi_Checkshots.csv", "survey_type": "points",
          "survey_date": "2026-09-29"}]}, SimpleNamespace(survey_dirs=[str(HERE / "surveys")], setup_fitted_to=None),

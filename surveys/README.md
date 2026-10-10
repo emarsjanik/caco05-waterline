@@ -48,11 +48,15 @@ photos: no photo of the window found, e.g. a wrong `--photo-roots`; or a
 survey whose file `surveys.csv` names was not found, e.g. a misnamed lidar or a
 wrong `--survey-dirs`, or has no current comparison), or the outputs on disk
 are not one build; a disabled date exits 2; exit 4: not started, because
-another build of the same date is running. A row with no survey file yet
-(the October GCPs) is not a missing part. With `--all` the code of the
-worst date is returned, worst by severity, not by number: 1 if any date
-failed, else 4 if any was busy, else 3 if any was partial, else 0
-(disabled dates do not count); the summary table has a status column. A missing waterline map
+another build of the same date is running; exit 5: not started, refused by
+the run's own settings (a `--setup-coef` other than the one the date's
+waterlines carry, without `--replace`; a C of unknown origin, without
+`--setup-fitted-to`; `--dry-run` says when a real run would be refused). A
+row with no survey file yet (the October GCPs) is not a missing part. With
+`--all` the code of the worst date is returned, worst by severity, not by
+number: 1 if any date failed, else 5 if any was refused, else 4 if any was
+busy, else 3 if any was partial, else 0 (disabled dates do not count); the
+summary table has a status column. A missing waterline map
 on the photos says why: no photo of the window found (the photo roots), or
 `daily_elevation_map.py` failed (its exit code and log).
 
@@ -196,10 +200,11 @@ actually ran and can only make the label worse, saying why:
 * the setup coefficient is read from the waterlines the DEM was built with
   (the detection stamps, checked against the setup the rows imply), never from
   the command line of a later `--steps compare`. A `--setup-coef` other than a
-  known fit is refused unless `--setup-fitted-to` says where it came from: the
-  survey file it was fitted to (comparisons with that survey become CIRCULAR)
-  or `'none:<how>'`, e.g. `'none:repeat crossings, dem_from_contours.py
-  --fit-setup on 2025-01-18..23'`. A C of unknown origin is never INDEPENDENT.
+  known fit is refused (exit 5) unless `--setup-fitted-to` says where it
+  came from: the survey file it was fitted to (comparisons with that survey
+  become CIRCULAR) or `'none:<how>'`, e.g. `'none:repeat crossings,
+  dem_from_contours.py --fit-setup on 2025-01-18..23'`. A C of unknown origin
+  is never INDEPENDENT.
 
 The setup itself is not exact either (the station's C is not changed here;
 each README states the bias):
@@ -217,7 +222,7 @@ each README states the bias):
   frames: too few to be an estimate), and a fit with each line re-projected
   at still water + setup gave C ~0.043-0.046 (day-block 90% ~0.02-0.055);
   the within-cell slope of repeat crossings (no survey, the same analysis)
-  gave 0.043 (0.026-0.053). 0.037 lies inside each of these, so the station
+  gave 0.043 (0.026-0.053). 0.037 lies inside both 90% intervals, so the station
   keeps it; the RTK, which stops above the low-tide beach, cannot pin C more
   closely (a survey reaching the low-tide line on days with different waves
   would). Each build measures the same thing on its own frames:
@@ -254,9 +259,9 @@ each README states the bias):
   same ADCP still water); the caveat explains why the lines may differ from
   the lidar, not from that expectation. To take the question out, fit C in the
   date's own frame, each build in its OWN `--output-root` (in the default
-  root a build with another C replaces the C = 0.037 product of that date,
-  and for the 2025 dates its detection runs again, ~50 min a two-camera
-  week):
+  root a build with another C would replace the C = 0.037 product of that
+  date, so it is refused there without `--replace`; for the 2025 dates its
+  detection runs again, ~50 min a two-camera week):
   ```
   python3 survey_products.py --date 2025-01-23 --setup-coef 0 \
       --output-root /mnt/I2Rgus_Data/survey_products_c0
@@ -264,15 +269,20 @@ each README states the bias):
       /mnt/I2Rgus_Data/survey_products_c0/2025-01-23/waterlines/contour_points_ground_filtered.csv \
       /tmp/fit_2025-01-23 --fit-setup --max-hs 1.5 --no-plot
   ```
-  and read the curve it prints (median spread of repeat crossings against
-  C). On one week it is usually flat: on the 29 Sep - 5 Oct 2026 lines it
-  gave 0.024-0.026 (the same spread with each line re-projected: 0.029, 90%
-  ~0.00-0.04), and on the C = 0 lines of 29 Sep - 2 Oct alone -0.004 to
-  +0.008 ("The data do not favour a positive setup correction"). The fit
-  prints the range of C whose spread lies within 5 mm of its best and calls
-  a range 0.02 or wider a FLAT minimum. Adopt a C only if its minimum is
-  clear, with `--setup-coef <C> --setup-fitted-to
-  'none:repeat crossings, <window>' --output-root
+  and read what it prints: the median spread of repeat crossings against C,
+  the near-best band (the C whose spread lies within 5 mm of its best; 0.02
+  or wider is a FLAT minimum), and how C = 0 and the C in use (the station's
+  0.037, from `waterline_timex_cron.sh`) compare. It offers a C to apply
+  only when C = 0 and the C in use both lie outside that band and the
+  minimum is not flat; otherwise it says which of them it cannot tell from
+  its best. One week's curve is noisy: on the C = 0 lines of 29 Sep - 5 Oct
+  2026 this recipe printed a band of +0.006 to +0.034 (best 0.026, FLAT;
+  0.037 spreads 6 mm more than the best), the unfiltered rows +0.026 to
+  +0.040 ("not distinguishable from the C in use"), and 29 Sep - 2 Oct alone
+  -0.020 to +0.010 ("not distinguishable from C = 0"); the same spread with
+  each line re-projected gave 0.029 (90% ~0.00-0.04). Adopt a C only if it
+  holds over weeks of different waves, with `--setup-coef <C>
+  --setup-fitted-to 'none:repeat crossings, <window>' --output-root
   /mnt/I2Rgus_Data/survey_products_c<C>`; the lidar comparison stays
   INDEPENDENT. Otherwise keep the station's C.
 * **wave currency.** C was fitted with ADCP-currency Hs and NDBC 44008 peak
@@ -292,13 +302,15 @@ each README states the bias):
   python3 survey_products.py --summary --output-root /mnt/I2Rgus_Data/survey_products_c0
   python3 survey_products.py --summary          # the C = 0.037 builds, default root
   ```
-  Run in the default root it would REPLACE the C = 0.037 product of that
-  date (every step rebuilt, `--summary` then shows only the C = 0 build; the
-  run warns `replacing the C = 0.037 product in ...` before it starts and
-  again at the end), and for a 2025 date it re-runs the detection (~50 min a
-  two-camera week: each line is placed at the elevation its setup gives
-  it). Its numbers are biased too: every C = 0 line on the 2026 transects
-  lies below the survey's lowest shot (WHERE THE SURVEY STOPS).
+  Run in the default root it is REFUSED (exit 5: it would replace the
+  C = 0.037 product of that date, and `--summary` would then show only the
+  C = 0 build); the refusal names the root that C belongs in (the default
+  root for the station's C, `<default root>_c<C>` for any other).
+  `--replace` overwrites on purpose. For a 2025 date the build re-runs the
+  detection (~50 min a two-camera week: each line is placed at the
+  elevation its setup gives it). Its numbers are biased too: every C = 0
+  line on the 2026 transects lies below the survey's lowest shot (WHERE THE
+  SURVEY STOPS).
 * **GNSS-R datum (live dates).** The live water level rests on one survey of
   the antenna (NGS OPUS, GEOID18: +0.349 m, +/-0.061 m, mostly the geoid
   model). It largely cancels against GEOID18 RTK shots, but every absolute
@@ -389,7 +401,8 @@ beach face expects about the same). That C is taken as 0.029-0.043, the two
 re-projected estimates of the Oct 2026 recheck (a scratch analysis, not code
 in this repository): 0.029 for the spread `dem_from_contours.py
 --fit-setup` minimises, a flat minimum (90% ~0.00-0.04; `--fit-setup`
-itself, which does not re-project, gives 0.024-0.026 there), and 0.043
+itself, which does not re-project, prints a near-best band of +0.006 to
++0.034 there on the C = 0 lines), and 0.043
 (0.026-0.053) for the within-cell slope of elevation on sqrt(Hs L0). What is left
 is compared with what the full offset would do at the transects' range from
 each camera (~55 m from c1, ~110-120 m from c2, where the full offsets would
@@ -439,10 +452,12 @@ python3 survey_products.py --date 2025-01-23 --dry-run   # inputs found, labels,
 python3 survey_products.py --date 2025-01-23             # then 2025-03-06, 2026-09-29, --summary
 ```
 
-One setup coefficient per output root: a date rebuilt with another
-`--setup-coef` in the same root replaces the product built before (the run
-warns). Give a C = 0 or a refitted C its own `--output-root` (above, "a build
-with C = 0").
+One setup coefficient per output root: a run that would rebuild a date with
+another `--setup-coef` in the same root is refused (exit 5) and names the
+root that C belongs in; `--replace` overwrites on purpose. Give a C = 0 or a
+refitted C its own `--output-root` (above, "a build with C = 0"). A full
+rebuild with another `--window` or `--utc-hours` replaces the date's product
+(the run says so): build such a recheck in its own `--output-root` too.
 
 The code is tested here under the station's oldest libraries too (Python
 3.8, numpy 1.17.4, matplotlib 3.3.4, pandas 1.1.5). The waterline maps on the

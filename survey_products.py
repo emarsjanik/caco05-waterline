@@ -41,7 +41,7 @@ surveys.csv (column label_override_reason), which is printed next to
 the label. The setup coefficient is read from the waterlines the DEM was
 built from, never from the command line of a later --steps compare.
 A --setup-coef other than the known fits must say where it was fitted
-(--setup-fitted-to <survey file> or 'none:<how>'), or it is refused.
+(--setup-fitted-to <survey file> or 'none:<how>'), or it is refused (exit 5).
 
 HOW, per date (--steps, in this order; each step is skipped when its
 outputs exist, are newer than its inputs and were made with the same
@@ -107,8 +107,14 @@ the mark if even that cannot be written: the previous build's numbers are
 never presented as current. --summary re-checks every comparison against
 the stamps on disk. One build of a date at a time: a build holds
 <date>/.build.lock while it runs; a second one refuses to start (exit 4).
---all returns the code of its worst date by severity: 1 if any date failed,
-else 4 if any was busy, else 3 if any was partial, else 0.
+ONE C PER ROOT: a run that would rebuild a date's waterlines with a C other
+than the one they carry (it would overwrite that product) is refused, exit
+5, and told the root that C belongs in (the default root for the station's
+C, <default root>_c<C> for any other); --replace overwrites on purpose. A
+--setup-coef of unknown origin without --setup-fitted-to is refused, exit 5
+(a --dry-run says so). --all returns the code of its worst date by
+severity: 1 if any date failed, else 5 if any was refused, else 4 if any
+was busy, else 3 if any was partial, else 0.
 
 WHAT A LATER RUN CANNOT CHANGE. The outputs on disk keep the settings they
 were built with: the DEM settings, the setup coefficient, the photo window
@@ -116,7 +122,9 @@ and hours, and the input files. A later run that does not rebuild the steps
 using an option (e.g. --steps compare --window ..., or a --live-contours
 whose step fails) says NOT APPLIED, and the README, provenance and the
 "rebuild everything" line report what built the outputs. --window and
---utc-hours apply only to a run of every step from the forcing to the DEM.
+--utc-hours apply only to a run of every step from the forcing to the DEM;
+such a run replaces the date's product built for another window (it says
+so: build a recheck with another window in its own --output-root).
 --synthetic NOTE (or a SYNTHETIC_FIXTURE file in a photo root) marks a build
 from synthetic test inputs on every output.
 
@@ -142,7 +150,8 @@ Usage:
         --setup-fitted-to 'none:repeat crossings, dem_from_contours.py --fit-setup on 2025-01-18..23' \\
         --output-root /mnt/I2Rgus_Data/survey_products_c0.034
         (another C in its own --output-root: in the default root it would replace the C = 0.037
-         product of that date, and a 2025 date's detection runs again, ~50 min a two-camera week)
+         product of that date, so it is refused there without --replace; a 2025 date's detection
+         runs again, ~50 min a two-camera week)
     python3 survey_products.py --all
     python3 survey_products.py --summary
     (station defaults; override the inputs with --photo-roots, --survey-dirs,
@@ -211,23 +220,26 @@ SETUP_FITS = {
             "how": "fitted 8 Oct 2026 as the median of the per-frame C = -(waterline - RTK)/sqrt(Hs*L0) of the "
                    "waterlines lying on the 2026-09-29 RTK transects (14 frames, 29 Sep - 5 Oct 2026; 90% "
                    "0.028-0.058), each line taken where it lay WITHOUT setup; repeat crossings (no survey): "
-                   "dem_from_contours.py --fit-setup gives 0.024-0.026 on those lines, a flat minimum (the same "
-                   "spread with each line re-projected: 0.029, 90% ~0.00-0.04), so on one week it does not pin C "
-                   "by itself. Rechecked Oct 2026 with "
+                   "dem_from_contours.py --fit-setup on those lines built with C = 0 prints a near-best band (C "
+                   "within 5 mm of its best spread) of +0.006 to +0.034 (filtered, --max-hs 1.5; a flat minimum) "
+                   "and +0.026 to +0.040 on the unfiltered rows (the same spread with each line re-projected: "
+                   "0.029, 90% ~0.00-0.04), so on one week it does not pin C by itself. Rechecked Oct 2026 with "
                    "each line re-projected at still water + setup: the transects stop at their lowest shot "
                    "(+1.2 to +1.7 m), below which a line can only read low and above which a high-reading line "
                    "drops out, so a fit over every crossing is biased by where the survey stops (0.067 over all "
                    "crossings); over only the lines at least 0.1-0.2 m above the lowest shots the fit gives "
                    "~0.043-0.046 (day-block 90% ~0.02-0.055), and the within-cell slope of repeat crossings (no "
-                   "survey, re-projected) 0.043 (0.026-0.053). 0.037 lies inside each of these (not the biased "
-                   "all-crossings value): Stockdon et al. "
+                   "survey, re-projected) 0.043 (0.026-0.053). 0.037 lies inside each 90% interval of these "
+                   "(~0.00-0.04, 0.026-0.053, ~0.02-0.055; not the biased all-crossings value) and the unfiltered "
+                   "rows' --fit-setup band (the filtered lines' band stops just below it): Stockdon et al. "
                    "(2006) setup 0.35 x beta_f for a ~1:10 beach face (beta_f ~0.106). The RTK, which stops above "
                    "the low-tide beach, cannot pin C more closely",
             "wave_currency": "offshore_hs_m = hs_best of archive/waves_marconi.csv (ADCP wh_4061 "
                              "currency), offshore_tp_s = NDBC 44008 peak period",
             # The 29 Sep - 5 Oct 2026 frames on the RTK transects both ways (Oct 2026: survey_products.py
-            # --date 2026-09-29 --window 2026-09-29 2026-10-05 on the station's rows, then survey_compare's
-            # transect check of each frame without setup (re-projected at still water) and with it
+            # --date 2026-09-29 --window 2026-09-29 2026-10-05 --output-root <root>_recheck on the station's
+            # rows -- its own root: in the default one it would replace the 26 Sep - 2 Oct product -- then
+            # survey_compare's transect check of each frame without setup (re-projected at still water) and with it
             # re-projected): medians of waterline - RTK over the 18 frames (all lines: compare_rtk.py's
             # set), the median setup applied, and per frame (with - without) / setup ('keep_paired': the
             # share of its setup a line keeps once re-projected). These all-crossings medians are biased LOW
@@ -2740,6 +2752,11 @@ def setup_in_use(plan, args):
         "this run's --setup-coef (nothing built yet)"
 
 
+def setup_fit_known(coef):
+    """True when C is a key of SETUP_FITS (where it was fitted is known)."""
+    return any(abs(k - float(coef or 0.0)) < 1e-9 for k in SETUP_FITS)
+
+
 def replaced_setup(plan, args, steps):
     """The C(s) of the waterlines on disk when this run would rebuild them with another C in the
     same folder (e.g. '0.037'), else None."""
@@ -2752,23 +2769,52 @@ def replaced_setup(plan, args, steps):
     return " / ".join(f"{c:g}" for c in built)
 
 
+def root_for_c(root, coef):
+    """The output root a build with this C belongs in: the C = SETUP_COEF products in the base root
+    (the default /mnt/I2Rgus_Data/survey_products), any other C in <base root>_c<C> (e.g. ..._c0).
+    The base is this root without a '_c<number>' suffix, so the advice from a ..._c0 root points
+    back at the station-C root, never at ..._c0_c0.037."""
+    root = Path(root)
+    base = re.sub(r"_c\d+(\.\d+)?$", "", root.name) or root.name
+    want = round(float(coef or 0.0), 6)
+    return root.parent / (base if abs(want - SETUP_COEF) < 1e-9 else f"{base}_c{want:g}")
+
+
 def setup_replace_note(plan, args, steps):
     """A run that would build a C other than the one the waterlines on disk carry, into the SAME
-    folder: what it replaces, what reruns, and how to keep both builds. -> text or None."""
+    folder: what it would replace, what reruns, and the root that C belongs in. -> text or None.
+    Such a run is refused unless it passes --replace (build_date)."""
     old = replaced_setup(plan, args, steps)
     if old is None:
         return None
     want = round(float(args.setup_coef or 0.0), 6)
     root = Path(args.output_root)
-    alt = root.parent / (root.name + ("_c0" if not want else f"_c{want:g}"))
-    text = (f"replacing the C = {old} product in {plan['out']}: this run builds C = {want:g} into the same folder "
-            f"(waterlines, filter, DEM, maps and comparisons are rebuilt, the C = {old} ones overwritten, and "
-            f"--summary on {root} then shows only the C = {want:g} build). To keep both, build each C in its own "
-            f"root: --output-root {alt} (then --summary --output-root on each root).")
+    alt = root_for_c(root, want)
+    text = (f"the C = {old} product in {plan['out']} would be REPLACED: this run builds C = {want:g} into the same "
+            f"folder (waterlines, filter, DEM, maps and comparisons rebuilt, the C = {old} ones overwritten, and "
+            f"--summary on {root} then shows only the C = {want:g} build). Build each C in its own root: "
+            f"--output-root {alt} for C = {want:g} (then --summary --output-root on each root); give --replace "
+            f"only to replace this product on purpose.")
     if plan.get("era") != "live":
         text += (f" For this date the photo detection runs again (~{SEC_PER_PHOTO_DETECT:.0f} s a photo, ~50 min "
                  f"a two-camera week): each line is placed at the elevation its setup gives it.")
     return text
+
+
+def window_replace_note(plan, args, steps):
+    """A run that rebuilds a built date with another photo window or UTC hours, in the SAME folder:
+    what it replaces and where to build it instead. -> text or None (only when this run rebuilds from
+    the forcing through the DEM: otherwise keep_built_window keeps the built window)."""
+    if not set(WINDOW_STEPS) <= set(steps):
+        return None
+    diff = window_differences(plan, built_settings(plan))
+    if not diff:
+        return None
+    root = Path(args.output_root)
+    return (f"replacing the product in {plan['out']} built for another window/hours ({'; '.join(diff)}): this "
+            f"run rebuilds the date for its own window into the same folder, and --summary on {root} then shows "
+            f"only this build. To keep both, build it in its own --output-root, e.g. "
+            f"{root.parent / (root.name + '_recheck')}.")
 
 
 _FIT_POINTS = {}
@@ -2945,8 +2991,11 @@ def survey_compare_findings(plan, s, survey_path, label, dem, args=None):
     envs = sorted({str(c["envelope_path"]) for c in plan["cams"].values() if c.get("envelope_path")})
     try:
         cams = load_cameras(eos, {}) if eos else {}
+        # the setup fits are applied here by survey_products' own rule (setup_caveats, Verdict), with
+        # surveys.csv's label_override_reason; survey_compare.py's run applies them again on its own
         return audit_label(label, survey_path, s["survey_type"], s.get("survey_date"), cams,
-                           envs[0] if len(envs) == 1 else None, dem, dirs=eo_dirs(args) if args else ())
+                           envs[0] if len(envs) == 1 else None, dem, dirs=eo_dirs(args) if args else (),
+                           setup_fits=False)
     except SystemExit as exc:                      # its loaders exit on a missing file
         return [(None, f"survey_compare.py's checks could not run: {exc}", "note")]
 
@@ -2996,8 +3045,9 @@ def step_compare(plan, args, state):
     if fits_from.startswith("the waterlines") and used != {round(float(args.setup_coef), 6)}:
         warn(f"this run's --setup-coef {args.setup_coef} is NOT what the waterlines were built with "
              f"(C = {', '.join(str(c) for c in sorted(used))}): the label, README and provenance use the C that "
-             f"built them. To apply {args.setup_coef}, rebuild from the detection (--steps detect,filter,dem,"
-             f"maps,compare or all steps)")
+             f"built them. To apply {args.setup_coef}, build it from the detection (all steps) in its own "
+             f"--output-root ({root_for_c(args.output_root, args.setup_coef)}): in this root it would replace "
+             f"this product (refused without --replace)")
     dd = dem_settings_differ(dem_settings_built(out), dem_settings_requested(args))
     if dd:
         warn(f"this run's DEM options are NOT what the DEM on disk was built with ({dd}): the comparison, README "
@@ -3570,8 +3620,9 @@ def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
                        f"the survey covers (WHERE, under the comparison). A build with C = 0 (or a C fitted to other "
                        f"data, --setup-fitted-to) compares INDEPENDENTLY; build it in its own folder, e.g. "
                        f"survey_products.py --date {plan['date']} --setup-coef 0 --output-root "
-                       f"{plan['out'].parent.parent / (plan['out'].parent.name + '_c0')} (in this folder it would "
-                       f"replace this product), and read it with --summary --output-root on that root. An independent "
+                       f"{root_for_c(plan['out'].parent, 0.0)} (in this folder it would "
+                       f"replace this product, so it is refused there without --replace), and read it with --summary "
+                       f"--output-root on that root. An independent "
                        f"check of the whole intertidal needs another survey that fitted nothing, e.g. a calm, "
                        f"low-tide RTK across it.")
         fit = SETUP_FITS.get(C) if f.get("kind") == "known" else None
@@ -3638,8 +3689,11 @@ def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
                           f"{rc['c_internal_slope']:.3f} "
                           f"({rc['c_internal_slope90'][0]:.3f}-{rc['c_internal_slope90'][1]:.3f})"
                           if rc.get("c_internal_slope") else "")
-                       + f". C = {C} lies inside each of these; a survey reaching the low-tide line on days with "
-                         f"different waves would pin it."
+                       + (f". C = {C} lies inside each of these 90% intervals" if all(
+                           lo_ <= C <= hi_ for lo_, hi_ in ([af["c_fit_dayblock90"]] if af else [])
+                           + ([rc["c_internal_slope90"]] if rc.get("c_internal_slope90") else []))
+                          else ". Not every 90% interval here holds C = {}".format(C))
+                       + "; a survey reaching the low-tide line on days with different waves would pin it."
                        + own_floor
                        + f" A line given the setup is re-projected landward onto higher "
                          f"beach, so it keeps only part of its setup (~{keep:.2f} x on the recheck's frames; the rest depends "
@@ -3698,15 +3752,18 @@ def still_water_caveat(C, wv, era):
         text += (" (s is not measured here: " + (sw.get("note") or "the 2026 GNSS-R record is not on this computer")
                  + "; on the station historical_forcing.py measures it.)")
     text += (" To take the question out, C can be fitted in this date's own frame, each build in its OWN "
-             "--output-root (in this folder a build with another C replaces this product, and its detection runs "
-             "again, ~50 min a two-camera week): build with --setup-coef 0 --output-root <root>_c0, run "
+             "--output-root (in this folder a build with another C would replace this product, so it is refused "
+             "without --replace; its detection runs again, ~50 min a two-camera week): build with --setup-coef 0 "
+             "--output-root <root>_c0, run "
              "dem_from_contours.py <root>_c0/<date>/waterlines/contour_points_ground_filtered.csv <scratch stem> "
              "--fit-setup --max-hs 1.5 --no-plot (repeat crossings of the same cells at different wave heights: no "
-             "survey) and read the curve it prints. On one week it is usually flat (on the 29 Sep - 5 Oct 2026 lines "
-             "--fit-setup gave 0.024-0.026; on the C = 0 lines of 29 Sep - 2 Oct alone, -0.004 to +0.008, and the fit "
-             "says FLAT when the C within 5 mm of its best spread spans 0.02 or more): adopt a C only "
-             "if its minimum is clear, by building with --setup-coef <that C> --setup-fitted-to 'none:repeat "
-             "crossings, <window>' in a third root; the label stays INDEPENDENT. Otherwise keep the station's C.")
+             "survey) and read what it prints. It offers a C to apply only when C = 0 and the C in use both lie "
+             "outside its near-best band (C within 5 mm of its best spread) and the minimum is not flat. One week's "
+             "curve is noisy: on the C = 0 lines of 29 Sep - 5 Oct 2026 (filtered, --max-hs 1.5) the band was "
+             "+0.006 to +0.034 (flat), and on 29 Sep - 2 Oct alone -0.020 to +0.010 ('not distinguishable from "
+             "C = 0'). Adopt a C only if it holds over weeks of different waves, by building with --setup-coef "
+             "<that C> --setup-fitted-to 'none:repeat crossings, <window>' in a third root; the label stays "
+             "INDEPENDENT. Otherwise keep the station's C.")
     return text
 
 
@@ -3880,7 +3937,8 @@ def collect_caveats(plan, args, state, forcing, prov):
 # the Oct 2026 recheck of the filtered 29 Sep - 5 Oct 2026 lines (a scratch analysis made while
 # reviewing C, not code in this repository) gave 0.029 for the spread that
 # dem_from_contours.py --fit-setup minimises (a flat minimum, 90% ~0.00-0.04; --fit-setup itself, which
-# does not re-project, gives 0.024-0.026 there) and 0.043 (90% 0.026-0.053) for the within-cell slope
+# does not re-project, prints a near-best band of +0.006 to +0.034 there on the C = 0 lines, --max-hs 1.5)
+# and 0.043 (90% 0.026-0.053) for the within-cell slope
 # of elevation on sqrt(Hs*L0). The range is the two estimates, not an interval of either. A
 # constant pointing error moves every frame's line alike, so it does not change how well repeat
 # crossings agree: this C is blind to it, unlike the C fitted to the 2026 RTK (which absorbs any level
@@ -3890,7 +3948,8 @@ SETUP_C_INTERNAL = (0.029, 0.043)
 SETUP_C_INTERNAL_HOW = ("Oct 2026 recheck of the 29 Sep - 5 Oct 2026 lines, each re-projected, outside this "
                         "repository's code: the repeat-crossing spread that dem_from_contours.py --fit-setup "
                         "minimises, 0.029 (a flat minimum, 90% ~0.00-0.04; --fit-setup itself, not re-projecting, "
-                        "0.024-0.026), and the within-cell slope of elevation on sqrt(Hs L0), 0.043 (0.026-0.053)")
+                        "prints a near-best band of +0.006 to +0.034 on the C = 0 lines), and the within-cell slope "
+                        "of elevation on sqrt(Hs L0), 0.043 (0.026-0.053)")
 # The share of its setup a line keeps once re-projected landward at still water + setup, as measured
 # in the paired C = 0 sensitivities of the builds (Jan 2025 ~0.6, the 2026 RTK 0.71, Mar 2025 ~0.8):
 # used only where a build has no paired measurement of its own (a C = 0 build).
@@ -4974,7 +5033,14 @@ def dry_run(plan, args, steps):
             say(f"  {st}", "built before (" + d["finished_utc"] + ")" if d else "not built yet")
     rep = setup_replace_note(plan, args, steps)
     if rep:
-        warn(rep)
+        warn(rep + (" --replace given: a real run replaces it." if args.replace else
+                    " A real run would be REFUSED (exit 5) without --replace."))
+    rep_w = window_replace_note(plan, args, steps)
+    if rep_w:
+        warn(rep_w)
+    if args.setup_coef and not args.setup_fitted_to and not setup_fit_known(args.setup_coef):
+        warn(f"a real run would be REFUSED (exit 5): --setup-coef {args.setup_coef} is not a known fit; give "
+             f"--setup-fitted-to <survey file> or --setup-fitted-to 'none:<how>'")
     say("expected", f"~{max(1.0, est / 60):.0f} min ({how})")
     if overlap_note(est):
         say("  note", f"started now, {overlap_note(est)}")
@@ -5142,9 +5208,16 @@ def build_date(date, cfg, surveys, args, steps):
         warn(f"{date}: {note}")
     try:
         rep = setup_replace_note(plan, args, steps)
+        if rep and not args.replace:
+            warn(f"{date}: NOT built: {rep}")
+            return "refused"
         if rep:
-            warn(rep)
+            warn(rep + " (--replace given)")
             state["replaced_c"] = replaced_setup(plan, args, steps)
+        rep_w = window_replace_note(plan, args, steps)
+        if rep_w:
+            warn(rep_w)
+            state["replaced_window"] = rep_w
         return run_date(plan, args, steps, state)
     finally:
         release_lock(plan["out"])
@@ -5286,7 +5359,11 @@ def run_date(plan, args, steps, state):
     # what an operator must not miss, again at the end
     if state.get("replaced_c"):
         warn(f"this run REPLACED the C = {state['replaced_c']} product in {plan['out']} with a C = "
-             f"{float(args.setup_coef or 0.0):g} build (another C goes in its own --output-root)")
+             f"{float(args.setup_coef or 0.0):g} build (--replace; another C goes in its own --output-root, "
+             f"{root_for_c(args.output_root, args.setup_coef)})")
+    if state.get("replaced_window"):
+        warn(f"this run REPLACED the product built for another window/hours in {plan['out']} (a recheck with "
+             f"another window goes in its own --output-root)")
     for cam, why in failed_cameras(plan, state).items():
         warn(f"{cam} contributed NOTHING to this product: {why} (status partial)")
     ns = (prov.get("setup") or {}).get("frames_left_out_without_setup") or {}
@@ -6219,9 +6296,13 @@ def main():
     ap.add_argument("--utc-hours", default=None, help="instead of the table's, e.g. 13.5-18 or all")
     ap.add_argument("--setup-coef", type=float, default=SETUP_COEF,
                     help=f"wave-setup coefficient C (default {SETUP_COEF}, the live station's; 0 = none). A C other "
-                         f"than the one a date was built with REPLACES that build in <root>/<date>/ (and reruns a "
-                         f"2025 date's detection): give each C its own --output-root, e.g. "
-                         f"{DEFAULT_OUTPUT_ROOT}_c0")
+                         f"than the one a date was built with would REPLACE that build in <root>/<date>/ (and rerun a "
+                         f"2025 date's detection), so such a run is refused without --replace: give each C its own "
+                         f"--output-root, e.g. {DEFAULT_OUTPUT_ROOT}_c0")
+    ap.add_argument("--replace", action="store_true",
+                    help="build into a date folder whose waterlines carry another C and REPLACE that product. "
+                         "Without it such a run is refused (exit 5): another C goes in its own --output-root "
+                         f"({DEFAULT_OUTPUT_ROOT}_c<C>; the C = {SETUP_COEF} products in {DEFAULT_OUTPUT_ROOT})")
     ap.add_argument("--setup-fitted-to", default=None, metavar="SURVEY or none:HOW",
                     help="where a --setup-coef other than the known fits was fitted: the survey file it was "
                          "fitted to (comparisons with that survey become CIRCULAR), or 'none:<how>' for a C fitted "
@@ -6294,12 +6375,14 @@ def main():
             ap.error(f"--utc-hours {args.utc_hours!r}: need 0 <= first < last <= 24 (UTC)")
     if args.setup_coef < 0:
         ap.error("--setup-coef must be >= 0")
-    if args.setup_coef and not any(abs(k - args.setup_coef) < 1e-9 for k in SETUP_FITS) \
-            and not args.setup_fitted_to and not args.dry_run:
-        ap.error(f"--setup-coef {args.setup_coef}: where was this C fitted? Give --setup-fitted-to <survey file> "
-                 f"(the survey it was fitted to) or --setup-fitted-to 'none:<how>' (fitted to no survey). A C of "
-                 f"unknown origin could be fitted to the very survey it is compared with")
-    if args.setup_fitted_to and any(abs(k - args.setup_coef) < 1e-9 for k in SETUP_FITS):
+    if args.setup_coef and not setup_fit_known(args.setup_coef) and not args.setup_fitted_to and not args.dry_run:
+        # refused with exit 5 ('refused'), not argparse's 2, which means a disabled date here
+        print(f"{ap.prog}: error: --setup-coef {args.setup_coef}: where was this C fitted? Give --setup-fitted-to "
+              f"<survey file> (the survey it was fitted to) or --setup-fitted-to 'none:<how>' (fitted to no "
+              f"survey). A C of unknown origin could be fitted to the very survey it is compared with. NOTHING "
+              f"built", file=sys.stderr)
+        return EXIT_CODES["refused"]
+    if args.setup_fitted_to and setup_fit_known(args.setup_coef):
         warn(f"--setup-fitted-to ignored: C = {args.setup_coef} is a known fit (SETUP_FITS)")
     if args.gnssr_spline is None:
         from marconi_water_level import GNSSR_SPLINE, GAUGE_CSV
@@ -6331,7 +6414,8 @@ def main():
         results[d] = build_date(d, cfg, srv, args, steps)
     rule("all dates")
     for d, r in results.items():
-        say(d, r + {"partial": " (PARTIAL: see its README)", "failed": " (FAILED: see its log)"}.get(r, ""))
+        say(d, r + {"partial": " (PARTIAL: see its README)", "failed": " (FAILED: see its log)",
+                    "refused": " (NOT built: see the WARNING above)"}.get(r, ""))
     if not args.dry_run:
         summary(args)
     return worst_exit(results.values())
@@ -6339,12 +6423,14 @@ def main():
 
 # Exit codes: 0 built (or dry run), 1 a step failed, 2 the date is disabled, 3 built but PARTIAL
 # (a camera contributed nothing, a part is missing: a camera's pointing check or photo map, or the
-# outputs on disk are not one build), 4 not started: another build of the date is running.
-EXIT_CODES = {"built": 0, "dry-run": 0, "disabled": 2, "failed": 1, "partial": 3, "busy": 4}
+# outputs on disk are not one build), 4 not started: another build of the date is running, 5 not
+# started: refused by the run's own settings (a C other than the one the date's waterlines carry,
+# without --replace; a --setup-coef of unknown origin, without --setup-fitted-to).
+EXIT_CODES = {"built": 0, "dry-run": 0, "disabled": 2, "failed": 1, "partial": 3, "busy": 4, "refused": 5}
 # --all returns the code of its WORST date by severity, not the largest number: a failed date (1)
-# outranks one not started because another build held it (4), which outranks a partial one (3).
-# Disabled dates (2) are skipped by --all and do not count.
-SEVERITY = ("failed", "busy", "partial")
+# outranks one refused (5) or not started because another build held it (4), which outrank a partial
+# one (3). Disabled dates (2) are skipped by --all and do not count.
+SEVERITY = ("failed", "refused", "busy", "partial")
 
 
 def worst_exit(results):

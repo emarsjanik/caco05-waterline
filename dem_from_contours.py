@@ -30,10 +30,15 @@ SOURCES OF ERROR, roughly in order of size:
     as of the Nov 2025 calibration. Unverified since.
   * Water level: GNSS-R, a measurement rather than a model.
   * Wave setup: the detected edge sits ABOVE the still-water line by an
-    amount that grows with wave height, but is assigned the still-water
-    elevation -- so the DEM reads LOW where rough-water frames land.
-    Not corrected here; --max-hs leaves those frames out instead, using
-    the offshore wave record (fetch_buoy_waves.py).
+    amount that grows with wave height. When the contours carry
+    beach_elevation_navd88 (water level + C*sqrt(Hs*L0), C from
+    extract_elevation_contours.py --setup-coef; the station's since
+    6 Oct 2026, C = SETUP_COEF of waterline_timex_cron.sh), that is what
+    is gridded, so the setup is included; how well depends on C
+    (--fit-setup checks it against repeat crossings). Without it the edge
+    is given the still-water elevation and the DEM reads LOW where
+    rough-water frames land; --max-hs leaves the roughest frames out,
+    using the offshore wave record (fetch_buoy_waves.py).
 
 Usage:
     python3 dem_from_contours.py contour_points_ground.csv dem_out \\
@@ -251,7 +256,8 @@ def load_frame_info(path):
             info[k] = {"epoch": num(r.get("capture_epoch")),
                        "tide": num(r.get("tide_elevation_navd88")),
                        "hs": num(r.get("offshore_hs_m")),
-                       "tp": num(r.get("offshore_tp_s"))}
+                       "tp": num(r.get("offshore_tp_s")),
+                       "setup": num(r.get("setup_correction_m"))}
     return info
 
 
@@ -292,18 +298,96 @@ def median_spread_by_cell(groups, vals, min_frames):
 
 
 # --fit-setup: the C range whose median spread lies within FIT_SETUP_NEAR_M of the best is
-# printed; FIT_SETUP_FLAT_WIDTH or wider is a flat minimum (on the filtered 29 Sep - 2 Oct 2026
-# lines without setup the spread changes by under 5 mm from C -0.02 to +0.01).
+# printed (the near-best band); FIT_SETUP_FLAT_WIDTH or wider is a flat minimum. On one week
+# of lines the curve is noisy at the few-mm level (on the filtered 29 Sep - 5 Oct 2026 C = 0
+# lines, --max-hs 1.5, it wanders 0.248-0.256 m over C 0-0.04), so neither the best C nor the
+# exact band width means much by itself: a C is offered to apply only when C = 0 AND the C in
+# use both lie OUTSIDE the near-best band (each spreads more than FIT_SETUP_NEAR_M above the best
+# and lies outside the band's range) and the band is narrower than FIT_SETUP_FLAT_WIDTH.
+# Otherwise the fit says which of the two it cannot tell apart from its best on this window.
 FIT_SETUP_NEAR_M = 0.005
 FIT_SETUP_FLAT_WIDTH = 0.02
+STATION_CRON = Path(__file__).resolve().parent / "waterline_timex_cron.sh"
 
 
-def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames):
+def carried_setup_coef(info):
+    """The C the contours carry: median of setup_correction_m / sqrt(Hs*L0) over the frames
+    with a non-zero setup; None when no frame carries one (a C = 0 build, or no setup column)."""
+    cs = []
+    for v in info.values():
+        if np.isfinite(v["setup"]) and v["setup"] != 0.0 and v["hs"] > 0 and v["tp"] > 0:
+            cs.append(v["setup"] / np.sqrt(v["hs"] * 9.81 * v["tp"] ** 2 / (2 * np.pi)))
+    return round(float(np.median(cs)), 4) if cs else None
+
+
+def station_setup_coef(path=STATION_CRON):
+    """SETUP_COEF of the station cron beside this script ('' = no setup = 0); None if unreadable."""
+    import re
+    try:
+        for line in Path(path).read_text().splitlines():
+            m = re.match(r'\s*SETUP_COEF=["\']?([0-9.]*)["\']?\s*(#.*)?$', line)
+            if m:
+                return float(m.group(1)) if m.group(1) else 0.0
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def setup_fit_verdict(valid, spread_at, c_use, use_from=""):
+    """
+    The lines --fit-setup prints under its curve. valid: [(C, median spread, cells)] on the
+    search grid; spread_at(C): the median spread at any C (for C = 0 and the C in use, which
+    need not lie on the grid); c_use: the C in use (None or 0: compare with C = 0 only), and
+    use_from where that value came from.
+    """
+    best = min(valid, key=lambda r: r[1])
+    near = [r[0] for r in valid if r[1] <= best[1] + FIT_SETUP_NEAR_M]
+    lo, hi = min(near), max(near)
+    flat = hi - lo >= FIT_SETUP_FLAT_WIDTH
+    out = [f"   C {lo:+.3f} to {hi:+.3f}: median spread within {FIT_SETUP_NEAR_M * 1000:.0f} mm of the "
+           f"best (the near-best band)" + (" -- a FLAT minimum: this fit alone does not pin C" if flat else "")]
+    # a C is told apart from the best only when it lies outside the near-best band: more than 5 mm
+    # above the best AND not between two C that are within it (the curve is noisy at the mm level)
+    s0 = spread_at(0.0)
+    same0 = s0 <= best[1] + FIT_SETUP_NEAR_M or lo <= 0.0 <= hi
+    su = spread_at(c_use) if c_use else None
+    same_use = su is not None and (su <= best[1] + FIT_SETUP_NEAR_M or lo <= c_use <= hi)
+    if c_use:
+        out.append(f"   C in use {c_use}" + (f" ({use_from})" if use_from else "")
+                   + f": median spread {su:.3f} m ({su - best[1]:+.3f} m from the best)")
+    if best[0] in (valid[0][0], valid[-1][0]):
+        out.append("   WARNING: best C is at the edge of the search range -- the data do not constrain it; "
+                   "do not apply.")
+    elif same0 and same_use:
+        out.append(f"   Neither C = 0 nor the C in use ({c_use}) can be told from the best on this window "
+                   f"(both inside the near-best band): this fit gives no reason to change C.")
+    elif same_use:
+        out.append(f"   Not distinguishable from the C in use ({c_use}) on this window (inside the near-best "
+                   f"band): keep it.")
+    elif same0:
+        out.append("   Not distinguishable from C = 0 on this window (inside the near-best band): the data do "
+                   "not favour a positive setup correction here. One week does not pin C: refit over weeks of "
+                   "different waves before changing the C in use.")
+    elif best[0] <= 0:
+        out.append("   The data do not favour a positive setup correction.")
+    elif flat:
+        out.append("   Do not apply on this window alone: refit over weeks of different waves (or keep the "
+                   "C in use).")
+    else:
+        out.append("   Beats C = 0" + (f" and the C in use ({c_use})" if c_use else "")
+                   + f" by more than {FIT_SETUP_NEAR_M * 1000:.0f} mm on this window; check it on other weeks "
+                   "of different waves before adopting it.")
+        out.append(f"   To apply: extract_elevation_contours.py ... --waves ... --setup-coef {best[0]}")
+    return out
+
+
+def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames, coefs=None):
     """
     Finds C in beach elevation = water level + C*sqrt(Hs*L0) that makes
     repeat crossings of each cell agree best (smallest median spread).
     Only frames with both Hs and Tp take part, at every C, so the
-    comparison is like for like.
+    comparison is like for like. coefs: the C values to try (default
+    -0.04 to +0.12 in steps of 0.002).
     """
     tide = np.array([info[f]["tide"] for f in pair_frame])
     hs = np.array([info[f]["hs"] for f in pair_frame])
@@ -311,7 +395,8 @@ def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames):
     phi = np.sqrt(hs * 9.81 * tp ** 2 / (2 * np.pi))
     ok = np.isfinite(phi) & np.isfinite(tide)
     groups = cell_groups(pair_cell[ok])
-    coefs = np.round(np.arange(-0.04, 0.1201, 0.002), 3)
+    if coefs is None:
+        coefs = np.round(np.arange(-0.04, 0.1201, 0.002), 3)
     result = [(c,) + median_spread_by_cell(groups, tide[ok] + c * phi[ok], min_frames)
               for c in coefs]
     return result, int(ok.sum()), len(set(pair_frame[ok]))
@@ -579,7 +664,15 @@ def main():
                          "--setup-coef) that makes repeat crossings agree best, from the "
                          "water level and offshore Hs/Tp of each frame. Diagnostic only: the "
                          "DEM is built from whatever correction the contours already carry. "
-                         "Run it on contours WITHOUT a correction applied.")
+                         "Run it on contours WITHOUT a correction applied. It offers a C to "
+                         "apply only when C = 0 and the C in use both lie outside its near-best "
+                         "band (the C whose spread is within 5 mm of its best) and the minimum "
+                         "is not flat.")
+    ap.add_argument("--setup-coef-in-use", type=float, default=None,
+                    help="With --fit-setup: the C in use, compared with the fit's best. "
+                         "Default: the C the contours carry (setup_correction_m / "
+                         "sqrt(Hs*L0)), else SETUP_COEF of waterline_timex_cron.sh beside "
+                         "this script.")
     ap.add_argument("--max-hs", type=float, default=None,
                     help="Leave out frames whose offshore wave height (offshore_hs_m, from "
                          "extract_elevation_contours.py --waves) exceeds this, in metres. In "
@@ -718,8 +811,19 @@ def main():
         print()
 
     if args.fit_setup:
+        carried = carried_setup_coef(info)
+        if args.setup_coef_in_use is not None:
+            c_use, use_from = args.setup_coef_in_use, "--setup-coef-in-use"
+        elif carried is not None:
+            c_use, use_from = carried, "the contours' setup_correction_m"
+        else:
+            c_use, use_from = station_setup_coef(), "SETUP_COEF of waterline_timex_cron.sh"
+        # the C in use is tried too (0.037 is not on the 0.002 grid), so it can be the best
+        grid = np.round(np.arange(-0.04, 0.1201, 0.002), 3)
+        if c_use and grid[0] < c_use < grid[-1]:
+            grid = np.unique(np.r_[grid, round(c_use, 4)])
         result, n_pairs, n_frames = fit_setup_coefficient(pair_cell, pair_frame, info,
-                                                          args.min_points)
+                                                          args.min_points, coefs=grid)
         valid = [r for r in result if np.isfinite(r[1])]
         if not valid:
             print("Setup fit         : no frames with both Hs and Tp -- run "
@@ -728,30 +832,27 @@ def main():
             base = next(r for r in valid if r[0] == 0.0)
             best = min(valid, key=lambda r: r[1])
             print(f"Setup fit         : {n_frames} frame(s), {n_pairs} cell samples")
+            if carried is not None:
+                print(f"   NOTE: these contours carry a setup (C ~{carried}): each line was placed at "
+                      f"still water + that setup. Fit on contours built with no setup (C = 0).")
             print(f"   C = 0      median spread {base[1]:.3f} m ({base[2]} cells)")
             print(f"   C = {best[0]:<6} median spread {best[1]:.3f} m  <-- best"
                   f"  (implied slope C/0.35 = {best[0] / 0.35:.3f})")
             for c, sp, n in valid:
                 if round(c * 1000) % 20 == 0:
                     print(f"      C {c:+.2f}: {sp:.3f} m")
-            # how sharp the minimum is: on one week of lines the curve is often flat, and
-            # its lowest point alone then says little about C
-            near = [r[0] for r in valid if r[1] <= best[1] + FIT_SETUP_NEAR_M]
-            flat = max(near) - min(near) >= FIT_SETUP_FLAT_WIDTH
-            print(f"   C {min(near):+.3f} to {max(near):+.3f}: median spread within "
-                  f"{FIT_SETUP_NEAR_M * 1000:.0f} mm of the best"
-                  + (" -- a FLAT minimum: this fit alone does not pin C" if flat else ""))
-            if best[0] in (valid[0][0], valid[-1][0]):
-                print("   WARNING: best C is at the edge of the search range -- the data do "
-                      "not constrain it; do not apply.")
-            elif best[0] <= 0:
-                print("   The data do not favour a positive setup correction.")
-            elif flat:
-                print("   Do not apply on this window alone: refit over weeks of different "
-                      "waves (or keep the C in use).")
-            else:
-                print(f"   To apply: extract_elevation_contours.py ... --waves ... "
-                      f"--setup-coef {best[0]}")
+
+            def spread_at(c):
+                hit = [r[1] for r in valid if abs(r[0] - c) < 1e-9]
+                if hit:
+                    return hit[0]
+                return fit_setup_coefficient(pair_cell, pair_frame, info, args.min_points,
+                                             coefs=[c])[0][0][1]
+            # how sharp the minimum is, and whether C = 0 or the C in use do as well: on one
+            # week of lines the curve is often flat and noisy, and its lowest point alone then
+            # says little about C
+            for line in setup_fit_verdict(valid, spread_at, c_use or None, use_from):
+                print(line)
         print()
 
     if args.max_day_offset:

@@ -575,6 +575,65 @@ def test_fix2(d):
     Path(str(dem_p).replace("_dem.asc", "_info.json")).unlink()
 
 
+def test_setup_fit_label(d):
+    print("a survey a setup coefficient was fitted to: CIRCULAR unless the DEM says it carries no setup")
+    import survey_products as sp
+    d = Path(d) / "setupfit"
+    (d / "bare").mkdir(parents=True)
+    dem_p, _ = make_dem(d / "bare")
+
+    def shots(path, seed):
+        rng = np.random.default_rng(seed)
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Name", "Code", "Code description", "Easting", "Northing", "Elevation", "Description",
+                        "CS name"])
+            for k in range(12):
+                e, n = X0 + rng.uniform(5, 70), Y0 + rng.uniform(5, 100)
+                w.writerow([str(k + 1), "P", "Point", f"{e:.3f}", f"{n:.3f}", f"{beach(e, n):.4f}", "Transect",
+                            "NAD83(2011) / UTM zone 19N + NAVD88(GEOID18) height"])
+        return path
+    rtk = shots(d / "fitted_shots.csv", 5)
+    fake = 0.0123                                 # a fit made for this test only, to these shots
+    sp.SETUP_FITS[fake] = {"survey_stem": "fitted_shots", "survey_sha256": sc.file_sha256(rtk),
+                           "survey_type": "points", "survey_date": "2026-09-29"}
+    try:
+        def mine(dem, survey=rtk, date_="2026-09-29", info=None):
+            return [f for f in sc.setup_fit_findings(str(survey), "points", date_, str(dem), info)
+                    if "C = 0.0123" in f[1]]
+        f = mine(dem_p)
+        check(len(f) == 1 and f[0][0] == "CIRCULAR" and f[0][2] == "rule" and "same content" in f[0][1],
+              "the fitted shots, a DEM with no provenance or info file: CIRCULAR (a rule: its C is not recorded)")
+        copy = d / "renamed_export.csv"
+        shutil.copy(rtk, copy)
+        f = mine(dem_p, survey=copy)
+        check(f and f[0][0] == "CIRCULAR", "the same shots under another name: still recognised (by content)")
+        for c, want, kind in ((fake, "CIRCULAR", "chain"), (0.0, None, "note")):
+            sub = d / f"prov{c:g}" / "dem"
+            sub.mkdir(parents=True)
+            shutil.copy(dem_p, sub / "x_dem.asc")
+            (sub.parent / "provenance.json").write_text(json.dumps({"setup": {"coef": c, "fits": [{"coef": c}]}}))
+            f = mine(sub / "x_dem.asc")
+            check(f and f[0][0] == want and f[0][2] == kind,
+                  f"provenance.json says C = {c:g}: " + ("CIRCULAR, a chain fact" if want else "a note, no downgrade"))
+        f = mine(dem_p, info={"setup_share": 0.0})
+        check(f and f[0][0] is None and "carries no setup" in f[0][1],
+              "the DEM's info file says none of its points carry a setup: a note")
+        f = mine(dem_p, info={"setup_share": 1.0})
+        check(f and f[0][0] == "CIRCULAR" and "carries one" in f[0][1], "... and one that does: CIRCULAR")
+        other = shots(d / "other_day.csv", 9)
+        check(not mine(dem_p, survey=other, date_="2026-10-15"), "other shots of another day: nothing")
+        h, _ = quiet(sc.compare, str(dem_p), str(rtk), "points", "INDEPENDENT", "claimed", name="sf",
+                     output_dir=str(d / "out"), survey_date="2026-09-29", plot=False)
+        check(h["suggested_label"] == "CIRCULAR" and h["downgrade_warning"],
+              "survey_compare.py itself: INDEPENDENT passed for the fitted shots -> DOWNGRADE WARNING, CIRCULAR")
+    finally:
+        del sp.SETUP_FITS[fake]
+    check("--label CIRCULAR" in sc.__doc__ and "2026-09-27_rtk" not in sc.__doc__
+          and 'RTK check shots, not used anywhere' not in sc.__doc__,
+          "the docstring's RTK example is labelled CIRCULAR (C = 0.037 was fitted to those shots)")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
@@ -603,6 +662,7 @@ def main():
         test_survey_floor(d)
         test_no_overlap(d)
         test_fix2(d)
+        test_setup_fit_label(d)
         test_py38()
     finally:
         if not args.keep:

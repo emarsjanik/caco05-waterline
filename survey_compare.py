@@ -35,9 +35,13 @@ compared by name and by content; a lineage that cannot be followed is
 a downgrade too, as a rule that can misfire), a calibration
 dated the day of a point survey (solved from those GCPs?), a GCP target
 file as the survey, a search envelope (--envelope-source, or a
-provenance.json next to the DEM) placed with this survey. It also
-prints the time between the photos and the survey: the beach moves, and
-a difference over a week of storms is not all error.
+provenance.json next to the DEM) placed with this survey, and a survey
+that a wave-setup coefficient was fitted to (survey_products.py
+SETUP_FITS, matched by content as survey_products.py does: the station's
+C = 0.037 was fitted to the 2026-09-29 RTK shots) unless the DEM's
+provenance.json or STEM_info.json says it was built with no setup
+(C = 0). It also prints the time between the photos and the survey: the
+beach moves, and a difference over a week of storms is not all error.
 
 HOW, DSM SURVEYS (lidar GeoTIFF or .asc, read by compare_dem_survey.py).
 The 0.25 m lidar is aggregated to the DEM's own grid: each DEM cell gets
@@ -156,8 +160,13 @@ Usage:
 
     python3 survey_compare.py --dem dem_intertidal_7day_dem.asc \\
         --survey 2026-09-29_Marconi_Checkshots.csv --survey-type points \\
-        --name 2026-09-27_rtk --label INDEPENDENT --why "RTK check shots, not used anywhere" \\
-        --survey-date 2026-09-29 --photo-dates 2026-09-20 2026-10-04
+        --name 2026-09-29_rtk --label CIRCULAR \\
+        --why "C = 0.037 (waterline_timex_cron.sh SETUP_COEF) was fitted to these shots" \\
+        --survey-date 2026-09-29 --photo-dates 2026-09-26 2026-10-02
+    (the station's DEM carries C = 0.037, fitted to these very shots: CIRCULAR. Only a
+     DEM built with C = 0, e.g. survey_products.py --date 2026-09-29 --setup-coef 0
+     --output-root <root>_c0, compares INDEPENDENTLY; given a better label for a DEM
+     that may carry that C, the script prints a DOWNGRADE WARNING)
 """
 
 import re
@@ -991,11 +1000,90 @@ def lineage_text(lin):
 KINDS = ("chain", "rule", "note")
 
 
-def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_source, dem_path, dirs=()):
+def dem_setup(dem_path, dem_info=None):
+    """
+    The wave-setup coefficient the DEM was built with, as far as the files next to it say.
+    -> (C or None, has_setup True/False/None, where it was read). provenance.json (survey_products.py)
+    gives C itself; STEM_info.json (dem_from_contours.py) only whether its points carry a setup
+    (setup_share 0: none, i.e. C = 0).
+    """
+    for d in (Path(dem_path).resolve().parent, Path(dem_path).resolve().parent.parent):
+        pj = d / "provenance.json"
+        if not pj.exists():
+            continue
+        try:
+            su = json.loads(pj.read_text()).get("setup") or {}
+        except (OSError, ValueError, AttributeError):
+            break
+        cs = {round(float(f["coef"]), 6) for f in su.get("fits") or [] if f.get("coef") is not None}
+        if not cs and isinstance(su.get("coef"), (int, float)):
+            cs = {round(float(su["coef"]), 6)}
+        if len(cs) == 1:
+            c = cs.pop()
+            return c, c != 0.0, f"{pj.name}: setup C = {c:g}"
+        break
+    share = (dem_info or {}).get("setup_share")
+    if isinstance(share, (int, float)):
+        if share == 0:
+            return 0.0, False, "the DEM's info file: none of its points carry a wave setup (C = 0)"
+        return None, True, f"the DEM's info file: {share:.0%} of its points carry a wave setup, of a C it does not record"
+    return None, None, "no provenance.json or info file next to the DEM says which C built it"
+
+
+def setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info=None):
+    """
+    A survey that a setup coefficient was fitted to (survey_products.SETUP_FITS, matched as
+    survey_products.py does: by content, file name, the shots' coordinates, then type and date)
+    cannot test a DEM built with that C: CIRCULAR, unless the DEM says it carries no setup.
+    -> findings as audit_label's.
+    """
+    try:
+        import survey_products as sp
+    except Exception as exc:                       # noqa: BLE001 -- never let the check stop a comparison
+        return [(None, f"setup fits not checked (survey_products.py not importable: {exc!r})", "note")]
+    found = []
+    built, has_setup, src = dem_setup(dem_path, dem_info)
+    # where the fit's own shots may be, for the coordinate match (a re-export changes the bytes)
+    look = argparse.Namespace(survey_dirs=[str(Path(survey_path).resolve().parent), str(HERE / "surveys"),
+                                           str(HERE / "calibration")])
+    for coef, fit in sorted(sp.SETUP_FITS.items()):
+        try:
+            how, why = sp.survey_matches_fit(dict(fit, kind="known"),
+                                             {"survey_type": survey_type, "survey_date": survey_date},
+                                             survey_path, look)
+        except Exception as exc:                   # noqa: BLE001
+            found.append((None, f"setup fit C = {coef} not checked against this survey ({exc!r})", "note"))
+            continue
+        if not how:
+            continue
+        what = (f"this survey is the one the wave-setup coefficient C = {coef} (waterline_timex_cron.sh / "
+                f"survey_products.py SETUP_COEF) was fitted to ({why})")
+        if has_setup is False:
+            found.append((None, f"{what}, but the DEM carries no setup ({src}): that fit does not enter", "note"))
+        elif built is not None and abs(built - coef) > 1e-6:
+            found.append((None, f"{what}; the DEM was built with another C ({src}): say where that C was "
+                                 f"fitted", "note"))
+        elif built is not None:
+            found.append(("CIRCULAR", f"{what}, and the DEM was built with it ({src}): the comparison cannot "
+                                      f"test the setup or the overall level it sets",
+                          "chain" if how == "same" else "rule"))
+        else:
+            found.append(("CIRCULAR", f"{what}; {src}"
+                                      + (" (it carries one)" if has_setup else "")
+                                      + f": a DEM of the station's waterlines carries C = {coef}, so the comparison "
+                                        f"is CIRCULAR unless the DEM was built with C = 0 (e.g. survey_products.py "
+                                        f"--setup-coef 0 --output-root <root>_c0)", "rule"))
+    return found
+
+
+def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_source, dem_path, dirs=(),
+                dem_info=None, setup_fits=True):
     """
     What the script can see of the chain. -> list of (suggested label or None, text, kind):
     a suggested label worse than `label` is a DOWNGRADE WARNING; None is a note. kind is one of
-    KINDS. dirs: extra folders where files named in the EO notes are looked for.
+    KINDS. dirs: extra folders where files named in the EO notes are looked for. dem_info: the
+    DEM's STEM_info.json (whether its points carry a wave setup). setup_fits: also check the
+    survey against the setup fits (setup_fit_findings; survey_products.py applies them itself).
     """
     found = []
     sname, sstem = Path(survey_path).name, Path(survey_path).stem
@@ -1077,6 +1165,8 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
                 found.append((None, "provenance search envelope: " + "; ".join(
                     f"{k} = {v}" for k, v in env[:3]), "note"))
         break
+    if setup_fits:
+        found += setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info)
     return found
 
 
@@ -1721,7 +1811,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
 
     # -- the label: what can be checked
     findings = audit_label(label, survey_path, survey_type, survey_date, cams, envelope_source,
-                           dem_path, dirs=eo_dirs or ())
+                           dem_path, dirs=eo_dirs or (), dem_info=dem_info)
     outside, from_mid, gap_text = time_gap(survey_date, photo_dates)
     worst = label
     for sug, _, _ in findings:
