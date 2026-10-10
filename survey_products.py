@@ -75,9 +75,11 @@ stale, and nothing stale is ever reported as current):
             each row tagged with its water-level and wave source.
   filter    waterline_consistency.py (its defaults, as the live cron).
             If it fails, the unfiltered file is used and that is said.
-  dem       dem_from_contours.py over the window (the cron's DEM settings),
-            asc_to_geotiff.py (EPSG:32619; NAVD88 EPSG:5703 vertical keys on
-            the DEM), and the DEM page by dem_figure.py with the date's own
+  dem       dem_from_contours.py over the window (the cron's DEM settings;
+            its day test is not run on fewer than 3 camera-days, where it
+            would reject both of two days that disagree, and the README says
+            so), asc_to_geotiff.py (EPSG:32619; NAVD88 EPSG:5703 vertical keys
+            on the DEM), and the DEM page by dem_figure.py with the date's own
             camera positions.
   maps      daily_elevation_map.py per camera on the window's photos, and a
             plan view of the filtered waterlines coloured by elevation over
@@ -105,6 +107,8 @@ the mark if even that cannot be written: the previous build's numbers are
 never presented as current. --summary re-checks every comparison against
 the stamps on disk. One build of a date at a time: a build holds
 <date>/.build.lock while it runs; a second one refuses to start (exit 4).
+--all returns the code of its worst date by severity: 1 if any date failed,
+else 4 if any was busy, else 3 if any was partial, else 0.
 
 WHAT A LATER RUN CANNOT CHANGE. The outputs on disk keep the settings they
 were built with: the DEM settings, the setup coefficient, the photo window
@@ -143,6 +147,7 @@ Usage:
 """
 
 import io
+import contextlib
 import os
 import re
 import sys
@@ -849,32 +854,49 @@ def live_rows_file(plan, args, state):
     say("archive rows", f"reading {src} ({st.st_size / 1e6:.0f} MB; ~1 min per GB on the NUC) for "
         f"{plan['first']} .. {plan['last']}")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    drop_stamp(out, "archive_rows")
+    # Read into a new file first: the rows of the earlier build (and their stamp, which says which
+    # window built the outputs on disk) are replaced only once the new window has rows. A window with
+    # none, or a read cut short, leaves them, so the README and the 'rebuild everything' line keep
+    # naming the window the DEM and waterlines on disk came from.
+    new = dst.parent / (dst.name + ".new")
     # The cron rewrites this file in place (opened with 'w') at 12:30, 19:25 and 20:55 local:
     # a read that overlaps a rewrite sees a short or cut file. Size and time are compared
     # before and after; on a change the file is read again, once.
-    for attempt in (1, 2):
-        before = (src.stat().st_size, src.stat().st_mtime)
-        t0 = time.time()
-        res = read_live_rows(src, dst, plan)
-        after = (src.stat().st_size, src.stat().st_mtime)
-        if before == after:
-            break
-        if attempt == 1:
-            warn(f"{src} changed while it was read (the cron rewrites it): reading it again")
-        else:
-            raise StepFailed(f"{src} changed twice while it was read (the cron is rewriting it): "
-                             f"run again in a few minutes")
-    n_in, n_out, frames, other, bad = res
-    say("archive rows", f"{n_out} of {n_in} rows, {len(frames)} frames -> {dst} ({time.time() - t0:.0f} s)")
-    if other:
-        warn("rows of frames named for another station than the date's left out: "
-             + ", ".join(f"{c} {sum(v.values())} rows ({', '.join(f'{k} {n}' for k, n in sorted(v.items()))})"
-                         for c, v in sorted(other.items())))
-    if bad:
-        warn(f"{bad} row(s) with an unreadable capture time skipped (a cut-off line?)")
-    if not n_out:
-        raise StepFailed(f"no rows in {src} for {plan['first']} .. {plan['last']}")
+    try:
+        for attempt in (1, 2):
+            before = (src.stat().st_size, src.stat().st_mtime)
+            t0 = time.time()
+            res = read_live_rows(src, new, plan)
+            after = (src.stat().st_size, src.stat().st_mtime)
+            if before == after:
+                break
+            if attempt == 1:
+                warn(f"{src} changed while it was read (the cron rewrites it): reading it again")
+            else:
+                raise StepFailed(f"{src} changed twice while it was read (the cron is rewriting it): "
+                                 f"run again in a few minutes")
+        n_in, n_out, frames, other, bad = res
+        say("archive rows", f"{n_out} of {n_in} rows, {len(frames)} frames ({time.time() - t0:.0f} s)")
+        if other:
+            warn("rows of frames named for another station than the date's left out: "
+                 + ", ".join(f"{c} {sum(v.values())} rows ({', '.join(f'{k} {n}' for k, n in sorted(v.items()))})"
+                             for c, v in sorted(other.items())))
+        if bad:
+            warn(f"{bad} row(s) with an unreadable capture time skipped (a cut-off line?)")
+        if not n_out:
+            kept = read_stamp(out, "archive_rows")
+            raise StepFailed(f"no rows in {src} for {plan['first']} .. {plan['last']}"
+                             + (f"; the archive rows of the earlier build ({kept.get('rows_out')} rows) and the "
+                                f"outputs made from them are kept" if kept and dst.exists() else ""))
+        drop_stamp(out, "archive_rows")
+        os.replace(str(new), str(dst))
+    finally:
+        if new.exists():
+            try:
+                new.unlink()
+            except OSError:
+                pass
+    say("archive rows", f"-> {dst}")
     write_stamp(out, "archive_rows", sig, extra={"rows_in": n_in, "rows_out": n_out, "frames": len(frames),
                                                  "other_station_rows": other, "malformed_rows": bad})
     state["archive_rows_built"] = True
@@ -1254,14 +1276,15 @@ def check_pointing(plan, cam, photos, args):
 OFFSET_REPORT_DEG = 0.05
 
 
-def pointing_offset(info, eo_file):
+def pointing_offset(info, eo_file, rate=True):
     """(tilt, roll, text) of the window's constant horizon offset against the calibration when
-    either exceeds OFFSET_REPORT_DEG (from check_pointing's info; an older result's own text is
-    kept), else None."""
+    either exceeds OFFSET_REPORT_DEG (from check_pointing's info; an older result without the
+    numbers keeps its own text), else None. rate=False leaves out the rough tilt-only rate (for a
+    README that gives the per-band table from the date's own DEM, which counts the roll too)."""
     if not info:
         return None
     dt, dr = info.get("window_horizon_dtilt_deg"), info.get("window_horizon_droll_deg")
-    if info.get("calibration_offset") and info.get("calibration_offset_deg"):
+    if (dt is None or dr is None) and info.get("calibration_offset") and info.get("calibration_offset_deg"):
         a, b = info["calibration_offset_deg"]
         return a, b, info["calibration_offset"]
     if dt is None or dr is None or not info.get("clear_horizon_days") or \
@@ -1275,8 +1298,8 @@ def pointing_offset(info, eo_file):
         top = min(pr_) < 0.1 * H_
         where = (f". The calibration puts the horizon at rows {max(min(pr_), 0):.0f}-{max(pr_):.0f} of the {H_}-row "
                  f"frame" + (f", inside the frame on only {ic_[0]} of the {ic_[1]} columns checked" if off_frame else "")
-                 + (": partly OFF the frame, where the lens model is extrapolated, so a lens-model error is the "
-                    "likelier cause" if off_frame else
+                 + (": partly OFF the frame, where the lens model is extrapolated, so the offset there may be the "
+                    "lens model's rather than the pointing's" if off_frame else
                     ": near the top edge, far from the GCPs, where the lens model is least constrained" if top else ""))
     text = (f"the sea horizon sits " + (f"{px:.0f} px " if px is not None else "")
             + f"from where {eo_file} puts it over the window ({info.get('clear_horizon_days')} day(s) with a clear "
@@ -1284,9 +1307,10 @@ def pointing_offset(info, eo_file):
             f"a calibration error or the lens model's error near the top of the frame (the horizon lies far "
             f"outside the GCPs the calibration was solved from); only day-to-day CHANGES are used to leave "
             f"days out. If it is pointing, it matters: the view grazes the beach, so 0.1 deg of tilt moves a "
-            f"waterline ~6-9 m along a range of 250-350 m, ~0.13-0.17 m of DEM there (rough rate: "
-            f"~{abs(dt) / 0.1 * 0.15:.2f} m for this offset at ~300 m; the README gives it per range band from "
-            f"this date's own DEM)" + where)
+            f"waterline ~6-9 m along a range of 250-350 m, ~0.13-0.17 m of DEM there"
+            + (f" (rough rate, tilt only, roll ignored: ~{abs(dt) / 0.1 * 0.15:.2f} m for this offset at ~300 m; "
+               f"the README gives it per range band from this date's own DEM, roll included)" if rate else "")
+            + where)
     return dt, dr, text
 
 
@@ -2000,7 +2024,64 @@ def view_calibration(plan):
     return d
 
 
-def dem_cmds(plan, args):
+# dem_from_contours.py's day test compares each camera-day with the DEM built WITHOUT it. With fewer
+# than 3 camera-days that DEM is the other day alone: two days that differ by more than the limit get
+# equal and opposite offsets and BOTH are rejected, leaving no points (the script then stops with a
+# traceback). With fewer than this many camera-days the test is not run, and the README says so.
+DEM_DAY_TEST_MIN = 3
+
+
+def camera_days(plan, args, src=None):
+    """The (camera, local day) pairs dem_from_contours.py's day test would see: frames of the window
+    (UTC day of capture_time_utc) with ground coordinates, not left out by its wave filter (Hs >
+    --dem-max-hs; a frame with no wave record is kept, as it does), keyed by the station's local day
+    (America/New_York) as it keys them. -> sorted list of 'cam YYYY-MM-DD'."""
+    src = Path(src or waterline_file(plan, quiet_=True))
+    max_hs = float(args.dem_max_hs) if args.dem_max_hs else None
+    epochs = {}
+    try:
+        with open(src, newline="") as f:
+            for r in csv.DictReader(f):
+                if not r.get("easting_utm19") or not r.get("northing_utm19"):
+                    continue
+                day = (r.get("capture_time_utc") or "")[:10]
+                if day < plan["first"] or day > plan["last"]:
+                    continue
+                k = (r.get("camera", ""), r.get("source_file", ""))
+                if k in epochs:
+                    continue
+                hs = r.get("offshore_hs_m", "")
+                if max_hs is not None and hs not in ("", None) and float(hs) > max_hs:
+                    continue
+                try:
+                    epochs[k] = float(r.get("capture_epoch") or "nan")
+                except ValueError:
+                    epochs[k] = float("nan")
+    except (OSError, ValueError):
+        return []
+    import pandas as pd
+    keys = set()
+    for (cam, _), ep in epochs.items():
+        if ep == ep:
+            keys.add(f"{cam} " + pd.Timestamp(int(ep), unit="s", tz="UTC").tz_convert("America/New_York")
+                     .strftime("%Y-%m-%d"))
+    return sorted(keys)
+
+
+def day_test_off(plan, args, src=None):
+    """Why the DEM's day test is not run for this window ('' when it is, or when it is off by option)."""
+    if not args.dem_max_day_offset:
+        return ""
+    cd = camera_days(plan, args, src)
+    if len(cd) >= DEM_DAY_TEST_MIN:
+        return ""
+    return (f"only {len(cd)} camera-day(s) in the window ({', '.join(cd) or 'none'}): with fewer than "
+            f"{DEM_DAY_TEST_MIN}, the DEM without one day is the other day alone, so two days that differ by more "
+            f"than {args.dem_max_day_offset} m would get equal and opposite offsets and both be rejected, leaving no "
+            f"points. Every camera-day is kept; a difference between them stays in the DEM's spread")
+
+
+def dem_cmds(plan, args, day_test=True):
     out = plan["out"]
     stem = out / "dem" / plan["date"]
     cmd = [sys.executable, HERE / "dem_from_contours.py", waterline_file(plan), stem,
@@ -2009,7 +2090,7 @@ def dem_cmds(plan, args):
            "--no-plot"]
     if args.dem_max_hs:
         cmd += ["--max-hs", args.dem_max_hs]
-    if args.dem_max_day_offset:
+    if args.dem_max_day_offset and day_test:
         cmd += ["--max-day-offset", args.dem_max_day_offset]
     tif = [sys.executable, HERE / "asc_to_geotiff.py"] + [f"{stem}_{k}.asc" for k in ("dem", "spread", "count")] + \
           ["--epsg", args.geotiff_epsg]
@@ -2027,7 +2108,10 @@ def step_dem(plan, args, state):
         raise StepFailed(f"no waterlines in {src.parent}: run the detect step first")
     if src.name == "contour_points_ground.csv":
         warn("the DEM is built from the UNFILTERED waterlines (no filtered file)")
-    stem, cmd, tif, page = dem_cmds(plan, args)
+    no_day_test = day_test_off(plan, args, src)
+    if no_day_test:
+        warn(f"DEM day test NOT run: {no_day_test}")
+    stem, cmd, tif, page = dem_cmds(plan, args, day_test=not no_day_test)
     outs = [Path(f"{stem}_{k}.{e}") for k in ("dem", "spread", "count") for e in ("asc", "tif")] + \
            [Path(f"{stem}_dem.png")]
     src_key = "filter" if src.name.endswith("_filtered.csv") else "merge"
@@ -2049,14 +2133,15 @@ def step_dem(plan, args, state):
         log.unlink()                        # its cell counts are read back from this run's log
     rc = run_cmd(cmd, log)
     if rc != 0 or not Path(f"{stem}_dem.asc").exists():
-        raise StepFailed(f"dem_from_contours.py failed (exit {rc}); see {log}")
+        raise StepFailed(f"dem_from_contours.py failed (exit {rc}): {dem_failure_reason(log)}; see {log}")
     cells = dem_log_counts(log)
     rc = run_cmd(tif, log)
     if rc != 0:
         raise StepFailed(f"asc_to_geotiff.py failed (exit {rc}); see {log}")
     view_calibration(plan)
     rc = run_cmd(page, log)
-    extra = {"cells": cells, "source": str(src), "settings": dem_settings_requested(args)}
+    extra = {"cells": cells, "source": str(src),
+             "settings": dict(dem_settings_requested(args), day_test_off=no_day_test or None)}
     if rc != 0 or not Path(f"{stem}_dem.png").exists():
         warn(f"the DEM page (dem_figure.py) failed (exit {rc}); the grids are fine. See {log}")
         write_stamp(out, "dem", dict(sig, page_failed=True), [cmd, tif, page], scripts=STEP_SCRIPTS["dem"],
@@ -2110,6 +2195,37 @@ def dem_settings_differ(built, wanted):
         if (b is None) != (v is None) or (b is not None and abs(float(b) - float(v)) > 1e-9):
             diff.append(f"{k}: asked {v}, DEM on disk {b}")
     return ", ".join(diff)
+
+
+def dem_failure_reason(log):
+    """Why dem_from_contours.py stopped, from its log: every camera-day rejected by the day test (no
+    points left), no points in the window, or its last error line. -> text"""
+    try:
+        lines = [ln.rstrip() for ln in Path(log).read_text().splitlines()]
+    except OSError:
+        return "no log"
+    tested, rejected, in_day = 0, 0, False
+    for ln in lines:
+        if ln.startswith("Day consistency"):
+            in_day, tested, rejected = True, 0, 0
+            continue
+        if in_day:
+            m = re.match(r"^\s+(\S+ \d{4}-\d\d-\d\d)\s", ln)
+            if m:
+                tested += 1
+                rejected += "REJECTED" in ln
+            elif not ln.strip().startswith("left out"):
+                in_day = False
+    if tested and rejected == tested:
+        return (f"the day-consistency test (--dem-max-day-offset) rejected every camera-day ({rejected} of "
+                f"{tested}): no points were left to grid. The days disagree by more than the limit; with so few "
+                f"days the test cannot tell which one is off: rerun with --dem-max-day-offset 0 (test off) or a "
+                f"wider --window")
+    for ln in lines:
+        if ln.startswith("No georectified points matched"):
+            return "no waterline points in the window (dem_from_contours.py: 'No georectified points matched')"
+    err = [ln for ln in lines if re.match(r"^(ERROR|[A-Za-z]+Error)\b", ln.strip())]
+    return err[-1].strip() if err else "see its log"
 
 
 def dem_log_counts(log):
@@ -3150,6 +3266,8 @@ def chain_current(plan, maps=True):
                    "max_day_offset_m": filt.get("max_day_offset")}
         for k, v in on_disk.items():
             b = built.get(k)
+            if k == "max_day_offset_m" and built.get("day_test_off"):
+                b = None                     # asked for, but not run on so few camera-days (step_dem)
             if (b is None) != (v is None) or (b is not None and abs(float(b) - float(v)) > 1e-9):
                 return False, (f"the DEM grids on disk ({plan['date']}_info.json: {k} {v}) are not the ones the DEM "
                                f"stamp built ({k} {b}); rerun --steps dem,maps,compare")
@@ -3251,21 +3369,35 @@ def prior_checks(plan):
     return out
 
 
-def prior_check_caveat(plan, pc, fits, forcing):
+def build_setup_effect(prov, survey_stem):
+    """This build's own paired C = 0 sensitivity on a survey: per camera, the median rise the setup gave
+    the lines once re-projected (with - without, the same frames or points), from the comparison on
+    disk. -> {camera: (effect m, what it rests on)} ({} when there is none)."""
+    out = {}
+    for c in (prov or {}).get("comparisons") or []:
+        if not c.get("current") or Path(c.get("survey_path") or "").stem != survey_stem:
+            continue
+        pr = ((((c.get("headline") or {}).get("waterlines") or {}).get("without_setup") or {}).get("paired") or {})
+        for cam, v in (pr.get("by_camera") or {}).items():
+            if v.get("setup_effect_median") is not None and v.get("n"):
+                k, what = independent_count(v)
+                out[cam] = (float(v["setup_effect_median"]), f"{k} {what}")
+    return out
+
+
+def prior_check_caveat(plan, pc, fits, forcing, prov=None):
     """The README caveat for an earlier check of the real photos: what its tool printed, the same
     numbers as waterline - survey (per camera, signs written out), and what this build should then
-    give with its setup (the setup less the part a landward re-projection takes back: (without -
-    with) / applied on the 2026 RTK, ~0.8)."""
+    give with its setup: the earlier lines plus the rise THIS build's setup gives each camera's lines
+    once re-projected (its own paired C = 0 sensitivity, per camera), else a range over the shares
+    kept measured so far (SHARE_KEPT_RANGE x the window's setup). The share differs by date, camera
+    and geometry (2026 RTK 0.71, Jan 2025 ~0.6, Mar 2025 ~0.8), so no single share is carried over."""
     wv = (forcing or {}).get("waves", {})
     su = wv.get("setup_in_window") or {}
     med = su.get("daytime_median_m") if su.get("daytime_median_m") is not None else su.get("median_m")
     setup = med if med is not None else pc["predicted_setup_m"]
     C = fits[0]["coef"] if fits else None
-    rc = (SETUP_FITS.get(C) or {}).get("rtk_check") if C else None
-    # the share of its setup a line keeps once re-projected, PAIRED per frame on the 2026 RTK (the
-    # difference of the two medians, (0.333 - 0.127) / 0.257, would say ~0.8)
-    keep = (rc.get("keep_paired") or (rc["without_setup_m"] - rc["with_setup_m"]) / rc["setup_applied_m"]) \
-        if rc else 1.0
+    eff = build_setup_effect(prov, pc["survey_stem"]) if C else {}
     cams = sorted(pc["cameras"])
     per, rep = pc["waterline_minus_survey"], pc.get("reported") or {}
     low = [c for c in cams if per[c][0] < -0.05]
@@ -3291,13 +3423,25 @@ def prior_check_caveat(plan, pc, fits, forcing):
         text += ("HIGH without any setup is NOT what the swash explains (it would make the lines read low): the "
                  "setup will make them read higher still, so look for a pointing or water-level error. ")
     if C and nosetup:
-        expect = ", ".join(f"{c} ~{per[c][0] + setup * keep:+.2f} m" for c in cams)
+        lo_k, hi_k = SHARE_KEPT_RANGE
+        rng = ", ".join(f"{c} {per[c][0] + setup * lo_k:+.2f} to {per[c][0] + setup * hi_k:+.2f}" for c in cams)
         full = ", ".join(f"{c} {per[c][0] + setup:+.2f}" for c in cams)
+        if all(c in eff for c in cams):
+            own = ", ".join(f"{c} ~{per[c][0] + eff[c][0]:+.2f} m ({per[c][0]:+.2f} {eff[c][0]:+.3f}, on "
+                            f"{eff[c][1]})" for c in cams)
+            how_ = (f"this build's own paired C = 0 sensitivity gives each camera's lines a rise of "
+                    + ", ".join(f"{c} {eff[c][0]:+.3f} m ({eff[c][0] / setup:.2f} x the setup median)" for c in cams)
+                    + f": expect waterline - {pc['survey_text']} of about {own}")
+        else:
+            how_ = (f"once its landward re-projection is counted a line keeps ~{lo_k}-{hi_k} x its setup (the shares "
+                    f"measured so far: it depends on the date, the camera and the beach; this build's own paired C = 0 "
+                    f"sensitivity, in compare/*_comparison.txt, gives it per camera): expect waterline - "
+                    f"{pc['survey_text']} of about {rng} m")
         text += (f"This build adds the setup (C = {C}: median {setup:.2f} m in the window's daytime"
-                 f"{'' if med is not None else ', predicted'}), which raises every line by ~{keep:.2f} x its setup "
-                 f"once its landward re-projection is counted (the per-frame share kept on the 2026 RTK): unless this "
-                 f"build's envelope changes the detections, expect waterline - {pc['survey_text']} of about {expect} "
-                 f"({full} m if the whole setup counted). That expectation already holds the setup's "
+                 f"{'' if med is not None else ', predicted'}), which raises every line; {how_} unless this build's "
+                 f"envelope changes the detections ({rng} m over the shares {lo_k}-{hi_k}; {full} m if the whole "
+                 f"setup counted; the earlier check's own NMAD, {', '.join(f'{c} {per[c][1]:.2f}' for c in cams)} m, "
+                 f"is the scale of agreement to expect). That expectation already holds the setup's "
                  f"under-correction listed below: do not subtract it again"
                  + (". It holds the still-water-reference effect listed below too: the earlier check was made on "
                     "lines at the same ADCP still water as this build's, so that effect is inside its numbers. Those "
@@ -3306,8 +3450,9 @@ def prior_check_caveat(plan, pc, fits, forcing):
     vals = [per[c][0] for c in cams]
     if len(vals) > 1 and max(vals) - min(vals) > 0.1:
         text += (f"The difference between the cameras ({' vs '.join(f'{c} {per[c][0]:+.2f}' for c in cams)} m) "
-                 f"cannot come from the water level or the setup, which are the same for both: it points at the "
-                 f"pointing or the lens model; see the horizon offsets per camera in this README. ")
+                 f"cannot come from the water level or the setup as far as both cameras were measured over the same "
+                 f"hours of {pc['window']}: it points at the pointing or the lens model; see the horizon offsets per "
+                 f"camera in this README. ")
     text += (f"Until this product is built from the real photos of {pc['window']} (on the station computer only) "
              f"these are the only real numbers for this date: a build from other photos (e.g. the synthetic test "
              f"fixture, rendered with the setup planted) says nothing about the real beach. Read the per-camera lines "
@@ -3315,7 +3460,7 @@ def prior_check_caveat(plan, pc, fits, forcing):
     return text
 
 
-def setup_caveats(plan, args, state, forcing, fits, era):
+def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
     """Caveats about the setup coefficient actually used, its origin and its reference frame."""
     cav = []
     wv = (forcing or {}).get("waves", {})
@@ -3324,7 +3469,9 @@ def setup_caveats(plan, args, state, forcing, fits, era):
         cams = f" (cameras {', '.join(f['cameras'])})" if len(fits) > 1 else ""
         if f.get("kind") == "none":
             cav.append(f"No wave-setup correction{cams}: each waterline is given the still-water level only, so "
-                       f"lines marked by the swash read LOW by about the setup (~0.2-0.4 m in moderate waves).")
+                       f"lines marked by the swash read LOW, by roughly {SHARE_KEPT_RANGE[0]}-{SHARE_KEPT_RANGE[1]} x "
+                       f"the setup (the setup is ~0.2-0.4 m in moderate waves; a line placed at still water also "
+                       f"moves seaward onto lower beach, which takes back the rest).")
             continue
         if f.get("kind") == "unknown":
             cav.append(f"The setup coefficient C = {C}{cams} was given on the command line WITHOUT saying where it "
@@ -3358,9 +3505,32 @@ def setup_caveats(plan, args, state, forcing, fits, era):
             med = su.get("daytime_median_m") if era != "live" else None
             med = med if med is not None else su.get("median_m")
             keep = rc.get("keep_paired") or 0.7
+            own = {}
+            for s_ in plan.get("surveys") or []:
+                own.update(build_setup_effect(prov, Path(s_.get("path") or "").stem))
             inplace = rc.get("with_setup_in_place_m")
             reproj = rc["with_setup_m"] - (inplace or 0.0)
             prior = bool(prior_checks(plan))
+            # what the re-projection takes back on THIS date: from this build's own paired C = 0 rise per
+            # camera when there is one; on the live beach and days of the RTK, that RTK's own share; else
+            # a range over the shares measured so far (they differ by date, camera and geometry)
+            if not med:
+                reproj_here = ""
+            elif own and era != "live":
+                reproj_here = (" Here the re-projection alone leaves the lines ~"
+                               + ", ".join(f"{c} {med - e:.2f} m" for c, (e, _) in sorted(own.items()))
+                               + f" low (the setup median {med:.2f} m less this build's own paired rise per camera, "
+                                 f"compare/*_comparison.txt), plus whatever C mismatch this date has")
+            elif era == "live":
+                reproj_here = (f" On this beach and these days the re-projection alone leaves this DEM "
+                               f"~{(1 - keep) * med:.2f} m low (~{1 - keep:.1f} x the setup median of {med:.2f} m), "
+                               f"plus the C mismatch")
+            else:
+                reproj_here = (f" The share kept depends on the date, camera and beach ({SHARE_KEPT_RANGE[0]}-"
+                               f"{SHARE_KEPT_RANGE[1]} in the builds so far): the re-projection alone may leave this "
+                               f"DEM ~{(1 - SHARE_KEPT_RANGE[1]) * med:.2f}-{(1 - SHARE_KEPT_RANGE[0]) * med:.2f} m "
+                               f"low ({1 - SHARE_KEPT_RANGE[1]:.1f}-{1 - SHARE_KEPT_RANGE[0]:.1f} x the setup median of "
+                               f"{med:.2f} m), plus whatever C mismatch this date has")
             cav.append(f"C = {C} under-corrects. On the 2026-09-29 RTK transects ({rc['frames']} frames of "
                        f"{rc['window']}, the same frames both ways) the lines read {rc['without_setup_m']:.2f} m low "
                        f"without setup and still {rc['with_setup_m']:.2f} m low with it (median setup applied "
@@ -3370,9 +3540,7 @@ def setup_caveats(plan, args, state, forcing, fits, era):
                        + (f"(2) C = {C} is below those frames' own per-frame C ({rc['c_per_frame_in_place']:.3f} with "
                           f"no re-projection), ~{inplace:.2f} m (C was fitted on 14 of them, each line taken where it "
                           f"lay WITHOUT setup)." if inplace is not None else "(2) the rest is a C mismatch on those frames.")
-                       + (f" If the beach behaved alike here, the re-projection alone leaves this DEM "
-                          f"~{(1 - keep) * med:.2f} m low (~{1 - keep:.1f} x the setup median of {med:.2f} m), plus "
-                          f"whatever C mismatch this date has" if med else "")
+                       + reproj_here
                        + (" -- already inside the EARLIER CHECK expectation above: do not add it to that." if prior
                           else ".")
                        + (" That residual was measured in the GNSS-R frame (lines at the GNSS-R level); against the "
@@ -3475,8 +3643,8 @@ def collect_caveats(plan, args, state, forcing, prov):
                    "that offset. It largely cancels against RTK shots on NAVD88 (GEOID18), the same geoid model, but "
                    "not in the absolute NAVD88 heights of the GeoTIFFs.")
     # an earlier real measurement of these photos first: it can contradict the expectations below
-    cav[:0] = [prior_check_caveat(plan, pc, fits, forcing) for pc in prior_checks(plan)]
-    cav += setup_caveats(plan, args, state, forcing, fits, era)
+    cav[:0] = [prior_check_caveat(plan, pc, fits, forcing, prov) for pc in prior_checks(plan)]
+    cav += setup_caveats(plan, args, state, forcing, fits, era, prov)
     # frames that got no setup: left out of the waterlines (and so the DEM), counted
     m = read_stamp(out, "merge") or {}
     ns = m.get("no_setup_frames") or {}
@@ -3519,27 +3687,23 @@ def collect_caveats(plan, args, state, forcing, prov):
             cav.append(f"{cam}: days with a different pointing KEPT in the detection: "
                        f"{', '.join(res['different_days'])}"
                        + (" (--keep-moved-days)." if getattr(args, "keep_moved_days", False) else "."))
-        off = pointing_offset(info, info.get("calibration") or plan["cams"].get(cam, {}).get("eo_file"))
+        eo_ = info.get("calibration") or plan["cams"].get(cam, {}).get("eo_file")
+        off = pointing_offset(info, eo_)
         if off:
-            text = f"{cam}: {off[2]}"
             dt, dr = off[0], off[1]
             sens = tilt_sensitivity(plan, cam, dt, dr)
+            if sens:
+                off = pointing_offset(info, eo_, rate=False) or off
+            text = f"{cam}: {off[2]}"
             if sens:
                 text += (f". From this date's own DEM and calibration, a pointing error of {dt:+.2f}/{dr:+.2f} deg "
                          f"(tilt/roll) would shift the DEM by: "
                          + ", ".join(f"{r['dem_error_m']:+.2f} m at {r['range_m']} m (lines moved "
                                      f"{r['shift_m']:.1f} m)" for r in sens)
                          + " -- if the offset is the pointing and not the lens model")
-            if plan["era"] == "live":
-                rc_ = (SETUP_FITS.get(SETUP_COEF) or {}).get("rtk_check") or {}
-                text += (f". For the live CACO05 20251113 calibrations this is most likely the lens model at the "
-                         f"frame edge, not a camera offset: with the same calibrations the waterlines on the "
-                         f"2026-09-29 RTK transects (~100 m from the cameras) read {rc_.get('without_setup_m', 0.33):.2f} m "
-                         f"low without the setup, about what the setup of those frames (median "
-                         f"{rc_.get('setup_applied_m', 0.26):.2f} m) and its known under-correction account for "
-                         f"({rc_.get('with_setup_m', 0.13):.2f} m low with C = {SETUP_COEF}); a pointing error this "
-                         f"large would add about the shift listed above at that range, which the RTK does not show. "
-                         f"Read those shifts as what the offset WOULD do if it were the pointing")
+                test = pointing_vs_survey(plan, cam, (dt, dr), sens, prov, fits)
+                if test:
+                    text += ". " + test
             cav.append(text + ".")
         if info.get("warning"):
             cav.append(f"{cam}: {info['warning']}.")
@@ -3599,6 +3763,157 @@ def collect_caveats(plan, args, state, forcing, prov):
     return cav
 
 
+# A setup coefficient fitted to NO survey: repeat crossings of the same DEM cells agree best at C =
+# 0.03-0.04 (dem_from_contours.py --fit-setup on lines without setup; waterline_timex_cron.sh). A
+# constant pointing error moves every frame's line alike, so it does not change how well repeat
+# crossings agree: this C is blind to it, unlike the C fitted to the 2026 RTK (which absorbs any level
+# error at the transects, of the setup or of the pointing). Stockdon et al. (2006): setup = 0.35 x
+# foreshore slope x sqrt(H0 L0), so C ~0.035-0.045 on a 1:10-1:8 beach face.
+SETUP_C_INTERNAL = (0.03, 0.04)
+# The share of its setup a line keeps once re-projected landward at still water + setup, as measured
+# in the paired C = 0 sensitivities of the builds (Jan 2025 ~0.6, the 2026 RTK 0.71, Mar 2025 ~0.8):
+# used only where a build has no paired measurement of its own (a C = 0 build).
+SHARE_KEPT_RANGE = (0.6, 0.8)
+
+
+def compared_frames_scale(plan, name, cam):
+    """Median sqrt(Hs*L0) (m) over the frames of camera `cam` compared on the survey's transects
+    (compare/<name>_waterline_frames.csv), from the waterlines' own offshore_hs_m / offshore_tp_s.
+    -> (scale, frames) or (None, 0)."""
+    fr = plan["out"] / "compare" / f"{name}_waterline_frames.csv"
+    try:
+        with open(fr, newline="") as f:
+            want = {r["frame"] for r in csv.DictReader(f) if r.get("camera") == cam}
+    except (OSError, KeyError):
+        return None, 0
+    if not want:
+        return None, 0
+    want |= {w + ".jpg" for w in want}
+    x = {}
+    try:
+        with open(waterline_file(plan, quiet_=True), newline="") as f:
+            for r in csv.DictReader(f):
+                k = r.get("source_file", "")
+                if k in want and k not in x:
+                    try:
+                        hs, tp = float(r.get("offshore_hs_m") or "nan"), float(r.get("offshore_tp_s") or "nan")
+                    except ValueError:
+                        continue
+                    if hs == hs and tp == tp:
+                        x[k] = float(np.sqrt(hs * G * tp ** 2 / (2 * np.pi)))
+    except OSError:
+        return None, 0
+    return (float(np.median(list(x.values()))), len(x)) if x else (None, 0)
+
+
+def survey_range_from(plan, name, cam, zlo, zhi):
+    """Median distance (m) from camera `cam` of the survey's transect points in its view with
+    elevations in [zlo, zhi] (where the lines were compared), from compare/<name>_points.csv."""
+    try:
+        with open(plan["out"] / "compare" / f"{name}_points.csv", newline="") as f:
+            rows = list(csv.DictReader(f))
+    except OSError:
+        return None
+    d = []
+    for tr in (True, False):
+        for r in rows:
+            try:
+                z, dist = float(r.get("survey_z_navd88") or "nan"), float(r.get("distance_from_camera_m") or "nan")
+            except ValueError:
+                continue
+            if r.get("camera") != cam or not (zlo <= z <= zhi) or dist != dist:
+                continue
+            if tr and "transect" not in (r.get("description", "") + r.get("name", "")).lower():
+                continue
+            d.append(dist)
+        if d:
+            break
+    return float(np.median(d)) if d else None
+
+
+def pointing_vs_survey(plan, cam, offset, sens, prov, fits):
+    """
+    Can a survey's waterline check tell a pointing error from a lens-model one? Only on evidence that
+    fitted nothing to that survey: the lines WITHOUT setup (C = 0) against the survey, minus the setup a
+    pointing-blind C (SETUP_C_INTERNAL, repeat crossings) explains, leaves what pointing, swash and
+    detector bias share; compared with what the full offset would do at the survey's range from the
+    camera (tilt_sensitivity), it bounds the part of the offset that cannot be ruled out. A check with
+    a C fitted to this same survey cannot say (that C absorbs any level error there). -> text or None.
+    """
+    C = float(fits[0]["coef"]) if fits and fits[0].get("coef") is not None else None
+    for c in prov.get("comparisons") or []:
+        h = c.get("headline") or {}
+        wl = h.get("waterlines") or {}
+        # only a check at a known range from the camera (frames on RTK transects): a DSM comparison
+        # pools every range, where the offset's effect varies from nothing to metres
+        if not c.get("current") or not wl.get("n") or not wl.get("by_camera") or wl.get("unit") != "frames":
+            continue
+        name = f"{plan['date']}_{c['name']}"
+        no_setup = str(wl.get("setup", "")).startswith("NO setup") or not C
+        if no_setup:
+            v = (wl.get("by_camera") or {}).get(cam) or {}
+            obs0, n0 = v.get("median"), v.get("frames") or v.get("n")
+            scale, nsc = compared_frames_scale(plan, name, cam)
+            if obs0 is None or not scale:
+                continue
+            per_c = (SHARE_KEPT_RANGE[0] * scale, SHARE_KEPT_RANGE[1] * scale)
+            how = (f"its frames' median sqrt(Hs L0) of {scale:.1f} m x {SETUP_C_INTERNAL[0]}-{SETUP_C_INTERNAL[1]} "
+                   f"x the share of its setup a line keeps once re-projected, {SHARE_KEPT_RANGE[0]}-"
+                   f"{SHARE_KEPT_RANGE[1]} as measured in the paired builds")
+        else:
+            v = (((wl.get("without_setup") or {}).get("paired") or {}).get("by_camera") or {}).get(cam) or {}
+            obs0, n0, eff = v.get("without_setup_median"), v.get("frames") or v.get("n"), v.get("setup_effect_median")
+            if obs0 is None or eff is None:
+                continue
+            per_c = (eff / C, eff / C)
+            how = (f"this build's own paired effect, {eff:+.3f} m at C = {C:g} with the re-projection, scaled to "
+                   f"C = {SETUP_C_INTERNAL[0]}-{SETUP_C_INTERNAL[1]}")
+        lo = obs0 + per_c[0] * SETUP_C_INTERNAL[0]
+        hi = obs0 + per_c[1] * SETUP_C_INTERNAL[1]
+        zc = wl.get("line_elevation_compared") or {}
+        rng = survey_range_from(plan, name, cam, (zc.get("p5") or 0.0) - 0.2, (zc.get("max") or 9.0) + 0.2)
+        if rng is None:
+            continue
+        band = None
+        for r in sens:
+            a, b = (float(x) for x in r["range_m"].split("-"))
+            if a <= rng < b:
+                band = r
+        if band is None:
+            band = min(sens, key=lambda r: min(abs(rng - float(x)) for x in r["range_m"].split("-")))
+        pred = band["dem_error_m"]
+        circ = (" The check of these lines WITH the setup cannot say: C = %g was fitted to this same survey, so any "
+                "level error on its transects, of the setup or of the pointing, is absorbed into C (that comparison "
+                "is CIRCULAR for the level)." % C) if (C and any(f.get("kind") == "known" for f in fits)
+                                                       and c.get("label") == "CIRCULAR") else ""
+        few_ = f" ({n0} frames: too few for an estimate)" if (n0 or 0) < FEW_N else f" ({n0} frames)"
+        head = (f"Is it the pointing?{circ} Judged on what fitted nothing to {c['name']}: repeat crossings of the same "
+                f"DEM cells agree best at C = {SETUP_C_INTERNAL[0]}-{SETUP_C_INTERNAL[1]} (dem_from_contours.py "
+                f"--fit-setup on lines without setup), blind to a constant pointing error, which moves every frame's "
+                f"line alike, and Stockdon's 0.35 x a ~1:10 beach face expects about that. Without setup the {cam} "
+                f"lines read {obs0:+.2f} m against the survey on its transects{few_}; that setup raises them by "
+                f"{lo - obs0:.2f}-{hi - obs0:.2f} m ({how}), leaving {lo:+.2f} to {hi:+.2f} m")
+        where = f" at the transects (~{rng:.0f} m from {cam}, the {band['range_m']} m band)"
+        if pred >= -0.02 and pred <= 0.02:
+            return head + where + f", where the offset would barely move the DEM ({pred:+.2f} m): this survey cannot test it"
+        f_lo, f_hi = sorted((lo / pred, hi / pred))
+        f_lo, f_hi = max(f_lo, 0.0), max(f_hi, 0.0)
+        if f_hi <= 0.0:
+            verdict = (f", of the opposite sign to the {pred:+.2f} m the full offset would cause there: the "
+                       f"transects show no sign of it being pointing (on {n0} frames)")
+        elif f_hi >= 1.0:
+            verdict = (f", as much as the {pred:+.2f} m the full offset would cause there: the transects cannot rule "
+                       f"out that the whole offset is pointing; swash and detector bias at the waterline are "
+                       f"confounded with it")
+        else:
+            verdict = (f", which is {f_lo * 100:.0f}-{f_hi * 100:.0f}% of the {pred:+.2f} m the full offset would "
+                       f"cause there: the full offset is unlikely to be pointing, but a part of it, up to ~"
+                       f"{f_hi * offset[0]:+.2f}/{f_hi * offset[1]:+.2f} deg tilt/roll, cannot be ruled out; swash "
+                       f"and detector bias at the waterline are confounded with it")
+        return head + where + verdict + ". Read the shifts above as what the offset WOULD do if it were all pointing"
+    return None
+
+
 def storm_caveats(plan, args, prov, first_used, last_used):
     """A caveat per known storm (STORMS) that reaches into the window or ended within 3 days of it:
     which frame days are the storm's tail before the survey, what changed and where, and whether a
@@ -3634,10 +3949,46 @@ def storm_caveats(plan, args, prov, first_used, last_used):
                              f"{n.min():.0f}-{n.max():.0f}: they overlap that loss.")
             except (SystemExit, Exception):
                 pass
-        text += (" Whether the beach was steady over the window shows in the per-day rows of waterlines - survey "
-                 "(compare/*_comparison.txt): a trend from day to day is change, not error.")
+        text += " " + PER_DAY_ROWS_NOTE
         cav.append(text)
     return cav
+
+
+# What a step or trend in the per-day rows of waterlines - survey can and cannot say. On the sandbox's
+# synthetic fixture (every day rendered from ONE lidar: a static beach) this method's per-day medians
+# drift by ~0.09 m over Jan 18-23 (+0.01 to -0.08 m) and ~0.17 m over Mar 3-9 (+0.06 to -0.10 m), with a
+# ~0.07 m step across the 20 Jan wave event (survey_build/fixture/README.md, 'By day'): the detector's
+# error depends on the elevation, and the tide phase of the hours sampled moves from day to day.
+PER_DAY_ROWS_NOTE = (
+    "The per-day rows of waterlines - survey (compare/*_comparison.txt) show whether the lines moved over the "
+    "window, but a step or trend there may be change of the beach OR a method error that depends on the "
+    "conditions: on a static synthetic beach this method's per-day medians drift by up to ~0.17 m over a week "
+    "(Jan -0.09 m, Mar -0.17 m, with a ~0.07 m step across a wave event), because its error depends on the "
+    "elevation and the tide phase of the hours sampled moves from day to day. Compare days at a similar survey "
+    "elevation (the rows' 'at z' column, or the elevation bands) before calling a difference change.")
+
+
+def frame_epochs(plan):
+    """{camera: {source_file: capture epoch}} of the waterlines in use (for placing frames against an
+    event by time, not by calendar day)."""
+    res = {}
+    try:
+        with open(waterline_file(plan, quiet_=True), newline="") as f:
+            for r in csv.DictReader(f):
+                k, cam = r.get("source_file", ""), r.get("camera", "?")
+                d = res.setdefault(cam, {})
+                if k in d:
+                    continue
+                try:
+                    d[k] = float(r.get("capture_epoch") or "nan")
+                except ValueError:
+                    d[k] = float("nan")
+                if d[k] != d[k]:
+                    e = epoch_of(k)
+                    d[k] = float(e) if e is not None else float("nan")
+    except OSError:
+        return {}
+    return res
 
 
 # Offshore Hs (the ADCP currency of the forcing) from which a span of the window counts as a wave
@@ -3721,34 +4072,55 @@ def wave_event_caveats(plan, prov, first_used, last_used):
     sd = sdays[0] if sdays else plan["date"]
     max_hs = (dem_settings_built(out) or {}).get("max_hs_m")
     dropped = rough_days(waterline_file(plan, quiet_=True), float(max_hs)) if max_hs else {}
-    for ev in wave_events(out / "forcing", plan["first"], plan["last"]):
+    events = wave_events(out / "forcing", plan["first"], plan["last"])
+    fep = frame_epochs(plan) if events else {}
+    for ev in events:
         a = datetime.fromtimestamp(ev["start"], tz=timezone.utc)
         b = datetime.fromtimestamp(ev["end"], tz=timezone.utc)
         da, db = a.strftime("%Y-%m-%d"), b.strftime("%Y-%m-%d")
         if any(not (db < sv["first"] or da > sv["last"]) for sv in STORMS):
             continue
         pk = datetime.fromtimestamp(ev["peak_at"], tz=timezone.utc)
-        before = [d for d in days if d < da]
-        after = [d for d in days if d > db]
-        during = [d for d in days if da <= d <= db]
-        rel = ("after it" if sd > db else "before it" if sd < da else "during it")
+        # frames placed by their capture TIME against the event (a wave record stands for the half hour
+        # on either side of it), not by calendar day: a one-hour event is not 'during' a whole day
+        t_a, t_b = ev["start"] - 1800.0, ev["end"] + 1800.0
+        cls = {"before": {}, "during": {}, "after": {}}
+        for cam, fr in (fep or {}).items():
+            for k, e in fr.items():
+                if e != e:
+                    continue
+                c_ = "before" if e < t_a else "after" if e > t_b else "during"
+                dd = datetime.fromtimestamp(e, tz=timezone.utc).strftime("%Y-%m-%d")
+                cls[c_][dd] = cls[c_].get(dd, 0) + 1
+        if not any(cls.values()):                     # no capture times: by day, as before
+            cls = {"before": {d: 0 for d in days if d < da}, "during": {d: 0 for d in days if da <= d <= db},
+                   "after": {d: 0 for d in days if d > db}}
+
+        def frames_text(k, what):
+            v = cls[k]
+            if not v:
+                return ""
+            n = sum(v.values())
+            return (f"{n} frame(s) {what} it ({', '.join(sorted(v))})" if n else
+                    f"the frames of {', '.join(sorted(v))} {what} it")
+        # the survey's time of day is not known: on an event day it is 'the same day', not before/after
+        rel = ("after it" if sd > db else "before it" if sd < da else
+               "on the same day as the event (its time is not known)" if da == db else
+               "within the event's days (its time is not known)")
         span = (f"{a:%Y-%m-%d %H:%M} .. {b:%Y-%m-%d %H:%M} UTC" if ev["end"] > ev["start"] else
                 f"{a:%Y-%m-%d %H:%M} UTC")
         srcs = ", ".join(sorted(x for x in ev["sources"] if x)) or "the forcing"
         text = (f"HIGH WAVES in the window: offshore Hs >= {EVENT_HS_M:.1f} m over {span} (peak {ev['peak']:.2f} m "
                 f"at {pk:%Y-%m-%d %H:%M} UTC; {srcs}, forcing/waves.csv). The beach may have changed across it, and "
                 f"the DEM grids the frames of both sides together: "
-                + "; ".join(x for x in (
-                    f"frames of {', '.join(before)} before it" if before else "",
-                    f"of {', '.join(during)} during it" if during else "",
-                    f"of {', '.join(after)} after it" if after else "") if x)
+                + "; ".join(x for x in (frames_text("before", "before"), frames_text("during", "during"),
+                                        frames_text("after", "after")) if x)
                 + f"; the survey ({sd}) is {rel}.")
-        gone = [f"{c} {d}" for c, ds in sorted(dropped.items()) for d in ds if da <= d <= db or d in during]
+        gone = [f"{c} {d}" for c, ds in sorted(dropped.items()) for d in ds if da <= d <= db or d in cls["during"]]
         if gone:
             text += (f" The DEM left out every frame of {', '.join(gone)} (offshore Hs > {float(max_hs):g} m, its "
                      f"wave filter).")
-        text += (" Read the per-day rows of waterlines - survey (compare/*_comparison.txt): a step between the days "
-                 "before and after the event is change of the beach, not an error of the method.")
+        text += " " + PER_DAY_ROWS_NOTE
         cav.append(text)
     return cav
 
@@ -3770,20 +4142,89 @@ def camera_medians(bc):
             if k != "neither" and v and v.get("n") and v.get("median") is not None}
 
 
+def _camera_groups(h):
+    """(what, by_camera dict, unit) of a comparison's per-camera statistics: DEM - survey (DEM cells or
+    points: n itself) and waterlines - survey (frames or distinct survey points)."""
+    wl = h.get("waterlines") or {}
+    return (("DEM - survey", h.get("by_camera") or {}, None),
+            ("waterlines - survey", wl.get("by_camera") or {}, wl.get("unit") or "points"))
+
+
+def _split_of(bc, unit, limit):
+    """-> (medians {cam: (median, n)}, spread m, rests-on {cam: (count, what)}) or None for < 2 cameras."""
+    m = camera_medians(bc)
+    if len(m) < 2:
+        return None
+    vals = [v[0] for v in m.values()]
+    rests = {c: (independent_count(bc[c], unit) if unit else (m[c][1], "values")) for c in m}
+    return m, max(vals) - min(vals), rests
+
+
+def _split_cause(what, bc, wl):
+    """Why two cameras may differ, from what their compared values share. The DEM cells of two cameras
+    are different parts of the beach; waterlines are the cameras' own only when both were compared at
+    the same times (same water level, waves and setup)."""
+    if what.startswith("DEM"):
+        return ("the cameras' cells are different parts of the beach, made from different frames: pointing, "
+                "lens model, or the beach and the frames themselves")
+    cams = sorted(c for c in bc if c != "neither")
+    tm = {c: (bc[c].get("times"), bc[c].get("shared_times")) for c in cams}
+    if all(t is not None and s_ is not None for t, s_ in tm.values()):
+        if all(t and s_ / float(t) >= 0.8 for t, s_ in tm.values()):
+            return ("compared at the same times (" + ", ".join(f"{c} {s_} of {t}" for c, (t, s_) in tm.items())
+                    + "): the water level and the setup are the same for both, so pointing or lens model")
+        txt = ("compared at different times (" + ", ".join(f"{c} {t} time(s), {s_} shared" for c, (t, s_) in
+                                                           tm.items()) + "): the water level, waves and setup differ "
+               "too, so this need not be the cameras")
+    else:
+        txt = ("not known to be compared at the same times: the water level, waves and setup may differ too, so "
+               "this need not be the cameras")
+    su = {c: bc[c].get("setup_median") for c in cams if bc[c].get("setup_median") is not None}
+    if su and any(abs(v) > 1e-6 for v in su.values()):
+        txt += "; median setup of the frames compared " + ", ".join(f"{c} {v:.2f} m" for c, v in su.items())
+    hs = {c: bc[c].get("hs_median") for c in cams if bc[c].get("hs_median") is not None}
+    if hs:
+        txt += "; their median offshore Hs " + ", ".join(f"{c} {v:.2f} m" for c, v in hs.items())
+    pr = (((wl or {}).get("without_setup") or {}).get("paired") or {}).get("by_camera") or {}
+    pp = {c: pr[c] for c in cams if c in pr and pr[c].get("with_setup_median") is not None
+          and pr[c].get("without_setup_median") is not None}
+    if len(pp) > 1:
+        txt += ("; with / without the setup " + ", ".join(
+            f"{c} {v['with_setup_median']:+.3f} / {v['without_setup_median']:+.3f}" for c, v in pp.items()))
+    return txt
+
+
 def camera_split(h, limit=CAMERA_SPLIT_M):
     """Text when the per-camera medians of a comparison (DEM - survey, or waterlines - survey) are more
-    than `limit` apart, else ''."""
+    than `limit` apart AND every camera's median rests on at least FEW_N values (DEM cells or points;
+    frames or distinct survey points for the waterlines), else ''. The cause is named only from what
+    the values share (_split_cause)."""
     out = []
-    for what, bc in (("DEM - survey", h.get("by_camera")),
-                     ("waterlines - survey", (h.get("waterlines") or {}).get("by_camera"))):
-        m = camera_medians(bc)
-        if len(m) > 1:
-            vals = [v[0] for v in m.values()]
-            if max(vals) - min(vals) > limit:
-                out.append(f"{what} by camera " + ", ".join(f"{c} {v[0]:+.3f} (n {v[1]})" for c, v in m.items())
-                           + f": {max(vals) - min(vals):.2f} m apart")
-    return ("; ".join(out) + f" -- more than {limit:.2f} m: the pooled median hides a camera difference "
-            f"(pointing or lens model; the water level and setup are the same for both)") if out else ""
+    for what, bc, unit in _camera_groups(h):
+        r = _split_of(bc, unit, limit)
+        if not r or r[1] <= limit or any(k < FEW_N for k, _ in r[2].values()):
+            continue
+        m, spread, rests = r
+        out.append(f"{what} by camera " + ", ".join(f"{c} {v[0]:+.3f} ({rests[c][0]} {rests[c][1]})"
+                                                    for c, v in m.items())
+                   + f": {spread:.2f} m apart, more than {limit:.2f} m: the pooled median hides a camera "
+                     f"difference ({_split_cause(what, bc, h.get('waterlines'))})")
+    return "; ".join(out)
+
+
+def camera_split_note(h, limit=CAMERA_SPLIT_M):
+    """Text when per-camera medians are more than `limit` apart but a camera rests on fewer than FEW_N
+    values: too few to compare the cameras (no flag), else ''."""
+    out = []
+    for what, bc, unit in _camera_groups(h):
+        r = _split_of(bc, unit, limit)
+        if not r or r[1] <= limit or not any(k < FEW_N for k, _ in r[2].values()):
+            continue
+        m, spread, rests = r
+        out.append(f"{what}: too few to compare the cameras (" + ", ".join(
+            f"{c} {v[0]:+.3f} on {rests[c][0]} {rests[c][1]}" for c, v in m.items())
+                   + f"; {spread:.2f} m apart, but below {FEW_N} a median is not an estimate)")
+    return "; ".join(out)
 
 
 def independent_count(v, unit=None):
@@ -4050,7 +4491,7 @@ def waterline_readme_lines(wl_):
                 + f" ({wl_.get('method')})"))
     zu, za = wl_.get("line_elevation_compared"), wl_.get("line_elevation_all")
     if zu:
-        L.append(f"      WHERE: the line points compared lie at {zu['p5']:+.2f} to {zu['max']:+.2f} m (p5..max; "
+        L.append(f"      WHERE: the line points compared lie at {zu['p5']:+.2f} to {zu['p95']:+.2f} m (p5..p95; "
                  f"median {zu['median']:+.2f})"
                  + (f", the window's lines at {za['p5']:+.2f} to {za['p95']:+.2f} m (p5..p95)" if za else "")
                  + ": this check covers only that part of the beach")
@@ -4143,7 +4584,9 @@ def write_readme(plan, args, prov):
     fits_ = (prov.get("setup") or {}).get("fits") or []
     no_setup = bool(fits_) and all(f.get("kind") == "none" or not f.get("coef") for f in fits_)
     w("Each photo's waterline is where the water met the sand; its elevation is the measured water level "
-      + ("only: NO wave setup (C = 0), so a line marked by the swash reads LOW by about the setup. " if no_setup else
+      + ("only: NO wave setup (C = 0), so a line marked by the swash reads LOW, by roughly "
+         f"{SHARE_KEPT_RANGE[0]}-{SHARE_KEPT_RANGE[1]} x the setup (the line also moves seaward onto lower beach). "
+         if no_setup else
          f"plus the wave setup (C = {(prov.get('setup') or {}).get('coef')}). ")
       + "Many waterlines at different tides make the DEM.")
     w("")
@@ -4171,6 +4614,8 @@ def write_readme(plan, args, prov):
                 w("      by camera: " + line)
         if camera_split(h):
             w("    CAMERAS DIFFER: " + camera_split(h))
+        if camera_split_note(h):
+            w("    cameras: " + camera_split_note(h))
         wl_ = h.get("waterlines") or {}
         if wl_.get("n"):
             for ln in waterline_readme_lines(wl_):
@@ -4244,11 +4689,13 @@ def write_readme(plan, args, prov):
          (prov["filter"]["result"] or "not run yet")))
     dm = prov["dem"]
     w(f"  DEM: {dm['script']} cell {dm['cell_m']} m, min {dm['min_points']} frames per cell, max spread "
-      f"{dm['max_spread_m']} m, max Hs {dm['max_hs_m']} m, max day offset {dm['max_day_offset_m']} m "
-      f"(from {dm.get('settings_from')})"
+      f"{dm['max_spread_m']} m, max Hs {dm['max_hs_m']} m, max day offset {dm['max_day_offset_m']} m"
+      + (" (day test NOT run)" if dm.get("day_test_off") else "") + f" (from {dm.get('settings_from')})"
       + (f"; this run asked for other DEM settings ({dem_settings_differ(dm, dm.get('requested_this_run') or {})}): "
          f"NOT applied, rerun --steps dem,maps,compare" if dem_settings_differ(dm, dm.get("requested_this_run") or {})
          else ""))
+    if dm.get("day_test_off"):
+        w(f"      day test not run: {dm['day_test_off']}")
     cl = dm.get("cells") or {}
     if cl:
         w(f"      cells the waterlines crossed {cl.get('with_points')}: filled {cl.get('filled')}, blanked "
@@ -4259,8 +4706,8 @@ def write_readme(plan, args, prov):
         w(f"      gridded {sum(bf['frames'].values())} frames ("
           + ", ".join(f"{k} {v}" for k, v in sorted(bf["frames"].items())) + f") on {bf.get('days')} days; "
           f"left out before gridding: {flt_.get('rough_frames', 0)} frames with Hs > {flt_.get('max_hs')} m, "
-          f"{len(flt_.get('camera_days_rejected') or [])} camera-days off the rest by > "
-          f"{flt_.get('max_day_offset')} m")
+          + (f"{len(flt_.get('camera_days_rejected') or [])} camera-days off the rest by > "
+             f"{flt_.get('max_day_offset')} m" if flt_.get("max_day_offset") else "no day test"))
     w(f"      GeoTIFFs: {dm['geotiff']}")
     sw = prov["software"]
     w(f"  software: {sw.get('note')} (per step in provenance.json software.by_step)")
@@ -4618,6 +5065,8 @@ def run_date(plan, args, steps, state):
             if old_int is not None:
                 signal.signal(signal.SIGINT, old_int)
         raise
+    if state["failures"]:
+        keep_built_window(plan, args, (), state, why="a step failed before the outputs were rebuilt for it")
     prov = write_provenance(plan, args, state, final=True)
     rule(f"{date}: summary of this run ({time.time() - t_all:.0f} s)")
     for st in STEPS:
@@ -4630,13 +5079,18 @@ def run_date(plan, args, steps, state):
                 say("  by camera", per_camera_text(h.get("by_camera")))
             if camera_split(h):
                 warn(f"{c['name']}: {camera_split(h)}")
+            if camera_split_note(h):
+                say("  cameras", camera_split_note(h))
             wl_ = h.get("waterlines") or {}
             if wl_.get("n"):
                 say("  waterlines", stat_text(wl_, "waterlines - survey") + "; by camera "
                     + (per_camera_text(wl_.get("by_camera"), wl_.get("unit")) or "-"))
                 zu = wl_.get("line_elevation_compared")
                 if zu:
-                    say("  where", f"line points compared at {zu['p5']:+.2f} .. {zu['max']:+.2f} m only (p5..max)")
+                    za = wl_.get("line_elevation_all") or {}
+                    say("  where", f"line points compared at {zu['p5']:+.2f} .. {zu['p95']:+.2f} m only (p5..p95)"
+                        + (f"; the window's lines {za['p5']:+.2f} .. {za['p95']:+.2f} m" if za.get("p95") is not None
+                           else ""))
             ws = wl_.get("without_setup") or {}
             pr = ws.get("paired") or {}
             if pr.get("n"):
@@ -4720,6 +5174,16 @@ def built_settings(plan):
                 res["cams"][cam] = {"first": v[0], "last": v[1], "hours": (float(v[2][0]), float(v[2][1]))}
             except (TypeError, ValueError, IndexError):
                 pass
+        if not res["cams"]:
+            # no archive-rows stamp (e.g. a product of an older version whose read failed): the DEM's
+            # own window (dem_from_contours.py --start-date/--end-date) still says what the grids on
+            # disk came from; the hours are not recorded there, so this run's are assumed
+            w = stamp_words(out, "dem")
+            a, b = opt_after(w, "--start-date"), opt_after(w, "--end-date")
+            if a and b:
+                for cam, c in plan["cams"].items():
+                    if read_stamp(out, f"detect_{cam}"):
+                        res["cams"][cam] = {"first": a, "last": b, "hours": tuple(float(x) for x in c["hours"])}
         if res["cams"]:
             res["forcing"] = (min(v["first"] for v in res["cams"].values()),
                               max(v["last"] for v in res["cams"].values()))
@@ -4774,7 +5238,7 @@ def window_differences(plan, bs):
     return diff
 
 
-def keep_built_window(plan, args, steps, state):
+def keep_built_window(plan, args, steps, state, why=""):
     """
     A product's photo window and hours are fixed by its waterlines (and forcing). A run asking for
     another --window / --utc-hours applies them only when it rebuilds from the forcing through the
@@ -4786,9 +5250,9 @@ def keep_built_window(plan, args, steps, state):
     diff = window_differences(plan, bs)
     if not diff or set(WINDOW_STEPS) <= set(steps):
         return
-    text = (f"this run's window/hours NOT applied ({'; '.join(diff)}): the outputs on disk were built for "
-            f"the window shown; to apply them, rebuild from the forcing (all steps: drop --steps, or --steps "
-            f"{','.join(STEPS)})")
+    text = (f"this run's window/hours NOT applied ({'; '.join(diff)})" + (f" ({why})" if why else "")
+            + f": the outputs on disk were built for the window shown; to apply them, rebuild from the forcing "
+              f"(all steps: drop --steps, or --steps {','.join(STEPS)})")
     warn(text)
     state["not_applied"].append(text)
     f = bs.get("forcing")
@@ -5123,12 +5587,14 @@ def summary(args):
                    "waterlines_n_independent_unit": wunit or None,
                    "waterlines_too_few": bool(wl.get("n")) and wk < FEW_N,
                    "waterlines_method": wl.get("method"),
-                   "waterlines_elevation_p5_m": num(zu.get("p5")), "waterlines_elevation_max_m": num(zu.get("max")),
+                   "waterlines_elevation_p5_m": num(zu.get("p5")), "waterlines_elevation_p95_m": num(zu.get("p95")),
+                   "waterlines_elevation_max_m": num(zu.get("max")),
                    "c0_paired_n": pr.get("n"), "c0_paired_unit": pr.get("unit"),
                    "c0_without_setup_median_m": num(pr.get("without_setup_median")),
                    "c0_with_setup_median_m": num(pr.get("with_setup_median")),
                    "c0_dropped": (ws.get("unpaired") or {}).get("with_setup_only"),
                    "camera_split": camera_split(h) or None,
+                   "camera_note": camera_split_note(h) or None,
                    "days_outside_frames": h.get("days_outside_photo_window"),
                    "days_survey_minus_frames_middle": round(mid, 1) if mid is not None else None,
                    "days_survey_minus_product_date": dprod,
@@ -5151,6 +5617,9 @@ def summary(args):
                 row[f"c0_n_independent_{cam}"] = independent_count(pc_)[0] if pc_ and pc_.get("n") else None
             kp_, up_ = independent_count(pr) if pr.get("n") else (None, None)
             row["c0_n_independent"], row["c0_n_independent_unit"] = kp_, up_
+            # the label of the C = 0 values: what the comparison would be without a setup coefficient
+            row["c0_label"] = (label_without_setup(c.get("table_label") or label, cc.get("label_reasons"))
+                               if cur and pr.get("n") else None)
             row["c0_too_few"] = bool(pr.get("n")) and kp_ < FEW_N
             row["dem_by_camera"] = {k: v[0] for k, v in dem_cam.items()}
             row["waterlines_by_camera"] = {k: v[0] for k, v in wl_cam.items()}
@@ -5171,8 +5640,10 @@ def summary(args):
                 st_ = (load_json(root / d / "provenance.json") or {}).get("status")
                 for sv in ([x for x in srv if x["date"] == d] or [{"name": "-", "survey_type": "", "survey_date": "",
                                                                       "label": ""}]):
+                    lw, lw_why = label_when_built(d, sv, cfg, srv, args)
                     not_yet.append({"date": d, "survey": sv["name"], "survey_type": sv["survey_type"],
                                     "survey_date": sv["survey_date"], "table_label": sv["label"],
+                                    "label_when_built": lw, "label_when_built_reason": lw_why,
                                     "comparison": (f"not built yet (no {d}/ under this root)" if not st_ else
                                                    f"no comparison row yet (product status: {st_})")})
                 continue
@@ -5189,7 +5660,7 @@ def summary(args):
         return 1
     fields = [k for k in (rows[0].keys() if rows else ["date", "survey", "survey_type", "survey_date", "comparison"])
               if k not in ("dem_by_camera", "waterlines_by_camera")]
-    for k in ("table_label",):
+    for k in ("table_label", "label_when_built", "label_when_built_reason"):
         if k not in fields:
             fields.append(k)
     with open(root / "summary.csv", "w", newline="") as f:
@@ -5219,7 +5690,7 @@ def summary(args):
              "C       the wave-setup coefficient the product was built with (0 = no setup); where it was",
              "        fitted is under 'Why each label'",
              "under each row: the medians per camera ('!' = cameras more than "
-             f"{CAMERA_SPLIT_M:.2f} m apart: the pooled median hides it),",
+             f"{CAMERA_SPLIT_M:.2f} m apart, each on >= {FEW_N} values: the pooled median hides it),",
              "        with what each rests on (DEM cells; frames or distinct survey points for the lines;",
              "        'too few' below 10), where on the beach the lines were compared, and the C = 0",
              "        sensitivity on the same frames", "",
@@ -5260,9 +5731,11 @@ def summary(args):
             bc.append("lines " + ", ".join(f"{k} {v:+.3f} ({wl_cam(k)})" for k, v in r["waterlines_by_camera"].items()))
         if bc:
             lines.append(f"{'':<11} {'!' if r['camera_split'] else ' '} by camera: " + "; ".join(bc))
+        if r.get("camera_note"):
+            lines.append(f"{'':<11}   cameras: {r['camera_note']}")
         if r.get("waterlines_elevation_p5_m") is not None:
             lines.append(f"{'':<11}   lines compared at {r['waterlines_elevation_p5_m']:+.2f} .. "
-                         f"{r['waterlines_elevation_max_m']:+.2f} m only (p5..max)")
+                         f"{r['waterlines_elevation_p95_m']:+.2f} m only (p5..p95)")
         if r.get("c0_paired_n"):
             cams0 = [k for k in ("c1", "c2") if r.get(f"c0_n_independent_{k}")]
             lines.append(f"{'':<11}   C = 0 sensitivity, the same {r['c0_paired_n']} {r['c0_paired_unit']}"
@@ -5271,6 +5744,9 @@ def summary(args):
                          + f": {r['c0_without_setup_median_m']:+.3f} m without the setup vs "
                          f"{r['c0_with_setup_median_m']:+.3f} m with it"
                          + (" -- TOO FEW: not an estimate" if r.get("c0_too_few") else "")
+                         + (f"; the C = 0 values are {r['c0_label']} (no setup coefficient fitted to this survey in them)"
+                            if r.get("c0_label") and r.get("label") in LABELS
+                            and LABELS.index(r["c0_label"]) < LABELS.index(r["label"]) else "")
                          + (f" ({r['c0_dropped']} drop out at C = 0)" if r.get("c0_dropped") else "")
                          + (("; by camera " + ", ".join(
                              f"{k} {r[f'c0_without_setup_median_{k}_m']:+.3f} / {r[f'c0_with_setup_median_{k}_m']:+.3f}"
@@ -5280,15 +5756,21 @@ def summary(args):
             lines.append(f"{'':<11} survey_compare.py's checks suggest {r['survey_compare_suggests']}"
                          + (f" (overruled: {r['overruled']})" if r["overruled"] else ""))
     if not_yet:
-        lines += ["", "Enabled in the configuration, no comparison under this root yet:"]
+        lines += ["", "Enabled in the configuration, no comparison under this root yet (its label if built with "
+                      f"this run's options, C = {args.setup_coef:g}):"]
         for r in not_yet:
+            lw, tl = r.get("label_when_built"), r.get("table_label")
             lines.append(f"  {r['date']} {r['survey']}: {r['comparison']}"
-                         + (f"; its label when built: {r['table_label']}" if r.get("table_label") else ""))
+                         + (f"; table label {tl}" if tl else "")
+                         + (f"; built with C = {args.setup_coef:g} it becomes {lw} ({r['label_when_built_reason']})"
+                            if lw and lw != tl and r.get("label_when_built_reason") else
+                            f"; its label when built: {lw}" if lw else ""))
     if disabled:
         lines += ["", "Not built (disabled at the user's request in the configuration):"]
         for r in disabled:
             lines.append(f"  {r['date']} {r['survey']}: {r['comparison']}"
-                         + (f"; its label when built: {r['table_label']}" if r.get("table_label") else ""))
+                         + (f"; table label {r['table_label']} (the build may make it worse, never better)"
+                            if r.get("table_label") else ""))
     lines += ["", "Why each label:"]
     for r in rows:
         if not r["current"]:
@@ -5307,6 +5789,39 @@ def summary(args):
     except Exception as exc:
         warn(f"summary figure failed: {exc!r}")
     return 0
+
+
+def label_when_built(date, sv, cfg, srv, args):
+    """The label a not-yet-built comparison would get if built with this run's options (the C of
+    --setup-coef, the table's envelopes and calibrations), as --dry-run reports it: never the table's
+    label when the chain would make it worse. -> (label, short reason) ('', '' for no survey row)."""
+    if not sv.get("label") or sv.get("name") in (None, "", "-"):
+        return "", ""
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            plan = build_plan(date, cfg, srv, args)
+            if not plan:
+                return sv["label"], ""
+            paths, _ = resolve_survey(sv, plan, args)
+            v = Verdict(sv)
+            for p_ in (paths or [Path(sv["path"] or sv["name"])]):
+                honest_label(sv, plan, args, p_, fits=[setup_fit_info(args.setup_coef, args)], verdict=v)
+    except (SystemExit, Exception) as exc:          # never let the summary fail on a table problem
+        return sv["label"], f"not checked: {exc}"
+    worst = [r for r in v.reasons if r.startswith(v.label + ":")]
+    return v.label, (worst[0][len(v.label) + 1:].strip() if worst else "")
+
+
+def label_without_setup(table_label, reasons):
+    """The label a comparison would have with no setup coefficient (C = 0): the table's label made
+    worse by every reason except the setup coefficient's (a paired C = 0 value of a comparison that is
+    CIRCULAR only through C fitted to its survey is INDEPENDENT)."""
+    lab = table_label if table_label in LABELS else "CIRCULAR"
+    for r in reasons or []:
+        k = str(r).split(":", 1)[0]
+        if k in LABELS and "setup coefficient" not in str(r) and LABELS.index(k) > LABELS.index(lab):
+            lab = k
+    return lab
 
 
 def summary_figure(rows, path, disabled=(), not_yet=()):
@@ -5339,19 +5854,42 @@ def summary_figure(rows, path, disabled=(), not_yet=()):
     # spread bar below 3 values (the NMAD of one value is 0, which would read as perfect).
     few_ = np.array([(r["n"] or 0) < FEW_N for r in rs])
     wl_few = np.array([bool(r.get("waterlines_too_few")) for r in rs])
+    # A CIRCULAR or PARTLY-CIRCULAR comparison is not a test of what was fitted to (or placed with) its
+    # survey: drawn grey and hollow, never in the colours of an independent result. Its paired C = 0
+    # values (the same frames without the setup), when nothing else made it circular, are drawn
+    # beside it as their own, independent mark. Rows of synthetic test inputs carry a hatched band and
+    # a SYNTHETIC tag on their name.
+    circ = np.array([r.get("label") in ("CIRCULAR", "PARTLY-CIRCULAR") for r in rs])
+    c0_ok = np.array([bool(circ[k] and r.get("c0_label") and r.get("c0_without_setup_median_m") is not None
+                           and LABELS.index(r["c0_label"]) < LABELS.index(r["label"]))
+                      for k, r in enumerate(rs)])
+    if c0_ok.any():
+        lim = max(lim, max(abs(r["c0_without_setup_median_m"]) for k, r in enumerate(rs) if c0_ok[k]) * 1.15)
+    synth = np.array([bool(r.get("synthetic")) for r in rs])
+    for k, yy in enumerate(y):
+        if synth[k]:
+            ax.axhspan(yy - 0.45, yy + 0.45, facecolor="none", edgecolor=GRID, hatch="////", lw=0, zorder=0)
     any_cam = False
     for k, (yy, m_, e_) in enumerate(zip(y, med, nm)):
-        ax.errorbar([m_], [yy + 0.12], xerr=None if not np.isfinite(e_) else [e_], fmt="o", color=SERIES_1,
-                    ecolor=SERIES_1, capsize=0, elinewidth=1.2 if few_[k] else 2, ms=8,
-                    mfc="white" if few_[k] else SERIES_1, mew=1.6, alpha=0.45 if few_[k] else 1.0, zorder=3)
+        c1_, c2_ = (MUTED, MUTED) if circ[k] else (SERIES_1, SERIES_2)
+        ax.errorbar([m_], [yy + 0.12], xerr=None if not np.isfinite(e_) else [e_], fmt="o", color=c1_,
+                    ecolor=c1_, capsize=0, elinewidth=1.2 if (few_[k] or circ[k]) else 2, ms=8,
+                    mfc="white" if (few_[k] or circ[k]) else c1_, mew=1.6, alpha=0.45 if few_[k] else 1.0, zorder=3)
         if np.isfinite(wl_med[k]):
             ax.errorbar([wl_med[k]], [yy - 0.12], xerr=None if not np.isfinite(wl_nm[k]) else [wl_nm[k]], fmt="D",
-                        mfc="white", mec=SERIES_2, color=SERIES_2, ecolor=SERIES_2, elinewidth=1.5, capsize=0,
+                        mfc="white", mec=c2_, color=c2_, ecolor=c2_, elinewidth=1.5, capsize=0,
                         ms=6, mew=1.6, alpha=0.45 if wl_few[k] else 1.0, zorder=3)
+        if c0_ok[k]:
+            r = rs[k]
+            ax.plot([r["c0_without_setup_median_m"]], [yy - 0.34], marker="s", ms=6.5, ls="", color=SERIES_2,
+                    mfc="white" if r.get("c0_too_few") else SERIES_2, mec=SERIES_2, mew=1.6,
+                    alpha=0.45 if r.get("c0_too_few") else 1.0, zorder=4)
+            ax.annotate(f"C = 0: {r['c0_label']}", (r["c0_without_setup_median_m"], yy - 0.34), xytext=(7, 0),
+                        textcoords="offset points", va="center", ha="left", fontsize=7, color=INK2, zorder=5)
         # each camera's median, small, named, on the same row (only where there are two, and not on a
         # row that is itself too few to be an estimate); faint where that camera has fewer than FEW_N
-        for bc, yo, col, pre, skip in ((rs[k]["dem_by_camera"], 0.12, SERIES_1, "n_", few_[k]),
-                                       (rs[k]["waterlines_by_camera"], -0.12, SERIES_2, "waterlines_n_", wl_few[k])):
+        for bc, yo, col, pre, skip in ((rs[k]["dem_by_camera"], 0.12, c1_, "n_", few_[k]),
+                                       (rs[k]["waterlines_by_camera"], -0.12, c2_, "waterlines_n_", wl_few[k])):
             if len(bc) > 1 and not skip:
                 any_cam = True
                 # names to the outer side of each mark (left of the lower, right of the higher), so two
@@ -5374,6 +5912,18 @@ def summary_figure(rows, path, disabled=(), not_yet=()):
         handles.append(plt.Line2D([], [], marker="o", ls="", color=SERIES_1, mfc="white", alpha=0.45, ms=7,
                                   label=f"faint: fewer than {FEW_N} compared (frames or survey points for the "
                                         f"lines), not an estimate"))
+    if circ.any():
+        handles.append(plt.Line2D([], [], marker="o", ls="-", color=MUTED, mfc="white", mec=MUTED, ms=7, lw=1.2,
+                                  label="grey, hollow: CIRCULAR / PARTLY-CIRCULAR, fitted to (or placed with) this "
+                                        "survey: not a test of what was fitted"))
+    if c0_ok.any():
+        handles.append(plt.Line2D([], [], marker="s", ls="", color=SERIES_2, mfc=SERIES_2, ms=6.5,
+                                  label="waterlines - survey with C = 0 (no setup), the same frames: its own label "
+                                        "beside it"))
+    if synth.any():
+        from matplotlib.patches import Patch
+        handles.append(Patch(facecolor="white", edgecolor=GRID, hatch="////",
+                             label="hatched: SYNTHETIC test fixture: tests the pipeline, not the beach"))
     leg = ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0, -0.42 if len(rs) < 3 else -0.18),
                     fontsize=8, frameon=False, ncol=2)
     for k, (yy, r) in enumerate(zip(y, rs)):
@@ -5393,13 +5943,18 @@ def summary_figure(rows, path, disabled=(), not_yet=()):
             extra.append("tests the pipeline, not the beach")
         if r.get("waterlines_too_few"):
             extra.append(f"lines: {r['waterlines_n_independent']} {r['waterlines_n_independent_unit']}, too few")
+        if c0_ok[k]:
+            extra.append(f"C = 0, the same {r.get('c0_paired_n')} {r.get('c0_paired_unit')}: "
+                         f"{r['c0_without_setup_median_m']:+.2f} m, {r['c0_label']}"
+                         + (" (too few)" if r.get("c0_too_few") else ""))
         if r.get("camera_split"):
             extra.append(f"cameras disagree by more than {CAMERA_SPLIT_M:.1f} m: see the per-camera marks")
         reason += extra
         ax.annotate("\n".join(reason), (lim, yy + 0.04), xytext=(8, 0), textcoords="offset points", va="top",
                     ha="left", fontsize=7.6, color=INK2, annotation_clip=False, linespacing=1.15)
     ax.set_yticks(y)
-    ax.set_yticklabels([f"{r['date']}  {r['survey']}" for r in rs], color=INK)
+    ax.set_yticklabels([f"{r['date']}  {r['survey']}" + ("\nSYNTHETIC FIXTURE" if r.get("synthetic") else "")
+                        for r in rs], color=INK)
     ax.set_ylim(-0.75, len(rs) - 0.35)
     ax.tick_params(axis="x", colors=INK2)
     ax.set_xlim(-lim, lim)
@@ -5571,14 +6126,29 @@ def main():
         say(d, r + {"partial": " (PARTIAL: see its README)", "failed": " (FAILED: see its log)"}.get(r, ""))
     if not args.dry_run:
         summary(args)
-    worst = max((EXIT_CODES.get(r, 1) for r in results.values() if r != "disabled"), default=0)
-    return worst
+    return worst_exit(results.values())
 
 
 # Exit codes: 0 built (or dry run), 1 a step failed, 2 the date is disabled, 3 built but PARTIAL
 # (a camera contributed nothing, a part is missing: a camera's pointing check or photo map, or the
 # outputs on disk are not one build), 4 not started: another build of the date is running.
 EXIT_CODES = {"built": 0, "dry-run": 0, "disabled": 2, "failed": 1, "partial": 3, "busy": 4}
+# --all returns the code of its WORST date by severity, not the largest number: a failed date (1)
+# outranks one not started because another build held it (4), which outranks a partial one (3).
+# Disabled dates (2) are skipped by --all and do not count.
+SEVERITY = ("failed", "busy", "partial")
+
+
+def worst_exit(results):
+    """Exit code of an --all run: the most severe per-date result (failed > busy > partial > built)."""
+    res = [r for r in results if r != "disabled"]
+    unknown = [r for r in res if r not in EXIT_CODES]
+    if unknown:
+        return 1                                  # an unexpected result is a failure, never a pass
+    for r in SEVERITY:
+        if r in res:
+            return EXIT_CODES[r]
+    return 0
 
 
 if __name__ == "__main__":

@@ -23,11 +23,18 @@ coefficient and the DEM settings (cell, minimum frames, spread, Hs and
 day-offset limits, GeoTIFF EPSG) reported are those the outputs on disk were
 built with, never a later command line's: `--steps compare --dem-cell 1`
 warns that the option is not applied and says to rerun `--steps
-dem,maps,compare`. The same holds for the photo window and hours and the
-input files: a `--window` or `--utc-hours` is applied only by a run of every
+dem,maps,compare`. The DEM's day test (a camera-day off the DEM made
+without it by more than 0.15 m is left out) is not run on fewer than 3
+camera-days: there the DEM without one day is the other day alone, two days
+that disagree get equal and opposite offsets and both would be rejected,
+leaving nothing to grid; the README says so, and a DEM that still fails
+says why (from `logs/dem.log`). The photo window and hours and the input
+files are likewise those of the build: a `--window` or `--utc-hours` is applied only by a run of every
 step from the forcing through the DEM (otherwise, e.g. `--steps compare
 --window ...`, the run keeps the window the outputs were built for and the
-README says `NOT APPLIED`), and an input file (`--live-contours`, the
+README says `NOT APPLIED`; a full run whose first step fails, e.g. a live
+`--window` with no archive rows, keeps the rows, stamps and window of the
+earlier build and says `NOT APPLIED` too), and an input file (`--live-contours`, the
 forcing files, `--photo-roots`) whose step failed or did not run is reported
 the same way; the "rebuild everything" line always names the window, hours
 and files the outputs on disk came from (their build stamps).
@@ -40,8 +47,10 @@ survey whose file `surveys.csv` names was not found, e.g. a misnamed lidar or a
 wrong `--survey-dirs`, or has no current comparison), or the outputs on disk
 are not one build; a disabled date exits 2; exit 4: not started, because
 another build of the same date is running. A row with no survey file yet
-(the October GCPs) is not a missing part. With `--all` the worst code is
-returned and the summary table has a status column. A missing waterline map
+(the October GCPs) is not a missing part. With `--all` the code of the
+worst date is returned, worst by severity, not by number: 1 if any date
+failed, else 4 if any was busy, else 3 if any was partial, else 0
+(disabled dates do not count); the summary table has a status column. A missing waterline map
 on the photos says why: no photo of the window found (the photo roots), or
 `daily_elevation_map.py` failed (its exit code and log).
 
@@ -109,13 +118,15 @@ sign a line given no setup must have (a timex line is marked where the swash
 reaches), the sign of the biases listed under Labels and the sign the C = 0
 sensitivity of this product should show: no discrepancy of sign. The setup
 (C = 0.037, ~0.28 m that week) raises every line; once re-projected landward
-each line keeps ~0.71 x its setup (per frame on the 2026 RTK), so unless the
-new envelope changes the detections, expect waterline - Jan lidar of about
-**c1 -0.26 m, c2 +0.05 m** (+/-0.01 with the window's own setup; c1 -0.18,
-c2 +0.13 m if the whole setup counted). That expectation already holds the
-setup's under-correction (below): it is not to be added again. The 0.3 m
-difference between the cameras, on the same water level and setup, points at
-the pointing or the lens model. The README of that date says so, gives the
+each line keeps a share of its setup that depends on the date, the camera and
+the beach (0.71 per frame on the 2026 RTK; ~0.6 and ~0.8 in the Jan and Mar
+2025 builds), so unless the new envelope changes the detections, expect
+waterline - Jan lidar of about **c1 -0.29 to -0.24 m, c2 +0.02 to +0.07 m**
+over shares of 0.6-0.8 (c1 -0.18, c2 +0.13 m if the whole setup counted). The
+build gives the expectation from its own paired C = 0 sensitivity, per
+camera. It already holds the setup's under-correction (below): it is not to
+be added again. The 0.3 m difference between the cameras, measured over the
+same hours, points at the pointing or the lens model. The README of that date says so, gives the
 headline per camera, the C = 0 sensitivity (the same lines without the setup)
 and each camera's sea-horizon offset against its calibration.
 
@@ -194,16 +205,17 @@ each README states the bias):
   measured on those same frames (each line without setup re-projected at
   still water, with the setup added in place, and with it re-projected):
   (1) a line given the setup is re-projected landward onto higher beach,
-  which takes back ~0.07 m: each line keeps ~0.71 x its setup (the per-frame
-  median; ~0.3 x is lost, by the beach slope and the cross-shore distance);
-  (2) C = 0.037 is below those frames' own per-frame C (0.046 with no
-  re-projection; C was fitted on 14 of them, each line taken where it lay
-  WITHOUT setup): ~0.06 m. The re-projection part carries over to any date
-  (~0.3 x its setup; each README gives it in metres); the C mismatch belongs
-  to those frames. The synthetic test beach shows the same geometry: a line
-  mapped onto the still-water plane reads low by about 0.65-0.7 x the setup
-  (the share kept). For
-  2025-01-23 the earlier-check expectation above already holds both.
+  which takes back ~0.07 m: each line keeps ~0.71 x its setup there (the
+  per-frame median; ~0.3 x is lost, by the beach slope and the cross-shore
+  distance); (2) C = 0.037 is below those frames' own per-frame C (0.046
+  with no re-projection; C was fitted on 14 of them, each line taken where
+  it lay WITHOUT setup): ~0.06 m. The share kept is not one number to carry
+  to other dates: it depends on the slope, the camera and its distance. The
+  paired C = 0 sensitivities of the 2025 builds (real lidar beaches and
+  calibrations, synthetic photos) give ~0.6 for Jan (c1 0.63, c2 0.57) and
+  ~0.8 for Mar; each README gives its own build's per camera, and in metres.
+  The C mismatch belongs to those frames. For 2025-01-23 the earlier-check
+  expectation above already holds both.
 * **still-water reference (2025 dates).** C was fitted with each line at the
   GNSS-R water level. The GNSS-R footprint is the surf zone (`gnssr_qc.py`,
   `gnssir_reflection_audit.py`), where breaking waves raise the mean level:
@@ -271,7 +283,11 @@ left out (offshore Hs > 1.5 m: the largest setups, where C and the still
 water err most) are compared apart and counted, with the statistic of all
 frames next to them. `--summary` gives each camera's median too (a pooled
 median near zero can hide two cameras off in opposite directions: more than
-0.1 m apart is flagged), with what each rests on (frames or distinct survey
+0.1 m apart is flagged when each camera rests on at least 10 frames, cells
+or survey points, else 'too few to compare the cameras'; the difference is
+put on the cameras, pointing or lens model, only when both were compared at
+the same times, else each camera's median setup and its values with and
+without the setup are given), with what each rests on (frames or distinct survey
 points, 'too few' below 10), the C = 0 sensitivity (marked the same way), the
 setup coefficient of each build and, for a label the table gave, why from the
 build (e.g. "C = 0: no setup, nothing fitted to this survey"). Dates enabled
@@ -279,11 +295,19 @@ in the configuration with no product yet are listed as such.
 
 Beach change: besides the storms measured on the station (the 25-26 Sep 2026
 storm), each README looks at the date's own forcing: a span of the window with
-offshore Hs >= 2.0 m gets a HIGH WAVES caveat naming the frame days before
-and after it, where the survey lies, and the days the DEM left out entirely
-for their waves (2025-01-23: Hs 2.9 m on 20 Jan, between the early frames and
-the lidar flight). The per-day rows of waterlines - survey show whether the
-beach moved.
+offshore Hs >= 2.0 m gets a HIGH WAVES caveat counting the frames before,
+during and after it (by capture time), where the survey lies, and the days
+the DEM left out entirely for their waves (2025-01-23: Hs 2.9 m on 20 Jan,
+between the early frames and the lidar flight). The per-day rows of
+waterlines - survey show whether the lines moved, but a step or trend there
+may be change of the beach OR a method error that depends on the conditions:
+on the static synthetic fixture (every day rendered from one lidar) the
+per-day medians drift by ~0.09 m over Jan 18-23 and ~0.17 m over Mar 3-9,
+with a ~0.07 m step across the 20 Jan event, because the detector's error
+depends on the elevation and the tide phase of the sampled hours moves from
+day to day. Each row gives the median survey elevation its values were taken
+at ('at z'): compare days at a similar elevation, or within one elevation
+band, before calling a difference change.
 
 Pointing: each camera's sea horizon over the window is compared with where
 its calibration puts it; the constant tilt/roll is printed for every camera
@@ -300,11 +324,23 @@ camera offsets. Each README says where the calibration puts the horizon: on
 the live CACO05 20251113 calibrations it falls at the top edge of the frame
 (c1: rows ~140 to 1, then off the frame), where the lens model is
 extrapolated far beyond its GCPs, and the real 2026 photos read 34-41 px
-(~0.6-0.9 deg) off. That is most likely a lens-model error at the frame
-edge, not a camera offset: with the same calibrations the RTK transects
-(~100 m from the cameras) read within 0.13-0.33 m, which the setup accounts
-for, not the metre-level DEM shifts such a tilt would cause. The README's
-DEM-shift table says what the offset WOULD do if it were the pointing.
+(~0.6-0.9 deg) off. Lens model or pointing? The 2026 RTK cannot decide it
+with C = 0.037, because that C was fitted to the same RTK shots: any level
+error on the transects, of the setup or of the pointing, is absorbed into
+C. The README therefore judges it on what fitted nothing to the RTK: the
+lines WITHOUT setup (C = 0) against the RTK, minus the setup that a C fitted
+to repeat crossings explains (0.03-0.04, `dem_from_contours.py --fit-setup`;
+a constant pointing error moves every frame's line alike and does not show
+there; Stockdon's 0.35 x a ~1:10 beach face expects the same). What is left
+is compared with what the full offset would do at the transects' range from
+each camera (~55 m from c1, ~110-120 m from c2, where the full offsets would
+put the lines ~0.4 and ~0.6 m low: not the metre-level shifts the table gives
+at 200-350 m, where no survey exists). On the 2026 lines up to about half of
+c1's offset and a quarter of c2's cannot be ruled out (5-7 frames per camera,
+too few for an estimate; swash and detector bias at the waterline are
+confounded with it): the full offset is unlikely to be pointing, a part of
+it cannot be ruled out. The README's DEM-shift table says what the offset
+WOULD do if it were all pointing.
 
 Synthetic inputs: a build from the sandbox test fixture (photos rendered from
 the lidar with the water level and setup planted) is run with `--synthetic
