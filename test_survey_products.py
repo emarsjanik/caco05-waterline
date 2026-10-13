@@ -32,16 +32,30 @@ current folder for the run, so a file name never finds a file of the folder
 the test was started from), on fixture tables, survey files and folders of
 their own: the outcome is the same on the station NUC as in a clean
 checkout. Three kinds of check read the station's own state, and say so:
-the validation of surveys/survey_dates.csv and surveys/surveys.csv as they
-are now (every row readable, every disabled date refused, every calibration
-there: a failure there is a real problem of the tables), the two checks
-on the real 2026-09-29 RTK file, run when it is found, and the commit a
-stamp records, checked when the code is a git checkout. A check that cannot
-run is skipped, counted and said why.
+  * the station's surveys/survey_dates.csv and surveys/surveys.csv as they
+    are now, which the owner edits (test_station_tables, run last so a table
+    problem cannot hide the code's results, every problem listed): only what
+    survey_products needs of them or does with them -- read with no warning
+    (no text cut by a comma outside quotes), every date switched off refused
+    and planned with --force-disabled, every date switched on planned, the
+    calibration of every camera switched on there, and the product's own
+    label rules applied to their rows (an envelope placed with the compared
+    survey, a points survey of its calibration's day unless a
+    label_override_reason is written: no better than PARTLY-CIRCULAR). An
+    edit the product accepts never fails it;
+  * the two checks on the real 2026-09-29 RTK file, run when it is found;
+  * the commit a stamp records, checked when the code is a git checkout.
+What was asked for in the tables (the dates switched off, windows, the 29 Sep
+RTK row and its text, envelopes, calibrations in the repository, the Oct GCP
+label) is checked on the tables as the repository shipped them with this
+test (git, as of the last commit of this file), so the owner's edits, even
+committed on the station, never reach it. A check that cannot run is
+skipped, counted and said why.
 """
 
 import os
 import io
+import re
 import sys
 import csv
 import json
@@ -90,7 +104,10 @@ def real_rtk():
     surveys.csv gives, in the survey folders) and confirmed by its sha256.
     -> (path, "") or (None, why it cannot be used)."""
     fit = sp.SETUP_FITS[sp.SETUP_COEF]
-    rows = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    try:
+        rows, _ = quiet(sp.read_table, sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    except SystemExit:                  # a table survey_products cannot read: test_station_tables says so
+        rows = []
     names = [Path(r["path"]).name for r in rows if Path(r.get("path") or "").stem == fit["survey_stem"]]
     names = names or [fit["survey_stem"] + ".csv"]
     differ, unreadable = [], []
@@ -654,6 +671,13 @@ def is_enabled(row):
     return row["enabled"] in ("1", "yes", "true", "True")
 
 
+def calibration_day(eo_file):
+    """The day a calibration was solved, from its name (CACO03_c1_20241023_EO.yaml -> 2024-10-23), read
+    here by the test itself, so a check of the product's calibration-day rule does not use the product's."""
+    m = re.search(r"_(\d{4})(\d\d)(\d\d)_", Path(str(eo_file)).name)
+    return "-".join(m.groups()) if m else None
+
+
 def test_config(d):
     print("the configuration: its behaviour on fixture tables")
     d = Path(d) / "config"
@@ -702,48 +726,6 @@ def test_config(d):
     check(len(rows) == 3, f"Oct GCPs merged: 3 targets, the one both cameras saw once (got {len(rows)})")
 
 
-def test_station_tables(d):
-    print("the station's own tables (surveys/*.csv as they are now): validated, whatever the owner switched on")
-    cfg = sp.read_table(sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS)
-    srv = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
-    dates = sorted({r["date"] for r in cfg})
-    off = [x for x in dates if not any(is_enabled(r) for r in cfg if r["date"] == x)]
-    for x in dates:
-        try:
-            plan, out = quiet(sp.build_plan, x, cfg, srv, cfg_args())
-            forced = quiet(sp.build_plan, x, cfg, srv, cfg_args(force_disabled=True))[0] if x in off else None
-        except SystemExit as exc:
-            check(False, f"{x}: its rows cannot be built ({exc})")
-        if x in off:
-            check(plan is None and "DISABLED" in out and forced is not None,
-                  f"{x}: switched off in the table: refused, and builds with --force-disabled")
-        else:
-            check(plan is not None and plan["cams"], f"{x}: switched on: its plan is built")
-    for r in cfg:
-        if r["era"] == "live":
-            continue
-        for s in srv:
-            if s["date"] == r["date"] and s["path"]:
-                check(Path(s["path"]).name != Path(r["envelope_survey"]).name,
-                      f"{r['date']} {r['camera']}: envelope {r['envelope_survey'][:28]}... is not the compared survey")
-    for r in cfg:
-        eo = HERE / "calibration" / r["eo_file"]
-        check(eo.exists(), f"{r['date']} {r['camera']}: calibration {r['eo_file']} exists")
-    check(all(s["survey_date"] == s["date"] for s in srv if s.get("survey_date")),
-          "every survey's date is its product's date (the 29 Sep 2026 RTK is the 2026-09-29 product, not 27 Sep)")
-    rtk_row = [s for s in srv if s["name"] == "rtk_2026-09-29"][0]
-    check(rtk_row["label"] == "INDEPENDENT" and "CIRCULAR" in rtk_row["why"] and "C = 0.037" in rtk_row["why"]
-          and "calm low-tide RTK" in rtk_row["why"] and "+1.2 m" in rtk_row["why"],
-          "the 2026 RTK row: INDEPENDENT as a table label, saying the setup rule makes it CIRCULAR with C = 0.037, "
-          "where the check is and what an independent check needs")
-    # points surveyed on a calibration's own day may be the GCPs it was solved from (the Oct GCPs)
-    gcps = [s for s in srv if s["survey_type"] == "points"
-            and any(sp.eo_date(r["eo_file"]) == s["survey_date"] for r in cfg if r["date"] == s["date"])]
-    check(gcps and all(s["label"] in ("PARTLY-CIRCULAR", "CIRCULAR") for s in gcps),
-          f"GCP rows (points of their calibration's day: {', '.join(s['name'] for s in gcps)}): PARTLY-CIRCULAR, "
-          f"whether or not their file has arrived")
-
-
 def test_table_commas(d):
     print("a comma in a table's text: inside double quotes, or said")
     d = Path(d) / "commas"
@@ -755,12 +737,204 @@ def test_table_commas(d):
     rows, out = quiet(sp.read_table, bad, sp.CONFIG_FIELDS)
     check("WARNING" in out and "line 2: 1 field(s) more than its 11 columns" in out and rows[0]["notes"] == "c2 only",
           "a table row with more fields than columns (a comma in a text not in quotes): a WARNING naming the line")
-    for path in (sp.DEFAULT_CONFIG, sp.DEFAULT_SURVEYS):        # the station's own tables, as they are now
-        with open(path, newline="") as f:
-            rows = [r for r in csv.reader(f) if r and not r[0].startswith("#")]
+    short = d / "short_surveys.csv"            # the optional last column left off: read as empty, no warning
+    short.write_text("date,name,path,survey_type,survey_date,label,why,label_override_reason\n"
+                     "2026-09-29,rtk_b,2026-09-29_b.csv,points,2026-09-29,INDEPENDENT,second set\n")
+    rows, out = quiet(sp.read_table, short, sp.SURVEY_FIELDS)
+    check("WARNING" not in out and rows[0]["why"] == "second set" and rows[0]["label_override_reason"] == "",
+          "a row without its optional last column (label_override_reason): read as empty, no warning")
+
+
+def git_out(*words):
+    """git run on the code's checkout -> (stdout text, "") or (None, why not)."""
+    try:
+        r = subprocess.run(["git", "-C", str(HERE)] + list(words), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"git cannot be run here ({exc})"
+    if r.returncode != 0:
+        err = r.stderr.decode("utf-8", "replace").strip().splitlines()
+        return None, f"git cannot read a checkout at {HERE}" + (f" ({err[0][:120]})" if err else "")
+    return r.stdout.decode("utf-8", "replace"), ""
+
+
+def shipped_commit():
+    """The commit the repository shipped this test in: the last one that changed test_survey_products.py.
+    -> (commit, "") or (None, why not). The tables are read as of that commit, not of HEAD: on the station
+    the owner edits them, and may commit the edits to pull past them; neither reaches the checks of what
+    was asked for (a merge that brings upstream code in leaves this file as upstream wrote it)."""
+    out, why = git_out("log", "-1", "--format=%H", "--", "test_survey_products.py")
+    if out is None or not out.strip():
+        return None, why or f"git has no commit of test_survey_products.py in a checkout at {HERE}"
+    return out.strip(), ""
+
+
+def test_shipped_tables(d):
+    """surveys/*.csv as the repository shipped them with this test (git, at the last commit of this file),
+    not as the station has them: the dates, windows, envelopes, calibrations and labels this branch was
+    asked for. On the station or in a clean checkout the same files are checked; the owner's later edits,
+    committed or not, are test_station_tables' business."""
+    print("the tables as the repository shipped them with this test (git): what was asked for")
+    d = Path(d) / "shipped"
+    d.mkdir()
+    commit, why = shipped_commit()
+    if commit is None:
+        skip("shipped-tables checks", why)
+        return
+    print(f"  (surveys/*.csv and calibration/ as of commit {commit[:12]}, the last commit of this test)")
+    texts = {}
+    for name in ("survey_dates.csv", "surveys.csv"):
+        out, why = git_out("show", f"{commit}:./surveys/{name}")
+        if out is None:
+            skip("shipped-tables checks", why)
+            return
+        texts[name] = out
+        (d / name).write_text(out, encoding="utf-8")
+    tracked, why = git_out("ls-tree", "--name-only", commit, "calibration/")
+    if tracked is None:
+        skip("shipped-tables checks", why)
+        return
+    in_repo = {Path(x).name for x in tracked.splitlines()}
+    for name in texts:
+        rows = list(csv.reader(io.StringIO(texts[name], newline="")))
+        rows = [r for r in rows if r and not r[0].startswith("#")]
         bad_rows = [i + 1 for i, r in enumerate(rows) if len(r) != len(rows[0])]
-        check(not bad_rows, f"surveys/{Path(path).name}: every row has its {len(rows[0])} columns (a comma in a "
-                            f"text is inside double quotes)" + (f": NOT rows {bad_rows}" if bad_rows else ""))
+        check(not bad_rows, f"surveys/{name}: every row has its {len(rows[0])} columns (a comma in a text is "
+                            f"inside double quotes)" + (f": NOT rows {bad_rows}" if bad_rows else ""))
+    cfg = sp.read_table(d / "survey_dates.csv", sp.CONFIG_FIELDS)
+    srv = sp.read_table(d / "surveys.csv", sp.SURVEY_FIELDS)
+    tabs = {"config": str(d / "survey_dates.csv"), "surveys": str(d / "surveys.csv")}
+    for date in ("2024-10-23", "2025-03-19"):
+        plan, out = quiet(sp.build_plan, date, cfg, srv, cfg_args(**tabs))
+        forced, _ = quiet(sp.build_plan, date, cfg, srv, cfg_args(force_disabled=True, **tabs))
+        check(plan is None and "DISABLED" in out and forced is not None,
+              f"{date}: switched off (the user asked to skip it): refused, and builds with --force-disabled")
+    plan, _ = quiet(sp.build_plan, "2025-01-23", cfg, srv, cfg_args(**tabs))
+    check(plan["last"] == "2025-01-23" and all(c["station"] == "CACO03" for c in plan["cams"].values()),
+          "2025-01-23: CACO03 only, 24 Jan (the re-set) outside the window")
+    plan, _ = quiet(sp.build_plan, "2025-03-06", cfg, srv, cfg_args(**tabs))
+    check(list(plan["cams"]) == ["c2"] and plan["cams"]["c2"]["station"] == "CACO04", "2025-03-06: c2 only, CACO04")
+    plan, _ = quiet(sp.build_plan, "2026-09-29", cfg, srv, cfg_args(**tabs))
+    check(plan["first"] == "2026-09-26" and plan["last"] == "2026-10-02" and plan["era"] == "live"
+          and [s["name"] for s in plan["surveys"]] == ["rtk_2026-09-29"]
+          and not [r for r in cfg if r["date"] == "2026-09-27"],
+          "2026-09-29 (the user first called it 27 Sep): window 26 Sep - 2 Oct, the 29 Sep RTK; no 2026-09-27 product")
+    rtk_row = [s for s in srv if s["name"] == "rtk_2026-09-29"][0]
+    check(rtk_row["date"] == rtk_row["survey_date"] == "2026-09-29" and rtk_row["label"] == "INDEPENDENT"
+          and "CIRCULAR" in rtk_row["why"] and "C = 0.037" in rtk_row["why"]
+          and "calm low-tide RTK" in rtk_row["why"] and "+1.2 m" in rtk_row["why"],
+          "the 2026 RTK row: surveyed 29 Sep, the 2026-09-29 product; INDEPENDENT as a table label, saying the "
+          "setup rule makes it CIRCULAR with C = 0.037, where the check is and what an independent check needs")
+    for r in cfg:
+        if r["era"] == "live":
+            continue
+        for s in srv:
+            if s["date"] == r["date"] and s["path"]:
+                check(Path(s["path"]).name != Path(r["envelope_survey"]).name,
+                      f"{r['date']} {r['camera']}: envelope {r['envelope_survey'][:28]}... is not the compared survey")
+    missing = sorted({r["eo_file"] for r in cfg if r["eo_file"] not in in_repo})
+    check(not missing, f"every calibration the {len(cfg)} rows name is in the repository's calibration/"
+                       + (f": NOT {', '.join(missing)}" if missing else ""))
+    # points surveyed on a calibration's own day may be the GCPs it was solved from: the table says so itself
+    gcps = [s for s in srv if s["survey_type"] == "points" and not s.get("label_override_reason")
+            and any(calibration_day(r["eo_file"]) == s["survey_date"] for r in cfg if r["date"] == s["date"])]
+    check(all(s["label"] in ("PARTLY-CIRCULAR", "CIRCULAR") for s in gcps),
+          f"GCP rows (points of their calibration's day: {', '.join(s['name'] for s in gcps) or 'none'}): "
+          f"PARTLY-CIRCULAR in the table, whether or not their file has arrived")
+    oct_ = [s for s in srv if s["name"] == "oct_gcps"][0]
+    check(oct_["label"] == "PARTLY-CIRCULAR" and not oct_["path"], "Oct GCPs: PARTLY-CIRCULAR, path empty until the "
+                                                                   "file arrives")
+
+
+def test_station_tables(d):
+    """The station's own tables as they are on this computer, which the owner edits (surveys/README.md: add a
+    date, switch one on or off, give a survey file that has arrived). Only what survey_products itself needs
+    of them, or does with them, is asserted, so an edit the product accepts never fails here; what was asked
+    for in the tables the repository ships is test_shipped_tables'. Every problem is listed, not just the
+    first, and this group runs last: a table problem cannot hide the results of the code's checks."""
+    print("the station's own tables (surveys/*.csv as they are now): what survey_products needs of them")
+    problems = []
+
+    def tcheck(cond, msg):
+        if cond:
+            print(f"  ok  {msg}")
+        else:
+            print(f"  FAIL  {msg}")
+            problems.append(msg)
+    tables = {}
+    for path, fields in ((sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS), (sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)):
+        # read as the product reads them (its warning is printed once per line and run: forget earlier reads)
+        sp._TABLE_WARNED.difference_update({k for k in sp._TABLE_WARNED if k[0] == str(Path(path))})
+        try:
+            tables[path], out = quiet(sp.read_table, path, fields)
+        except SystemExit as exc:
+            tables[path], out = None, f"WARNING {exc}"
+        warned = [ln.split(": ", 1)[-1] for ln in out.splitlines() if "WARNING" in ln]
+        tcheck(not warned, f"surveys/{Path(path).name}: read by survey_products with no warning"
+                           + (f": {'; '.join(warned)}" if warned else ""))
+    cfg, srv = tables[sp.DEFAULT_CONFIG], tables[sp.DEFAULT_SURVEYS]
+    if cfg is None or srv is None:
+        check(False, f"the station's tables: {len(problems)} problem(s): {' | '.join(problems)}")
+    dates = sorted({r["date"] for r in cfg})
+    off = [x for x in dates if not any(is_enabled(r) for r in cfg if r["date"] == x)]
+    plans = {}
+    for x in dates:
+        try:
+            plan, out = quiet(sp.build_plan, x, cfg, srv, cfg_args())
+            forced = quiet(sp.build_plan, x, cfg, srv, cfg_args(force_disabled=True))[0] if x in off else plan
+        except SystemExit as exc:
+            tcheck(False, f"{x}: its rows cannot be planned ({exc})")
+            continue
+        plans[x] = forced
+        if x in off:
+            tcheck(plan is None and "DISABLED" in out and forced is not None,
+                   f"{x}: switched off: refused, and builds with --force-disabled")
+        else:
+            tcheck(plan is not None and plan["cams"], f"{x}: switched on: its plan is built")
+    for r in cfg:
+        if is_enabled(r):
+            tcheck(bool(sp.resolve_file(r["eo_file"], [str(HERE / "calibration")])),
+                   f"{r['date']} {r['camera']} (switched on): its calibration {r['eo_file']} is in calibration/")
+    # The product's label rules on these rows (survey_products.honest_label): a survey the search envelope was
+    # placed with, and a points survey made on its calibration's day (maybe its GCPs), can be no better than
+    # PARTLY-CIRCULAR; the second rule is overruled only by a written label_override_reason. Stand-in files
+    # (each its own content) let the envelopes and surveys be found by their names alone.
+    stand = Path(d) / "station_tables"
+    stand.mkdir()
+    for n in {Path(r["envelope_survey"]).name for r in cfg if r["envelope_survey"]} | \
+             {Path(s["path"]).name for s in srv if s["path"] and not any(ch in s["path"] for ch in "*?[")}:
+        (stand / n).write_text(f"stand-in for {n}\n")
+    n_rule = 0
+    for x, plan in plans.items():
+        if plan is None:
+            continue
+        # the cameras a build of the date uses: those switched on, or every one of a date switched off (forced)
+        a = cfg_args(survey_dirs=[str(stand)], force_disabled=x in off)
+        plan = quiet(sp.build_plan, x, cfg, srv, a)[0]
+        for s in plan["surveys"]:
+            v = sp.Verdict(s)
+            sp.honest_label(s, plan, a, sp.survey_path_for(s, plan, a), fits=[], verdict=v)
+            worse = sp.LABELS.index(v.label) >= sp.LABELS.index("PARTLY-CIRCULAR")
+            env = [cam for cam, c in plan["cams"].items() if s["path"] and c["envelope_survey"]
+                   and Path(c["envelope_survey"]).name == Path(s["path"]).name]
+            if env:
+                n_rule += 1
+                tcheck(worse and any("search envelope was placed with this survey" in t for t in v.reasons),
+                       f"{x} {s['name']}: the {'/'.join(env)} search envelope was placed with it: "
+                       f"{v.label} (PARTLY-CIRCULAR or worse)")
+            if s["survey_type"] == "points" and any(calibration_day(c["eo_file"]) == s.get("survey_date")
+                                                    for c in plan["cams"].values()):
+                n_rule += 1
+                said = [t for t in v.reasons + v.overridden if "was solved on the survey day" in t]
+                if v.override:
+                    tcheck(said, f"{x} {s['name']}: points of its calibration's day, label_override_reason "
+                                 f"written: the calibration-day downgrade overruled and listed ({v.label})")
+                else:
+                    tcheck(worse and said, f"{x} {s['name']}: points of its calibration's day (maybe its GCPs): "
+                                           f"{v.label} (PARTLY-CIRCULAR or worse)")
+    print(f"  ({n_rule} survey row(s) of these tables concerned by the envelope and calibration-day rules)")
+    check(not problems, f"the station's tables: {len(problems)} problem(s): {' | '.join(problems)}"
+          if problems else f"the station's tables: {len(cfg)} date rows and {len(srv)} survey rows, no problem")
 
 
 def test_frames_per_day(d):
@@ -1658,7 +1832,6 @@ def main():
         test_keep_moved_days(d)
         test_live_rows(d)
         test_config(d)
-        test_station_tables(d)
         test_table_commas(d)
         test_frames_per_day(d)
         test_caveats(d)
@@ -1676,6 +1849,10 @@ def main():
         test_fit_setup_flat(d)
         test_one_setup_coef()
         test_py38()
+        # the tables last: the repository's as shipped, then the station's as they are now, so a table the
+        # owner has edited cannot stop the checks of the code before they have run
+        test_shipped_tables(d)
+        test_station_tables(d)
     finally:
         os.chdir(start)
         if not args.keep:

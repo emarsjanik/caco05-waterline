@@ -48,29 +48,47 @@ does not need scipy.
 The self-tests give the same result on the NUC as in a clean checkout: they run on fixtures
 and folders of their own, in a temporary folder that is also their current folder, with the
 station's search folders and archive files switched off (`test_historical_forcing.py`'s last
-check confirms that no build named a station file). What they read of the station is said:
-`test_survey_products.py` validates `surveys/survey_dates.csv` and `surveys/surveys.csv` as
-they are (every row readable, every date switched off refused, every date switched on planned,
-every calibration there), whatever the owner has switched on or filled in, and the following
-two kinds of check depend on the computer and are skipped, counted and explained when they
-cannot run. The checks of a pointing fit that is not on the computer (a correction carried
-from a lidar fit that cannot be found must be CIRCULAR as a rule) name that fit after the
-test's own temporary folder: the products also look for such a fit in the repository's
-`calibration/`, where the station keeps its own fits, and no station file can have that name.
+check confirms that no build named a station file). What they read of the station is said.
 
-Two checks of `test_survey_products.py` (the real RTK file renamed, and re-exported under
-another date, must still be CIRCULAR) need the real `2026-09-29_Marconi_Checkshots.csv` (the
-same rules are also checked, everywhere, on a test fit of the test's own). The test looks for
-it as the survey products do (the name `surveys/surveys.csv` gives, in the station's survey
-folders: `Chelsea_calibration`, `waterline`, `waterline/calibration`, the repo's
-`calibration` and `surveys`; `--survey-dirs <folder>` adds one) and confirms it by its sha256.
-If it is not found, the two checks print `skip` and the last line reads
-`all survey_products tests passed (2 skipped: renamed-RTK check, re-exported-RTK check: the
-real RTK file 2026-09-29_Marconi_Checkshots.csv is not in ...)`: put the file in one of those
-folders, or pass `--survey-dirs`, to run them. A file of that name whose sha256 differs (e.g.
-re-saved with other line endings) is named as such. The commit a build stamp records is
-checked when git can read the code's checkout; otherwise `skipped: commit check: git cannot
-read a checkout at ...`.
+`test_survey_products.py` checks `surveys/survey_dates.csv` and `surveys/surveys.csv` as the
+owner has them now last of all, so a table problem cannot hide the results of the code's
+checks, and lists every problem. It asserts only what `survey_products.py` itself needs of
+them or does with them: both tables read with no warning (a comma in a text outside double
+quotes cuts the text); every date switched off refused, and planned with `--force-disabled`;
+every date switched on planned; the calibration of every camera switched on found in
+`calibration/`; and the product's own label rules applied to their rows (a survey the search
+envelope was placed with, or a points survey made on its calibration's day unless
+`label_override_reason` is written, is no better than PARTLY-CIRCULAR). An edit
+`surveys/README.md` describes (a date added, switched on or off, a survey file given, a second
+survey of a date, a row without its optional last column) never fails it.
+
+What was asked for in the tables (23 Oct 2024 and 19 Mar 2025 switched off, the windows, the
+29 Sep 2026 RTK row and its text, envelopes from the other lidar, every calibration in the
+repository, the Oct GCPs PARTLY-CIRCULAR, every row with all its columns) is checked on the
+tables as the repository shipped them with the test: read with git as of the last commit of
+`test_survey_products.py`, not of HEAD, so the owner's edits never reach it, even when they
+are committed on the station to pull past them.
+
+The checks of a pointing fit that is not on the computer (a correction carried from a lidar
+fit that cannot be found must be CIRCULAR as a rule) name that fit after the test's own
+temporary folder: the products also look for such a fit in the repository's `calibration/`,
+where the station keeps its own fits, and no station file can have that name.
+
+Three kinds of check depend on the computer, and are skipped, counted and explained when they
+cannot run. Two checks of `test_survey_products.py` (the real RTK file renamed, and re-exported
+under another date, must still be CIRCULAR) need the real `2026-09-29_Marconi_Checkshots.csv`
+(the same rules are also checked, everywhere, on a test fit of the test's own). The test looks
+for it as the survey products do (the name `surveys/surveys.csv` gives, in the station's survey
+folders: `Chelsea_calibration`, `waterline`, `waterline/calibration`, the repo's `calibration`
+and `surveys`; `--survey-dirs <folder>` adds one) and confirms it by its sha256. If it is not
+found, the two checks print `skip` and the last line reads `all survey_products tests passed (2
+skipped: renamed-RTK check, re-exported-RTK check: the real RTK file
+2026-09-29_Marconi_Checkshots.csv is not in ...)`: put the file in one of those folders, or
+pass `--survey-dirs`, to run them. A file of that name whose sha256 differs (e.g. re-saved with
+other line endings) is named as such. The commit a build stamp records, and the tables as
+shipped, are checked when git can read the code's checkout; otherwise `skipped: commit check:
+git cannot read a checkout at ...` and `skipped: shipped-tables checks: git cannot read a
+checkout at ...` (a copy that is not a checkout, or a user git refuses: "dubious ownership").
 
 After the next cron run (12:30, 19:25 or 20:55 local):
 
