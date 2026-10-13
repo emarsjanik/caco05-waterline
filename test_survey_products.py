@@ -3299,6 +3299,230 @@ def test_oct_path(d):
           "README: a few transferred hours inside the ADCP period are counted, not 'every'")
 
 
+# forcing.json's water_level of the real Oct 2024 build, as historical_forcing.py of f4ba895 (main, on
+# the NUC) writes it: the tests' record and the fit window, none of the fields a newer one adds
+OCT_WL_OLD = {
+    "sources_used": {"chatham_transfer": 1681}, "method": "harmonic", "cv_rms_m": 0.0756,
+    "extrapolation_rms_m": 0.0851, "extrapolation_rms_daytime_m": 0.0806, "extrapolation_bias_m": 0.0139,
+    "transfer_sigma_m": 0.0851, "fit_window": ["2024-12-09 18:00", "2025-03-10 15:00"],
+    "period_vs_adcp": "44 days BEFORE the ADCP record (transfer extrapolated)",
+    "adcp_datum": {"source": "adcp_water_level_navd88.csv (adcp_to_navd88.py)"},
+    "methods": {"harmonic": {"extrapolation_tests": [
+        {"n": 534, "rms_m": 0.095, "bias_m": 0.0375, "rms_daytime_m": 0.0849,
+         "test": "fit 2025-01-01..2025-03-11 -> predict 2024-12-09..2025-01-01"},
+        {"n": 688, "rms_m": 0.0765, "bias_m": -0.0045, "rms_daytime_m": 0.0772,
+         "test": "fit 2024-12-09..2025-02-10 -> predict 2025-02-10..2025-03-11"}]}}}
+OCT_PERIOD = {"start": "2024-10-20", "end": "2024-10-26", "start_utc": "2024-10-20 00:00",
+              "end_utc": "2024-10-27 00:00"}
+
+
+def test_oct_transfer_caveat(d):
+    print("the Oct 2024 water-level caveat, worked out from forcing.json itself (old or new)")
+    sdir = Path(d) / "oct_caveat_surveys"
+    sdir.mkdir()
+    cfg = sp.read_table(sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS)
+    srv = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    plan, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, cfg_args(survey_dirs=[str(sdir)], force_disabled=True))
+    a = SimpleNamespace(setup_coef=sp.SETUP_COEF)
+    # (1) a forcing.json built by the code on the NUC now (f4ba895): the README rewritten by this code
+    # (--steps maps,compare after a pull, no forcing rebuild) still gives the reach, the backward test
+    # and FURTHER THAN TESTED: it said only '44 days BEFORE the ADCP record' (review, finding 1)
+    forcing = {"period": dict(OCT_PERIOD), "water_level": dict(OCT_WL_OLD), "waves": {}}
+    cav = [c for c in sp.collect_caveats(plan, a, {}, forcing, {}) if "Chatham gauge 8447435 transferred" in c]
+    c = cav[0] if cav else ""
+    check(len(cav) == 1 and c.startswith("Every water level") and "backward extrapolation test" in c
+          and "0-23 days before" in c and "0.095 m" in c and "+0.037" in c and "FURTHER THAN TESTED" in c
+          and "44-51 days before" in c, "old forcing.json: backward test 0-23 days, RMS 0.095, bias +0.037, "
+                                        "44-51 days out, FURTHER THAN TESTED")
+    check("0-29" not in c and "0-23 and 0-29" not in c,
+          "... judged by the backward test's reach only, not the farthest of both tests")
+    check("0.0851 m, is the pooled RMS of both tests (an older historical_forcing.py)" in c
+          and "this side's test gives 0.095 m" in c,
+          "... and the 0.0851 m sigma_m an older forcing step wrote is named as the pooled RMS, not this side's")
+    check("not averaged away" in c and "week left out" not in c,
+          "... the shared (window-mean) error said; no week-mean numbers an old forcing.json lacks")
+    # (2) a forcing.json of this code: sigma_m is the backward test's, the week-mean error is given
+    wl = dict(OCT_WL_OLD, transfer_sigma_m=0.095, transfer_sigma_measured=False,
+              period_vs_adcp="44-51 days BEFORE the ADCP record (transfer extrapolated)",
+              week_mean_error={"weeks": 13, "rms_m": 0.0506, "min_m": -0.0892, "max_m": 0.1016},
+              beyond_tested="this period lies 44-51 days before the transfer's fit window, ...")
+    forcing = {"period": dict(OCT_PERIOD), "water_level": wl, "waves": {}}
+    c = [x for x in sp.collect_caveats(plan, a, {}, forcing, {}) if "Chatham gauge 8447435 transferred" in x][0]
+    check("carries 0.095 m as its sigma_m" in c and "older" not in c and "-0.089 .. +0.102 m" in c
+          and "RMS 0.051 m" in c and "13 weeks" in c,
+          "new forcing.json: each level carries 0.095 m; a whole week's mean error -0.089..+0.102 m (RMS 0.051)")
+    # (3) an ADCP-era date with a few transferred hours inside the record: the pooled RMS, no side
+    wl = dict(OCT_WL_OLD, sources_used={"adcp": 300, "chatham_transfer": 12}, period_vs_adcp="96% covered")
+    forcing = {"period": {"start_utc": "2025-01-16 00:00", "end_utc": "2025-01-24 00:00"}, "water_level": wl,
+               "waves": {}}
+    c = [x for x in sp.collect_caveats(plan, a, {}, forcing, {}) if "Chatham gauge 8447435 transferred" in x][0]
+    check(c.startswith("12 of 312 water levels") and "backward" not in c and "FURTHER THAN TESTED" not in c
+          and "Extrapolation RMS 0.0851 m" in c and "not averaged away" not in c,
+          "a hole inside the record: the pooled RMS, no side, no FURTHER THAN TESTED, no window-mean sentence")
+    # (4) the README's WHAT THIS IS: no 'measured water level' for a date none of whose levels is
+    w = sp.level_words({"water_level": {"sources_used": {"chatham_transfer": 1681}}})
+    check("measured water level" not in w and "Chatham gauge's water level transferred" in w,
+          "README: the Oct levels are called the Chatham gauge transferred, not measured")
+    check(sp.level_words({"water_level": {"sources_used": {"adcp": 1500}}}) == "the measured water level "
+          and "12 of 312" in sp.level_words({"water_level": {"sources_used": {"adcp": 300, "chatham_transfer": 12}}}),
+          "... the ADCP's levels are measured; a mixed date says how many are transferred")
+
+
+def test_gcp_files_any_format(d):
+    print("GCP files in any format survey_compare.py reads, merged on their coordinates")
+    import survey_compare as sc
+    d = Path(d) / "gcp_formats"
+    d.mkdir()
+    hdr = "Name,Code,Easting,Northing,Elevation,Description,Longitude,Latitude,Ellipsoidal height,CS name\r\n"
+    crs = "NAD83(2011) / UTM zone 19N + NAVD88(GEOID18) height"
+    e1 = d / "emlid_c1.csv"
+    e1.write_text(hdr + f"T1,gcp,420134.298,4638335.154,2.274,target,-69.9,41.9,-26.0,{crs}\r\n"
+                        f"T2,gcp,420140.100,4638380.200,1.105,target,-69.9,41.9,-27.1,{crs}\r\n")
+    e2 = d / "emlid_c2.csv"
+    e2.write_text(hdr + f"T2,gcp,420140.100,4638380.200,1.105,target,-69.9,41.9,-27.1,{crs}\r\n"
+                        f"T9,gcp,420126.801,4638440.088,0.834,target,-69.9,41.9,-27.4,{crs}\r\n")
+    check(sc.read_points(e1)["format"] == "Emlid Flow CSV", "an Emlid file alone reads as Emlid")
+    m = sp.merged_points([e1, e2], d / "m_emlid.csv")
+    q = sc.read_points(m)
+    check(len(q["E"]) == 3 and sorted(q["name"]) == ["T1", "T2", "T9"] and set(q["crs"]) == {crs}
+          and np.isclose(q["Z"][list(q["name"]).index("T9")], 0.834),
+          "two Emlid files merged: 3 targets (T2 once), names and CRS kept, readable (it failed: 'no "
+          "Easting/Northing/Elevation columns')")
+    from compare_rtk import load_transects
+    check(load_transects(str(m), 5.0) == [], "... and compare_rtk's transect reader reads the merged file")
+    # headers in another order: every target kept (the second file's were dropped)
+    a1 = d / "hdr_a.csv"
+    a1.write_text("Name,Easting,Northing,Elevation\nA1,420100.0,4638400.0,1.20\nA2,420110.0,4638410.0,0.80\n")
+    a2 = d / "hdr_b.csv"
+    a2.write_text("Elevation,Northing,Easting,Name\n0.50,4638500.0,420120.0,B1\n0.40,4638510.0,420125.0,B2\n")
+    q = sc.read_points(sp.merged_points([a1, a2], d / "m_hdr.csv"))
+    k = list(q["name"]).index("B1")
+    check(len(q["E"]) == 4 and np.isclose(q["E"][k], 420120.0) and np.isclose(q["N"][k], 4638500.0)
+          and np.isclose(q["Z"][k], 0.50), "two header files, columns in another order: all 4 targets, right axes")
+    # CIRN rows with target names that are not numbers ('T1'): read alone (it failed) and merged
+    c1 = d / "cirn_alnum.csv"
+    c1.write_bytes(b"T1,420134.298,4638335.154,2.274\r\nGCP-2,420140.100,4638380.200,1.105\r\n")
+    q = sc.read_points(c1)
+    check(q["format"].startswith("CIRN") and list(q["name"]) == ["T1", "GCP-2"] and np.isclose(q["Z"][0], 2.274),
+          "CIRN rows named T1, GCP-2: read as CIRN, names kept (it exited: 'no Easting/Northing/Elevation')")
+    c2 = d / "cirn_num.csv"
+    c2.write_bytes(b"301,420135.051,4638385.088,0.816\r\nGCP-2,420140.100,4638380.200,1.105\r\n")
+    m = sp.merged_points([c1, c2], d / "m_cirn.csv")
+    q = sc.read_points(m)
+    check(q["format"].startswith("CIRN") and sorted(q["name"]) == ["301", "GCP-2", "T1"]
+          and not Path(m).read_text().startswith("Name"),
+          "CIRN files with mixed names merged: still CIRN (no header), 3 targets")
+    q = sc.read_points(sp.merged_points([c1, e2], d / "m_mixed.csv"))
+    check(len(q["E"]) == 3 and sorted(q["name"]) == ["GCP-2", "T1", "T9"] and crs in q["crs"],
+          "a CIRN file and an Emlid file merged: one file, the CRS of the Emlid targets kept, GCP-2/T2 once")
+    # a file survey_compare.py cannot read: SurveyFileError naming it, never SystemExit (which escaped
+    # step_maps' 'except Exception' and failed the whole product)
+    bad = d / "empty_c2.csv"
+    bad.write_text("\n")
+    try:
+        sp.merged_points([c1, bad], d / "m_bad.csv")
+        check(False, "an unreadable file raises")
+    except sp.SurveyFileError as exc:
+        check(str(bad) in str(exc), f"an unreadable file: SurveyFileError naming it ({exc})")
+    words = d / "words.csv"
+    words.write_text("Name,Code\nT1,gcp\n")
+    try:
+        sp.read_survey_points(words)
+        check(False, "no coordinate columns raises")
+    except sp.SurveyFileError as exc:
+        check("Easting/Northing/Elevation" in str(exc), "no coordinate columns: SurveyFileError, the reason kept")
+    # a kill during the read still ends the run (the SIGTERM handler raises SystemExit)
+    real = sc.read_points
+    try:
+        def killed(path):
+            raise SystemExit("terminated by signal 15 (SIGTERM)")
+        sc.read_points = killed
+        try:
+            sp.read_survey_points(c1)
+            check(False, "a termination passes through")
+        except sp.SurveyFileError:
+            check(False, "a termination was taken for a bad file")
+        except SystemExit as exc:
+            check(sp.is_termination(exc), "a SIGTERM during the read is not taken for a bad file: the run ends")
+    finally:
+        sc.read_points = real
+
+    # the plan view with a bad survey file: drawn without its points, with a warning (it failed the build)
+    src = d / "ground.csv"
+    src.write_text("source_file,camera,capture_time_utc,tide_elevation_navd88,beach_elevation_navd88,"
+                   "easting_utm19,northing_utm19\n"
+                   + "".join(f"f{k},c1,2024-10-2{k % 5}T15:00:00Z,0.1,{0.2 + 0.1 * k:.2f},{420100 + k},{4638380 + k}\n"
+                             for k in range(20)))
+    row = {"name": "oct_gcps", "survey_type": "points", "survey_date": "2024-10-23", "label": "PARTLY-CIRCULAR",
+           "path": ""}
+    sdir = d / "surveys"
+    sdir.mkdir()
+    shutil.copy(c1, sdir / "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv")
+    (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c2_xyz.csv").write_text("\n")
+    a = cfg_args(survey_dirs=[str(sdir)], force_disabled=True)
+    plan = {"date": "2024-10-23", "era": "chatham", "first": "2024-10-20", "last": "2024-10-26", "out": d,
+            "cams": {}, "surveys": [row]}
+    check(len(sp.resolve_survey(row, plan, a)[0]) == 2, "both camera files found")
+    png = d / "plan.png"
+    _, out = quiet(sp.plan_view_map, plan, src, [row], a, png)
+    check(png.exists() and "points of oct_gcps are NOT drawn" in out and "2024-10-23_Marconi_Extrinsic_Targets_c2"
+          in out, "plan view: an unreadable GCP file costs its points (warned), not the map or the build")
+    (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c2_xyz.csv").write_bytes(
+        b"T9,420126.801,4638440.088,0.834\r\n")
+    png.unlink()
+    _, out = quiet(sp.plan_view_map, plan, src, [row], a, png)
+    check(png.exists() and "NOT drawn" not in out, "... and with both files readable, drawn with the points")
+
+
+def test_merge_level_source(d):
+    print("the merged waterlines name the forcing's level source, not 'tide_model'")
+    d = Path(d) / "lvlsrc"
+    (d / "waterlines" / "c1").mkdir(parents=True)
+    (d / "forcing").mkdir()
+    (d / "forcing" / "water_level.csv").write_text(
+        "time,water_level_navd88,source,sigma_m\n2024-10-23T15:00:00Z,0.40,chatham_transfer,0.095\n"
+        "2024-10-23T15:06:00Z,0.41,chatham_transfer,0.095\n")
+    (d / "forcing" / "waves.csv").write_text(
+        "time_utc,epoch,wvht_m,dpd_s,mwd_deg,source,hs_sigma_m,tp_sigma_s\n"
+        "2024-10-23T15:00:00Z,1729695600,1.0,9.0,90,wis+ndbc44013,0.3,1.0\n")
+    f = d / "waterlines" / "c1" / "contour_points_ground.csv"
+    f.write_text("source_file,camera,capture_time_utc,capture_epoch,tide_elevation_navd88,tide_model_spread,"
+                 "water_level_source,offshore_hs_m,offshore_tp_s,setup_correction_m,beach_elevation_navd88,"
+                 "easting_utm19,northing_utm19\n"
+                 "a,c1,2024-10-23T15:00:00Z,1729695600,0.40,0.0,tide_model,1.0,9.0,0.3,0.70,420100,4638400\n")
+    plan = {"date": "2024-10-23", "era": "chatham", "out": d, "first": "2024-10-20", "last": "2024-10-26",
+            "cams": {"c1": {}}, "surveys": []}
+    quiet(sp.merge_cameras, plan, [("c1", f)], SimpleNamespace(setup_coef=0.037))
+    r = list(csv.DictReader(open(d / "waterlines" / "contour_points_ground.csv")))[0]
+    check(r["water_level_source"] == "chatham_transfer" and r["forcing_level_source"] == "chatham_transfer"
+          and r["tide_model_spread"] == "" and r["forcing_level_sigma_m"] == "0.095",
+          "chatham era: water_level_source = chatham_transfer (it said tide_model), no tide-model spread")
+    plan["era"] = "live"
+    f.write_text(f.read_text().replace(",tide_model,", ",gnssr_measured,"))
+    quiet(sp.merge_cameras, plan, [("c1", f)], SimpleNamespace(setup_coef=0.037))
+    r = list(csv.DictReader(open(d / "waterlines" / "contour_points_ground.csv")))[0]
+    check(r["water_level_source"] == "gnssr_measured" and "forcing_level_source" not in r,
+          "live era: the station's own source kept, no forcing columns")
+
+
+def test_dry_run_needs_adcp():
+    print("the dry run marks the ADCP as required for the October (chatham) date")
+    found = {"adcp": None, "adcp_navd88": None, "chatham": Path("chatham.csv"), "wis": Path("wis.csv"), "ndbc": None}
+    lines, warns = sp.forcing_input_notes("chatham", found, sp.SETUP_COEF)
+    t = dict(lines)
+    check("REQUIRED" in t["adcp"] and "derived" in t["adcp_navd88"],
+          "chatham era, no ADCP: listed as REQUIRED (it was a bare 'NOT FOUND'); its NAVD88 file optional")
+    check(any("no ADCP record" in w and "FAIL" in w for w in warns), "... and a warning that the forcing step fails")
+    found["adcp"] = Path("sig1000_waves_ALL.csv")
+    lines, warns = sp.forcing_input_notes("chatham", found, sp.SETUP_COEF)
+    check(not warns, "with the ADCP and WIS: no warning")
+    found["wis"] = None
+    _, warns = sp.forcing_input_notes("chatham", found, sp.SETUP_COEF)
+    check(any("no WIS or NDBC" in w for w in warns), "no WIS and no NDBC: the wave warning stays")
+    _, warns = sp.forcing_input_notes("adcp", {"adcp": None, "adcp_navd88": None}, sp.SETUP_COEF)
+    check(not warns, "ADCP era: no chatham-era warnings")
+
+
 def test_one_setup_coef():
     print("one setup coefficient for the station and the products")
     import historical_forcing as hf
@@ -3395,6 +3619,10 @@ def main():
         test_c_change(d)
         test_fit_setup_flat(d)
         test_oct_path(d)
+        test_oct_transfer_caveat(d)
+        test_gcp_files_any_format(d)
+        test_merge_level_source(d)
+        test_dry_run_needs_adcp()
         test_one_setup_coef()
         test_py38()
         # the tables last: the repository's as shipped, then the station's as they are now (with its live

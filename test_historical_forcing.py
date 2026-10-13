@@ -571,9 +571,129 @@ def test_extrapolation_reach():
     note = "\n".join(hf.reach_note_lines({"extrapolation_reach_days": [list(r) for r in reach],
                                           "beyond_tested": "this period lies 44-51 days from the ADCP record"}))
     check("report: the reach as measured, not '0-9 weeks', and FURTHER THAN TESTED when it is",
-          "0-9 weeks" not in note and "0-23 and 0-29 days" in note and "FURTHER THAN TESTED" in note, note[-160:])
+          "0-9 weeks" not in note and "0-23 days before and 0-29 days after" in note
+          and "FURTHER THAN TESTED" in note, note[-160:])
     note = "\n".join(hf.reach_note_lines({}))
     check("report: no FURTHER THAN TESTED line for a period inside the reach", "FURTHER THAN TESTED" not in note)
+
+
+# The two tests' records as forcing.json keeps them (the real Oct 2024 build's numbers)
+REAL_TESTS = [{"n": 534, "rms_m": 0.095, "bias_m": 0.0375, "p95_abs_m": 0.1876, "n_daytime": 111,
+               "rms_daytime_m": 0.0849, "test": "fit 2025-01-01..2025-03-11 -> predict 2024-12-09..2025-01-01"},
+              {"n": 688, "rms_m": 0.0765, "bias_m": -0.0045, "p95_abs_m": 0.1405, "n_daytime": 142,
+               "rms_daytime_m": 0.0772, "test": "fit 2024-12-09..2025-02-10 -> predict 2025-02-10..2025-03-11"}]
+
+
+def test_transfer_reach_by_side():
+    """A period on one side of the fit window is judged by the test predicting on THAT side (found in
+    review: October, before the record, was given the pooled RMS 0.085 m, which mixes in the forward
+    test's smaller error, with no bias, and the farthest reach of either test, 29 days, as the bound)."""
+    wl = {"method": "harmonic", "fit_window": ["2024-12-09 18:00", "2025-03-10 15:00"],
+          "methods": {"harmonic": {"extrapolation_tests": REAL_TESTS}}}
+    r = hf.transfer_reach(wl, "2024-10-20 00:00", "2024-10-27 00:00")
+    check("reach: Oct 2024 lies before the fit window, 44-51 days out",
+          r["side"] == "before" and round(r["beyond_days"][0]) == 44 and round(r["beyond_days"][1]) == 51,
+          str(r["beyond_days"]))
+    check("reach: judged by the backward test only (0-23 days before its fit window)",
+          len(r["tests"]) == 1 and r["tests"][0]["reach_days"] == [0, 23] and r["reach_days"] == 23,
+          str([t["test"] for t in r["tests"]]))
+    check("reach: sigma = the backward test's larger RMS (0.095 m), not the pooled 0.085",
+          r["sigma_m"] == 0.095 and "backward" in r["basis"] and "+0.037" in r["basis"], r["basis"][:120])
+    check("reach: Oct 2024 is FURTHER THAN TESTED", r["beyond_tested"] and "FURTHER THAN TESTED" in r["basis"])
+    txt = hf.beyond_tested_text(r)
+    check("reach: its sentence names the backward test's 23 days, RMS and bias, not 0-29",
+          "0-23 days before" in txt and "0.095" in txt and "+0.037" in txt and "29" not in txt, txt[:160])
+    # epochs work as well as forcing.json's strings
+    r2 = hf.transfer_reach(wl, ep("2024-10-20"), ep("2024-10-27"))
+    check("reach: epochs or strings, same answer", r2["sigma_m"] == r["sigma_m"] and r2["side"] == "before")
+    # a period after the record: the forward test (0-29 days after), inside its reach
+    r = hf.transfer_reach(wl, "2025-03-20 00:00", "2025-03-27 00:00")
+    check("reach: 20-26 Mar 2025 after the record, forward test, inside its 29 days",
+          r["side"] == "after" and r["reach_days"] == 29 and not r["beyond_tested"] and r["sigma_m"] == 0.0772,
+          f"{r['side']} {r['reach_days']} {r['sigma_m']}")
+    # a period inside the fit window's span (hours the ADCP lacks): the pooled RMS stands
+    r = hf.transfer_reach(wl, "2025-01-16 00:00", "2025-01-24 00:00")
+    check("reach: a period inside the span has no side and no sigma of its own",
+          r["side"] is None and r["sigma_m"] is None and not r["beyond_tested"])
+    # no backward test ran (too few ADCP hours): no sigma of its own, said so
+    wl2 = dict(wl, methods={"harmonic": {"extrapolation_tests": [{"test": REAL_TESTS[0]["test"],
+                                                                  "skipped": "not enough ADCP hours"},
+                                                                 REAL_TESTS[1]]}})
+    r = hf.transfer_reach(wl2, "2024-10-20 00:00", "2024-10-27 00:00")
+    check("reach: no backward test ran -> no side sigma, basis says why",
+          r["side"] == "before" and r["sigma_m"] is None and "no extrapolation test" in r["basis"], r["basis"])
+    check("reach: no fit window -> nothing", hf.transfer_reach({}, "2024-10-20", "2024-10-27")["side"] is None)
+
+
+def test_week_mean_error():
+    """The error a week-long window shares: each left-out week's mean residual over 13.5-18 UTC."""
+    t = np.arange(ep("2025-01-06"), ep("2025-02-03"), 3600.0)      # four ISO weeks, hourly
+    wk = (t - t[0]) // (7 * 86400)
+    r = np.choose(wk.astype(int), [0.10, -0.05, 0.02, 0.0]) + 0.3 * np.sin(t / 3600.0)   # tide-like wiggle
+    day = hf.daytime(t)
+    want = [float(np.mean(r[(wk == k) & day])) for k in range(4)]
+    w = hf.week_mean_error(t, r)
+    check("week means: 4 weeks, min/max/RMS of the daytime week means",
+          w["weeks"] == 4 and abs(w["min_m"] - min(want)) < 1e-4 and abs(w["max_m"] - max(want)) < 1e-4
+          and abs(w["rms_m"] - float(np.sqrt(np.mean(np.square(want))))) < 1e-4, str(w))
+    r2 = r.copy()
+    r2[wk == 3] = np.nan
+    check("week means: a week with no residuals is not counted", hf.week_mean_error(t, r2)["weeks"] == 3)
+    check("week means: none at all -> None", hf.week_mean_error(t, np.full(len(t), np.nan)) is None)
+
+
+def test_before_record_e2e(fx, out):
+    """A period wholly BEFORE the ADCP record, end to end: every transferred row carries the backward
+    test's error, flagged as not measured when the period lies further out than that test reaches;
+    the report and forcing.json say so. The ADCP here starts 2025-01-01 and the backward test is
+    shortened (fit 01-10.., predict 01-01..01-10: 0-9 days), so 10-16 Dec lies 16-22 days out."""
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    a = pd.read_csv(fx["adcp"])
+    keep = hf.to_epoch(a["time"]) >= ep("2025-01-01")
+    adcp = out / "sig1000_from_jan.csv"
+    a[keep].to_csv(adcp, index=False)
+    n = pd.read_csv(fx["adcp_navd88"])
+    navd = out / "adcp_navd88_from_jan.csv"
+    n[hf.to_epoch(n["time"]) >= ep("2025-01-01")].to_csv(navd, index=False)
+    real_tests, real_dirs = hf.EXTRAPOLATION_TESTS, hf.SEARCH_DIRS
+    empty = out / "empty"
+    empty.mkdir(exist_ok=True)
+    try:
+        hf.EXTRAPOLATION_TESTS = [("2025-01-10", "2025-03-11", "2025-01-01", "2025-01-10"),
+                                  ("2025-01-01", "2025-02-10", "2025-02-10", "2025-03-11")]
+        hf.SEARCH_DIRS = [empty]                 # nothing found by default names: only the files given
+        res, log = quiet(lambda: build("2024-12-10", "2024-12-16", out / "f", adcp=adcp,
+                                        adcp_navd88=navd, chatham=fx["chatham"], wis=fx["wis"],
+                                        download=False, plot=False))
+    finally:
+        hf.EXTRAPOLATION_TESTS, hf.SEARCH_DIRS = real_tests, real_dirs
+    wl = pd.read_csv(res["water_level_csv"])
+    js = json.loads((out / "f" / "forcing.json").read_text())["water_level"]
+    m = js["methods"][js["method"]]
+    back = [t for t in m["extrapolation_tests"] if t["test"].startswith("fit 2025-01-10")][0]
+    want = max(back["rms_m"], back["rms_daytime_m"])
+    tr = (wl["source"] == "chatham_transfer").to_numpy()
+    check("before: every row is the transfer", tr.all(), str(set(wl["source"])))
+    check("before: sigma_m = the backward test's larger RMS, not the pooled one",
+          np.allclose(wl["sigma_m"][tr], round(want, 4)) and js["transfer_sigma_m"] == want,
+          f"{js['transfer_sigma_m']} vs backward {want}, pooled {m['extrapolation_pooled']['rms_m']}")
+    check("before: flagged as not measured (16-22 days out, the backward test reaches 9)",
+          js["transfer_sigma_measured"] is False and "backward" in (js.get("beyond_tested") or "")
+          and "0-9 days before" in js["beyond_tested"], str(js.get("beyond_tested"))[:160])
+    check("before: the week-mean error is recorded", (js.get("week_mean_error") or {}).get("weeks", 0) >= 4,
+          str(js.get("week_mean_error")))
+    rep = (out / "f" / "forcing_report.txt").read_text()
+    check("before: the report says NOT MEASURED, the basis, the week-mean error and FURTHER THAN TESTED",
+          "NOT MEASURED this far out" in rep and "from the backward extrapolation test" in rep
+          and "WEEK-MEAN ERROR" in rep and "FURTHER THAN TESTED" in rep)
+    # the levels themselves are right (the synthetic transfer is exact up to 1 cm noise)
+    a_ep, mt = fx["truth"][0], fx["truth"][1]
+    w_ep = hf.to_epoch(wl["time"])
+    on = (w_ep % 3600 == 0) & (w_ep >= a_ep[0])
+    err = wl["water_level_navd88"].to_numpy(float)[on] - np.interp(w_ep[on], a_ep, mt)
+    check("before: the transferred levels match the (hidden) ADCP", float(np.sqrt(np.mean(err ** 2))) < 0.04,
+          f"RMS {float(np.sqrt(np.mean(err ** 2))):.4f} m")
 
 
 def main():
@@ -613,7 +733,8 @@ def main():
                    ("e2e", test_end_to_end, (fx, work / "e2e")),
                    ("adcp-only", test_adcp_only, (fx, work / "adcp_only")),
                    ("partial and errors", test_partial_and_errors, (fx, work / "errors")),
-                   ("download", test_download_fallback, (fx, work / "download"))]
+                   ("download", test_download_fallback, (fx, work / "download")),
+                   ("before record", test_before_record_e2e, (fx, work / "before_record"))]
         if fx is None:
             check("the groups that need the fixture", False,
                   f"not run (no fixture): {', '.join(n for n, _, _ in need_fx)}, search")
@@ -624,6 +745,8 @@ def main():
         if fx is not None:
             run_group("search", test_station_search, fx, work / "search")
         run_group("reach", test_extrapolation_reach)
+        run_group("reach by side", test_transfer_reach_by_side)
+        run_group("week mean", test_week_mean_error)
         run_group("isolation", test_isolation, work)
     finally:
         hf.SEARCH_DIRS = station_dirs

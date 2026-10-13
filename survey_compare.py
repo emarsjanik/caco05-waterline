@@ -339,8 +339,9 @@ def _num(s):
 def read_points(path):
     """
     Point survey -> dict(E, N, Z, name, code, desc, format, crs, skipped).
-    Emlid Flow CSV, CIRN 'num,E,N,Z' (no header) or a CSV with E/N/Z,
-    x/y/z or Easting/Northing/Elevation headers.
+    Emlid Flow CSV, CIRN 'num,E,N,Z' (no header; the target name in the first
+    column may be any text, e.g. T1 or GCP-3) or a CSV with E/N/Z, x/y/z or
+    Easting/Northing/Elevation headers.
     """
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = [r for r in csv.reader(f) if any(c.strip() for c in r)]
@@ -349,7 +350,9 @@ def read_points(path):
     out = {"E": [], "N": [], "Z": [], "name": [], "code": [], "desc": [], "crs": [],
            "skipped": 0}
     first = rows[0]
-    if len(first) >= 4 and all(_num(c) is not None for c in first[:4]):
+    # CIRN when the first row's E, N, Z are numbers: only the coordinates must be (a target named
+    # 'T1' took the file for a header and failed); a header row has words there
+    if len(first) >= 4 and all(_num(c) is not None for c in first[1:4]):
         out["format"] = "CIRN targets (num,E,N,Z; no header)"
         for r in rows:
             v = [_num(c) for c in r[:4]]

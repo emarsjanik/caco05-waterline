@@ -535,9 +535,14 @@ drawn without a new georectification.
 ## Run time on the NUC
 
 Detection dominates: `detect_original_view.py` runs the detector on the
-whole 2448 x 2048 frame, measured at 22-26 s per photo here (not yet on the
-NUC10i3; its progress lines print the real rate), i.e. **~50 min for a
-two-camera week** of daytime photos. Everything else takes a few minutes.
+whole 2448 x 2048 frame, measured at 17-26 s per photo off the station (a
+2.8 GHz Xeon), i.e. **~50-70 min for a two-camera week** of 13.5-18 UTC
+photos (120-165 photos: the count depends on the date's photo cadence; the
+dry run prints it). The rate on the station's NUC10i3 has NOT been
+measured: no date with detection has been built there yet (the 2026-09-29
+product runs none), so budget 1-2 h and read the real rate from the first
+`detecting : photo k of N, ... (S s per photo)` line of the build log.
+Everything else takes a few minutes.
 The live date (2026-09-29) runs no detection: it reads the station's
 contour file (~1 min per GB) and takes a few minutes in all (79 s here for
 67 MB of rows). The
@@ -602,11 +607,22 @@ The October date also needs its forcing files, which are NOT downloaded:
   half of the window's daytime hours, before any detection;
 * the Chatham 8447435 record (`chatham_2024-10_to_2025-03.csv`; downloaded
   from NOAA when missing, unless `--no-download`) and the ADCP files (the
-  transfer is fitted on their overlap). 20-26 Oct 2024 lies 44-51 days
-  before the ADCP record, further than the transfer's two extrapolation tests
-  reach (0-23 and 0-29 days beyond their fit windows): its extrapolation RMS
-  (0.085 m) is not a measured error for October, and the forcing report and
-  the README say so.
+  transfer is fitted on their overlap; without the ADCP the forcing step
+  fails, and the dry run says so). 20-26 Oct 2024 lies 44-51 days before the
+  ADCP record. A period before the record is judged by the BACKWARD
+  extrapolation test (fit 2025-01-01..03-10, predict 0-23 days before it):
+  RMS 0.095 m, bias +0.037 m (the transfer above the ADCP: elevations that
+  much high), written as each level's `sigma_m`. October lies further out
+  than that test reaches, so its error is NOT measured: the forcing report
+  (`FURTHER THAN TESTED`), forcing.json (`transfer_sigma_measured: false`)
+  and the README say so. The error is shared, not averaged away: the mean
+  error of a whole left-out week of the overlap (13.5-18 UTC) ranged
+  -0.09..+0.10 m (RMS 0.05 m), and a week-long DEM carries one such mean in
+  every frame. A README written by a newer survey_products.py from a
+  forcing.json built before it (`--steps maps,compare` after a `git pull`)
+  works this out from forcing.json's own record of the tests; the
+  `sigma_m` in water_level.csv and the forcing report change only when the
+  forcing step is rebuilt (which rebuilds the detection after it).
 
 Run `--date 2024-10-23 --force-disabled --dry-run` first: it lists each
 forcing file found or NOT FOUND.

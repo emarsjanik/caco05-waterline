@@ -610,7 +610,12 @@ only if it holds over several weeks of different waves; then change it in all th
   2025-03-06 windows are inside the ADCP record: water level measured.
 * **Value** [REAL], fitted on the ADCP overlap: harmonic transfer, 13 constituents, M2 ratio
   1.481, Marconi leads by 70 min, residual x 0.85; leave-one-week-out RMS 0.076 m,
-  extrapolation RMS 0.085 m (used as `sigma_m`). The linear alternative
+  extrapolation RMS 0.085 m pooled (`sigma_m` inside the record's span). A period wholly
+  before the record gets the backward test's error: RMS 0.095 m (daytime 0.085), bias
+  +0.037 m (fit 2025-01-01..03-10, predict 2024-12-09..12-31); after it, the forward test's
+  0.077 m. The mean error of a whole left-out week (13.5-18 UTC) ranged -0.089..+0.102 m,
+  RMS 0.051 m over 13 weeks: a week-long DEM carries one such mean in every frame
+  (`forcing.json` `water_level.week_mean_error`). The linear alternative
   (Marconi = 1.403 x Chatham(t + 72 min) - 0.033 m, i.e. Marconi leads by 72 min; the code's
   `lag` is -72 min in `Marconi(t) = a x Chatham(t - lag) + b`) scored 0.166 / 0.174 m and is
   not used.
@@ -618,9 +623,16 @@ only if it holds over several weeks of different waves; then change it in all th
   refitted to GNSS-R over the last 30 days on every run; default (1.24, -48 min, -0.10 m,
   sigma 0.13 m) only without GPS overlap.
 * **Limits.** The transfer changes with the inlet and harbour; months from the overlap the
-  error can exceed the extrapolation RMS, which the two tests measure on predictions 0-23 and
-  0-29 days beyond their fit windows. 20-26 Oct 2024 lies 44-51 days before the ADCP record:
-  further than tested (the forcing report and the product README say so).
+  error can exceed the extrapolation RMS, which the two tests measure on predictions 0-23 days
+  before and 0-29 days after their fit windows. 20-26 Oct 2024 lies 44-51 days before the ADCP
+  record, beyond the backward test's 23 days: further than tested (the forcing report, its
+  `transfer_sigma_measured: false` in forcing.json and the product README say so).
+  [SCRATCH] Within the backward test the far half (15-23 days back) scored RMS 0.140 m, bias
+  +0.109 m, but that is the calendar stretch (9-24 Dec 2024) that every backward fit predicts
+  worst (fit from 23 Jan: 30-45 days back RMS 0.114, bias +0.068; fit from 1 Feb: 45-60 days
+  back RMS 0.136, bias +0.102, while its 15-45 days back stay at 0.057-0.063): an event of
+  those weeks, not an error measured to grow with distance. How it grows beyond 23 days back
+  is not known.
 * **Re-check.** `forcing_report.txt`, block `Chatham -> Marconi transfer`.
 
 ### 4.5 Wave height and period conversions (dates or hours without the ADCP)

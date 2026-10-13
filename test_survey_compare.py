@@ -756,6 +756,25 @@ def test_left_out_frames_window(d):
           f"20-23 Jan compared (as many per camera as the DEM gridded), none compared apart ({fs})")
 
 
+def test_cirn_target_names(d):
+    print("CIRN target files whose target names are not numbers")
+    d = Path(d) / "cirn_names"
+    d.mkdir()
+    f = d / "targets_c1_xyz.csv"
+    f.write_bytes(b"T1,420134.298,4638335.154,2.274\r\nGCP-2,420140.100,4638380.200,1.105\r\n"
+                  b"bad,420141.0,,1.0\r\n")
+    p = sc.read_points(f)
+    check(p["format"].startswith("CIRN") and list(p["name"]) == ["T1", "GCP-2"] and p["skipped"] == 1
+          and abs(p["E"][0] - 420134.298) < 1e-9 and abs(p["Z"][1] - 1.105) < 1e-9,
+          "names T1 and GCP-2 read as CIRN targets (the file was taken for a header and the run exited); "
+          "a row without coordinates skipped")
+    h = d / "headed.csv"
+    h.write_text("num,E,N,Z\n1,420100.0,4638400.0,1.20\n")
+    p = sc.read_points(h)
+    check(not p["format"].startswith("CIRN") and list(p["name"]) == ["1"] and abs(p["Z"][0] - 1.2) < 1e-9,
+          "a 'num,E,N,Z' header row is still a header")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
@@ -797,6 +816,7 @@ def main():
         test_fix2(d)
         test_setup_fit_label(d)
         test_left_out_frames_window(d)
+        test_cirn_target_names(d)
         test_py38()
     finally:
         os.chdir(start)

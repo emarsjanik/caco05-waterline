@@ -2629,7 +2629,9 @@ def step_detect(plan, args, state):
     if not parts:
         raise StepFailed("no camera produced waterlines")
     merged = wdir / "contour_points_ground.csv"
-    sig = {"parts": [[c, str(p)] for c, p in parts], "era": plan["era"], "v": 2,
+    # v 3 (historical eras): water_level_source / tide_model_spread now name the forcing's level source;
+    # the live era's merge is unchanged (v 2), so a built live date does not rebuild for it
+    sig = {"parts": [[c, str(p)] for c, p in parts], "era": plan["era"], "v": 2 if plan["era"] == "live" else 3,
            "after": dict({f"detect_{c}": token(out, f"detect_{c}") for c, _ in parts},
                          forcing=token(out, "forcing")),
            "drop_no_setup": bool(args.setup_coef)}
@@ -2887,7 +2889,9 @@ def implied_c(setup, hs, tp):
 def merge_cameras(plan, parts, args):
     """
     waterlines/contour_points_ground.csv: every camera's rows, each tagged with its water-level and
-    wave source (forcing_level_source, forcing_level_sigma_m, forcing_waves_source).
+    wave source (forcing_level_source, forcing_level_sigma_m, forcing_waves_source); outside the live
+    era water_level_source is the forcing's level source too (adcp / chatham_transfer, not the
+    extractor's 'tide_model') and tide_model_spread is blank (no tide model was used).
     With a setup coefficient (C > 0) a frame whose setup could not be computed (no Hs/Tp within
     the wave record's gap limit) is LEFT OUT: its elevation would be the still water only, about
     one setup (0.2-0.4 m) below its neighbours, and dem_from_contours.py would keep it. Those
@@ -2936,6 +2940,13 @@ def merge_cameras(plan, parts, args):
                             cache[k] = ((lk[1][i] if i is not None else "", lk[2][i] if i is not None else "",
                                          lk[4][j] if j is not None else ""))
                         r["forcing_level_source"], r["forcing_level_sigma_m"], r["forcing_waves_source"] = cache[k]
+                        # extract_elevation_contours.py calls every --water-level CSV a 'tide_model' (with a
+                        # 0.0 spread across model columns): here the level is the forcing's (ADCP or Chatham
+                        # transfer), so the row says that, not that a tide model gave it
+                        if "water_level_source" in r:
+                            r["water_level_source"] = cache[k][0] or "historical_forcing"
+                        if "tide_model_spread" in r:
+                            r["tide_model_spread"] = ""
                     w.writerow(r)
                     n += 1
     os.replace(str(dst) + ".tmp", dst)
@@ -3437,6 +3448,10 @@ def step_maps(plan, args, state):
             built = True
         except Exception as exc:
             warn(f"plan-view map failed: {exc!r}")
+        except SystemExit as exc:                 # a loader's sys.exit (survey_compare.py's readers)
+            if is_termination(exc):
+                raise
+            warn(f"plan-view map failed: {exc}")
     missing = [cam for cam in plan["cams"] if not (mdir / f"{plan['date']}_waterlines_{cam}.png").exists()]
     if missing:
         warn(f"waterline map(s) on the photos NOT drawn: "
@@ -3496,11 +3511,10 @@ def plan_survey_points(s, plan, args, folder):
     """The points of point survey s for the plan view (survey_compare.read_points' dict): every file
     of it (the GCPs come as one file per camera), merged as the comparison merges them (a target in
     two files once, into folder/<date>_<name>_plan_points.csv), not only the first file found."""
-    from survey_compare import read_points
     paths = resolve_survey(s, plan, args)[0]
     if len(paths) == 1:
-        return read_points(paths[0])
-    return read_points(merged_points(paths, Path(folder) / f"{plan['date']}_{s['name']}_plan_points.csv"))
+        return read_survey_points(paths[0])
+    return read_survey_points(merged_points(paths, Path(folder) / f"{plan['date']}_{s['name']}_plan_points.csv"))
 
 
 def plan_view_map(plan, src, surveys, args, png):
@@ -3578,8 +3592,14 @@ def plan_view_map(plan, src, surveys, args, png):
     legend.append(plt.Line2D([], [], marker="o", ls="", color=SAND[2], ms=4,
                              label=f"waterlines of {min(pdays)} .. {max(pdays)} ({len(pdays)} days, {n_all:,} points)"
                              if pdays else f"waterlines ({n_all:,} points)"))
+    p = None
     if pts:
-        p = plan_survey_points(pts, plan, args, Path(png).parent)
+        try:
+            p = plan_survey_points(pts, plan, args, Path(png).parent)
+        except SurveyFileError as exc:
+            warn(f"plan view: the points of {pts['name']} are NOT drawn: {exc}")
+            notes.append(f"{pts['name']}: points NOT drawn (survey file unreadable, see the build log)")
+    if p is not None:
         inside = (p["E"] > x0) & (p["E"] < x1) & (p["N"] > y0) & (p["N"] < y1)
         pe, pn, pz = p["E"][inside], p["N"][inside], p["Z"][inside]
         # Only points inside the waterlines' elevation range can be read on its colour
@@ -3686,9 +3706,9 @@ def missing_survey_message(s, plan, args, note):
         others = [d for d in dirs if d != where]
         expect = (f"{where}/{s.get('survey_date') or plan['date']}_Marconi_Extrinsic_Targets_<cam>_xyz.csv "
                   + (f"(or in {', '.join(others)}: the folders this run searches, --survey-dirs) " if others else "")
-                  + f"(no header: num,E,N,Z in UTM 19N / NAVD88, like "
-                  f"calibration/2025-11-13_Marconi_Extrinsic_Targets_c1_xyz.csv), or write its path in "
-                  f"{args.surveys} (column path)")
+                  + f"(UTM 19N / NAVD88; num,E,N,Z rows without a header like "
+                  f"calibration/2025-11-13_Marconi_Extrinsic_Targets_c1_xyz.csv, any target names, or an Emlid "
+                  f"Flow CSV; one file per camera is fine), or write its path in {args.surveys} (column path)")
     else:
         expect = f"the survey file (lidar DSM .tif or .asc) and write its name in {args.surveys} (column path)"
     # maps too: the plan view draws the survey (a compare-only run left it drawn without the points)
@@ -3697,21 +3717,57 @@ def missing_survey_message(s, plan, args, note):
             + " (the photo maps are kept if current; the plan view and the comparison are made, ~1 min)")
 
 
+class SurveyFileError(Exception):
+    """A survey file survey_compare.read_points cannot read (empty, no coordinate columns, ...)."""
+
+
+def is_termination(exc):
+    """True for the SystemExit main()'s SIGTERM handler raises: a kill must end the run, never be
+    taken for a loader's sys.exit on a bad file."""
+    return str(exc).startswith("terminated by signal")
+
+
+def read_survey_points(path):
+    """survey_compare.read_points, with its sys.exit on a file it cannot read turned into
+    SurveyFileError: a bad survey file costs that survey's comparison or the plan view's points, not
+    the build (a SystemExit escaped step_maps' 'except Exception' and failed the product)."""
+    from survey_compare import read_points
+    try:
+        return read_points(path)
+    except SystemExit as exc:
+        if is_termination(exc):
+            raise
+        raise SurveyFileError(str(exc) or f"{path}: not a point survey survey_compare.py can read")
+
+
 def merged_points(paths, dst):
-    """Several CIRN target files (e.g. one per camera) -> one, duplicates (same E,N,Z) once."""
+    """Several files of one point survey (the GCPs come as one file per camera) -> one file that
+    survey_compare.py reads. Each file is read as survey_compare.py reads it (CIRN num,E,N,Z rows with
+    or without numeric target names, Emlid Flow CSV, a CSV with E/N/Z headers; CRLF or not) and the
+    points are merged on their parsed coordinates (a target in two files, to the mm, once): copying
+    the first four columns of every row merged two Emlid files into a header-less mess survey_compare
+    .py could not read, and dropped a second file whose columns came in another order. Written as
+    CIRN rows (name,E,N,Z) when every file is CIRN, else with Name,Code,Easting,Northing,Elevation,
+    Description,CRS headers (code, description and CRS kept; compare_rtk.py's transect reader reads
+    it too). The file is rewritten only when its content changes (its age keeps the comparison
+    current). Raises SurveyFileError naming a file that cannot be read. -> dst"""
+    parts = [(p_, read_survey_points(p_)) for p_ in paths]
+    cirn = all(q["format"].startswith("CIRN") for _, q in parts)
     seen, rows = set(), []
-    for p in paths:
-        with open(p, newline="") as f:
-            for r in csv.reader(f):
-                if len(r) < 4:
-                    continue
-                key = tuple(r[1:4])
-                if key in seen:
-                    continue
-                seen.add(key)
-                rows.append(r[:4])
+    for _, q in parts:
+        for k in range(len(q["E"])):
+            key = tuple(int(round(float(q[c][k]) * 1000)) for c in ("E", "N", "Z"))
+            if key in seen:
+                continue
+            seen.add(key)
+            xyz = [f"{float(q[c][k]):.4f}".rstrip("0").rstrip(".") for c in ("E", "N", "Z")]
+            rows.append([q["name"][k]] + xyz if cirn else
+                        [q["name"][k], q["code"][k], xyz[0], xyz[1], xyz[2], q["desc"][k], q["crs"][k]])
     buf = io.StringIO()
-    csv.writer(buf, lineterminator="\n").writerows(rows)
+    w = csv.writer(buf, lineterminator="\n")
+    if not cirn:
+        w.writerow(["Name", "Code", "Easting", "Northing", "Elevation", "Description", "CRS"])
+    w.writerows(rows)
     data = buf.getvalue().encode()
     # compared as bytes: a text read turns csv's default '\r\n' into '\n', so the file never
     # matched, was rewritten on every run, and its new time re-ran the comparison every time
@@ -4150,7 +4206,18 @@ def step_compare(plan, args, state):
         survey_path = paths[0]
         if len(paths) > 1:
             cdir.mkdir(parents=True, exist_ok=True)
-            survey_path = merged_points(paths, cdir / f"{name}_survey_points.csv")
+            try:
+                survey_path = merged_points(paths, cdir / f"{name}_survey_points.csv")
+            except SurveyFileError as exc:
+                warn(f"comparison {name} FAILED: {exc}")
+                results[s["name"]] = {"status": "failed", "label": s["label"], "reason": str(exc)}
+                state["failures"].append(f"compare {s['name']}: a survey file cannot be read ({exc})")
+                for p in comparison_files(plan, s):     # nothing of an earlier file may look current
+                    if p.exists():
+                        p.unlink()
+                drop_stamp(out, f"compare_{s['name']}")
+                failed_any += 1
+                continue
             say("compare", f"{len(paths)} files merged into {survey_path}")
         v = Verdict(s)
         # every file of the survey (several point files are merged): the worst of them
@@ -4884,6 +4951,73 @@ def still_water_caveat(C, wv, era):
     return text
 
 
+def transfer_caveat(wl, period, n_tr, n_all):
+    """The README's caveat on water levels that are the Chatham gauge transferred to Marconi.
+    What the extrapolation tests say about this period (the test predicting on its side of the fit
+    window, its reach, RMS and bias, and whether the period lies further out) is worked out here from
+    forcing.json's own record of the tests (historical_forcing.transfer_reach), not read from fields
+    only a newer historical_forcing.py writes: a README rewritten after a pull (--steps maps,compare,
+    a minute) from a forcing.json built before it says it too, without rebuilding the forcing step
+    and so the hour of detection after it."""
+    fw = wl.get("fit_window") or []
+    every = n_tr == n_all
+    head = (("Every water level" if every else f"{n_tr} of {n_all} water levels")
+            + f" of this date {'is' if every else 'are'} the Chatham gauge 8447435 transferred to Marconi "
+            f"({wl.get('method')} transfer" + (f", fitted on the ADCP {fw[0]} .. {fw[1]} UTC" if len(fw) == 2 else "")
+            + f"; leave-one-week-out RMS {wl.get('cv_rms_m')} m)"
+            + (f". This period lies {wl['period_vs_adcp']}" if wl.get("period_vs_adcp") else ""))
+    parts = [head]
+    rch = None
+    if period.get("start_utc") and period.get("end_utc") and wl.get("methods") and len(fw) == 2:
+        try:
+            from historical_forcing import transfer_reach
+            rch = transfer_reach(wl, period["start_utc"], period["end_utc"])
+        except Exception:                          # an unreadable record: the fields below still say it
+            rch = None
+    sig = wl.get("transfer_sigma_m")
+    if rch and rch["tests"]:
+        side, t = rch["side"], rch["tests"]
+        parts.append(f"On that side the transfer was tested only by the {'backward' if side == 'before' else 'forward'} "
+                     "extrapolation test, predicting "
+                     + ", ".join(f"{x['reach_days'][0]}-{x['reach_days'][1]}" for x in t)
+                     + f" days {side} its fit window: RMS "
+                     + ", ".join(f"{x['rms_m']:.3f} m (daytime "
+                                 + ("n/a" if x.get("rms_daytime_m") is None else f"{x['rms_daytime_m']:.3f}") + ")"
+                                 for x in t)
+                     + ", bias " + ", ".join(f"{x['bias_m']:+.3f}" for x in t)
+                     + " m (transfer minus ADCP: a positive bias reads the water, and every elevation, that much high)")
+        if rch["beyond_tested"]:
+            near, far = rch["beyond_days"]
+            parts.append(f"This date lies {near:.0f}-{far:.0f} days {side} the fit window: FURTHER THAN TESTED, so its "
+                         "error is not measured and may exceed that RMS and bias (the harbour and inlet change; the "
+                         "2026 GNSS-R fit of the same transfer differs, forcing_report.txt)")
+        if sig is not None and abs(float(sig) - rch["sigma_m"]) > 0.0005:
+            parts.append(f"The sigma_m written in forcing/water_level.csv, {sig} m, is the pooled RMS of both tests "
+                         f"(an older historical_forcing.py): this side's test gives {rch['sigma_m']:.3f} m (rebuilding "
+                         "the forcing step writes it, and rebuilds everything after it)")
+        else:
+            parts.append(f"Each transferred level carries {sig} m as its sigma_m (forcing/water_level.csv)")
+    else:
+        # hours the ADCP lacks inside its record (the pooled tests stand), or a forcing.json without them
+        reach = wl.get("extrapolation_reach_days") or []
+        parts.append(f"Extrapolation RMS {wl.get('extrapolation_rms_m')} m; each transferred level carries "
+                     f"{sig} m as its sigma_m"
+                     + (f"; the extrapolation tests predict {' and '.join(f'{a}-{b}' for a, b in reach)} days "
+                        f"beyond their fit windows" if reach else ""))
+        if wl.get("beyond_tested"):
+            parts.append("FURTHER THAN TESTED: the transfer's error for this date is not measured and may exceed "
+                         "that RMS (the harbour and inlet change; the 2026 GNSS-R fit of the same transfer differs, "
+                         "forcing_report.txt)")
+    if every:
+        wm = wl.get("week_mean_error")
+        parts.append("The error is shared, not averaged away: every frame of the window carries the window's one "
+                     "mean transfer error"
+                     + (f" (over the ADCP overlap, the mean error of a whole week left out and predicted from the "
+                        f"rest, 13.5-18 UTC, was {wm['min_m']:+.3f} .. {wm['max_m']:+.3f} m, RMS {wm['rms_m']:.3f} m, "
+                        f"over {wm['weeks']} weeks)" if wm else ""))
+    return ". ".join(parts) + ". Every elevation of the DEM moves with it."
+
+
 def collect_caveats(plan, args, state, forcing, prov):
     cav = []
     era = plan["era"]
@@ -4903,21 +5037,7 @@ def collect_caveats(plan, args, state, forcing, prov):
                    + (" (no ADCP level is used here, but the Chatham transfer was fitted to the ADCP's NAVD88 "
                       "levels, so it carries the same datum)." if n_all and n_tr == n_all else "."))
         if n_tr:
-            fw = wl.get("fit_window") or []
-            reach = wl.get("extrapolation_reach_days") or []
-            cav.append(("Every water level" if n_tr == n_all else f"{n_tr} of {n_all} water levels")
-                       + f" of this date {'is' if n_tr == n_all else 'are'} the Chatham gauge 8447435 transferred "
-                       f"to Marconi ({wl.get('method')} transfer"
-                       + (f", fitted on the ADCP {fw[0]} .. {fw[1]} UTC" if len(fw) == 2 else "")
-                       + f"; leave-one-week-out RMS {wl.get('cv_rms_m')} m, extrapolation RMS "
-                       f"{wl.get('extrapolation_rms_m')} m, the error given to each transferred level)"
-                       + (f". This period lies {wl['period_vs_adcp']}" if wl.get("period_vs_adcp") else "")
-                       + (f"; the extrapolation tests predict {' and '.join(f'{a}-{b}' for a, b in reach)} days "
-                          f"beyond their fit windows" if reach else "")
-                       + (": FURTHER THAN TESTED, so the transfer's error for this date is not measured and may "
-                          "exceed that RMS (the harbour and inlet change; the 2026 GNSS-R fit of the same "
-                          "transfer differs, forcing_report.txt)" if wl.get("beyond_tested") else "")
-                       + ". Every elevation of the DEM moves with it.")
+            cav.append(transfer_caveat(wl, (forcing or {}).get("period") or {}, n_tr, n_all))
         for c in wv.get("caveats") or []:
             cav.append("Waves: " + c)
     else:
@@ -6139,6 +6259,22 @@ def waterline_readme_lines(wl_):
     return L
 
 
+def level_words(prov):
+    """The README's words for the water level each line is put at: 'the measured water level' was
+    printed for the October 2024 date too, whose every level is the Chatham gauge transferred (and
+    extrapolated 44-51 days beyond the ADCP record), none measured at Marconi."""
+    srcs = (prov.get("water_level") or {}).get("sources_used") or {}
+    n_tr = sum(int(v) for k, v in srcs.items() if "chatham" in str(k))
+    n_all = sum(int(v) for v in srcs.values())
+    if n_all and n_tr == n_all:
+        return ("the Chatham gauge's water level transferred to Marconi (no level of this window was measured "
+                "at Marconi; see KNOWN CAVEATS) ")
+    if n_tr:
+        return (f"the measured water level ({n_tr} of {n_all} levels are the Chatham gauge transferred to "
+                "Marconi; see KNOWN CAVEATS) ")
+    return "the measured water level "
+
+
 def write_readme(plan, args, prov):
     out = plan["out"]
     d = plan["date"]
@@ -6167,7 +6303,7 @@ def write_readme(plan, args, prov):
       + (f"{days[0]} .. {days[-1]} ({len(days)} days)" if days else "no day") + dem_days_text(plan, fpd) + ".")
     fits_ = (prov.get("setup") or {}).get("fits") or []
     no_setup = bool(fits_) and all(f.get("kind") == "none" or not f.get("coef") for f in fits_)
-    w("Each photo's waterline is where the water met the sand; its elevation is the measured water level "
+    w("Each photo's waterline is where the water met the sand; its elevation is " + level_words(prov)
       + ("only: NO wave setup (C = 0), so a line marked by the swash reads LOW, by roughly "
          f"{SHARE_KEPT_RANGE[0]}-{SHARE_KEPT_RANGE[1]} x the setup (the line also moves seaward onto lower beach). "
          if no_setup else
@@ -6324,6 +6460,31 @@ def write_readme(plan, args, prov):
 # One date, all dates, summary
 # ---------------------------------------------------------------------
 
+def forcing_input_notes(era, found, setup_coef):
+    """What the dry run says of each forcing input historical_forcing.py will use ({key: Path or None},
+    forcing_inputs()): -> ([(key, text)], [warnings]). The chatham era needs the ADCP too: the transfer
+    is fitted on its overlap with Chatham and the WIS / NDBC waves are converted to its Hs, so without
+    it the forcing step fails; it was listed as 'NOT FOUND' with nothing to say it mattered."""
+    need = ({"adcp": "REQUIRED: the Chatham transfer is fitted on it and the WIS/NDBC waves are converted to "
+                     "its Hs",
+             "adcp_navd88": "the ADCP on NAVD88 (else its datum is derived from the Chatham mean, as "
+                            "adcp_to_navd88.py does)",
+             "chatham": "the Chatham gauge (else downloaded from NOAA when the period needs it)",
+             "wis": "WIS ST63064 waves (no download: required for the setup unless NDBC 44013 covers)",
+             "ndbc": "NDBC 44013 waves"} if era == "chatham" else
+            {"adcp": "the ADCP (water level and waves)", "adcp_navd88": "the ADCP on NAVD88"})
+    lines = [(k, (str(p) if p else "NOT FOUND") + (f"  <- {need[k]}" if k in need and not p else ""))
+             for k, p in found.items()]
+    warns = []
+    if era == "chatham" and found and not found.get("adcp"):
+        warns.append("no ADCP record (sig1000_waves_ALL.csv): the forcing step will FAIL (no Chatham transfer can "
+                     "be fitted and the WIS/NDBC waves cannot be converted); give --adcp")
+    if era == "chatham" and setup_coef and not (found.get("wis") or found.get("ndbc")):
+        warns.append("no WIS or NDBC wave file: the forcing step will FAIL (no waves for the setup); give --wis / "
+                     "--ndbc or put the files in the Chelsea_calibration folder")
+    return lines, warns
+
+
 def dry_run(plan, args, steps):
     rule(f"{plan['date']} (DRY RUN: nothing is written)")
     out = plan["out"]
@@ -6361,15 +6522,11 @@ def dry_run(plan, args, steps):
         except StepFailed as exc:
             found = {}
             say("  inputs", f"ERROR: {exc}")
-        need = ({"chatham": "the Chatham gauge (else downloaded from NOAA when the period needs it)",
-                 "wis": "WIS ST63064 waves (no download: required for the setup unless NDBC 44013 covers)",
-                 "ndbc": "NDBC 44013 waves"} if plan["era"] == "chatham" else
-                {"adcp": "the ADCP (water level and waves)", "adcp_navd88": "the ADCP on NAVD88"})
-        for k, p in found.items():
-            say(f"  {k}", (str(p) if p else "NOT FOUND") + (f"  <- {need[k]}" if k in need and not p else ""))
-        if plan["era"] == "chatham" and args.setup_coef and not (found.get("wis") or found.get("ndbc")):
-            warn("no WIS or NDBC wave file: the forcing step will FAIL (no waves for the setup); give --wis / "
-                 "--ndbc or put the files in the Chelsea_calibration folder")
+        lines, warns = forcing_input_notes(plan["era"], found, args.setup_coef)
+        for k, t in lines:
+            say(f"  {k}", t)
+        for t in warns:
+            warn(t)
         from historical_forcing import setup_share_inputs
         sh = setup_share_inputs(getattr(args, "gnssr_spline", None), getattr(args, "gauge_csv", None))
         say("  setup share", "2026 record for the share of setup GNSS-R sees: "
@@ -6398,8 +6555,12 @@ def dry_run(plan, args, steps):
                "comparison")
     else:
         est = 30 + total * SEC_PER_PHOTO_DETECT + 60 + 40 * len(plan["cams"]) + 40 * len(plan["surveys"])
-        how = (f"detection ~{SEC_PER_PHOTO_DETECT:.0f} s per photo, measured off the station; the NUC's own rate "
-               f"is printed by the detection's progress lines")
+        # the NUC10i3's rate has never been measured (no date with detection was built there): the
+        # estimate is the sandbox's rate, so a range up to twice it is given, and where to read the real one
+        how = (f"{total} photos at ~{SEC_PER_PHOTO_DETECT:.0f} s each as measured OFF the station; the NUC10i3's rate "
+               f"is NOT measured yet: allow up to ~{max(1.0, (est + total * SEC_PER_PHOTO_DETECT) / 60):.0f} min "
+               f"(twice the detection) and read the real rate from the first 'detecting : photo k of N ... "
+               f"(S s per photo)' line")
     say("steps", ", ".join(steps))
     for st in steps:
         key = {"forcing": "forcing", "filter": "filter", "dem": "dem"}.get(st)
