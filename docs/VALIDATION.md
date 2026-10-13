@@ -45,7 +45,9 @@ What a survey-date build reruns after this pull: a step reruns when a script in 
 changes. This PR changes none of the forcing, pointing, detection, filter, DEM or photo-map
 scripts; it changes `survey_compare.py`, so the next build of a date already built skips
 the forcing, pointing, detection, filter, DEM and photo maps, and reruns only its plan-view
-map and its comparisons (a minute or two per date).
+map and its comparisons (a minute or two per date). Checked on a 2026-09-29 build made with
+PR #87's code, then rebuilt after copying in the files this PR changes: every step up to the
+DEM skipped, the plan-view map and the comparison rebuilt (12 s), a further run skipped all.
 
 `view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file
 is unchanged by this PR, and the survey products use only its `ground_to_pixel`, which
@@ -586,10 +588,10 @@ only if it holds over several weeks of different waves; then change it in all th
 * Known limit, not fixed in this PR: the conversions are chosen by the setup error they cause,
   so a `--setup-coef 0` build of hours without the ADCP (no setup, no error to choose by)
   takes the first conversion listed (Hs linear, Tp raw), not those of the C = 0.037 build.
-  Only a C = 0 build of a `chatham`-era date is concerned, and every such date is switched off;
-  the fix (judge them with the station's C) belongs with the change that switches one on, as
-  it changes `historical_forcing.py`, and so reruns the forcing and the detection (~50 min per
-  two-camera week) of every date already built.
+  No date switched on has such hours (ADCP waves throughout) and every `chatham`-era date is
+  switched off, so no build is concerned now. The fix (judge them with the station's C) belongs
+  with the change that switches one on: it changes `historical_forcing.py`, and so reruns the
+  forcing and the detection (~50 min per two-camera week) of every date already built.
 
 ### 4.6 Camera pointing (calibrations) and the sea-horizon check
 
