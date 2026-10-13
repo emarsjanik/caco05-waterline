@@ -95,6 +95,21 @@ provenance.json. The detection checks first that the disk has room for it
 | `era` | where the water level and waves come from: `adcp` (Signature 1000, Dec 2024 - Mar 2025), `chatham` (no ADCP: NOAA Chatham 8447435 transferred to Marconi + WIS/NDBC waves converted to the ADCP's Hs; same code path, `historical_forcing.py`), `live` (the station's own archive: GNSS-R levels and the cron's waves) |
 | `notes` | why the row is as it is; printed when a date is refused |
 
+A text with a comma in it (`notes` here; `why` and `label_override_reason` in
+`surveys.csv`) must be inside double quotes, as the shipped rows are:
+`...,live,"off for now, waiting for the October recheck"` (a double quote
+inside the text is written twice: `""`). Without the quotes the comma ends
+the text: `survey_products.py` warns (`... field(s) more than its ... columns
+(a comma in a text that is not in double quotes?)`) and drops what follows,
+and the last group of `test_survey_products.py` (the station's own tables)
+FAILs on that warning. In `surveys.csv`, a row that leaves off its optional
+last column gives no warning at all: the text after the comma becomes that
+row's `label_override_reason`, which overrules the downgrades that column can
+overrule (`--dry-run` then prints `[overruled in surveys.csv (<the text>):
+<the downgrade>]` next to the label, a build warns `downgrade NOT applied,
+overruled in surveys.csv`, and `test_survey_products.py` lists every
+`label_override_reason` the tables hold).
+
 File names (`envelope_survey`, survey `path`) are looked for by name in
 `--survey-dirs` (default: the Chelsea_calibration folder, the waterline
 folder and its calibration folder, the repository's `calibration/` and
@@ -160,7 +175,7 @@ station.
 | `survey_type` | `dsm` or `points` |
 | `survey_date` | when it was surveyed (the time gap to the photos is reported) |
 | `label` | how independent the comparison is, before the script's own checks (below) |
-| `why` | the reason, printed next to the label everywhere |
+| `why` | the reason, printed next to the label everywhere (with a comma in it: inside double quotes, see above) |
 | `label_override_reason` | optional. Empty = every downgrade applies. A downgrade from a rule that can misfire (a point survey on the calibration's day may be its GCPs; a points survey of the date a setup coefficient was fitted on may be those shots; survey_compare.py's name and date checks) is NOT applied when a reason is written here, e.g. `FIXTURE points sampled from the lidar, not the calibration's GCPs`; the reason and the downgrade it overruled are printed next to the label. A downgrade from what the chain actually did (the envelope, a fitted pointing, a setup coefficient fitted to the same file) cannot be overruled |
 
 ## Labels

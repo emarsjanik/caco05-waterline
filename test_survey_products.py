@@ -41,8 +41,10 @@ checkout. Three kinds of check read the station's own state, and say so:
     calibration of every camera switched on there, and the product's own
     label rules applied to their rows (an envelope placed with the compared
     survey, a points survey of its calibration's day unless a
-    label_override_reason is written: no better than PARTLY-CIRCULAR). An
-    edit the product accepts never fails it;
+    label_override_reason is written: no better than PARTLY-CIRCULAR), and
+    every label_override_reason they hold is listed. An edit the product
+    reads with no warning and accepts never fails it (a text with a comma
+    goes inside double quotes: surveys/README.md);
   * the two checks on the real 2026-09-29 RTK file, run when it is found;
   * the commit a stamp records, checked when the code is a git checkout.
 What was asked for in the tables (the dates switched off, windows, the 29 Sep
@@ -773,6 +775,18 @@ def test_table_commas(d):
     rows, out = quiet(sp.read_table, short, sp.SURVEY_FIELDS)
     check("WARNING" not in out and rows[0]["why"] == "second set" and rows[0]["label_override_reason"] == "",
           "a row without its optional last column (label_override_reason): read as empty, no warning")
+    # surveys/README.md: in such a row a comma outside double quotes ends `why` with no warning, and the rest
+    # becomes the row's label_override_reason (test_station_tables lists every one the station's tables hold)
+    for why, reason, said in (("second GCP set, surveyed by Chris", "surveyed by Chris", "outside double quotes"),
+                              ('"second GCP set, surveyed by Chris"', "", "inside double quotes")):
+        short.write_text("date,name,path,survey_type,survey_date,label,why,label_override_reason\n"
+                         f"2024-10-23,oct_gcps_b,,points,2024-10-23,INDEPENDENT,{why}\n")
+        rows, out = quiet(sp.read_table, short, sp.SURVEY_FIELDS)
+        check("WARNING" not in out and rows[0]["label_override_reason"] == reason
+              and rows[0]["why"] == ("second GCP set" if reason else "second GCP set, surveyed by Chris"),
+              f"that row with a comma in `why` {said}: " + (f"no warning, the rest read as label_override_reason "
+                                                            f"{reason!r} (why the README asks for the quotes)"
+                                                            if reason else "read whole, no override"))
 
 
 def git_out(*words):
@@ -879,8 +893,9 @@ def test_shipped_tables(d):
 def test_station_tables(d):
     """The station's own tables as they are on this computer, which the owner edits (surveys/README.md: add a
     date, switch one on or off, give a survey file that has arrived). Only what survey_products itself needs
-    of them, or does with them, is asserted, so an edit the product accepts never fails here; what was asked
-    for in the tables the repository ships is test_shipped_tables'. Every problem is listed, not just the
+    of them, or does with them, is asserted, so an edit the product reads with no warning and accepts never
+    fails here (surveys/README.md: a text with a comma goes inside double quotes, or the product cuts it); what
+    was asked for in the tables the repository ships is test_shipped_tables'. Every problem is listed, not just the
     first, and this group runs last: a table problem cannot hide the results of the code's checks."""
     print("the station's own tables (surveys/*.csv as they are now): what survey_products needs of them")
     problems = []
@@ -905,6 +920,15 @@ def test_station_tables(d):
     cfg, srv = tables[sp.DEFAULT_CONFIG], tables[sp.DEFAULT_SURVEYS]
     if cfg is None or srv is None:
         check(False, f"the station's tables: {len(problems)} problem(s): {' | '.join(problems)}")
+    # a label_override_reason overrules the downgrades that can misfire, and in a row without its last column
+    # the end of a `why` cut at a comma outside double quotes lands there unwarned: each one is shown
+    over = [s for s in srv if s.get("label_override_reason")]
+    print(f"  ({len(over)} survey row(s) with a label_override_reason, which overrules the calibration-day, "
+          f"setup-fit-date and survey_compare name/date downgrades"
+          + (": each should be meant, not the end of a `why` cut at a comma outside double quotes)" if over else ")"))
+    for s in over:
+        print(f"      {s['date']} {s['name']}: label_override_reason {s['label_override_reason']!r}; "
+              f"its why ends {s['why'][-60:]!r}")
     dates = sorted({r["date"] for r in cfg})
     off = [x for x in dates if not any(is_enabled(r) for r in cfg if r["date"] == x)]
     plans = {}
