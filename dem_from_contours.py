@@ -48,8 +48,20 @@ Usage:
 Writes dem_out_{dem,spread,count}.asc (and _source.asc with
 --interpolate-edge), dem_out_info.json (dates, frames per camera and
 what the filters left out -- what the page needs and the grids do not
-hold) and the page dem_out_dem.png, drawn by dem_figure.py. To redraw
-the page from those files without rebuilding: python3 dem_figure.py dem_out
+hold; with --max-day-offset also each camera-day left out with its
+offset, and the day test's first-pass and final offsets) and the page
+dem_out_dem.png, drawn by dem_figure.py. To redraw the page from those
+files without rebuilding: python3 dem_figure.py dem_out
+
+THE DAY TEST (--max-day-offset) is iterative: the camera-day furthest
+over the limit from the DEM of the other days is left out, the others
+are measured again without it, and so on until none is over; a day left
+out on the way is taken back if it lies within the limit of the DEM of
+the kept days. One pass let the days it rejected shape the DEM it judged
+the others by (day_consistency() has the details). A camera whose day
+offsets run one way with time gets a WARNING: real change, or an error
+drifting with time (pointing, lens, a detection bias that follows the
+tides or waves), and the test then trims an end of it.
 
 THE PAGE IS ALWAYS THIS RUN'S. The old dem_out_dem.png is removed first
 (unless --no-plot); a window with too few cells, or no points at all,
@@ -402,26 +414,430 @@ def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames, coefs=None):
     return result, int(ok.sum()), len(set(pair_frame[ok]))
 
 
+class LeaveOneOut:
+    """
+    Offsets of groups of (cell, frame) samples -- camera-days or frames, the `keys` -- from the
+    DEM of other groups: for key k, the median over k's samples of (sample - the median of the
+    reference's samples in that cell), over the cells where the reference has >= min_frames
+    samples. The reference is every other key, or a chosen subset (offset(k, ref)), so the
+    iterative day test can recompute the offsets after each day it leaves out.
+
+    The samples are sorted once (by cell, then value); a cell median is the middle value or the
+    mean of the two middle values, as np.median gives it, so the offsets do not depend on the
+    order of the samples and equal those of the one-pass loop this replaced.
+    """
+
+    def __init__(self, pair_cell, pair_vals, pair_key, min_frames, min_pairs=30):
+        self.names, kid = np.unique(pair_key, return_inverse=True)
+        kid = np.asarray(kid).ravel()
+        order = np.lexsort((pair_vals, pair_cell))          # by cell, then value
+        self.c, self.v, self.k = pair_cell[order], pair_vals[order], kid[order]
+        self.min_frames, self.min_pairs = min_frames, min_pairs
+        self.index = {n: i for i, n in enumerate(self.names.tolist())}
+        # the cells each key has samples in (sorted, unique)
+        ko = np.lexsort((self.c, self.k))
+        kk, kc = self.k[ko], self.c[ko]
+        new = np.r_[True, (kk[1:] != kk[:-1]) | (kc[1:] != kc[:-1])] if len(kk) else np.zeros(0, bool)
+        uk, uc = kk[new], kc[new]
+        b = np.searchsorted(uk, np.arange(len(self.names) + 1))
+        self.cells = [uc[b[i]:b[i + 1]] for i in range(len(self.names))]
+
+    def near(self, i):
+        """Positions (in the sorted samples) of every sample in the cells key i has samples in."""
+        cells = self.cells[i]
+        lo = np.searchsorted(self.c, cells, "left")
+        n = np.searchsorted(self.c, cells, "right") - lo
+        return np.repeat(lo - np.r_[0, np.cumsum(n)[:-1]], n) + np.arange(int(n.sum()))
+
+    def offset(self, name, ref=None):
+        """(median offset of key `name` from the DEM of the reference keys, comparable samples).
+        ref: a boolean per key (in self.names order) -- the keys whose samples make the DEM;
+        None = all. The key's own samples never do. NaN offset with fewer than min_pairs."""
+        i = self.index[name]
+        pos = self.near(i)
+        c, v, kk = self.c[pos], self.v[pos], self.k[pos]
+        mine = kk == i
+        use = ~mine if ref is None else (~mine & ref[kk])
+        rc, rv = c[use], v[use]                           # still sorted by cell, then value
+        res = np.zeros(0)
+        if len(rc):
+            starts = np.flatnonzero(np.r_[True, rc[1:] != rc[:-1]])
+            n = np.diff(np.r_[starts, len(rc)])
+            ok = n >= self.min_frames
+            uc = rc[starts][ok]
+            med = ((rv[starts + (n - 1) // 2] + rv[starts + n // 2]) / 2)[ok]
+            if len(uc):
+                oc, ov = c[mine], v[mine]
+                at = np.minimum(np.searchsorted(uc, oc), len(uc) - 1)
+                hit = uc[at] == oc
+                res = ov[hit] - med[at[hit]]
+        return (float(np.median(res)) if len(res) >= self.min_pairs else np.nan, len(res))
+
+    def support(self, name, ref=None):
+        """How many OTHER keys the DEM `name` is judged against holds where it is compared: the
+        median, over its comparable samples, of the number of distinct reference keys in that
+        sample's cell (0 when none is comparable). Below 2 the DEM without the day is, in most of
+        its cells, one other day alone, and the test cannot tell which of the two is off."""
+        i = self.index[name]
+        pos = self.near(i)
+        c, kk = self.c[pos], self.k[pos]
+        mine = kk == i
+        use = ~mine if ref is None else (~mine & ref[kk])
+        rc, rk = c[use], kk[use]
+        if not len(rc):
+            return 0.0
+        starts = np.flatnonzero(np.r_[True, rc[1:] != rc[:-1]])
+        ok = np.diff(np.r_[starts, len(rc)]) >= self.min_frames
+        uc = rc[starts]
+        o = np.lexsort((rk, rc))
+        rc2, rk2 = rc[o], rk[o]
+        pc = rc2[np.r_[True, (rc2[1:] != rc2[:-1]) | (rk2[1:] != rk2[:-1])]]   # one per (cell, key)
+        nkeys = np.searchsorted(pc, uc, "right") - np.searchsorted(pc, uc, "left")
+        uc, nkeys = uc[ok], nkeys[ok]
+        if not len(uc):
+            return 0.0
+        oc = c[mine]
+        at = np.minimum(np.searchsorted(uc, oc), len(uc) - 1)
+        hit = uc[at] == oc
+        return float(np.median(nkeys[at[hit]])) if hit.any() else 0.0
+
+
 def day_offsets(pair_cell, pair_vals, pair_key, min_frames, min_pairs=30):
     """
     For each (camera, local day): the median difference between that
     day's samples and the DEM built WITHOUT that day, cell by cell.
     Leaving the day out matters: a day with many frames dominates the
     cells it covers and would otherwise hide its own error.
+    One pass, every key against all the others: the --max-frame-offset test
+    (keys = frames), and the first pass of the day test (day_consistency).
+    -> {key: (offset or NaN, comparable samples)}, keys sorted.
     """
-    out = {}
-    for k in sorted(set(pair_key)):
-        mine = pair_key == k
-        groups = cell_groups(pair_cell[~mine])
-        order, c, starts, ends = groups
-        others = pair_vals[~mine][order]
-        med = {}
-        for a, b in zip(starts, ends):
-            if b - a >= min_frames:
-                med[int(c[a])] = float(np.median(others[a:b]))
-        res = [v - med[int(cc)] for cc, v in zip(pair_cell[mine], pair_vals[mine]) if int(cc) in med]
-        out[k] = (float(np.median(res)) if len(res) >= min_pairs else np.nan, len(res))
+    loo = LeaveOneOut(pair_cell, pair_vals, pair_key, min_frames, min_pairs)
+    return {k: loo.offset(k) for k in loo.names.tolist()}
+
+
+# --max-day-offset, the day test. The days the cameras saw are compared with one another: a day
+# whose waterlines sit, on median, more than the limit from the DEM of the other days is left
+# out. ONE pass (each day against the DEM of all the others) lets the days it is about to leave
+# out shape that DEM: on the station's whole-archive DEM of 13 Oct 2026 c1's pre-storm days
+# (+0.27 to +1.40 m) pulled c1's cells up and four post-storm c1 days were left out as LOW
+# (-0.15 to -0.26 m). The test is therefore iterative (day_consistency): the day furthest over the
+# limit goes first and the others are measured again without it.
+# Fewer than DAY_TEST_MIN_DAYS testable camera-days and the DEM without one day is the other day
+# alone: the test cannot tell which one is off, so it leaves none out (first pass), or stops
+# (later passes). survey_products.py (DEM_DAY_TEST_MIN) relies on the same number.
+DAY_TEST_MIN_DAYS = 3
+# A camera whose day offsets (final, below) run one way with time -- |Spearman rho| of offset
+# against date above DAY_TREND_MIN_RHO over >= DAY_TREND_MIN_DAYS testable days, max - min above
+# the limit -- gets a WARNING: real beach change through the window, or an error that drifts with
+# time (pointing, lens, a detection bias that follows the tides or waves), gives that pattern, and
+# the day test then trims whichever end lies further out -- the station's 7-day DEM of 5-11 Oct
+# 2026: c1 -0.238, -0.058, -0.048, -0.034, +0.016, +0.132 m, the 5th left out and the 11th kept,
+# by one pass and by this test alike. Iterating does not cure that: once one end is left out the
+# DEM moves towards the other days, so on a steady trend the same end tends to go again. The
+# warning is the remedy; the synthetic Mar 2025 fixture (static beach, c2 drifting +0.07 to -0.09 m
+# over 3-9 Mar with the detector) gets it too.
+DAY_TREND_MIN_DAYS = 5
+DAY_TREND_MIN_RHO = 0.8
+DAY_TEST_METHOD = ("iterative: the camera-day furthest over the limit is left out and the others' "
+                   "offsets are recomputed without it, until none is over; each left-out day is then "
+                   "tried again against the DEM of the kept days and taken back, one at a time (the "
+                   "closest first), when it is within the limit and puts no kept day over it")
+
+
+def ranks(x):
+    """Ranks 1..n of x (ties share their mean rank), as Spearman's rho needs them. No scipy."""
+    x = np.asarray(x, float)
+    order = np.argsort(x, kind="mergesort")
+    xs = x[order]
+    r = np.empty(len(x))
+    if not len(x):
+        return r
+    starts = np.flatnonzero(np.r_[True, xs[1:] != xs[:-1]])
+    ends = np.r_[starts[1:], len(x)]
+    for a, b in zip(starts, ends):
+        r[order[a:b]] = (a + 1 + b) / 2.0
+    return r
+
+
+def spearman(x, y):
+    """Spearman's rank correlation: Pearson's r of the ranks (ties averaged). NaN when either
+    side is constant or there are fewer than 2 values."""
+    if len(x) < 2:
+        return np.nan
+    rx, ry = ranks(x), ranks(y)
+    rx, ry = rx - rx.mean(), ry - ry.mean()
+    den = np.sqrt((rx ** 2).sum() * (ry ** 2).sum())
+    return float((rx * ry).sum() / den) if den > 0 else np.nan
+
+
+def day_trends(offsets, limit, min_days=DAY_TREND_MIN_DAYS, min_rho=DAY_TREND_MIN_RHO):
+    """
+    Cameras whose camera-day offsets run one way with time. offsets: {"<camera> <YYYY-MM-DD>":
+    offset (NaN = not testable)}. A camera is listed when it has >= min_days testable days,
+    |Spearman rho| of offset against date > min_rho, and max - min offset > limit.
+    -> [{camera, days, spearman_rho, range_m, first: (day, offset), last: (day, offset)}],
+    cameras sorted.
+    """
+    by_cam = {}
+    for k, off in offsets.items():
+        if off is not None and np.isfinite(off):
+            cam, day = k.split(" ", 1)
+            by_cam.setdefault(cam, []).append((day, float(off)))
+    out = []
+    for cam in sorted(by_cam):
+        days = sorted(by_cam[cam])
+        if len(days) < min_days:
+            continue
+        y = np.array([o for _, o in days])
+        rho = spearman(np.arange(len(days)), y)
+        span = float(y.max() - y.min())
+        if np.isfinite(rho) and abs(rho) > min_rho and span > limit:
+            out.append({"camera": cam, "days": len(days), "spearman_rho": round(rho, 3),
+                        "range_m": round(span, 3), "first": days[0], "last": days[-1]})
     return out
+
+
+def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs=30,
+                    min_days=DAY_TEST_MIN_DAYS):
+    """
+    The --max-day-offset test. pair_key names each sample's camera-day ("<camera> <day>").
+
+    1. First pass: every camera-day against the DEM of all the other days (day_offsets). With
+       fewer than `min_days` testable days (offset not NaN) every day is kept (too_few).
+    2. Drop: while a kept, testable day is more than `limit` off the DEM of the other kept days,
+       leave out the ONE furthest off (largest |offset|; a tie goes to the first key in sorted
+       order) and recompute the kept days' offsets without it. Only a day whose DEM holds at
+       least min_days - 1 other kept days where it is compared (LeaveOneOut.support) can be
+       left out: against one other day alone the test cannot tell which of the two is off --
+       the 3-day rule of the first pass, applied to each day, so a camera whose view the other
+       camera barely shares is not trimmed down to one day. Stops when none is over, when every
+       day over is of that kind, or when fewer than `min_days` testable days are kept (those
+       over the limit stay; `stop` says so).
+    3. Take back: every left-out day is measured against the DEM of the kept days. Of those
+       within the limit, the closest (smallest |offset|; ties by key) is taken back if that puts
+       no kept day over the limit that was within it (else the next closest is tried); then all
+       are measured again against the new set, until a round takes none back. One day at a time
+       mirrors step 2 and makes the result independent of the order the days are tried in; the
+       kept set only grows here, so this ends.
+    4. Final offsets: kept days against the DEM of the other kept days; left-out days against
+       the DEM of the kept days. After step 3 every kept, testable day is within the limit
+       (unless step 2 stopped early).
+
+    Day offsets never depend on the order of the samples (medians), and every choice above is
+    made by |offset| then key, so the result is deterministic.
+    -> dict: first, final ({key: (offset or NaN, samples)}, keys sorted), steps ([(key, offset,
+    samples)] in the order left out), retests ([[(key, offset, samples)] per round, against the
+    kept days]), refused ([(key, offset, [kept days it would put over])]), taken_back (keys in
+    order), rejected (sorted keys), stop ('' or why step 2 stopped with days over the limit),
+    too_few (bool), testable (first-pass count).
+    """
+    loo = LeaveOneOut(pair_cell, pair_vals, pair_key, min_frames, min_pairs)
+    names = loo.names.tolist()
+    first = {k: loo.offset(k) for k in names}
+    testable = [k for k in names if np.isfinite(first[k][0])]
+    out = {"first": first, "final": dict(first), "steps": [], "retests": [], "refused": [],
+           "taken_back": [], "rejected": [], "stop": "", "too_few": len(testable) < min_days,
+           "testable": len(testable)}
+    if out["too_few"]:
+        return out
+
+    def over(off):
+        return bool(np.isfinite(off) and abs(off) > limit)
+
+    def rank(k, off):                       # furthest first; a tie goes to the first key
+        return (abs(off), -names.index(k))
+
+    kept = np.ones(len(names), bool)
+    cur = dict(first)                       # kept days: offset from the DEM of the other kept days
+    while True:
+        live = [k for k in names if kept[loo.index[k]]]
+        test = [k for k in live if np.isfinite(cur[k][0])]
+        bad = [k for k in test if over(cur[k][0])]
+        if not bad:
+            break
+        if len(test) < min_days:
+            out["stop"] = (f"only {len(test)} testable camera-day(s) kept: the test cannot tell which "
+                           f"day is off, so {', '.join(bad)} kept although over the limit")
+            break
+        judged = [k for k in bad if loo.support(k, kept) >= min_days - 1]
+        if not judged:
+            out["stop"] = (f"{', '.join(bad)} over the limit but kept: where each is compared, the DEM "
+                           f"without it holds fewer than {min_days - 1} other kept camera-days (median "
+                           f"per sample), so the test cannot tell which day is off")
+            break
+        worst = max(judged, key=lambda k: rank(k, cur[k][0]))
+        out["steps"].append((worst,) + tuple(cur[worst]))
+        kept[loo.index[worst]] = False
+        for k in live:
+            if k != worst:
+                cur[k] = loo.offset(k, kept)
+        cur.pop(worst)
+
+    dropped = [s[0] for s in out["steps"]]
+    away = {}                               # left-out days: offset from the DEM of the kept days
+    while dropped:
+        rnd = [(k,) + loo.offset(k, kept) for k in dropped]
+        out["retests"].append(rnd)
+        for k, off, n in rnd:
+            away[k] = (off, n)
+        cands = sorted((r for r in rnd if np.isfinite(r[1]) and abs(r[1]) <= limit),
+                       key=lambda r: (abs(r[1]), names.index(r[0])))
+        back, refused = None, []
+        for k, off, n in cands:
+            trial = kept.copy()
+            trial[loo.index[k]] = True
+            new = {j: loo.offset(j, trial) for j in cur}
+            pushed = [j for j in cur if over(new[j][0]) and not over(cur[j][0])]
+            if pushed:
+                refused.append((k, off, pushed))
+                continue
+            back = k
+            kept = trial
+            cur = new
+            cur[k] = (off, n)
+            break
+        if back is None:
+            out["refused"] = refused        # the last round's: those stand
+            break
+        out["taken_back"].append(back)
+        dropped.remove(back)
+        away.pop(back)
+    out["rejected"] = sorted(dropped)
+    if out["steps"]:
+        final = dict(cur)
+        final.update({k: away[k] for k in dropped})
+        out["final"] = {k: final[k] for k in names}
+    return out
+
+
+def _off(x):
+    return f"{x:+.3f} m" if np.isfinite(x) else "   --   "
+
+
+def day_test_report(dt, limit, n_left_points=None):
+    """
+    The lines the day test prints, the first block in the format survey_products.py
+    (dem_failure_reason) reads: 'Day consistency (...)', then one line per camera-day starting
+    with its key and its first-pass offset, '<-- REJECTED' on the days left out, then 'left out
+    N camera-day(s), M point(s)'. When the test left any day out on the way, each line also gives
+    the final offset, and the lines after the block say in what order and why.
+    n_left_points: points of the rejected days (None: no 'left out' line).
+    """
+    first, final = dt["first"], dt["final"]
+    moved = bool(dt["steps"])
+    order = {s[0]: i + 1 for i, s in enumerate(dt["steps"])}
+    back = set(dt["taken_back"])
+    rej = set(dt["rejected"])
+    lines = [f"Day consistency (median offset from the DEM without that day, limit +/-{limit} m):"]
+    for k in sorted(first):
+        off, n = first[k]
+        fo, fn = final[k]
+        if dt["too_few"]:
+            if not np.isfinite(off):
+                note = "  (too few comparable samples -- kept)"
+            elif abs(off) > limit:
+                note = f"  (off by more than the limit -- kept: fewer than {DAY_TEST_MIN_DAYS} testable days)"
+            else:
+                note = ""
+        elif k in rej:
+            note = f"  <-- REJECTED (left out {ordinal(order[k])})"
+        elif k in back:
+            note = f"  (left out {ordinal(order[k])}, taken back: within the limit of the kept days)"
+        elif not np.isfinite(off):
+            note = "  (too few comparable samples -- kept)"
+        elif not np.isfinite(fo):
+            note = "  (too few comparable samples left -- kept)"
+        elif abs(fo) > limit:
+            note = "  (over the limit -- kept: the test stopped, see below)"
+        else:
+            note = ""
+        fin = f"   final {_off(fo)}" if moved else ""
+        lines.append(f"   {k}   {_off(off)}   ({n} samples){fin}{note}")
+    if dt["too_few"]:
+        lines.append(f"   only {dt['testable']} testable camera-day(s): the test cannot tell which day is off; "
+                     f"every day kept")
+        return lines
+    if n_left_points is not None and rej:
+        lines.append(f"   left out {len(rej)} camera-day(s), {n_left_points} point(s)")
+    if not moved:
+        if dt["stop"]:
+            lines += _wrap(f"none left out: {dt['stop']}")
+        return lines
+    lines += _wrap(f"({DAY_TEST_METHOD}. First column: each day against the DEM of every other day, "
+                   f"the first pass; final: a kept day against the DEM of the other kept days, a day "
+                   f"left out against the DEM of the kept days)")
+    lines += _wrap("order left out: " + ", ".join(
+        _unit(f"{i + 1}. {k} ({_off(o)} at that step)") for i, (k, o, n) in enumerate(dt["steps"])))
+    if dt["stop"]:
+        lines += _wrap(f"stopped: {dt['stop']}")
+    for k, o, pushed in dt["refused"]:
+        lines += _wrap(f"not taken back: {_unit(k)} ({_off(o)} from the kept days) would put "
+                       f"{', '.join(_unit(j) for j in pushed)} over the limit")
+    if dt["taken_back"]:
+        lines += _wrap("taken back: " + ", ".join(_unit(f"{k} ({_off(final[k][0])})") for k in dt["taken_back"]))
+    else:
+        lines += _wrap("taken back: none (every day left out is still over the limit, or not comparable, "
+                       "against the DEM of the kept days)")
+    return lines
+
+
+def _unit(text):
+    """Text _wrap never breaks (a camera-day and its number stay on one line)."""
+    return text.replace(" ", "\0")
+
+
+def _wrap(text, width=100):
+    """An explanatory line of the log, wrapped: indented 3, continued at 5."""
+    import textwrap
+    return [ln.replace("\0", " ") for ln in
+            textwrap.wrap(text, width=width, initial_indent="   ", subsequent_indent="     ",
+                          break_on_hyphens=False, break_long_words=False)]
+
+
+def ordinal(n):
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def day_trend_warning(t, limit, rejected):
+    """The WARNING lines for one camera's trend (day_trends), naming the days the test left out."""
+    cam = t["camera"]
+    gone = [k for k in rejected if k.split(" ", 1)[0] == cam]
+    (d0, o0), (d1, o1) = t["first"], t["last"]
+    return [f"WARNING: {cam}'s camera-day offsets run one way with time over {t['days']} days "
+            f"(Spearman rho {t['spearman_rho']:+.2f}; {o0:+.3f} m on {d0} to {o1:+.3f} m on {d1}, a "
+            f"range of {t['range_m']:.2f} m > the {limit:g} m limit)."] + _wrap(
+            "Real beach change through the window, or an error that drifts with time (the camera's "
+            "pointing or lens, a detection bias that follows the tides or the waves), gives this pattern; "
+            "the day test then trims the end(s) furthest out"
+            + (f" -- left out here: {', '.join(_unit(k) for k in gone)}" if gone else " -- none left out here")
+            + f". Check {cam}'s pointing and the beach change before reading this DEM as one surface.")
+
+
+def day_test_record(dt, limit, trends):
+    """What <stem>_info.json keeps of the day test (filters), so a page can name the days left out
+    and say why. Offsets in m (None = not testable), rounded to 0.1 mm."""
+    def r(x):
+        return round(float(x), 4) if np.isfinite(x) else None
+    return {
+        "camera_days_rejected_offsets_m": {k: r(dt["final"][k][0]) for k in dt["rejected"]},
+        "day_test": {
+            "method": DAY_TEST_METHOD if not dt["too_few"] else
+            f"not applied: fewer than {DAY_TEST_MIN_DAYS} testable camera-days, every day kept",
+            "limit_m": limit,
+            "first_pass_offsets_m": {k: r(v[0]) for k, v in dt["first"].items()},
+            "final_offsets_m": {k: r(v[0]) for k, v in dt["final"].items()},
+            "samples": {k: int(v[1]) for k, v in dt["first"].items()},
+            "left_out_order": [s[0] for s in dt["steps"]],
+            "taken_back": list(dt["taken_back"]),
+            "stopped": dt["stop"] or None,
+            "trend_warnings": [{"camera": t["camera"], "days": t["days"], "spearman_rho": t["spearman_rho"],
+                                "range_m": t["range_m"], "first_day": t["first"][0],
+                                "first_offset_m": r(t["first"][1]), "last_day": t["last"][0],
+                                "last_offset_m": r(t["last"][1])} for t in trends],
+            "trend_from": "final offsets",
+        },
+    }
 
 
 def interpolate_between_contours(E, N, Z, frames, cell, max_spread, dem, max_edge):
@@ -650,10 +1066,15 @@ def main():
                          "many metres from the DEM built without that day (e.g. 0.15). "
                          "Catches days whose waterlines are consistently displaced -- a "
                          "different failure from the tide-direction check, which only sees "
-                         "direction. Days with fewer than 30 comparable samples are kept, and "
-                         "with fewer than 3 testable camera-days every day is kept (the DEM "
-                         "without one day is then the other day alone, so the test cannot tell "
-                         "which is off).")
+                         "direction. Iterative: the day furthest over the limit is left out "
+                         "and the others measured again without it, until none is over; a "
+                         "left-out day within the limit of the kept days is then taken back. "
+                         "Days with fewer than 30 comparable samples are kept, and with fewer "
+                         "than 3 testable camera-days every day is kept (the DEM without one "
+                         "day is then the other day alone, so the test cannot tell which is "
+                         "off). Prints the first-pass and final offsets, and a WARNING when a "
+                         "camera's offsets run one way with time over 5 or more days (real "
+                         "change, or an error drifting with time: the test then trims an end).")
     ap.add_argument("--max-frame-offset", type=float, default=None,
                     help="Leave out single frames whose samples sit, on median, more than this "
                          "many metres from the DEM built without that frame (e.g. 0.2). Runs "
@@ -760,6 +1181,7 @@ def main():
         args.contour_csv, args.camera, args.start_date, args.end_date, args.max_hs, args.exclude,
         stats=load_stats)
     rejected_frames, rejected_days = set(), set()
+    day_record = {"camera_days_rejected_offsets_m": {}, "day_test": None}
 
     if len(E) == 0:
         print("No georectified points matched. Check --camera and the date range.")
@@ -863,37 +1285,29 @@ def main():
         for f, z in zip(frames, Z):
             z_of.setdefault(f, z)
         pair_vals = np.array([z_of[f] for f in pair_frame])
-        offsets = day_offsets(pair_cell, pair_vals, pair_key, args.min_points)
-        rejected = set()
-        print(f"Day consistency (median offset from the DEM without that day, limit "
-              f"+/-{args.max_day_offset} m):")
-        # With fewer than 3 testable camera-days "the DEM without that day" is the
-        # other day alone: two days that differ by more than the limit get equal
-        # and opposite offsets and BOTH would be rejected, leaving no points. The
-        # test cannot tell which day is off, so every day is kept.
-        testable = [k for k, (off, n) in offsets.items() if np.isfinite(off)]
-        too_few_days = len(testable) < 3
-        for k, (off, n) in offsets.items():
-            if not np.isfinite(off):
-                note = "  (too few comparable samples -- kept)"
-            elif abs(off) > args.max_day_offset and too_few_days:
-                note = "  (off by more than the limit -- kept: fewer than 3 testable days)"
-            elif abs(off) > args.max_day_offset:
-                rejected.add(k)
-                note = "  <-- REJECTED"
-            else:
-                note = ""
-            off_s = f"{off:+.3f} m" if np.isfinite(off) else "   --   "
-            print(f"   {k}   {off_s}   ({n} samples){note}")
-        if too_few_days:
-            print(f"   only {len(testable)} testable camera-day(s): the test cannot tell which day is off; "
-                  f"every day kept")
-        rejected_days = set(rejected)
+        # Iterative (day_consistency): the day furthest over the limit is left out and the
+        # others measured again without it; left-out days within the limit of the kept days
+        # are taken back. With fewer than 3 testable camera-days "the DEM without that day"
+        # is the other day alone: the test cannot tell which day is off, and keeps them all.
+        dt = day_consistency(pair_cell, pair_vals, pair_key, args.max_day_offset, args.min_points)
+        rejected = set(dt["rejected"])
+        keep = None
         if rejected:
             frame_key = {f: f"{cam_of[f]} {local_day(epoch[f])}" for f in set(frames)}
             keep = np.array([frame_key[f] not in rejected for f in frames])
+        for line in day_test_report(dt, args.max_day_offset,
+                                    None if keep is None else int((~keep).sum())):
+            print(line)
+        # a camera whose day offsets run one way with time: the test may be trimming real change
+        # (or the ends of an error drifting with time), so the DEM is not one surface -- say so
+        trends = day_trends({k: v[0] for k, v in dt["final"].items()}, args.max_day_offset)
+        for t in trends:
+            for line in day_trend_warning(t, args.max_day_offset, dt["rejected"]):
+                print(line)
+        day_record = day_test_record(dt, args.max_day_offset, trends)
+        rejected_days = set(rejected)
+        if keep is not None:
             E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
-            print(f"   left out {len(rejected)} camera-day(s), {int((~keep).sum())} point(s)")
         print()
         if len(E) == 0:
             print("No points left: the day-consistency test rejected every camera-day "
@@ -1009,6 +1423,11 @@ def main():
             "frames_rejected": len(rejected_frames),
             "max_day_offset": args.max_day_offset,
             "camera_days_rejected": sorted(rejected_days),
+            # with --max-day-offset: the offset of each day left out from the DEM of the kept days
+            # (camera_days_rejected_offsets_m), and the test's numbers (day_test: first-pass and
+            # final offsets of every camera-day, the order left out, the days taken back, trend
+            # warnings); a page can name the days and say why. day_test is None without the test.
+            **day_record,
         },
     }
     with open(str(stem) + "_info.json", "w") as f:
