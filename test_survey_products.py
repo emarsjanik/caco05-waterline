@@ -581,6 +581,36 @@ def test_cwd_never_searched(d):
         cav = sp.storm_caveats(pl, SimpleNamespace(survey_dirs=[str(sdir)]), {}, "2026-09-26", "2026-10-02")
         check(len(cav) == 1 and "The rtk transects span N 4638380-4638500: they overlap that loss." in cav[0],
               "... once in a survey folder: found, and the storm caveat reads it")
+        # --dry-run and --summary (a date not built yet) label the survey as the build would: by its name in the
+        # survey folders, never by the current folder's copy. A setup fit of the test's own whose shots have
+        # this file's content: CIRCULAR only where the file is found.
+        fake = 0.0123
+        while any(abs(k - fake) < 1e-6 for k in sp.SETUP_FITS):
+            fake += 0.0001
+        sp.SETUP_FITS[fake] = {"survey_stem": "selftest_fit_shots", "survey_sha256": sp.sha256(Path("probe_shots.csv")),
+                               "survey_type": "points", "survey_date": "2026-10-15", "how": "a test fit"}
+        try:
+            row_t = dict(row, date="2026-09-29", label_override_reason="")
+            cfg_t = [{"date": "2026-09-29", "camera": "c1", "enabled": "1", "station": "CACO05",
+                      "first_day": "2026-09-26", "last_day": "2026-10-02", "eo_file": "CACO05_c1_20251113_EO-CV.yaml",
+                      "envelope_survey": "", "utc_hours": "0-24", "era": "live", "notes": ""}]
+            for dirs, want in (([str(empty)], "INDEPENDENT"), ([str(sdir)], "CIRCULAR")):
+                a = SimpleNamespace(setup_coef=fake, setup_fitted_to=None, survey_dirs=dirs, calibration=str(empty),
+                                    photo_roots=[str(empty)], live_contours=str(empty / "none.csv"),
+                                    gnssr_spline=str(empty / "none.txt"), gauge_csv=str(empty / "none.csv"),
+                                    surveys="surveys.csv", config="survey_dates.csv", force_disabled=False,
+                                    window=None, utc_hours=None, output_root=str(d / "no_output_root"))
+                plan_t = quiet(sp.build_plan, "2026-09-29", cfg_t, [row_t], a)[0]
+                _, out = quiet(sp.dry_run, plan_t, a, ["compare"])
+                lab = [ln.split(":", 1)[1].strip() for ln in out.splitlines() if ln.strip().startswith("label")]
+                when, _ = sp.label_when_built("2026-09-29", row_t, cfg_t, [row_t], a)
+                where = "only in the current folder" if want == "INDEPENDENT" else "in a survey folder"
+                check(len(lab) == 1 and lab[0].split(" ")[0] == want and when == want
+                      and (want == "INDEPENDENT" or "same content (sha256)" in lab[0]),
+                      f"--dry-run and --summary, the survey file {where}: {want} (a setup fit whose shots have its "
+                      f"content: CIRCULAR only where the build finds it)")
+        finally:
+            del sp.SETUP_FITS[fake]
     finally:
         os.chdir(start)
 

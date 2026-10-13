@@ -5074,7 +5074,9 @@ def dry_run(plan, args, steps):
     for s in plan["surveys"]:
         paths, note = resolve_survey(s, plan, args)
         v = Verdict(s)
-        for p_ in (paths or [Path(s["path"] or s["name"])]):
+        # a survey not found is labelled by its name in the survey folders (survey_path_for), never by a
+        # file of that name in the folder the command is run from: the label the build would give
+        for p_ in (paths or [survey_path_for(s, plan, args)]):
             honest_label(s, plan, args, p_, fits=[setup_fit_info(args.setup_coef, args)], verdict=v)
         label, reasons = v.label, v.reasons
         say(f"survey {s['name']}", f"{paths[0] if paths else 'MISSING'}{' (' + note + ')' if note else ''}")
@@ -6147,7 +6149,7 @@ def label_when_built(date, sv, cfg, srv, args):
                 return sv["label"], ""
             paths, _ = resolve_survey(sv, plan, args)
             v = Verdict(sv)
-            for p_ in (paths or [Path(sv["path"] or sv["name"])]):
+            for p_ in (paths or [survey_path_for(sv, plan, args)]):     # never a file of the current folder
                 honest_label(sv, plan, args, p_, fits=[setup_fit_info(args.setup_coef, args)], verdict=v)
     except (SystemExit, Exception) as exc:          # never let the summary fail on a table problem
         return sv["label"], f"not checked: {exc}"

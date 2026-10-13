@@ -100,7 +100,8 @@ File names (`envelope_survey`, survey `path`) are looked for by name in
 folder and its calibration folder, the repository's `calibration/` and
 `surveys/`), and `eo_file` in `calibration/` (`--calibration`): never in the
 folder the command is run from, so a build finds the same files wherever it
-is started. A path with a folder in it (absolute, or e.g. `./x.csv`) is
+is started, and `--dry-run` and `--summary` label a survey from the same
+files the build would use. A path with a folder in it (absolute, or e.g. `./x.csv`) is
 taken as given when it exists, else by its name in those folders.
 
 ### The dates now
