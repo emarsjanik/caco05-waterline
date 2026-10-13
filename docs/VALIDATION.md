@@ -618,7 +618,9 @@ only if it holds over several weeks of different waves; then change it in all th
   refitted to GNSS-R over the last 30 days on every run; default (1.24, -48 min, -0.10 m,
   sigma 0.13 m) only without GPS overlap.
 * **Limits.** The transfer changes with the inlet and harbour; months from the overlap the
-  error can exceed the extrapolation RMS (measured 0-9 weeks out).
+  error can exceed the extrapolation RMS, which the two tests measure on predictions 0-23 and
+  0-29 days beyond their fit windows. 20-26 Oct 2024 lies 44-51 days before the ADCP record:
+  further than tested (the forcing report and the product README say so).
 * **Re-check.** `forcing_report.txt`, block `Chatham -> Marconi transfer`.
 
 ### 4.5 Wave height and period conversions (dates or hours without the ADCP)

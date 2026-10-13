@@ -3197,6 +3197,108 @@ def test_filter_leaves_nothing_old(d):
           "before the filter runs: the old report and every consistency_<cam>.png are removed, the input kept")
 
 
+def test_oct_path(d):
+    print("the October 2024 (chatham era) path, as built end to end on the synthetic October fixture")
+    cfg = sp.read_table(sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS)
+    srv = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    oct_ = [s for s in srv if s["name"] == "oct_gcps"][0]
+    # The GCP advice names a folder the run searches: with --survey-dirs that leave out the station's
+    # Chelsea folder, a file put there would never be found.
+    sdir = Path(d) / "oct_surveys"
+    sdir.mkdir()
+    a = cfg_args(survey_dirs=[str(sdir)], force_disabled=True)
+    plan, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, a)
+    paths, note = sp.resolve_survey(oct_, plan, a)
+    msg = sp.missing_survey_message(oct_, plan, a, note)
+    want = f"{sdir}/2024-10-23_Marconi_Extrinsic_Targets_<cam>_xyz.csv"
+    check(want in msg and str(sp.CHELSEA) not in msg and "--force-disabled" in msg,
+          "Oct GCPs missing, --survey-dirs given: the advice names that folder, not the station's Chelsea folder")
+    check("--steps maps,compare" in msg,
+          "... and reruns the maps too (a compare-only rerun left the plan view drawn without the GCPs)")
+    (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv").write_text("1,420100.0,4638400.0,1.20\r\n")
+    paths, note = sp.resolve_survey(oct_, plan, a)
+    check(len(paths) == 1, "... and a file put where the advice says is found")
+    a2 = cfg_args(force_disabled=True)            # the station's defaults: Chelsea first
+    msg = sp.missing_survey_message(oct_, plan, a2, "no survey file given")
+    check(f"{sp.CHELSEA}/2024-10-23_Marconi_Extrinsic_Targets_<cam>_xyz.csv" in msg,
+          "... and with the station's own folders, the Chelsea folder (searched first)")
+    check("not on the NUC" not in oct_["why"],
+          "the Oct GCP label reason says nothing about the file being absent (it is printed once the file is there)")
+
+    # The GCPs arrive as one CRLF file per camera (as the 2025-11-13 target files), a target seen by
+    # both cameras in both files.
+    (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv").write_bytes(
+        b"101,420131.051,4638335.088,1.317\r\n301,420135.051,4638385.088,0.816\r\n")
+    (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c2_xyz.csv").write_bytes(
+        b"205,420126.801,4638440.088,1.034\r\n301,420135.051,4638385.088,0.816\r\n")
+    paths, _ = sp.resolve_survey(oct_, plan, a)
+    check(len(paths) == 2, "both camera files found by the survey date")
+    # (1) the merged file is rewritten only when its content changes: it was rewritten on every run
+    # (csv's '\r\n' never equalled a text read), so the comparison was redone on every run
+    dst = sdir / "merged.csv"
+    sp.merged_points(paths, dst)
+    os.utime(dst, (1.0e9, 1.0e9))
+    sp.merged_points(paths, dst)
+    check(dst.stat().st_mtime == 1.0e9 and len(dst.read_text().splitlines()) == 3,
+          "merged GCP file: 3 targets (301 once), not rewritten when nothing changed (keeps its age)")
+    # (2) the label reasons: the calibration-day rule ran once per FILE and listed every reason twice
+    v = sp.Verdict(oct_)
+    for p_ in paths:
+        sp.honest_label(oct_, plan, a, p_, fits=[], verdict=v)
+    check(v.label == "PARTLY-CIRCULAR" and len(v.reasons) == len(set(v.reasons)) == 2,
+          f"two GCP files: PARTLY-CIRCULAR, each camera's calibration-day reason once ({len(v.reasons)} reasons)")
+    # (3) the plan view draws every file's points, not only the first file's
+    pts = sp.plan_survey_points(oct_, plan, a, sdir)
+    check(len(pts["E"]) == 3 and np.isclose(sorted(pts["Z"])[-1], 1.317) and np.isclose(sorted(pts["Z"])[0], 0.816),
+          f"plan view: the targets of both camera files, 301 once ({len(pts['E'])} points)")
+
+    # (4) the summary of a date whose survey file has not arrived: never compared, not 'not current'
+    root = Path(d) / "oct_root"
+    pdir = root / "2024-10-23"
+    pdir.mkdir(parents=True)
+    (root / "summary.png").write_text("an old figure")
+    reason = sp.missing_survey_message(oct_, plan, a, "no survey file given in surveys.csv (column path)")
+    (pdir / "provenance.json").write_text(sp.json.dumps({
+        "date": "2024-10-23", "era": "chatham", "status": "complete",
+        "window": {"first_day": "2024-10-20", "last_day": "2024-10-26"}, "cameras": {}, "frames_per_day": {},
+        "comparisons": [{"name": "oct_gcps", "survey_path": "", "survey_type": "points", "survey_date": "2024-10-23",
+                         "table_label": "PARTLY-CIRCULAR", "label": "PARTLY-CIRCULAR", "why": oct_["why"],
+                         "status": "skipped", "reason": reason, "current": False}]}))
+    _, out = quiet(sp.summary, SimpleNamespace(output_root=str(root), config=str(sp.DEFAULT_CONFIG),
+                                               surveys=str(sp.DEFAULT_SURVEYS), setup_coef=sp.SETUP_COEF,
+                                               survey_dirs=[str(sdir)], calibration=str(HERE / "calibration")))
+    rows = list(csv.DictReader(open(root / "summary.csv")))
+    row = [r for r in rows if r["survey"] == "oct_gcps"][0]
+    check(row["label"] == "no survey file" and "no survey file yet" in row["comparison"]
+          and "not current" not in row["comparison"],
+          f"summary: the Oct GCPs NOT COMPARED for want of the file, not 'not current' ({row['label']!r})")
+    check(not (root / "summary.png").exists() and "no comparison has numbers yet" in out,
+          "summary: no figure when no comparison has numbers (and no old one left to look current)")
+
+    # (5) the README's water-level caveat for the chatham era: EVERY level is transferred (it said
+    # 'Some'), the period lies 44-51 days before the ADCP record, further than the extrapolation tests
+    # reach (0-23 and 0-29 days), and the transfer still carries the ADCP's datum
+    forcing = {"water_level": {
+        "sources_used": {"chatham_transfer": 1681}, "method": "harmonic", "cv_rms_m": 0.0756,
+        "extrapolation_rms_m": 0.0851, "fit_window": ["2024-12-09 18:00", "2025-03-10 15:00"],
+        "period_vs_adcp": "44-51 days BEFORE the ADCP record (transfer extrapolated)",
+        "extrapolation_reach_days": [[0, 23], [0, 29]],
+        "beyond_tested": "this period lies 44-51 days from the ADCP record, further than the extrapolation tests reach",
+        "adcp_datum": {"source": "adcp_water_level_navd88.csv (adcp_to_navd88.py)"}}, "waves": {}}
+    cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=sp.SETUP_COEF), {}, forcing, {})
+    wlc = [c for c in cav if "Chatham gauge 8447435 transferred" in c]
+    check(len(wlc) == 1 and wlc[0].startswith("Every water level") and "44-51 days BEFORE" in wlc[0]
+          and "0-23 and 0-29 days" in wlc[0] and "FURTHER THAN TESTED" in wlc[0] and "Some water" not in " ".join(cav),
+          "README: every level of the Oct date is the Chatham transfer, 44-51 days out, FURTHER THAN TESTED")
+    check(any(c.startswith("ADCP datum") and "carries the same datum" in c for c in cav),
+          "README: no ADCP level used, but the transfer carries the ADCP's datum")
+    forcing["water_level"].update(sources_used={"adcp": 300, "chatham_transfer": 12}, period_vs_adcp="96% covered",
+                                  beyond_tested=None)
+    cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=sp.SETUP_COEF), {}, forcing, {})
+    check(any(c.startswith("12 of 312 water levels") and "FURTHER THAN TESTED" not in c for c in cav),
+          "README: a few transferred hours inside the ADCP period are counted, not 'every'")
+
+
 def test_one_setup_coef():
     print("one setup coefficient for the station and the products")
     import historical_forcing as hf
@@ -3292,6 +3394,7 @@ def main():
         test_setup_share(d)
         test_c_change(d)
         test_fit_setup_flat(d)
+        test_oct_path(d)
         test_one_setup_coef()
         test_py38()
         # the tables last: the repository's as shipped, then the station's as they are now (with its live

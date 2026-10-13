@@ -552,6 +552,30 @@ def run_group(name, fn, *a):
         return None
 
 
+def test_extrapolation_reach():
+    """How far the transfer's error was measured, against how far out the Oct 2024 date lies
+    (found building it end to end: the report said 'measured 0-9 weeks from its fit window', which
+    covered October's 6-7 weeks; the tests predict 0-23 and 0-29 days beyond their fit windows)."""
+    reach = hf.extrapolation_reach_days()
+    check("reach: the two extrapolation tests predict 0-23 and 0-29 days beyond their fit windows",
+          [tuple(r) for r in reach] == [(0, 23), (0, 29)], str(reach))
+    a_ep = np.arange(ep("2024-12-09 18:00"), ep("2025-03-10 15:00") + 1, 3600.0)   # the real ADCP span
+    t0, t1 = ep("2024-10-20"), ep("2024-10-27")                                  # the Oct 2024 window
+    b = hf.beyond_record_days(t0, t1, a_ep)
+    check("beyond: 20-26 Oct 2024 lies 44-51 days before the ADCP record",
+          b is not None and round(b[0]) == 44 and round(b[1]) == 51, str(b))
+    rel = hf.relation(t0, t1, a_ep, 3600.0)
+    check("relation names both ends", rel.startswith("44-51 days BEFORE the ADCP record"), rel)
+    check("beyond: a window inside the record is not beyond it",
+          hf.beyond_record_days(ep("2025-01-16"), ep("2025-01-24"), a_ep) is None)
+    note = "\n".join(hf.reach_note_lines({"extrapolation_reach_days": [list(r) for r in reach],
+                                          "beyond_tested": "this period lies 44-51 days from the ADCP record"}))
+    check("report: the reach as measured, not '0-9 weeks', and FURTHER THAN TESTED when it is",
+          "0-9 weeks" not in note and "0-23 and 0-29 days" in note and "FURTHER THAN TESTED" in note, note[-160:])
+    note = "\n".join(hf.reach_note_lines({}))
+    check("report: no FURTHER THAN TESTED line for a period inside the reach", "FURTHER THAN TESTED" not in note)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--adcp", default=str(HERE / "sig1000_waves_ALL.csv"), help="the real ADCP record")
@@ -599,6 +623,7 @@ def main():
         run_group("still water", test_still_water_share, work / "still_water")
         if fx is not None:
             run_group("search", test_station_search, fx, work / "search")
+        run_group("reach", test_extrapolation_reach)
         run_group("isolation", test_isolation, work)
     finally:
         hf.SEARCH_DIRS = station_dirs

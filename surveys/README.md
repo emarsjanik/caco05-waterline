@@ -579,9 +579,15 @@ on matplotlib 3.3/3.4 (the version merged with the waterline work).
 Save it as `/mnt/I2Rgus_Data/Chelsea_calibration/2024-10-23_Marconi_Extrinsic_Targets_<cam>_xyz.csv`
 (no header: `num,E,N,Z`, UTM 19N / NAVD88, like
 `calibration/2025-11-13_Marconi_Extrinsic_Targets_c1_xyz.csv`), or write its
-path in the `oct_gcps` row of `surveys.csv`. When the October date is
-switched on (`enabled` = 1 in `survey_dates.csv`, or `--force-disabled`), the
-comparison runs. It is PARTLY-CIRCULAR: the 2024-10-23 calibration was solved
+path in the `oct_gcps` row of `surveys.csv` (one file per camera is fine: they
+are merged, a target in both once, for the comparison and the plan view).
+When the October date is switched on (`enabled` = 1 in `survey_dates.csv`, or
+`--force-disabled`), the comparison runs; on a date already built,
+`--date 2024-10-23 --force-disabled --steps maps,compare` (about a minute)
+makes it and redraws the plan view with the points. Only the GCPs inside
+the DEM's cells are compared (targets on the berm and the upper beach lie
+above the waterlines), so expect few points, each off by up to ~0.1-0.2 m
+from the slope inside a 2 m cell. It is PARTLY-CIRCULAR: the 2024-10-23 calibration was solved
 from those points (the pointing is fitted to them; the elevations still come
 from the water levels). Days before 23 Oct may have had another pointing
 (the 2024-08-27 calibration differs by ~2.3-2.5 deg in azimuth): the pointing
@@ -596,7 +602,11 @@ The October date also needs its forcing files, which are NOT downloaded:
   half of the window's daytime hours, before any detection;
 * the Chatham 8447435 record (`chatham_2024-10_to_2025-03.csv`; downloaded
   from NOAA when missing, unless `--no-download`) and the ADCP files (the
-  transfer is fitted on their overlap).
+  transfer is fitted on their overlap). 20-26 Oct 2024 lies 44-51 days
+  before the ADCP record, further than the transfer's two extrapolation tests
+  reach (0-23 and 0-29 days beyond their fit windows): its extrapolation RMS
+  (0.085 m) is not a measured error for October, and the forcing report and
+  the README say so.
 
 Run `--date 2024-10-23 --force-disabled --dry-run` first: it lists each
 forcing file found or NOT FOUND.

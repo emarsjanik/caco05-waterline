@@ -3420,8 +3420,9 @@ def step_maps(plan, args, state):
     os.replace(str(tmp), str(mdir / MAP_STATUS))
     png = mdir / f"{plan['date']}_waterlines_plan.png"
     surveys = [s for s in plan["surveys"] if resolve_survey(s, plan, args)[0]]
-    sig = {"src": str(src), "after": {"waterlines": waterline_token(plan)}, "v": 10,
-           "surveys": [[s["name"], file_sig(resolve_survey(s, plan, args)[0][0])] for s in surveys],
+    # every file of a survey (the GCPs come as one file per camera): all are drawn, so all sign it
+    sig = {"src": str(src), "after": {"waterlines": waterline_token(plan)}, "v": 11,
+           "surveys": [[s["name"]] + [file_sig(p) for p in resolve_survey(s, plan, args)[0]] for s in surveys],
            "scripts": scripts_sig("map_plan")}
     fresh, why = is_fresh(out, "map_plan", sig, [png], [src])
     if fresh and not args.force:
@@ -3489,6 +3490,17 @@ def signed(v, fmt="{:+.1f}"):
     if t.lstrip("+-").strip("0.") == "":            # 0 shown as 0, not -0.00 / +0.00 (float noise)
         t = t.lstrip("+-")
     return t.replace("-", "−")
+
+
+def plan_survey_points(s, plan, args, folder):
+    """The points of point survey s for the plan view (survey_compare.read_points' dict): every file
+    of it (the GCPs come as one file per camera), merged as the comparison merges them (a target in
+    two files once, into folder/<date>_<name>_plan_points.csv), not only the first file found."""
+    from survey_compare import read_points
+    paths = resolve_survey(s, plan, args)[0]
+    if len(paths) == 1:
+        return read_points(paths[0])
+    return read_points(merged_points(paths, Path(folder) / f"{plan['date']}_{s['name']}_plan_points.csv"))
 
 
 def plan_view_map(plan, src, surveys, args, png):
@@ -3567,9 +3579,7 @@ def plan_view_map(plan, src, surveys, args, png):
                              label=f"waterlines of {min(pdays)} .. {max(pdays)} ({len(pdays)} days, {n_all:,} points)"
                              if pdays else f"waterlines ({n_all:,} points)"))
     if pts:
-        from survey_compare import read_points
-        paths = resolve_survey(pts, plan, args)[0]
-        p = read_points(paths[0])
+        p = plan_survey_points(pts, plan, args, Path(png).parent)
         inside = (p["E"] > x0) & (p["E"] < x1) & (p["N"] > y0) & (p["N"] < y1)
         pe, pn, pz = p["E"][inside], p["N"][inside], p["Z"][inside]
         # Only points inside the waterlines' elevation range can be read on its colour
@@ -3668,14 +3678,23 @@ def missing_survey_message(s, plan, args, note):
                   f"{', '.join(args.survey_dirs)}, never in the folder the command runs from; a path with a "
                   f"folder in it as given first; --survey-dirs adds folders), or correct its path there")
     elif s["survey_type"] == "points":
-        expect = (f"{CHELSEA}/{s.get('survey_date') or plan['date']}_Marconi_Extrinsic_Targets_<cam>_xyz.csv "
-                  f"(no header: num,E,N,Z in UTM 19N / NAVD88, like "
+        # a folder this run looks in: the station's Chelsea folder when it is one of them (the
+        # default), else the first --survey-dirs folder (a file put in a folder not searched would
+        # never be found)
+        dirs = [str(d) for d in (args.survey_dirs or [])]
+        where = str(CHELSEA) if (not dirs or str(CHELSEA) in dirs) else dirs[0]
+        others = [d for d in dirs if d != where]
+        expect = (f"{where}/{s.get('survey_date') or plan['date']}_Marconi_Extrinsic_Targets_<cam>_xyz.csv "
+                  + (f"(or in {', '.join(others)}: the folders this run searches, --survey-dirs) " if others else "")
+                  + f"(no header: num,E,N,Z in UTM 19N / NAVD88, like "
                   f"calibration/2025-11-13_Marconi_Extrinsic_Targets_c1_xyz.csv), or write its path in "
                   f"{args.surveys} (column path)")
     else:
         expect = f"the survey file (lidar DSM .tif or .asc) and write its name in {args.surveys} (column path)"
+    # maps too: the plan view draws the survey (a compare-only run left it drawn without the points)
     return (f"SKIPPED {s['name']}: {note}. Provide {expect}, then rerun: python3 survey_products.py "
-            f"--date {plan['date']} --steps compare" + (" --force-disabled" if disabled else ""))
+            f"--date {plan['date']} --steps maps,compare" + (" --force-disabled" if disabled else "")
+            + " (the photo maps are kept if current; the plan view and the comparison are made, ~1 min)")
 
 
 def merged_points(paths, dst):
@@ -3692,9 +3711,12 @@ def merged_points(paths, dst):
                 seen.add(key)
                 rows.append(r[:4])
     buf = io.StringIO()
-    csv.writer(buf).writerows(rows)
-    if not (Path(dst).exists() and Path(dst).read_text() == buf.getvalue()):   # keep its age if unchanged
-        Path(dst).write_text(buf.getvalue())
+    csv.writer(buf, lineterminator="\n").writerows(rows)
+    data = buf.getvalue().encode()
+    # compared as bytes: a text read turns csv's default '\r\n' into '\n', so the file never
+    # matched, was rewritten on every run, and its new time re-ran the comparison every time
+    if not (Path(dst).exists() and Path(dst).read_bytes() == data):   # keep its age if unchanged
+        Path(dst).write_bytes(data)
     return dst
 
 
@@ -3971,10 +3993,14 @@ class Verdict:
             self.reasons.append(f"CIRCULAR: label {s['label']!r} is not one of {', '.join(LABELS)}")
 
     def worse(self, new, why, heuristic=False):
+        # each reason once: a survey of several files (one GCP file per camera) is checked file by
+        # file, and a rule about the cameras' calibrations fires once per file
         if heuristic and self.override and LABELS.index(new) > LABELS.index(self.label):
-            self.overridden.append(f"{new}: {why}")
+            if f"{new}: {why}" not in self.overridden:
+                self.overridden.append(f"{new}: {why}")
             return
-        self.reasons.append(f"{new}: {why}")
+        if f"{new}: {why}" not in self.reasons:
+            self.reasons.append(f"{new}: {why}")
         if LABELS.index(new) > LABELS.index(self.label):
             self.label = new
 
@@ -4867,15 +4893,31 @@ def collect_caveats(plan, args, state, forcing, prov):
     fits = (prov.get("setup") or {}).get("fits") or setup_in_use(plan, args)[0]
     if era in ("adcp", "chatham"):
         d = wl.get("adcp_datum") or {}
+        srcs = wl.get("sources_used") or {}
+        n_tr = sum(int(v) for k, v in srcs.items() if "chatham" in str(k))
+        n_all = sum(int(v) for v in srcs.values())
         cav.append("ADCP datum: the ADCP's NAVD88 offset was derived from the Chatham gauge's mean level over "
                    "the deployment (adcp_to_navd88.py), i.e. Marconi's mean level is assumed equal to "
                    f"Chatham's{' (' + str(d.get('source')) + ')' if d.get('source') else ''}. Every elevation "
-                   "shares this datum error.")
-        srcs = wl.get("sources_used") or {}
-        if any("chatham" in str(k) for k in srcs):
-            cav.append(f"Some water levels are the Chatham gauge transferred to Marconi ({wl.get('method')}; "
-                       f"CV RMS {wl.get('cv_rms_m')} m, extrapolation RMS {wl.get('extrapolation_rms_m')} m): "
-                       f"sources used {srcs}.")
+                   "shares this datum error"
+                   + (" (no ADCP level is used here, but the Chatham transfer was fitted to the ADCP's NAVD88 "
+                      "levels, so it carries the same datum)." if n_all and n_tr == n_all else "."))
+        if n_tr:
+            fw = wl.get("fit_window") or []
+            reach = wl.get("extrapolation_reach_days") or []
+            cav.append(("Every water level" if n_tr == n_all else f"{n_tr} of {n_all} water levels")
+                       + f" of this date {'is' if n_tr == n_all else 'are'} the Chatham gauge 8447435 transferred "
+                       f"to Marconi ({wl.get('method')} transfer"
+                       + (f", fitted on the ADCP {fw[0]} .. {fw[1]} UTC" if len(fw) == 2 else "")
+                       + f"; leave-one-week-out RMS {wl.get('cv_rms_m')} m, extrapolation RMS "
+                       f"{wl.get('extrapolation_rms_m')} m, the error given to each transferred level)"
+                       + (f". This period lies {wl['period_vs_adcp']}" if wl.get("period_vs_adcp") else "")
+                       + (f"; the extrapolation tests predict {' and '.join(f'{a}-{b}' for a, b in reach)} days "
+                          f"beyond their fit windows" if reach else "")
+                       + (": FURTHER THAN TESTED, so the transfer's error for this date is not measured and may "
+                          "exceed that RMS (the harbour and inlet change; the 2026 GNSS-R fit of the same "
+                          "transfer differs, forcing_report.txt)" if wl.get("beyond_tested") else "")
+                       + ". Every elevation of the DEM moves with it.")
         for c in wv.get("caveats") or []:
             cav.append("Waves: " + c)
     else:
@@ -7139,8 +7181,13 @@ def summary(args):
             dprod = ((date_cls.fromisoformat(c["survey_date"]) - date_cls.fromisoformat(prov["date"])).days
                      if c.get("survey_date") and prov.get("date") else None)
             n = h.get("n")
-            # no label without a current comparison: a label is a statement about numbers shown
-            label = (lab.get("label") or c.get("label") or "") if cur else "not current"
+            # no label without a current comparison: a label is a statement about numbers shown. A
+            # survey whose file has not arrived (the Oct 2024 GCPs) was never compared: not 'stale'
+            nofile = not cur and c.get("status") == "skipped" and not c.get("survey_path")
+            if nofile:
+                why_not = "not compared: no survey file yet (" + (c.get("reason") or "").split(". Provide")[0] + ")"
+            label = (lab.get("label") or c.get("label") or "") if cur else ("no survey file" if nofile
+                                                                           else "not current")
             cc = dict(c, label=label, label_reasons=lab.get("reasons") if cur else c.get("label_reasons"),
                       why=h.get("why") or c.get("why"))
             dem_cam = camera_medians(h.get("by_camera"))
@@ -7157,7 +7204,7 @@ def summary(args):
                    "label_reason": summary_reason(cc, prov) if cur else short_reason(cc),
                    "overruled": "; ".join((lab.get("overridden") if cur else c.get("overruled")) or []) or None,
                    "survey_compare_suggests": h.get("suggested_label") or "",
-                   "comparison": (c.get("status") if cur else f"not current: {why_not}"),
+                   "comparison": (c.get("status") if cur else why_not if nofile else f"not current: {why_not}"),
                    "current": cur, "n": n, "median_m": num(h.get("median")),
                    "nmad_m": num(h.get("nmad")) if (n or 0) >= 3 else None,
                    "rmse_m": num(h.get("rmse")),
@@ -7389,6 +7436,14 @@ def summary(args):
         lines.append(f"      full reason: {r['why']}")
     (root / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
+    if not any(r["median_m"] is not None for r in rows):
+        # e.g. only the Oct 2024 date built, before its GCP file arrived: nothing to plot, and an
+        # older figure would show numbers that are no longer the table's
+        if (root / "summary.png").exists():
+            (root / "summary.png").unlink()
+        print(f"\nwrote {root / 'summary.csv'}, {root / 'summary.txt'} (no summary figure: no comparison has "
+              f"numbers yet)")
+        return 0
     try:
         summary_figure(rows, root / "summary.png", disabled, not_yet)
         print(f"\nwrote {root / 'summary.csv'}, {root / 'summary.txt'}, {root / 'summary.png'}")

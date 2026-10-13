@@ -349,16 +349,62 @@ def daytime(ep):
     return (h >= DAYTIME_UTC[0]) & (h <= DAYTIME_UTC[1])
 
 
+def beyond_record_days(t0, t1, a_ep):
+    """(nearest, farthest) days of [t0, t1) outside the ADCP record, or None when it overlaps it."""
+    if not len(a_ep):
+        return None
+    if t1 <= a_ep[0]:
+        return ((a_ep[0] - t1) / 86400.0, (a_ep[0] - t0) / 86400.0)
+    if t0 > a_ep[-1]:
+        return ((t0 - a_ep[-1]) / 86400.0, (t1 - a_ep[-1]) / 86400.0)
+    return None
+
+
+def extrapolation_reach_days():
+    """How far beyond its own fit window each fixed extrapolation test predicts, in days:
+    [(nearest, farthest), ...] (EXTRAPOLATION_TESTS: 0-23 days before and 0-29 days after). The
+    extrapolation RMS is measured over that reach only; a period further from the ADCP record than
+    the farthest of these is further than tested."""
+    out = []
+    for fs, fe, ts, te in EXTRAPOLATION_TESTS:
+        f0, f1, s0, s1 = (to_epoch([x])[0] for x in (fs, fe, ts, te))
+        if s1 <= f0:
+            out.append((round((f0 - s1) / 86400.0), round((f0 - s0) / 86400.0)))
+        elif s0 >= f1:
+            out.append((round((s0 - f1) / 86400.0), round((s1 - f1) / 86400.0)))
+        else:
+            out.append((0, 0))
+    return out
+
+
+def reach_note_lines(wl_info):
+    """The report's NOTE on how far the transfer's error was measured, and whether this period lies
+    further out (an earlier text said 'measured 0-9 weeks from its fit window': the tests reach 0-23
+    and 0-29 days)."""
+    reach = wl_info.get("extrapolation_reach_days") or [list(r) for r in extrapolation_reach_days()]
+    lines = ["NOTE              : the 2026 GNSS-R fit was a 1.24, lag -48 min, b -0.10 (marconi_water_level.py",
+             "                    DEFAULT_FIT): the transfer changes with time (inlet and harbour change),",
+             "                    so the error for a date months from the overlap can exceed the",
+             "                    extrapolation RMS, which is measured on predictions "
+             + " and ".join(f"{a}-{b}" for a, b in reach) + " days",
+             "                    beyond their fit windows."]
+    if wl_info.get("beyond_tested"):
+        lines.append(f"FURTHER THAN TESTED: {wl_info['beyond_tested']}.")
+    return lines
+
+
 def relation(t0, t1, a_ep, max_gap_s):
     """Where [t0, t1) lies relative to the ADCP record, in words (from its coverage, so a
     hole inside the record counts as not measured)."""
     frac = float(covered(a_ep, np.arange(t0, t1, 360.0), max_gap_s).mean())
     if frac >= 1.0:
         return "inside the ADCP record (water level measured)"
+    # both ends of the period: its first day lies further out than its last (or the other way)
+    b = beyond_record_days(t0, t1, a_ep)
     if t1 <= a_ep[0]:
-        return f"{(a_ep[0] - t1) / 86400.0:.0f} days BEFORE the ADCP record (transfer extrapolated)"
+        return f"{b[0]:.0f}-{b[1]:.0f} days BEFORE the ADCP record (transfer extrapolated)"
     if t0 > a_ep[-1]:
-        return f"{(t0 - a_ep[-1]) / 86400.0:.0f} days AFTER the ADCP record (transfer extrapolated)"
+        return f"{b[0]:.0f}-{b[1]:.0f} days AFTER the ADCP record (transfer extrapolated)"
     return (f"{100 * frac:.0f}% covered by the ADCP (measured there, transferred elsewhere)" if frac > 0
             else "inside a hole in the ADCP record (transfer used)")
 
@@ -1263,10 +1309,8 @@ def write_report(path, args_echo, wl_info, wv_info, fits, wl_df, wv_df, cur_line
             P(f"This period       : {wl_info['period_vs_adcp']}")
         P(f"sigma_m transfer  : {wl_info.get('transfer_sigma_m')} m (larger of the pooled extrapolation "
           f"RMS, all hours and daytime)")
-        P("NOTE              : the 2026 GNSS-R fit was a 1.24, lag -48 min, b -0.10 (marconi_water_level.py")
-        P("                    DEFAULT_FIT): the transfer changes with time (inlet and harbour change),")
-        P("                    so the error for a date months from the overlap can exceed the")
-        P("                    extrapolation RMS, which is measured 0-9 weeks from its fit window.")
+        for line in reach_note_lines(wl_info):
+            P(line)
     P("")
     if wl_info.get("chatham_downloaded"):
         P("Chatham record    : downloaded from NOAA CO-OPS for this run (inputs.chatham in forcing.json)")
@@ -1621,6 +1665,19 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
     if len(a_ep):
         wl_info["period_vs_adcp"] = relation(t0, t1, a_ep, max_gap_s)
         say("period vs ADCP", wl_info["period_vs_adcp"])
+        # how far the extrapolation tests reach, and whether this period lies further out
+        reach = extrapolation_reach_days()
+        wl_info["extrapolation_reach_days"] = [list(r) for r in reach]
+        bd = beyond_record_days(t0, t1, a_ep)
+        if bd is not None:
+            wl_info["beyond_record_days"] = [round(bd[0], 1), round(bd[1], 1)]
+            far = max(r[1] for r in reach)
+            if bd[1] > far:
+                wl_info["beyond_tested"] = (
+                    f"this period lies {bd[0]:.0f}-{bd[1]:.0f} days from the ADCP record, further than the "
+                    f"extrapolation tests reach ({', '.join(f'{a}-{b}' for a, b in reach)} days beyond their fit "
+                    f"windows): the transfer's error here is not measured and may exceed the extrapolation RMS")
+                say("extrapolation", wl_info["beyond_tested"])
     if needs_transfer and gauge is None:
         say("WARNING", "the period is not all inside the ADCP record and there is no Chatham record")
     if len(wl_df) == 0 or not (wl_df["ep"] < t1).any() or not (wl_df["ep"] >= t0).any():
