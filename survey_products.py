@@ -567,6 +567,9 @@ CONFIG_FIELDS = ["date", "camera", "enabled", "station", "first_day", "last_day"
 SURVEY_FIELDS = ["date", "name", "path", "survey_type", "survey_date", "label", "why"]
 
 
+_TABLE_WARNED = set()
+
+
 def read_table(path, fields):
     path = Path(path)
     if not path.exists():
@@ -578,6 +581,12 @@ def read_table(path, fields):
             sys.exit(f"{path}: missing column(s) {', '.join(missing)} (expected {', '.join(fields)})")
         rows = []
         for r in rd:
+            if r.get(None) and (str(path), rd.line_num) not in _TABLE_WARNED:
+                # csv puts the fields past the header under None; read as they are, the text after a
+                # comma that is not inside double quotes would be dropped without a word
+                _TABLE_WARNED.add((str(path), rd.line_num))
+                warn(f"{path} line {rd.line_num}: {len(r[None])} field(s) more than its {len(rd.fieldnames)} "
+                     f"columns (a comma in a text that is not in double quotes?): the text after it is dropped")
             r = {k: (v or "").strip() for k, v in r.items() if k}
             if not r.get(fields[0]) or r[fields[0]].startswith("#"):
                 continue

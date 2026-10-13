@@ -534,6 +534,25 @@ def test_config(d):
     check(len(rows) == 3, f"Oct GCPs merged: 3 targets, the one both cameras saw once (got {len(rows)})")
 
 
+def test_table_commas(d):
+    print("a comma in a table's text: inside double quotes, or said")
+    d = Path(d) / "commas"
+    d.mkdir()
+    bad = d / "bad_dates.csv"
+    bad.write_text("date,camera,enabled,station,first_day,last_day,eo_file,envelope_survey,utc_hours,era,notes\n"
+                   "2025-03-06,c2,1,CACO04,2025-03-03,2025-03-09,CACO04_c2_20250219_EO.yaml,,13.5-18,adcp,"
+                   "c2 only, a comma not in quotes\n")
+    rows, out = quiet(sp.read_table, bad, sp.CONFIG_FIELDS)
+    check("WARNING" in out and "line 2: 1 field(s) more than its 11 columns" in out and rows[0]["notes"] == "c2 only",
+          "a table row with more fields than columns (a comma in a text not in quotes): a WARNING naming the line")
+    for path in (sp.DEFAULT_CONFIG, sp.DEFAULT_SURVEYS):        # the station's own tables, as they are now
+        with open(path, newline="") as f:
+            rows = [r for r in csv.reader(f) if r and not r[0].startswith("#")]
+        bad_rows = [i + 1 for i, r in enumerate(rows) if len(r) != len(rows[0])]
+        check(not bad_rows, f"surveys/{Path(path).name}: every row has its {len(rows[0])} columns (a comma in a "
+                            f"text is inside double quotes)" + (f": NOT rows {bad_rows}" if bad_rows else ""))
+
+
 def test_frames_per_day(d):
     print("frames per day (README caveats)")
     f = Path(d) / "fpd.csv"
@@ -1390,6 +1409,7 @@ def main():
         test_keep_moved_days(d)
         test_live_rows(d)
         test_config(d)
+        test_table_commas(d)
         test_frames_per_day(d)
         test_caveats(d)
         test_stamps(d)
