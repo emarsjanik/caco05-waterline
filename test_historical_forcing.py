@@ -511,6 +511,28 @@ def test_station_search(fx, out):
         hf.SEARCH_DIRS = saved
 
 
+def test_c0_waves(fx, out, e2e_out):
+    """A build without the setup (C = 0) writes the same waves as the station's C: the conversions are
+    chosen by the setup error they would cause, which C = 0 cannot tell apart."""
+    res0, _ = quiet(lambda: build("2025-02-19", "2025-02-20", Path(out), adcp=fx["adcp"],
+                                  adcp_navd88=fx["adcp_navd88"], chatham=fx["chatham"], wis=fx["wis"],
+                                  download=False, plot=False, setup_coef=0.0))
+    j37 = json.loads((Path(e2e_out) / "forcing.json").read_text())
+    m0, m37 = res0["waves"]["models"]["wis"], j37["waves"]["models"]["wis"]
+    w0 = pd.read_csv(res0["waves_csv"])
+    w37 = pd.read_csv(Path(e2e_out) / "waves.csv").set_index("epoch").reindex(w0["epoch"]).reset_index()
+    cols = ["wvht_m", "dpd_s", "source", "hs_sigma_m", "tp_sigma_s"]
+    check("C = 0: the same wave conversions and rows as C = 0.037 (WIS hours of the cut week)",
+          (m0["hs_best"], m0["tp_best"]) == (m37["hs_best"], m37["tp_best"])
+          and res0["waves"]["combination"]["tp_order"] == j37["waves"]["combination"]["tp_order"]
+          and (w0["source"] == "hs=wis;tp=wis").sum() > 24 and w0[cols].equals(w37[cols]),
+          f"Hs {m0['hs_best']} / {m37['hs_best']}, Tp {m0['tp_best']} / {m37['tp_best']}, "
+          f"{int((w0['source'] == 'hs=wis;tp=wis').sum())} WIS hours")
+    rep = (Path(out) / "forcing_report.txt").read_text()
+    check("C = 0: the report says the conversions are judged with the station's C",
+          "This build applies no setup (C = 0.0)" in rep and f"(C={hf.SETUP_COEF}) CV RMS" in rep)
+
+
 def test_isolation(work):
     """Every forcing.json this run wrote names only the fixture's files and the test's own folders."""
     work = Path(work).resolve()
@@ -524,7 +546,7 @@ def test_isolation(work):
         outside += [f"{fj.parent.name}: {x}" for x in paths
                     if x and not str(Path(x).resolve()).startswith(str(work) + os.sep)]
     check(f"isolation: the {n} forcing.json written name only the fixture's and the test's own files",
-          n >= 8 and not outside, "; ".join(outside)[:200])
+          n >= 9 and not outside, "; ".join(outside)[:200])
 
 
 def run_group(name, fn, *a):
@@ -572,6 +594,7 @@ def main():
         run_group("download", test_download_fallback, fx, work / "download")
         run_group("still water", test_still_water_share, work / "still_water")
         run_group("search", test_station_search, fx, work / "search")
+        run_group("C = 0 waves", test_c0_waves, fx, work / "c0_cut", work / "e2e")
         run_group("isolation", test_isolation, work)
     finally:
         hf.SEARCH_DIRS = station_dirs

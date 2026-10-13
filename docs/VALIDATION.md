@@ -37,7 +37,7 @@ python3 dem_figure.py --self-test                # ends "SELF-TEST PASSED"
 python3 daily_elevation_map.py --self-test       # ends "SELF-TEST PASSED"
 python3 test_survey_products.py                  # ends "all survey_products tests passed" (see below)
 python3 test_survey_compare.py                   # ends "all survey_compare tests passed"
-python3 test_historical_forcing.py               # ends "74/74 checks passed"
+python3 test_historical_forcing.py               # ends "76/76 checks passed"
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
@@ -540,7 +540,11 @@ only if it holds over several weeks of different waves; then change it in all th
   the direction-aware form (r 0.84, CV RMS 0.330 m), which wins; WIS Tp scaled by 1.061.
   NDBC 44013: `0.827 x Hs + 0.151 m` or direction-aware (r 0.87). Combined setup CV RMS
   0.079 m [REAL], 534 h of December overlap for WIS. Not used by the two enabled 2025 dates
-  (ADCP waves throughout). Source: `historical_forcing.py`, `forcing_report.txt`.
+  (ADCP waves throughout). Source: `historical_forcing.py`, `forcing_report.txt`. The
+  conversions are chosen by the setup error they cause; a `--setup-coef 0` build (no setup,
+  so no error to choose by) chooses them with the station's C = 0.037, so its waves are those
+  of the C = 0.037 build ([SYNTH] `test_historical_forcing.py`, `C = 0: the same wave
+  conversions and rows`).
 
 ### 4.6 Camera pointing (calibrations) and the sea-horizon check
 
