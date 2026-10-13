@@ -30,11 +30,46 @@ HOW.
      rows for the dates replaced), ready for dem_from_contours.py and
      compare_dem_survey.py.
 
+PHOTOS. --originals takes one or more folders, each searched
+recursively. On the station the same photo often sits in several of
+them (Chelsea_pics, waterline/composite, owg_marconi/images): a file
+name found more than once is used once (the largest copy -- a reduced
+copy would not fit the lens calibration -- and the first folder given
+on a tie), and the number skipped is printed; a copy whose image is
+not the lens file's size, or that cannot be read (a broken link), is
+never used. --station keeps only the
+photos whose file name carries that station ID (...GMT.2025.CACO03.c1.
+timex.jpg): the ID changes when the cameras are set up again (CACO03 ->
+CACO04 on 24 Jan 2025, when they moved ~5.7 m and turned ~15 deg), so a
+window that spans a re-set cannot mix two pointings. --skip-days leaves
+out days whose pointing was found to differ from --eo (survey_products.py
+checks every day first). The photos used are listed in photos.txt.
+
+SEARCH ENVELOPE AND INDEPENDENCE. The envelope is placed with
+--envelope-survey (--survey is the older name of the same option). If
+the DEM is later compared with that same survey, the comparison is
+PARTLY-CIRCULAR: give another survey of the same beach here (for the Jan
+2025 photos the Mar 2025 lidar, and the other way round) to keep it
+independent. The band is broad (+/-20 m across the beach), so a survey
+from weeks earlier or later bounds the search just as well.
+
+WAVE SETUP. --setup-coef C (with --waves) makes each line's elevation the
+water level plus C*sqrt(Hs*L0) (extract_elevation_contours.py), as the
+live station does since Oct 2026 (C = 0.037).
+
 Usage:
     python3 detect_original_view.py --camera c2 \\
         --eo calibration/CACO05_c2_2025-01-18_to_2025-01-23_lidar_EO.yaml \\
         --survey /mnt/I2Rgus_Data/Chelsea_calibration/2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif \\
         --start-date 2025-01-18 --end-date 2025-01-23
+
+    survey products (survey_products.py runs this for each camera):
+    python3 detect_original_view.py --camera c1 --station CACO03 \\
+        --eo calibration/CACO03_c1_20250123_EO.yaml \\
+        --envelope-survey /mnt/I2Rgus_Data/Chelsea_calibration/2025005FA_Marconi_Mar_YSMP_Lidar_DSM_25cm.tif \\
+        --originals /mnt/I2Rgus_Data/Chelsea_pics /mnt/I2Rgus_Data/waterline/composite \\
+        --water-level forcing/water_level.csv --waves forcing/waves.csv --setup-coef 0.037 \\
+        --start-date 2025-01-18 --end-date 2025-01-23 --merge-into "" --output waterlines/c1
 """
 
 import os
@@ -75,7 +110,9 @@ def envelope_from_survey(io, eo, survey, zlo, zhi, max_range, n_cols=40,
     r0 = max(int((y0 - (cy + max_range)) / cell), 0)
     r1 = min(int((y0 - (cy - max_range)) / cell), grid.shape[0])
     sub = grid[r0:r1:2, c0:c1:2]                    # every other cell: 0.5 m is plenty
-    rr, cc = np.nonzero(np.isfinite(sub) & (sub >= zlo) & (sub <= zhi))
+    band = np.isfinite(sub)                         # compared only where finite: no NaN warning on numpy 1.17
+    band[band] = (sub[band] >= zlo) & (sub[band] <= zhi)
+    rr, cc = np.nonzero(band)
     E = x0 + (c0 + 2 * cc + 0.5) * cell
     N = y0 - (r0 + 2 * rr + 0.5) * cell
     Z = sub[rr, cc]
@@ -107,25 +144,175 @@ def envelope_from_survey(io, eo, survey, zlo, zhi, max_range, n_cols=40,
     return env, left_far, float(ok.mean())
 
 
-def run(cmd, log):
+def run(cmd, log, progress=None):
+    """Runs cmd with its output appended to log. progress=(total, every): the detector's
+    'Processing: <photo>' lines are counted and every `every`-th is printed with the time
+    left, so a long detection on the station is never silent."""
+    import time
+    t0 = time.time()
     with open(log, "a") as f:
         f.write("\n$ " + " ".join(str(c) for c in cmd) + "\n")
-        p = subprocess.run([str(c) for c in cmd], stdout=f, stderr=subprocess.STDOUT)
-    return p.returncode == 0
+        f.flush()
+        if not progress:
+            p = subprocess.run([str(c) for c in cmd], stdout=f, stderr=subprocess.STDOUT)
+            return p.returncode == 0
+        total, every = progress
+        p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             universal_newlines=True, bufsize=1)
+        k, t1 = 0, None
+        for line in p.stdout:
+            f.write(line)
+            if line.startswith("Processing:"):
+                k += 1
+                now = time.time()
+                if k == 1:
+                    t1 = now                       # the rate is measured from the first photo on
+                    print(f"detecting         : photo 1 of {total} started "
+                          f"({(now - t0) / 60:.1f} min of set-up)", flush=True)
+                elif k % every == 0 or k == total:
+                    per = (now - t1) / (k - 1)     # seconds per photo so far
+                    print(f"detecting         : photo {k} of {total}, {(now - t0) / 60:.1f} min so far, "
+                          f"~{per * (total - k + 1) / 60:.0f} min left ({per:.0f} s per photo)", flush=True)
+        return p.wait() == 0
+
+
+PHOTO_NAME = re.compile(r"^(\d{9,11})\..*\.([A-Za-z]+\d+)\.(c\d)\.timex\.jpg$")
+
+
+def station_of(name):
+    """Station ID in a photo name ('...GMT.2025.CACO03.c1.timex.jpg' -> 'CACO03'), or None."""
+    m = PHOTO_NAME.match(name)
+    return m.group(2) if m else None
+
+
+def jpeg_size(path):
+    """(width, height) from the image header, or None if it cannot be read."""
+    try:
+        from PIL import Image
+        with Image.open(str(path)) as im:
+            return tuple(im.size)
+    except Exception:
+        pass
+    try:
+        import cv2
+        img = cv2.imread(str(path))
+        return (img.shape[1], img.shape[0]) if img is not None else None
+    except Exception:
+        return None
+
+
+def collect_photos(roots, camera, start_date, end_date, hours, station=None, skip_days=(), frame_size=None):
+    """
+    The camera's timex photos in the date window and UTC hours, from every
+    folder in `roots` searched recursively (symbolic links to folders are not
+    followed, so a link loop cannot hang it).
+    A name found in several folders is kept once. Copies that cannot be
+    stat'ed (a broken link) are never kept; with frame_size=(width, height)
+    (the lens file's NU, NV) a copy whose image is another size (a reduced
+    copy: its pixels would be georectified with the full-size lens model) or
+    cannot be read is never kept either, and a name with no good copy is
+    left out. Of the good copies the largest is kept, the first root on a tie.
+    -> (sorted list of Paths, counts dict: duplicates, unreadable, wrong_size, ...).
+    """
+    h0, h1 = hours
+    suffix = f".{camera}.timex.jpg"
+    cands = {}
+    n = {"files": 0, "duplicates": 0, "duplicates_differing": 0, "other_station": 0,
+         "outside_window": 0, "outside_hours": 0, "skipped_days": 0, "missing_roots": [],
+         "unreadable": 0, "wrong_size": 0, "no_good_copy": 0}
+    skip = set(skip_days or ())
+    for root in roots:
+        if not Path(root).is_dir():
+            n["missing_roots"].append(str(root))
+            continue
+        for dirpath, _, files in os.walk(str(root)):
+            for name in files:
+                if not name.endswith(suffix):
+                    continue
+                m = re.match(r"^(\d{9,11})\.", name)
+                if not m:
+                    continue
+                n["files"] += 1
+                if station and station_of(name) != station:
+                    n["other_station"] += 1
+                    continue
+                t = datetime.fromtimestamp(int(m.group(1)), tz=timezone.utc)
+                day = t.strftime("%Y-%m-%d")
+                if not (start_date <= day <= end_date):
+                    n["outside_window"] += 1
+                    continue
+                if not (h0 <= t.hour + t.minute / 60 <= h1):
+                    n["outside_hours"] += 1
+                    continue
+                if day in skip:
+                    n["skipped_days"] += 1
+                    continue
+                cands.setdefault(name, []).append(Path(dirpath) / name)
+    found = {}
+    want = tuple(int(v) for v in frame_size) if frame_size else None
+    for name, paths in cands.items():
+        n["duplicates"] += len(paths) - 1
+        sized = []
+        for k, p in enumerate(paths):
+            try:
+                sized.append((p.stat().st_size, -k, p))
+            except OSError:                       # a broken link or a vanished file
+                n["unreadable"] += 1
+        if len({s for s, _, _ in sized}) > 1:
+            n["duplicates_differing"] += 1
+        for _, _, p in sorted(sized, reverse=True):          # largest first, first root on a tie
+            if want is not None:
+                got = jpeg_size(p)
+                if got is None:
+                    n["unreadable"] += 1
+                    continue
+                if got != want:
+                    n["wrong_size"] += 1
+                    continue
+            found[name] = p
+            break
+        else:
+            n["no_good_copy"] += 1
+    return [found[k] for k in sorted(found)], n
+
+
+def place(src, dst):
+    """Hard link, else symbolic link, else copy: the detector only reads it."""
+    try:
+        os.link(src, dst)
+        return
+    except OSError:
+        pass
+    try:
+        os.symlink(Path(src).resolve(), dst)
+    except OSError:
+        shutil.copy2(src, dst)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--camera", required=True, choices=["c1", "c2"])
     ap.add_argument("--eo", required=True, help="the period's pointing (e.g. the lidar-fitted EO)")
-    ap.add_argument("--survey", required=True, help="lidar DSM for the search envelope")
+    ap.add_argument("--envelope-survey", "--survey", dest="envelope_survey", required=True,
+                    help="lidar DSM the search envelope is placed with (--survey: the older name). "
+                         "A DEM compared with this same survey is PARTLY-CIRCULAR")
     ap.add_argument("--start-date", required=True); ap.add_argument("--end-date", required=True)
-    ap.add_argument("--originals", default=str(CHELSEA / "work" / "original"),
-                    help="folder of original timex photos")
+    ap.add_argument("--originals", nargs="+", default=[str(CHELSEA / "work" / "original")],
+                    help="folder(s) of original timex photos, each searched recursively; a file "
+                         "name found in several is used once")
+    ap.add_argument("--station", default=None,
+                    help="keep only photos whose name carries this station ID, e.g. CACO03 "
+                         "(default: any)")
+    ap.add_argument("--skip-days", nargs="*", default=[], metavar="YYYY-MM-DD",
+                    help="leave out these days (e.g. a different pointing from --eo)")
     ap.add_argument("--water-level", default=str(CHELSEA / "adcp_water_level_navd88.csv"))
     ap.add_argument("--waves", default=str(CHELSEA / "adcp_waves.csv"))
+    ap.add_argument("--setup-coef", type=float, default=None,
+                    help="wave-setup coefficient C for extract_elevation_contours.py (needs "
+                         "--waves): elevation = water level + C*sqrt(Hs*L0). Default: none")
     ap.add_argument("--merge-into", default=str(CHELSEA / "contour_points_ground.csv"),
-                    help="main contour file; this camera's rows for the dates are replaced")
+                    help="main contour file; this camera's rows for the dates are replaced "
+                         "(\"\" = do not merge)")
     ap.add_argument("--merged-output", default=str(CHELSEA / "contour_points_ground_merged.csv"))
     ap.add_argument("--band", nargs=2, type=float, default=[-1.5, 2.5],
                     help="elevations (m NAVD88) bounding the search envelope (default -1.5 2.5)")
@@ -136,6 +323,8 @@ def main():
     ap.add_argument("--output", default=None,
                     help="work folder (default <Chelsea>/original_view_<camera>)")
     args = ap.parse_args()
+    if args.setup_coef is not None and not Path(args.waves).exists():
+        sys.exit(f"--setup-coef needs the waves at every frame: --waves {args.waves} not found")
 
     out = Path(args.output or CHELSEA / f"original_view_{args.camera}")
     for sub in ("src", "in", "detections", "debug", "overlays"):
@@ -147,7 +336,7 @@ def main():
     io = load_intrinsics(CAL / f"CACO05_{args.camera}_20240801_IO.yaml")
     eo_path = Path(args.eo) if Path(args.eo).exists() else CAL / args.eo
     eo = load_extrinsics(eo_path)
-    survey = read_survey(args.survey)
+    survey = read_survey(args.envelope_survey)
 
     # 1. envelope
     env, left_far, frac_ok = envelope_from_survey(io, eo, survey, *args.band, args.range)
@@ -158,39 +347,53 @@ def main():
     (out / "profile.json").write_text(json.dumps({args.camera: prof}, indent=1))
     print(f"envelope          : {len(env)} control points from the survey's "
           f"{args.band[0]:+g}..{args.band[1]:+g} m band ({100 * frac_ok:.0f}% of its cells in view); "
-          f"far side {'left' if left_far else 'right'}")
+          f"far side {'left' if left_far else 'right'}  [{Path(args.envelope_survey).name}]")
 
     # 2. frames
     h0, h1 = (float(v) for v in args.utc_hours.split("-"))
-    n = 0
-    for p in sorted(Path(args.originals).glob(f"*.{args.camera}.timex.jpg")):
-        m = re.match(r"^(\d{9,11})\.", p.name)
-        if not m:
-            continue
-        t = datetime.fromtimestamp(int(m.group(1)), tz=timezone.utc)
-        if not (args.start_date <= t.strftime("%Y-%m-%d") <= args.end_date):
-            continue
-        if not (h0 <= t.hour + t.minute / 60 <= h1):
-            continue
-        dst = out / "src" / p.name
-        try:
-            os.link(p, dst)
-        except OSError:
-            shutil.copy2(p, dst)
-        n += 1
+    photos, cnt = collect_photos(args.originals, args.camera, args.start_date, args.end_date,
+                                 (h0, h1), station=args.station, skip_days=args.skip_days,
+                                 frame_size=(io[0], io[1]))
+    for r in cnt["missing_roots"]:
+        print(f"WARNING           : photo folder not found: {r}")
+    if cnt["wrong_size"] or cnt["unreadable"]:
+        print(f"copies rejected   : {cnt['wrong_size']} of another size than the lens file's "
+              f"{int(io[0])} x {int(io[1])} (reduced copies), {cnt['unreadable']} unreadable (broken links?)"
+              + (f"; {cnt['no_good_copy']} photo(s) had no good copy at all and are left out"
+                 if cnt["no_good_copy"] else ""))
+    for p in photos:
+        place(p, out / "src" / p.name)
+    (out / "photos.txt").write_text("".join(f"{p}\n" for p in photos))
+    n = len(photos)
     print(f"frames            : {n} {args.camera} original photo(s), {args.start_date} to "
-          f"{args.end_date}, {args.utc_hours} UTC")
+          f"{args.end_date}, {args.utc_hours} UTC"
+          + (f", station {args.station}" if args.station else "") + f"  (list: {out / 'photos.txt'})")
+    if cnt["duplicates"]:
+        print(f"duplicates        : {cnt['duplicates']} skipped (same file name in more than one "
+              f"folder; kept the largest copy, the first folder on a tie"
+              + (f"; {cnt['duplicates_differing']} differed in size" if cnt["duplicates_differing"] else "")
+              + ")")
+    if args.station and cnt["other_station"]:
+        print(f"other station     : {cnt['other_station']} {args.camera} photo(s) named for another "
+              f"station than {args.station} left out")
+    if cnt["skipped_days"]:
+        print(f"skipped days      : {cnt['skipped_days']} photo(s) on {', '.join(sorted(args.skip_days))} "
+              f"(--skip-days)")
     if not n:
-        sys.exit(f"no {args.camera} timex frames in {args.originals} for those dates")
+        sys.exit(f"no {args.camera} timex frames in {' '.join(args.originals)} for those dates")
 
     # 3. detect
-    print("detecting         : (roughly 3-4 s per frame)")
+    # ~25 s per photo: the detector runs on the whole 2448 x 2048 frame (measured 22-26 s on a
+    # 2.8 GHz Xeon, Oct 2026; not yet on the NUC, whose progress lines below print its rate)
+    print(f"detecting         : {n} photos, ~{n * 25 / 60:.0f} min (~25 s each as measured off the station; "
+          f"the progress lines print the real rate); follow with: tail -f {log}", flush=True)
     if not run([sys.executable, HERE / "waterline_detector_v5.py",
                 "--profile-json", out / "profile.json",
                 "--min-signal-fraction", args.min_signal_fraction,
                 "--image-suffix", "timex.jpg",
                 "--source-dir", out / "src", "--input-dir", out / "in",
-                "--output-dir", out / "detections", "--debug-dir", out / "debug"], log):
+                "--output-dir", out / "detections", "--debug-dir", out / "debug"], log,
+               progress=(n, max(1, n // 10))):
         sys.exit(f"detector failed; see {log}")
     dets = sorted((out / "detections").glob("*.csv"))
     print(f"                    {len(dets)} frame(s) passed the detector's quality filters")
@@ -199,11 +402,12 @@ def main():
 
     # 4. water level + georectify
     contours, ground = out / "contour_points.csv", out / "contour_points_ground.csv"
+    setup = ["--setup-coef", args.setup_coef] if args.setup_coef is not None else []
     if not run([sys.executable, HERE / "extract_elevation_contours.py", args.water_level,
                 "--time-col", "time", "--level-col", "water_level_navd88",
                 "--min-coverage", args.min_signal_fraction,
-                "--waves", args.waves, "--wave-max-gap-minutes", 60,
-                "--processed-dir", out / "detections", "--output", contours], log) \
+                "--waves", args.waves, "--wave-max-gap-minutes", 60] + setup +
+               ["--processed-dir", out / "detections", "--output", contours], log) \
             or not contours.exists():
         sys.exit(f"contour extraction failed; see {log}")
     if not run([sys.executable, HERE / "georectify.py", contours, ground,

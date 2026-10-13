@@ -22,9 +22,11 @@ refined on all inliers pooled over every pair.
 
 LIMITS. The two setups must share a view of FIXED features (dune,
 bluff, fences). A large turn on a narrow lens can leave only sand and
-sea in common, which change between dates: the 22 deg re-aim of c2 on
-24 Jan 2025 (37 deg wide lens) gave 1 consistent match of 375. Then
-draw a survey on the photos instead (project_survey.py).
+sea in common, which change between dates: the 24 Jan 2025 re-set of c2
+(turned ~15 deg on a 37 deg wide lens) gave 1 consistent match of 375.
+And the camera must not have MOVED: that re-set also moved it ~5.8 m
+(calibration/calibration_history.csv), which no rotation can describe.
+Then draw a survey on the photos instead (project_survey.py).
 
 CHECKS (printed). Inlier count and ray residual in pixels; and the
 HORIZON, independent of the matches: where the new EO puts the sea
@@ -57,6 +59,10 @@ from view_reproject import ground_to_pixel
 HERE = Path(__file__).resolve().parent
 CAL = HERE / "calibration"
 EARTH_R = 6371000.0
+# Standard terrestrial refraction coefficient (ray curvature / Earth curvature). Over the sea it
+# varies with the air-sea temperature difference (roughly 0 to 0.25); across that range the
+# horizon dip from the cameras' ~20 m changes by about +/-0.01 deg, under 1 px here.
+REFRACTION_K = 0.13
 SCALE = 0.5            # features are found at half size
 
 
@@ -88,18 +94,34 @@ def R_to_angles(R):
     return az, tilt, roll
 
 
+def horizon_dip(h, k=REFRACTION_K):
+    """Dip of the sea horizon below the horizontal (radians) seen from h m above the sea: the ray
+    tangent to the curved sea, on an Earth of effective radius R/(1-k) (refraction bends the ray
+    down along the curve). ~sqrt(2h(1-k)/R): 0.13-0.14 deg from the cameras' ~20 m."""
+    re = EARTH_R / (1.0 - k)
+    return float(np.arccos(re / (re + max(float(h), 0.0))))
+
+
 def horizon_rows(io, eo, cols):
-    """Rows of the sea horizon (with Earth curvature) at the given columns, or NaN."""
+    """Rows of the sea horizon (Earth curvature and refraction) at the given columns, or NaN."""
     from georectify import build_P
     h = eo[2]
-    d = np.sqrt(2 * EARTH_R * h)
+    # The horizon is the ray tangent to the curved sea, depressed by the FULL dip below the
+    # horizontal. A point on the flat plane z = 0 at the horizon distance sqrt(2Rh), as used
+    # before Oct 2026, gives only half of it (h/d = sqrt(h/2R)): on a perfectly calibrated
+    # camera that reads as a constant tilt of ~+0.07 deg (true horizon projected with each
+    # station EO and fitted with horizon_check.fit_tilt_roll), above survey_products.py's
+    # 0.05 deg reporting threshold. Day-to-day changes were not affected (a constant bias).
+    # Any point on the ray will do; one at the horizon distance is used.
+    d = np.sqrt(2 * EARTH_R / (1.0 - REFRACTION_K) * max(float(h), 0.01))
+    z = h - d * np.tan(horizon_dip(h))
     az = eo[3] + np.deg2rad(np.linspace(-80, 80, 6000))
     X, Y = eo[0] + d * np.sin(az), eo[1] + d * np.cos(az)
-    U, V, ok = ground_to_pixel(X, Y, 0.0, io, eo)
+    U, V, ok = ground_to_pixel(X, Y, z, io, eo)
     # Keep only points whose UNDISTORTED position is near the frame: far outside
     # it the polynomial lens model folds back and puts them inside the image.
     P = build_P(io, eo)
-    q = P @ np.vstack([X, Y, np.zeros_like(X), np.ones_like(X)])
+    q = P @ np.vstack([X, Y, np.full_like(X, z), np.ones_like(X)])
     ui, vi = q[0] / q[2], q[1] / q[2]
     ok &= (ui > -0.1 * io[0]) & (ui < 1.1 * io[0]) & (vi > -0.1 * io[1]) & (vi < 1.1 * io[1])
     if ok.sum() < 2:

@@ -1,0 +1,1416 @@
+#!/usr/bin/env python3
+"""
+Tests For survey_products.py And The detect_original_view.py Photo Options
+=============================================================================
+Plain python3 (no pytest needed on the station):
+
+    python3 test_survey_products.py [--keep DIR]
+
+WHY. The survey products are judged by their labels and their numbers, so
+the parts that decide them are tested by construction:
+  * the live era adds the wave setup to the station's own rows itself; it
+    must give EXACTLY what extract_elevation_contours.py --setup-coef writes
+    (same values, same rounding, byte for byte);
+  * the photo search must use each photo once when the same file sits in
+    several folders (and the full-size copy, not a reduced one), keep only
+    the station ID asked for, leave out the days asked for, and not hang on
+    a symbolic-link loop;
+  * a label can only get worse: an envelope placed with the compared
+    survey, a pointing fitted to it, GCPs on the calibration day, or a setup
+    coefficient fitted to it must each downgrade it;
+  * the configuration must refuse the disabled dates (the user asked to skip
+    23 Oct 2024 for now and 19 Mar 2025) and never place a search envelope
+    with the survey of the same date;
+  * a step is skipped only when its outputs exist, are newer than its inputs
+    and were made with the same settings.
+
+HOW. Everything is written into a temporary folder (--keep DIR to look) and
+asserted on. Runs in ~5 s.
+"""
+
+import os
+import io
+import sys
+import csv
+import shutil
+import argparse
+import tempfile
+import calendar
+import contextlib
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+from datetime import datetime, timezone, timedelta
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import survey_products as sp                                  # noqa: E402
+from detect_original_view import collect_photos, station_of   # noqa: E402
+
+
+def quiet(fn, *a, **k):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        out = fn(*a, **k)
+    return out, buf.getvalue()
+
+
+def check(cond, msg):
+    if not cond:
+        raise AssertionError(msg)
+    print(f"  ok  {msg}")
+
+
+# where the real 2026-09-29 RTK file is looked for: the station's survey folders, as survey_products
+# looks (main() adds --survey-dirs); checks that need it are skipped, and counted, when it is not found
+RTK_DIRS = list(sp.DEFAULT_SURVEY_DIRS)
+SKIPPED = []
+
+
+def real_rtk():
+    """The real RTK file the station's C was fitted to, found as survey_products finds it (the path
+    surveys.csv gives, looked for in the survey folders) and confirmed by its sha256; else None."""
+    fit = sp.SETUP_FITS[sp.SETUP_COEF]
+    rows = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    names = [r["path"] for r in rows if Path(r.get("path") or "").stem == fit["survey_stem"]]
+    for n in names or [fit["survey_stem"] + ".csv"]:
+        for f in sp.resolve_file(n, RTK_DIRS):
+            if f.is_file() and sp.sha256(f) == fit["survey_sha256"]:
+                return f
+    return None
+
+
+def skip(what):
+    SKIPPED.append(what)
+    print(f"  skip  {what} (the real RTK file {sp.SETUP_FITS[sp.SETUP_COEF]['survey_stem']}.csv is not in "
+          f"{', '.join(RTK_DIRS)}; --survey-dirs adds folders)")
+
+
+def photo_name(t, station, cam):
+    e = calendar.timegm(t.timetuple())
+    return f"{e}.{t:%a.%b.%d_%H_%M_%S}.GMT.{t.year}.{station}.{cam}.timex.jpg"
+
+
+# ---------------------------------------------------------------------
+
+def test_setup_identical(d):
+    print("live-era setup = extract_elevation_contours.py --setup-coef")
+    d = Path(d) / "setup"
+    (d / "proc").mkdir(parents=True)
+    rng = np.random.default_rng(1)
+    t0 = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+    with open(d / "wl.csv", "w") as f:
+        f.write("time,water_level_navd88\n")
+        for k in range(48 * 6):
+            t = t0 + timedelta(minutes=10 * k)
+            f.write(f"{t:%Y-%m-%dT%H:%M:%SZ},{0.9 * np.sin(k / 37.0) + rng.normal(0, 0.01):.4f}\n")
+    with open(d / "waves.csv", "w") as f:
+        f.write("time_utc,epoch,wvht_m,dpd_s\n")
+        for k in range(48):
+            t = t0 + timedelta(hours=k)
+            if k == 3:                      # an hour without waves: that frame keeps no setup
+                continue
+            f.write(f"{t:%Y-%m-%dT%H:%M:%SZ},{calendar.timegm(t.timetuple())},"
+                    f"{rng.uniform(0.5, 2.5):.3f},{rng.uniform(4, 13):.2f}\n")
+    for k in range(12):
+        t = t0 + timedelta(minutes=30 * k + 7)
+        name = photo_name(t, "CACO05", "c1").replace(".jpg", ".csv")
+        cols = np.arange(0, 2448)
+        rows = 900 + 40 * np.sin(cols / 90.0) + 25 * np.sin(cols / 13.0) + k * 3 + rng.normal(0, 2, cols.size)
+        with open(d / "proc" / name, "w") as f:
+            f.write("Column,Row,Row_Precise,Peak_Sharpness,Has_Signal\n")
+            for c, r in zip(cols, rows):
+                f.write(f"{c},{int(r)},{r:.3f},0.5,1\n")
+    base = [sys.executable, str(HERE / "extract_elevation_contours.py"), str(d / "wl.csv"), "--time-col", "time",
+            "--level-col", "water_level_navd88", "--processed-dir", str(d / "proc"), "--waves",
+            str(d / "waves.csv"), "--wave-max-gap-minutes", "40", "--min-tide-agreement", "0"]
+    for out, extra in (("with.csv", ["--setup-coef", "0.037"]), ("without.csv", [])):
+        r = subprocess.run(base + extra + ["--output", str(d / out)], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, universal_newlines=True)
+        check(r.returncode == 0, f"extract_elevation_contours.py {' '.join(extra) or '(no setup)'} ran")
+    st = sp.apply_setup(d / "without.csv", d / "mine.csv", "c1", 0.037)
+    a = list(csv.DictReader(open(d / "with.csv")))
+    b = list(csv.DictReader(open(d / "mine.csv")))
+    check(len(a) == len(b) and len(a) > 1000, f"same rows ({len(a)})")
+    same = all(x["setup_correction_m"] == y["setup_correction_m"] and
+               x["beach_elevation_navd88"] == y["beach_elevation_navd88"] for x, y in zip(a, b))
+    check(same, "setup_correction_m and beach_elevation_navd88 identical, as text, on every row")
+    blank = [y for y in b if y["setup_correction_m"] == ""]
+    check(st["frames_without_waves"] >= 1 and all(y["beach_elevation_navd88"] == y["tide_elevation_navd88"]
+                                                  for y in blank),
+          f"{st['frames_without_waves']} frame(s) without waves keep a blank setup and the still-water level")
+    # rows that already carry a setup (the cron after 6 Oct 2026) are recomputed and compared
+    st2 = sp.apply_setup(d / "with.csv", d / "mine2.csv", "c1", 0.040)
+    check(st2["had_setup"] and abs(st2["max_diff_existing"] - (st2["setup_max"] * (1 - 0.037 / 0.040))) < 2e-4,
+          f"existing setup columns recomputed with the run's C (max change {st2['max_diff_existing']:.4f} m)")
+
+
+def test_collect_photos(d):
+    print("photo search: several folders, duplicates, station ID, skipped days")
+    d = Path(d) / "photos"
+    for sub in ("A", "B/sub/deeper", "C", "B/loop"):
+        (d / sub).mkdir(parents=True)
+    big, small = b"x" * 5000, b"x" * 100
+    names = []
+    for day in (21, 22, 23, 24):
+        for hh, mm in ((14, 0), (15, 30), (17, 0), (19, 0)):
+            t = datetime(2025, 1, day, hh, mm, tzinfo=timezone.utc)
+            st = "CACO04" if (day == 24 and hh >= 15) else "CACO03"
+            n = photo_name(t, st, "c1")
+            (d / "A" / n).write_bytes(big)
+            (d / "B" / "sub" / "deeper" / n).write_bytes(big)
+            names.append(n)
+    reduced = photo_name(datetime(2025, 1, 22, 15, 30, tzinfo=timezone.utc), "CACO03", "c1")
+    (d / "C" / reduced).write_bytes(small)                      # a reduced copy, in the FIRST folder
+    (d / "A" / reduced.replace("timex", "bright")).write_bytes(small)
+    os.symlink(d / "B", d / "B" / "loop" / "back")             # a loop: must not hang
+    roots = [str(d / "C"), str(d / "A"), str(d / "B"), str(d / "missing")]
+    ph, n = collect_photos(roots, "c1", "2025-01-21", "2025-01-24", (13.5, 18), station="CACO03")
+    check(len({p.name for p in ph}) == len(ph), "each file name once")
+    check(n["duplicates"] == 11 and n["duplicates_differing"] == 1,
+          f"duplicates counted ({n['duplicates']}, {n['duplicates_differing']} of another size)")
+    kept = [p for p in ph if p.name == reduced][0]
+    check(kept.stat().st_size == len(big), "the full-size copy kept, not the reduced one listed first")
+    check(all(station_of(p.name) == "CACO03" for p in ph) and n["other_station"] == 6,
+          "only CACO03 photos (the CACO04 ones of 24 Jan left out)")
+    check(len(ph) == 3 * 3 + 1, f"window and 13.5-18 UTC hours ({len(ph)} photos)")
+    check(n["missing_roots"] == [str(d / "missing")], "a missing folder is reported")
+    ph2, n2 = collect_photos(roots, "c1", "2025-01-21", "2025-01-24", (13.5, 18), station="CACO03",
+                             skip_days=["2025-01-22"])
+    check(not any("Jan.22" in p.name for p in ph2) and len(ph2) == len(ph) - 3, "--skip-days leaves the day out")
+    ph3, _ = collect_photos([str(d / "A")], "c1", "2025-01-21", "2025-01-24", (0, 24))
+    check(len(ph3) == 16, "no --station: every station, as before")
+    # real JPEGs: a reduced copy is rejected against the lens file's frame size, a broken link never kept
+    import cv2
+    j = d / "jpg"
+    for sub in ("a", "b", "c"):
+        (j / sub).mkdir(parents=True)
+    t = datetime(2025, 1, 18, 15, 0, tzinfo=timezone.utc)
+    full, half = photo_name(t, "CACO03", "c1"), photo_name(t + timedelta(hours=1), "CACO03", "c1")
+    cv2.imwrite(str(j / "b" / full), np.zeros((64, 80, 3), np.uint8))
+    os.symlink(j / "nowhere.jpg", j / "a" / full)                       # broken, in the first root
+    cv2.imwrite(str(j / "c" / half), np.zeros((32, 40, 3), np.uint8))   # only a reduced copy
+    ph4, n4 = collect_photos([str(j / "a"), str(j / "b"), str(j / "c")], "c1", "2025-01-18", "2025-01-18",
+                             (0, 24), frame_size=(80, 64))
+    check([p.name for p in ph4] == [full] and ph4[0].exists(), "the good copy kept, not the broken link listed first")
+    check(n4["unreadable"] == 1 and n4["wrong_size"] == 1 and n4["no_good_copy"] == 1,
+          f"broken link and reduced copy counted ({n4['unreadable']}, {n4['wrong_size']}); the reduced-only photo left out")
+
+
+def plan_for(d, era="adcp", env="2025005FA_Marconi_Mar_YSMP_Lidar_DSM_25cm.tif",
+             eo="CACO03_c1_20250123_EO.yaml", eo_text=None):
+    d = Path(d)
+    eo_path = d / eo
+    eo_path.write_text(eo_text or (HERE / "calibration" / "CACO03_c1_20250123_EO.yaml").read_text())
+    return {"date": "2025-01-23", "era": era, "first": "2025-01-18", "last": "2025-01-23", "surveys": [],
+            "out": d, "cams": {"c1": {"eo_file": eo, "eo_path": eo_path,
+                                      "envelope_path": Path(env) if env else None, "envelope_survey": env}}}
+
+
+def test_labels(d):
+    print("labels can only get worse")
+    d = Path(d) / "labels"
+    d.mkdir()
+    args = SimpleNamespace(setup_coef=0.037)
+    jan = {"name": "jan_lidar", "survey_type": "dsm", "survey_date": "2025-01-23", "label": "INDEPENDENT", "why": ""}
+    lab, why = sp.honest_label(jan, plan_for(d), args, Path("2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif"))
+    check(lab == "INDEPENDENT", "Jan lidar, envelope from the Mar lidar, GCP calibration: INDEPENDENT")
+    lab, why = sp.honest_label(jan, plan_for(d, env="2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif"), args,
+                               Path("2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif"))
+    check(lab == "PARTLY-CIRCULAR", "envelope placed with the compared lidar: PARTLY-CIRCULAR")
+    fitted = ("# fit_eo_to_survey.py: fitted to 2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif\n"
+              + (HERE / "calibration" / "CACO03_c1_20250123_EO.yaml").read_text())
+    lab, why = sp.honest_label(jan, plan_for(d, eo="CACO05_c1_2025-01-18_to_2025-01-23_lidar_EO.yaml",
+                                             eo_text=fitted), args,
+                               Path("2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif"))
+    check(lab == "CIRCULAR", "pointing fitted to the compared lidar: CIRCULAR")
+    rtk = {"name": "rtk_2026-09-29", "survey_type": "points", "survey_date": "2026-09-29",
+           "label": "INDEPENDENT", "why": ""}
+    p = plan_for(d, era="live", env=None, eo="CACO05_c1_20251113_EO-CV.yaml")
+    lab, why = sp.honest_label(rtk, p, args, Path("2026-09-29_Marconi_Checkshots.csv"))
+    check(lab == "CIRCULAR" and "setup" in why[0], "RTK with C = 0.037 (fitted to it): CIRCULAR")
+    # a C of unknown origin is never INDEPENDENT; a C declared fitted to no survey keeps the label
+    for c in (0.035, 0.05, 0.0371):
+        lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=c), Path("2026-09-29_Marconi_Checkshots.csv"))
+        check(lab == "PARTLY-CIRCULAR" and "unknown origin" in why[0], f"RTK with C = {c} of unknown origin: PARTLY-CIRCULAR")
+    lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=0.035, setup_fitted_to="none:repeat crossings"),
+                               Path("2026-09-29_Marconi_Checkshots.csv"))
+    check(lab == "INDEPENDENT", "RTK with a C declared fitted to no survey (--setup-fitted-to none:...): INDEPENDENT")
+    # the RTK file under another name is recognised by its content
+    real = Path(d) / "rtk_copy.csv"
+    rtk_src = real_rtk()
+    if rtk_src:
+        shutil.copy(str(rtk_src), str(real))
+        lab, why = sp.honest_label(dict(rtk, survey_date=""), p, args, real)
+        check(lab == "CIRCULAR" and "same content" in why[0], "the RTK shots renamed (rtk_copy.csv): still CIRCULAR, by sha256")
+    else:
+        skip("renamed-RTK check")
+    other = Path(d) / "another_rtk.csv"
+    other.write_text("Name,Easting,Northing,Elevation,Description\n1,420100,4638400,1.2,Transect\n")
+    v = sp.Verdict(rtk)
+    sp.honest_label(rtk, p, args, other, verdict=v)
+    check(v.label == "CIRCULAR" and "cannot be ruled out" in v.reasons[0],
+          "another points survey of the fit's date: possibly the same shots -> CIRCULAR")
+    v = sp.Verdict(dict(rtk, label_override_reason="a different survey: the 2026-09-29 afternoon RTK, not the fit's shots"))
+    sp.honest_label(rtk, p, args, other, verdict=v)
+    check(v.label == "INDEPENDENT" and v.overridden and "CIRCULAR" in v.overridden[0],
+          "... overruled only by label_override_reason, and the overruled downgrade is kept")
+    v = sp.Verdict(dict(rtk, label_override_reason="anything"))
+    sp.honest_label(rtk, p, args, real if real.exists() else Path("2026-09-29_Marconi_Checkshots.csv"), verdict=v)
+    check(v.label == "CIRCULAR", "the same shots (content or name) cannot be overruled")
+    # a C declared fitted to a survey file: CIRCULAR against that file
+    lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=0.05, setup_fitted_to=str(other),
+                                                       survey_dirs=[]), other)
+    check(lab == "CIRCULAR", "a C declared fitted to this very file: CIRCULAR")
+    gcp = {"name": "oct_gcps", "survey_type": "points", "survey_date": "2024-10-23", "label": "INDEPENDENT", "why": ""}
+    p = plan_for(d, eo="CACO03_c1_20241023_EO.yaml")
+    lab, why = sp.honest_label(gcp, p, args, Path("2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv"))
+    check(lab == "PARTLY-CIRCULAR", "GCPs of the calibration day, even if the table said INDEPENDENT")
+    lab, why = sp.honest_label(gcp, p, args, Path("2024-10-23_control.csv"))
+    check(lab == "PARTLY-CIRCULAR", "a point survey of the calibration day under any name ('_control.csv'): PARTLY-CIRCULAR")
+
+
+def test_round2(d):
+    print("carried pointings, earlier checks, horizon offsets, missing parts, DEM settings of the build")
+    d = Path(d) / "round2"
+    d.mkdir()
+    args = SimpleNamespace(setup_coef=0.037)
+    jan = {"name": "jan_lidar", "survey_type": "dsm", "survey_date": "2025-01-23", "label": "INDEPENDENT", "why": ""}
+    mar = dict(jan, name="mar_lidar", survey_date="2025-03-06")
+    janf, marf = (Path("2025005FA_Marconi_%s_YSMP_Lidar_DSM_25cm.tif" % m) for m in ("Jan", "Mar"))
+    base = (HERE / "calibration" / "CACO03_c1_20250123_EO.yaml").read_text()
+    # apply_pointing_correction.py carries a lidar fit's change to another period (*_corr_EO.yaml)
+    (d / "CACO05_c1_2025-01-18_to_2025-01-22_lidar_EO.yaml").write_text(
+        "# fit_eo_to_survey.py: fitted to 2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif\n" + base)
+    corr = ("# apply_pointing_correction.py: CACO04_c1_20250219_EO.yaml + (+0.120, -0.310, +0.020) deg from "
+            "CACO05_c1_2025-01-18_to_2025-01-22_lidar_EO.yaml; 2024-10-01..2025-01-17\n" + base)
+    p = plan_for(d, eo="CACO05_c1_20250219_corr_EO.yaml", eo_text=corr)
+    v = sp.Verdict(dict(jan, label_override_reason="anything"))
+    sp.honest_label(jan, p, args, janf, verdict=v)
+    check(v.label == "CIRCULAR" and any("carries a correction fitted to" in r for r in v.reasons),
+          "a *_corr_EO.yaml carried from the Jan lidar fit, against the Jan lidar: CIRCULAR, not overrulable")
+    pm = plan_for(d, eo="CACO05_c1_20250219_corr_EO.yaml", eo_text=corr, env=janf.name)   # Mar: envelope from Jan
+    lab, why = sp.honest_label(mar, pm, args, marf)
+    check(lab == "INDEPENDENT", "... against the Mar lidar (another survey): INDEPENDENT")
+    (d / "CACO05_c1_2025-01-18_to_2025-01-22_lidar_EO.yaml").unlink()
+    v = sp.Verdict(dict(mar, label_override_reason="the fit was to the Jan lidar (operator's notes)"))
+    sp.honest_label(mar, pm, args, marf, verdict=v)
+    check(v.label == "INDEPENDENT" and v.overridden and "cannot be resolved" in v.overridden[0],
+          "the fit it was carried from is not here: CIRCULAR as a rule, overruled only by a written reason")
+    lab, why = sp.honest_label(mar, pm, args, marf)
+    check(lab == "CIRCULAR", "... and without that reason: CIRCULAR")
+    # the earlier check of 2025-01-23 on the REAL photos leads the caveats, per camera, with what to
+    # expect now. pointing_fix_figure.py printed lidar - water level = c1 +0.46, c2 +0.15: the lines
+    # read LOW (waterline - lidar c1 -0.46, c2 -0.15), the sign a line without setup must have.
+    plan = {"era": "adcp", "date": "2025-01-23", "first": "2025-01-18", "last": "2025-01-23", "out": d,
+            "surveys": [dict(jan, path=str(janf))],
+            "cams": {c: {"eo_file": "CACO03_%s_20250123_EO.yaml" % c, "first": "2025-01-18", "last": "2025-01-23"}
+                     for c in ("c1", "c2")}}
+    pc0 = sp.PRIOR_CHECKS[0]
+    check(all(abs(pc0["waterline_minus_survey"][c][0] + pc0["reported"][c][0]) < 1e-12 for c in ("c1", "c2"))
+          and pc0["waterline_minus_survey"]["c1"][0] < 0 and "lidar elevation - water level" in pc0["reported_as"],
+          "the earlier check's sign: lidar - water level +0.46/+0.15 = waterline - lidar -0.46/-0.15 (lines LOW)")
+    forcing = {"waves": {"setup_in_window": {"median_m": 0.29, "daytime_median_m": 0.28}}}
+    cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=sp.SETUP_COEF), {}, forcing, {})
+    c0 = cav[0]
+    check(c0.startswith("EARLIER CHECK (real photos)") and "OPPOSITE" not in c0 and "HIGHER" not in c0
+          and "+0.46 m (NMAD 0.19)" in c0 and "+0.15 m (NMAD 0.23)" in c0
+          and "c1 -0.46 m (NMAD 0.19)" in c0 and "c2 -0.15 m (NMAD 0.23)" in c0
+          and "read LOW" in c0 and "no opposite-sign discrepancy" in c0,
+          "2025-01-23: the earlier result comes first, printed as measured (+0.46/+0.15 lidar - level) and as "
+          "waterline - lidar (-0.46/-0.15: LOW, the same sign as no setup)")
+    check("c1 -0.29 to -0.24, c2 +0.02 to +0.07 m" in c0 and "c1 -0.18, c2 +0.13 m if the" in c0
+          and "0.71 x its setup" not in c0 and "+/-0.01" not in c0 and "0.6-0.8 x its setup" in c0,
+          "... without a paired C = 0 effect of its own: c1 -0.29..-0.24 / c2 +0.02..+0.07 m over the shares kept "
+          "measured so far (0.6-0.8), no carried-over 0.71 and no false +/-0.01 (-0.18 / +0.13 m if all counted)")
+    # with this build's own paired C = 0 sensitivity, the expectation is the earlier lines plus that rise
+    prov_ = {"comparisons": [{"current": True, "survey_path": janf.name, "headline": {"waterlines": {
+        "without_setup": {"paired": {"by_camera": {
+            "c1": {"n": 40, "frames": 40, "setup_effect_median": 0.176, "n_independent": 40,
+                   "n_independent_unit": "frames"},
+            "c2": {"n": 30, "frames": 30, "setup_effect_median": 0.160, "n_independent": 30,
+                   "n_independent_unit": "frames"}}}}}}}]}
+    c0b = sp.prior_check_caveat(plan, dict(pc0, cameras=["c1", "c2"]), [{"coef": sp.SETUP_COEF}], forcing, prov_)
+    check("c1 ~-0.28 m (-0.46 +0.176, on 40 frames)" in c0b and "c2 ~+0.01 m (-0.15 +0.160, on 30 frames)" in c0b
+          and "c1 +0.176 m (0.63 x the setup median)" in c0b,
+          "... with this build's own paired effect per camera: c1 -0.46 + 0.176 ~ -0.28, c2 -0.15 + 0.160 ~ +0.01")
+    # a second survey's effect on a handful of points never replaces it (nor is used alone)
+    few_pts = {"current": True, "survey_path": "2025-01-23_points_xyz.csv", "headline": {"waterlines": {
+        "without_setup": {"paired": {"by_camera": {
+            "c1": {"n": 13, "setup_effect_median": 0.28, "n_independent": 3, "n_independent_unit": "survey points"},
+            "c2": {"n": 13, "setup_effect_median": 0.28, "n_independent": 4,
+                   "n_independent_unit": "survey points"}}}}}}}
+    eff2 = sp.build_setup_effect({"comparisons": prov_["comparisons"] + [few_pts]},
+                                 [janf.stem, "2025-01-23_points_xyz"])
+    check(eff2 == {"c1": (0.176, "40 frames"), "c2": (0.16, "30 frames")}
+          and sp.build_setup_effect({"comparisons": [few_pts]}, ["2025-01-23_points_xyz"]) == {},
+          "... the effect on the most frames is used; one on 3-4 survey points is too few to use")
+    check("PARTLY-CIRCULAR: its search envelope was placed with this same Jan 2025 lidar" in c0,
+          "... the earlier check carries its own label: PARTLY-CIRCULAR (envelope placed with the same lidar)")
+    under = [c for c in cav if c.startswith("C = 0.037 is not pinned by the 2026 RTK")]
+    check("do not subtract them again" in c0 and under and "EARLIER CHECK expectation above is made with C = 0.037 "
+          "and already holds the re-projection" in under[0] and "would sit ~0.03-0.05 m higher than with C = 0.037" in under[0]
+          and "biased LOW by where that survey stops" in under[0] and "C ~0.043-0.046" in under[0]
+          and "-0.04 to -0.03 m (7-10 frames: too few" in under[0] and "0.043 (0.026-0.053)" in under[0]
+          and "under-corrects" not in under[0],
+          "... the 2026 RTK numbers are said to be biased LOW by where that survey stops; above it the lines read "
+          "-0.04..-0.03 m and C ~0.043-0.046, internal 0.043: C = 0.037 is not shown to under-correct; the "
+          "re-projection is inside the expectation, never counted twice")
+    check("station computer only" in c0 and "synthetic test fixture" in c0 and "nothing about the real beach" in c0,
+          "... and says the real photos are on the station only; a fixture build says nothing about the real beach")
+    cav0 = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.0), {}, forcing, {})
+    check(cav0[0].startswith("EARLIER CHECK (real photos)") and "This build adds the setup" not in cav0[0],
+          "... with C = 0: no expectation from a setup that is not applied")
+    other = dict(plan, cams={"c1": dict(plan["cams"]["c1"], eo_file="CACO05_c1_20250219_corr_EO.yaml")})
+    check(not sp.prior_checks(other), "... not claimed for another calibration")
+    # a constant horizon offset is reported from 0.05 deg (not only above the 12 px day-to-day limit)
+    info = {"window_horizon_dtilt_deg": 0.12, "window_horizon_droll_deg": 0.01, "clear_horizon_days": 5,
+            "window_horizon_offset_px": 5.6}          # made-up values: a unit test, not a measurement
+    off = sp.pointing_offset(info, "CACO03_c1_20250123_EO.yaml")
+    check(off and abs(off[0] - 0.12) < 1e-9 and "6 px" in off[2], "a constant 0.12 deg tilt under 12 px: reported")
+    check(sp.pointing_offset(dict(info, window_horizon_dtilt_deg=0.03), "x") is None, "0.03 deg: not reported")
+    # a camera whose pointing was not checked or whose photo map is missing: status partial
+    miss = sp.missing_parts({"out": d, "date": "2025-01-23", "cams": {"c1": {}}},
+                            {"pointing": {"c1": {"rows": [], "info": {}}}})
+    check(any("pointing NOT checked" in m for m in miss) and any("no waterline map" in m for m in miss),
+          "no photos for the pointing check or the photo map: listed as missing parts")
+    # a survey surveys.csv names whose file is not found: a missing part (status partial, exit 3);
+    # a row with no file yet (the Oct GCPs) is not
+    empty = d / "no_surveys_here"
+    empty.mkdir()
+    named = dict(jan, path=str(janf.name))
+    nofile = {"name": "oct_gcps", "survey_type": "points", "survey_date": "2024-10-23", "label": "PARTLY-CIRCULAR",
+              "why": "", "path": ""}
+    miss = sp.missing_parts({"out": d, "date": "2025-01-23", "cams": {}, "surveys": [named, nofile]}, {},
+                            SimpleNamespace(survey_dirs=[str(empty)]))
+    check(any(m.startswith("jan_lidar: survey file") and "NOT FOUND" in m for m in miss)
+          and not any(m.startswith("oct_gcps") for m in miss),
+          "a named survey file not found: a missing part; a row with no file yet: not")
+    # the DEM settings reported are those the DEM on disk was built with
+    sp.write_stamp(d, "dem", {"cmd": "python3 dem_from_contours.py x.csv out --cell 2.0 --min-points 3 --max-spread 0.5 "
+                                     "--max-hs 1.5 --max-day-offset 0.15", "tif": "python3 asc_to_geotiff.py a --epsg 32619"})
+    built = sp.dem_settings_built(d)
+    check(built == {"cell_m": 2.0, "min_points": 3, "max_spread_m": 0.5, "max_hs_m": 1.5, "max_day_offset_m": 0.15,
+                    "geotiff_epsg": 32619}, "DEM settings read back from the build's own commands")
+    want = sp.dem_settings_requested(SimpleNamespace(dem_cell=1.0, dem_min_points=3, dem_max_spread=0.5, dem_max_hs=3.0,
+                                                     dem_max_day_offset=0.15, geotiff_epsg=32619))
+    dd = sp.dem_settings_differ(built, want)
+    check("cell_m: asked 1.0, DEM on disk 2.0" in dd and "max_hs_m: asked 3.0, DEM on disk 1.5" in dd
+          and "min_points" not in dd,
+          "a later command line's other DEM options are named as NOT applied, asked vs on disk the right way round")
+    later = SimpleNamespace(dem_cell=1.0, dem_min_points=3, dem_max_spread=0.5, dem_max_hs=3.0, dem_max_day_offset=0.15,
+                            geotiff_epsg=6348, setup_coef=sp.SETUP_COEF)
+    b = sp.built_args(later, {"out": d, "date": "2025-01-23", "cams": {"c1": {}}})
+    check(b.dem_cell == 2.0 and b.dem_max_hs == 1.5 and b.geotiff_epsg == 32619 and later.dem_cell == 1.0,
+          "the 'rebuild everything' line takes the DEM settings the DEM was built with, not this run's")
+    # a re-export of the RTK the station's C was fitted to, entered under another date: same shots
+    rtk_src = real_rtk()
+    if rtk_src:
+        lines = rtk_src.read_text().splitlines()
+        lines[1] = lines[1].replace(",", ", ", 1)
+        rex = d / "rtk_reexport.csv"
+        rex.write_text("\n".join(lines) + "\n")
+        rtk = {"name": "rtk_other", "survey_type": "points", "survey_date": "2026-09-30", "label": "INDEPENDENT",
+               "why": ""}
+        pl = plan_for(d, era="live", env=None, eo="CACO05_c1_20251113_EO-CV.yaml")
+        lab, why = sp.honest_label(rtk, pl, SimpleNamespace(setup_coef=0.037, survey_dirs=[str(rtk_src.parent)]), rex)
+        check(lab == "CIRCULAR" and "re-exported" in why[0], "a byte-changed re-export under another date: CIRCULAR "
+                                                               "by its coordinates")
+    else:
+        skip("re-exported-RTK check")
+
+
+def test_setup_in_use(d):
+    print("the label and provenance use the C the waterlines were built with")
+    d = Path(d) / "inuse"
+    (d / "waterlines").mkdir(parents=True)
+    p = plan_for(d, era="live", env=None, eo="CACO05_c1_20251113_EO-CV.yaml")
+    rtk = {"name": "rtk_2026-09-29", "survey_type": "points", "survey_date": "2026-09-29",
+           "label": "INDEPENDENT", "why": ""}
+    built = SimpleNamespace(setup_coef=0.037)
+    sp.write_stamp(d, "merge", {"x": 1}, extra={"setup": {"c1": {"coef": 0.037,
+                                                                  "fit": sp.setup_fit_info(0.037, built),
+                                                                  "implied_coef": 0.0370}}})
+    later = SimpleNamespace(setup_coef=0.02, setup_fitted_to="none:test")
+    fits, src = sp.setup_in_use(p, later)
+    check([f["coef"] for f in fits] == [0.037] and src.startswith("the waterlines"),
+          "a later --setup-coef 0.02 --steps compare: the C in use is the one the waterlines carry (0.037)")
+    lab, why = sp.honest_label(rtk, p, later, Path("2026-09-29_Marconi_Checkshots.csv"))
+    check(lab == "CIRCULAR", "... so the RTK comparison stays CIRCULAR")
+    check(abs(sp.implied_c(0.3541, 0.65, 9.5) - 0.037) < 2e-4, "C implied by a row's own setup, Hs and Tp")
+
+
+def test_merge_drops_no_setup(d):
+    print("frames without a wave record (no setup) are left out when C > 0")
+    d = Path(d) / "nosetup"
+    (d / "waterlines" / "c1").mkdir(parents=True)
+    f = d / "waterlines" / "c1" / "contour_points_ground.csv"
+    f.write_text("source_file,camera,capture_time_utc,capture_epoch,tide_elevation_navd88,offshore_hs_m,"
+                 "offshore_tp_s,setup_correction_m,beach_elevation_navd88,easting_utm19,northing_utm19\n"
+                 "a,c1,2026-09-29T14:00:00Z,1790690400,0.5,1.0,9.0,0.3,0.8,420100,4638400\n"
+                 "a,c1,2026-09-29T14:00:00Z,1790690400,0.5,1.0,9.0,0.3,0.8,420101,4638401\n"
+                 "b,c1,2026-09-29T15:00:00Z,1790694000,0.6,,,,0.6,420100,4638400\n")
+    plan = {"date": "2026-09-29", "era": "live", "out": d, "first": "2026-09-29", "last": "2026-09-29",
+            "cams": {"c1": {}}, "surveys": []}
+    st, out = quiet(sp.merge_cameras, plan, [("c1", f)], SimpleNamespace(setup_coef=0.037))
+    rows = list(csv.DictReader(open(d / "waterlines" / "contour_points_ground.csv")))
+    check(len(rows) == 2 and all(r["source_file"] == "a" for r in rows), "the frame without Hs/Tp is left out")
+    check(st["no_setup_frames"] == {"c1": 1} and "WARNING" in out, "counted per camera and warned")
+    listed = list(csv.DictReader(open(d / "waterlines" / "no_setup_frames.csv")))
+    check(len(listed) == 1 and listed[0]["source_file"] == "b", "listed in no_setup_frames.csv")
+    st, _ = quiet(sp.merge_cameras, plan, [("c1", f)], SimpleNamespace(setup_coef=0.0))
+    check(st["rows"] == 3, "C = 0: nothing left out (no frame has a setup)")
+
+
+def cfg_args(**kw):
+    a = dict(config=str(sp.DEFAULT_CONFIG), surveys=str(sp.DEFAULT_SURVEYS), force_disabled=False, window=None,
+             utc_hours=None, calibration=str(HERE / "calibration"), survey_dirs=sp.DEFAULT_SURVEY_DIRS,
+             output_root="/tmp/none", setup_coef=sp.SETUP_COEF)
+    a.update(kw)
+    return SimpleNamespace(**a)
+
+
+def test_config(d):
+    print("the configuration tables")
+    cfg = sp.read_table(sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS)
+    srv = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    for date in ("2024-10-23", "2025-03-19"):
+        plan, out = quiet(sp.build_plan, date, cfg, srv, cfg_args())
+        check(plan is None and "DISABLED" in out, f"{date} is refused (disabled at the user's request)")
+        plan, out = quiet(sp.build_plan, date, cfg, srv, cfg_args(force_disabled=True))
+        check(plan is not None, f"{date} builds with --force-disabled")
+    plan, _ = quiet(sp.build_plan, "2025-03-06", cfg, srv, cfg_args())
+    check(list(plan["cams"]) == ["c2"] and plan["cams"]["c2"]["station"] == "CACO04", "2025-03-06: c2 only, CACO04")
+    plan, _ = quiet(sp.build_plan, "2026-09-29", cfg, srv, cfg_args())
+    check(plan["first"] == "2026-09-26" and plan["last"] == "2026-10-02" and plan["era"] == "live"
+          and [s["name"] for s in plan["surveys"]] == ["rtk_2026-09-29"],
+          "2026-09-29 (the user first called it 27 Sep): window 26 Sep - 2 Oct, the 29 Sep RTK")
+    check(not [r for r in cfg if r["date"] == "2026-09-27"], "no 2026-09-27 product left in the table")
+    rtk_row = [s for s in srv if s["name"] == "rtk_2026-09-29"][0]
+    check(rtk_row["label"] == "INDEPENDENT" and "CIRCULAR" in rtk_row["why"] and "C = 0.037" in rtk_row["why"]
+          and "calm low-tide RTK" in rtk_row["why"] and "+1.2 m" in rtk_row["why"],
+          "the 2026 RTK row: INDEPENDENT as a table label, saying the setup rule makes it CIRCULAR with C = 0.037, "
+          "where the check is and what an independent check needs")
+    rtk_file = Path(sp.DEFAULT_SURVEY_DIRS[0]) / rtk_row["path"]
+    pl, _ = quiet(sp.build_plan, "2026-09-29", cfg, srv, cfg_args())
+    lab, why = sp.honest_label(rtk_row, pl, SimpleNamespace(setup_coef=sp.SETUP_COEF), rtk_file)
+    check(lab == "CIRCULAR" and "setup coefficient C = 0.037 was fitted to this survey" in why[0],
+          "... a default build (C = 0.037): CIRCULAR by the setup rule (the file's name, or its content when here)")
+    lab, why = sp.honest_label(rtk_row, pl, SimpleNamespace(setup_coef=0.0), rtk_file)
+    check(lab == "INDEPENDENT" and not why, "... a C = 0 build (fitted to nothing): INDEPENDENT")
+    plan, _ = quiet(sp.build_plan, "2025-01-23", cfg, srv, cfg_args())
+    check(plan["last"] == "2025-01-23" and all(c["station"] == "CACO03" for c in plan["cams"].values()),
+          "2025-01-23: CACO03 only, 24 Jan (the re-set) outside the window")
+    for r in cfg:
+        if r["era"] == "live":
+            continue
+        for s in srv:
+            if s["date"] == r["date"] and s["path"]:
+                check(Path(s["path"]).name != Path(r["envelope_survey"]).name,
+                      f"{r['date']} {r['camera']}: envelope {r['envelope_survey'][:28]}... is not the compared survey")
+    for r in cfg:
+        eo = HERE / "calibration" / r["eo_file"]
+        check(eo.exists(), f"{r['date']} {r['camera']}: calibration {r['eo_file']} exists")
+    labels = {s["name"]: s["label"] for s in srv}
+    check(labels["oct_gcps"] == "PARTLY-CIRCULAR" and not [s for s in srv if s["name"] == "oct_gcps"][0]["path"],
+          "Oct GCPs: PARTLY-CIRCULAR, path empty until the file arrives")
+    # The GCP files arrive later, one per camera, under the survey date's name: picked up by
+    # themselves and merged, a target both cameras saw counted once.
+    oct_ = [s for s in srv if s["name"] == "oct_gcps"][0]
+    sdir = Path(d) / "gcp_arrive"
+    sdir.mkdir()
+    a = cfg_args(survey_dirs=[str(sdir)])
+    paths, note = sp.resolve_survey(oct_, None, a)
+    check(not paths and "no survey file" in note, "Oct GCPs not there yet: skipped, with the reason")
+    (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv").write_text(
+        "1,420100.0,4638400.0,1.20\n2,420110.0,4638410.0,0.80\n")
+    (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c2_xyz.csv").write_text(
+        "2,420110.0,4638410.0,0.80\n3,420120.0,4638500.0,0.50\n")
+    paths, note = sp.resolve_survey(oct_, None, a)
+    check(len(paths) == 2 and "found" in note, "Oct GCPs arrive: both camera files found by their date")
+    rows = [ln for ln in Path(sp.merged_points(paths, sdir / "merged.csv")).read_text().splitlines() if ln]
+    check(len(rows) == 3, f"Oct GCPs merged: 3 targets, the one both cameras saw once (got {len(rows)})")
+
+
+def test_frames_per_day(d):
+    print("frames per day (README caveats)")
+    f = Path(d) / "fpd.csv"
+    f.write_text("source_file,camera,capture_time_utc,x\n"
+                 "a,c1,2025-01-18T14:00:00Z,1\na,c1,2025-01-18T14:00:00Z,2\nb,c1,2025-01-20T15:00:00Z,1\n"
+                 "c,c2,2025-01-20T15:00:00Z,1\n")
+    check(sp.frames_per_day(f) == {"c1": {"2025-01-18": 1, "2025-01-20": 1}, "c2": {"2025-01-20": 1}},
+          "frames counted once per photo, per camera and day")
+    check(sp.frames_per_day(Path(d) / "missing.csv") == {}, "no waterline file yet: nothing")
+    # the detector's scratch goes once the waterlines are written; the waterline CSVs stay
+    c = Path(d) / "prune" / "c1"
+    for sub in ("debug/x", "in", "detections", "overlays"):
+        (c / sub).mkdir(parents=True)
+    (c / "debug" / "x" / "a.png").write_bytes(b"0" * 10)
+    (c / "in" / "a.jpg").write_bytes(b"0" * 10)
+    (c / "detections" / "a.csv").write_text("Column,Row\n")
+    (c / "detections" / "a_overlay.png").write_bytes(b"0" * 10)
+    (c / "overlays" / "a.jpg").write_bytes(b"0" * 10)
+    quiet(sp.prune_detector_scratch, c)
+    left = sorted(str(p.relative_to(c)) for p in c.rglob("*") if p.is_file())
+    check(left == ["detections/a.csv", "overlays/a.jpg"], f"detector scratch removed, waterlines kept ({left})")
+
+
+def test_caveats(d):
+    print("README caveats")
+    out = Path(d) / "cav"
+    out.mkdir()
+    a = SimpleNamespace(setup_coef=sp.SETUP_COEF)
+    for era in ("live", "adcp"):
+        plan = {"era": era, "date": "2026-09-29", "first": "2026-09-26", "last": "2026-10-02", "out": out,
+                "surveys": [], "cams": {"c1": {"first": "2026-09-26", "last": "2026-10-02"}}}
+        forcing = {"waves": {"setup_in_window": {"median_m": 0.3, "daytime_median_m": 0.28}}}
+        cav = sp.collect_caveats(plan, a, {}, forcing, {"frames_per_day": {"c1": {"2026-09-29": 3}}})
+        text = "\n".join(cav)
+        first = "Live era" if era == "live" else "ADCP datum"
+        check(first in text, f"{era}: its own era caveat is there")
+        check("is not pinned by the 2026 RTK" in text and "under-corrects" not in text,
+              f"{era}: the caveat on what the 2026 RTK can say about C is there too")
+        check("none on 2026-09-26" in text, f"{era}: the window days without waterlines are listed")
+        check(("GNSS-R" in text and "surf zone" in text) == (era == "adcp"),
+              f"{era}: C's still-water reference (GNSS-R, surf zone) stated for the ADCP era only")
+        check("NOMINAL" in text and "6348" in text, f"{era}: the GeoTIFF CRS tag is said to be nominal")
+    cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.05), {}, forcing, {})
+    check(not any("not pinned by the 2026 RTK" in c for c in cav) and any("WITHOUT saying where" in c for c in cav),
+          "a C of unknown origin: no RTK caveat, and said to be of unknown origin")
+    cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.05, setup_fitted_to="none:crossings"), {}, forcing, {})
+    check(not any("fitted on this beach in Sep-Oct 2026" in c for c in cav),
+          "a declared C is not described as the 2026 fit")
+    check(sp.stat_text({"n": 1, "median": -0.3, "nmad": 0.0, "rmse": 0.3}).count("NMAD -") == 1
+          and "TOO FEW" in sp.stat_text({"n": 1, "median": -0.3, "nmad": 0.0, "rmse": 0.3}),
+          "one value: no NMAD, and marked too few")
+
+
+def test_stamps(d):
+    print("resumable steps")
+    d = Path(d) / "stamps"
+    d.mkdir()
+    inp, outp = d / "in.csv", d / "out.csv"
+    inp.write_text("a\n")
+    outp.write_text("b\n")
+    sig = {"cmd": "x --y 1"}
+    check(not sp.is_fresh(d, "k", sig, [outp], [inp])[0], "never built: not fresh")
+    sp.write_stamp(d, "k", sig, [["x", "--y", 1]])
+    check(sp.is_fresh(d, "k", sig, [outp], [inp])[0], "built with these settings: fresh")
+    check(not sp.is_fresh(d, "k", {"cmd": "x --y 2"}, [outp], [inp])[0], "other settings: rebuilt")
+    t = outp.stat().st_mtime
+    os.utime(inp, (t + 10, t + 10))
+    fresh, why = sp.is_fresh(d, "k", sig, [outp], [inp])
+    check(not fresh and "newer" in why, "an input newer than the output: rebuilt")
+    outp.unlink()
+    check(not sp.is_fresh(d, "k", sig, [outp], [])[0], "a missing output: rebuilt")
+    # chained: a rebuilt upstream step makes the filtered file stale
+    plan = {"out": d, "date": "x"}
+    w = d / "waterlines"
+    w.mkdir()
+    (w / "contour_points_ground.csv").write_text("a\n")
+    sp.write_stamp(d, "merge", {"m": 1})
+    (w / "contour_points_ground_filtered.csv").write_text("a\n")
+    sp.write_stamp(d, "filter", {"after": {"merge": sp.token(d, "merge")}})
+    check(sp.waterline_file(plan).name == "contour_points_ground_filtered.csv", "filtered file of the current merge: used")
+    sp.write_stamp(d, "merge", {"m": 2})
+    f, out = quiet(sp.waterline_file, plan)
+    check(f.name == "contour_points_ground.csv" and "NOT used" in out,
+          "filtered file of an earlier merge: NOT used, and said so")
+    check("waterline_consistency.py" in sp.scripts_sig("filter") and sp.scripts_sig("filter")["waterline_consistency.py"],
+          "the script's sha256 is part of the step's signature")
+    st = sp.read_stamp(d, "merge")
+    check(st["software"]["scripts"].get("survey_products.py") and "commit" in st["software"],
+          "each stamp records the commit and the sha256 of the scripts that built it")
+
+
+def test_keep_moved_days(d):
+    print("--keep-moved-days is applied when the detection runs, not stored")
+    res = {"different_days": ["2025-01-24"], "leave_out": True}
+    check(sp.skip_days_of(res, SimpleNamespace(keep_moved_days=False)) == ["2025-01-24"], "default: the day is left out")
+    check(sp.skip_days_of(res, SimpleNamespace(keep_moved_days=True)) == [], "--keep-moved-days on a rerun: kept")
+    check(sp.skip_days_of(dict(res, leave_out=False), SimpleNamespace(keep_moved_days=False)) == [],
+          "most days differ: nothing left out automatically")
+
+
+def test_live_rows(d):
+    print("live rows: window, hours, station ID; malformed rows counted")
+    d = Path(d) / "live"
+    d.mkdir()
+    src = d / "contours.csv"
+    rows = ["source_file,camera,capture_time_utc,tide_elevation_navd88,offshore_hs_m,offshore_tp_s"]
+    for st, h in (("CACO05", 14), ("CACO05", 15), ("CACO04", 16)):
+        t = datetime(2026, 9, 29, h, 0, tzinfo=timezone.utc)
+        n = photo_name(t, st, "c2").replace(".jpg", "")
+        rows += [f"{n},c2,{t:%Y-%m-%dT%H:%M:%SZ},0.5,1.0,9.0"] * 3
+    rows.append("x,c2,2026-09-29T1")                  # a line cut off by the cron's rewrite
+    src.write_text("\n".join(rows) + "\n")
+    plan = {"cams": {"c2": {"first": "2026-09-29", "last": "2026-09-29", "hours": (0.0, 24.0), "station": "CACO05"}}}
+    n_in, n_out, frames, other, bad = sp.read_live_rows(src, d / "out.csv", plan)
+    check(n_out == 6 and len(frames) == 2, "only the date's station ID kept (CACO05)")
+    check(other == {"c2": {"CACO04": 3}}, "rows of frames named for another station counted, per camera")
+    check(bad == 1, "a cut-off row skipped and counted, no traceback")
+    # with --force the rows are read once per run, not once per step that asks for them (the forcing
+    # and the detection): two reads would leave them two different builds, never one product
+    pl = dict(plan, out=d / "prod", first="2026-09-29", last="2026-09-29", date="2026-09-29")
+    a = SimpleNamespace(live_contours=str(src), force=True)
+    state = {}
+    quiet(sp.live_rows_file, pl, a, state)
+    t1 = sp.token(pl["out"], "archive_rows")
+    quiet(sp.live_rows_file, pl, a, state)
+    check(t1 and sp.token(pl["out"], "archive_rows") == t1, "--force: the live rows read once per run")
+    quiet(sp.live_rows_file, pl, a, {})
+    check(sp.token(pl["out"], "archive_rows") != t1, "... and again by the next forced run")
+
+
+def test_fix1(d):
+    print("horizon dip, in-progress mark and summary re-check, storm, camera split, independent counts")
+    d = Path(d) / "fix1"
+    d.mkdir()
+    # the predicted sea horizon holds the full Earth-curvature dip: the true horizon of a PERFECT camera
+    # (geometric dip with refraction k, projected with the station EO) fits as no tilt
+    from georectify import load_extrinsics, load_intrinsics
+    from view_reproject import ground_to_pixel
+    from horizon_check import fit_tilt_roll
+    import estimate_eo_rotation as er
+    for eo_name, cam in (("CACO03_c1_20250123_EO.yaml", "c1"), ("CACO05_c2_20251113_EO-CV.yaml", "c2")):
+        io_ = load_intrinsics(HERE / "calibration" / f"CACO05_{cam}_20240801_IO.yaml")
+        eo = load_extrinsics(HERE / "calibration" / eo_name)
+        cols = np.arange(150, int(io_[0]) - 150, 100)
+        fits = []
+        for k in (0.0, er.REFRACTION_K, 0.25):
+            dip, dd_ = er.horizon_dip(eo[2], k), 20000.0
+            az = eo[3] + np.deg2rad(np.linspace(-80, 80, 6000))
+            U, V, ok = ground_to_pixel(eo[0] + dd_ * np.sin(az), eo[1] + dd_ * np.cos(az), eo[2] - dd_ * np.tan(dip),
+                                       io_, eo)
+            o = np.argsort(U[ok])
+            obs = np.interp(cols, U[ok][o], V[ok][o], left=np.nan, right=np.nan)
+            fits.append(float(fit_tilt_roll(io_, eo, cols, obs)[0][0]))
+        check(abs(fits[1]) < 0.003 and max(abs(f) for f in fits) < 0.015 < sp.OFFSET_REPORT_DEG,
+              f"{eo_name}: a perfect camera fits tilt {fits[1]:+.3f} deg (k 0.13), {fits[0]:+.3f}/{fits[2]:+.3f} for "
+              f"k 0/0.25 (was +0.06-0.07 with half the dip), well under the {sp.OFFSET_REPORT_DEG} deg report limit")
+    # a build marks the product in progress first: an interrupted build never leaves the previous
+    # README / provenance looking current, and --summary re-checks against the stamps on disk
+    out = d / "2025-01-23"
+    out.mkdir()
+    (out / "README.txt").write_text("SURVEY-DATE PRODUCT 2025-01-23  (built x, status: complete)\nold numbers\n")
+    (out / "provenance.json").write_text('{"date": "2025-01-23", "status": "complete", "window": {"first_day": '
+                                         '"2025-01-18", "last_day": "2025-01-23"}, "comparisons": [{"name": '
+                                         '"jan_lidar", "current": true, "headline": {"n": 5, "median": 0.1}}]}')
+    plan = {"date": "2025-01-23", "era": "adcp", "first": "2025-01-18", "last": "2025-01-23", "out": out,
+            "cams": {}, "surveys": []}
+    a = cfg_args(output_root=str(d), photo_roots=sp.DEFAULT_PHOTO_ROOTS, adcp=None, adcp_navd88=None, chatham=None,
+                 wis=None, ndbc=None, live_contours=str(sp.DEFAULT_LIVE_CONTOURS), setup_fitted_to=None,
+                 geotiff_epsg=sp.GEOTIFF_EPSG, gnssr_spline=None, gauge_csv=None, live_cron=str(sp.LIVE_CRON),
+                 pointing_log_dir=str(HERE / "archive"), pointing_frames=3, pointing_fail=sp.POINT_FAIL_DEG,
+                 dem_cell=sp.DEM_CELL, dem_min_points=sp.DEM_MIN_POINTS, dem_max_spread=sp.DEM_MAX_SPREAD,
+                 dem_max_hs=sp.DEM_MAX_HS, dem_max_day_offset=sp.DEM_MAX_DAY_OFFSET, keep_moved_days=False,
+                 no_download=False)
+    sp.mark_in_progress(plan, a)
+    sp.mark_in_progress(plan, a)                       # a second attempt: one banner, the old text kept once
+    rd = (out / "README.txt").read_text()
+    prov = sp.load_json(out / "provenance.json")
+    check(rd.startswith("BUILD IN PROGRESS / INTERRUPTED") and rd.count("BUILD IN PROGRESS / INTERRUPTED") == 1
+          and rd.count("old numbers") == 1 and prov["status"] == "in progress"
+          and prov["previous_status"] == "complete" and not prov["comparisons"][0]["current"],
+          "the build marks README and provenance in progress (once), every comparison not current")
+    cur, why, h, _ = sp.summary_comparison(prov, out, prov["comparisons"][0])
+    check(not cur and "in progress" in why and not h, "--summary shows nothing of a product in progress as current")
+    prov2 = dict(prov, status="complete")
+    cur, why, h, _ = sp.summary_comparison(prov2, out, prov2["comparisons"][0])
+    check(not cur and "no finished comparison" in why,
+          "--summary re-checks the stamps on disk: a 'complete' provenance with no comparison stamp is not current")
+    # the storm of 25-26 Sep 2026 reaches into the live window: said, with the storm-tail days
+    pl = {"date": "2026-09-29", "era": "live", "first": "2026-09-26", "last": "2026-10-02", "out": d,
+          "cams": {}, "surveys": [{"name": "rtk", "survey_type": "points", "survey_date": "2026-09-29", "path": ""}]}
+    cav = sp.storm_caveats(pl, cfg_args(survey_dirs=[]), {"frames_per_day": {"c1": {"2026-09-26": 3, "2026-09-27": 2,
+                                                                                    "2026-09-30": 4}}},
+                           "2026-09-26", "2026-10-02")
+    check(len(cav) == 1 and cav[0].startswith("STORM: the 25-26 Sep 2026 storm") and "2026-09-26, 2026-09-27" in cav[0]
+          and "-0.12 m" in cav[0] and "per-day rows" in cav[0],
+          "2026-09-29: the storm caveat names the storm-tail frame days before the survey and the measured change")
+    pl_jan = dict(pl, first="2025-01-18", last="2025-01-23")
+    check(not sp.storm_caveats(pl_jan, cfg_args(survey_dirs=[]), {}, "2025-01-18", "2025-01-23"),
+          "... and nothing for a window far from it")
+    # two cameras off in opposite directions: flagged, whatever the pooled median
+    h = {"median": 0.0, "by_camera": {"c1": {"n": 300, "median": -0.15}, "c2": {"n": 226, "median": 0.15},
+                                      "neither": {"n": 3, "median": 2.0}}}
+    check("0.30 m apart" in sp.camera_split(h) and "pooled median hides" in sp.camera_split(h)
+          and not sp.camera_split({"by_camera": {"c1": {"n": 9, "median": 0.02}, "c2": {"n": 9, "median": 0.05}}}),
+          "cameras 0.30 m apart flagged (the 'outside the views' group ignored); 0.03 m apart: not")
+    # a points survey: 33 values from 7 survey points is 7, TOO FEW
+    wl = {"n": 33, "median": -0.03, "nmad": 0.09, "rmse": 0.1, "unit": "points", "frames": 32, "survey_points": 7,
+          "n_independent": 7, "n_independent_unit": "survey points",
+          "by_camera": {"c1": {"n": 18, "median": -0.02, "frames": 18, "survey_points": 3}}}
+    t = sp.stat_text(wl, "waterlines - survey")
+    check("TOO FEW (7 survey points < 10)" in t and "c1 -0.020 m (n 18, 18 frames, 3 survey points, too few survey points)"
+          in sp.per_camera_text(wl["by_camera"], "points"),
+          "waterlines on a points survey: judged on the distinct survey points (7: TOO FEW), per camera too")
+    t = sp.stat_text({"n": 16, "median": -0.127, "nmad": 0.098, "rmse": 0.19, "unit": "frames", "n_independent": 16,
+                      "n_independent_unit": "frames"}, "waterlines - survey")
+    check("TOO FEW" not in t, "16 frames on RTK transects: an estimate")
+
+
+def test_fix2(d):
+    print("one build at a time, the window and inputs of the build, map reasons, still water, waves, summary")
+    d = Path(d) / "fix2"
+    d.mkdir()
+    a = cfg_args(output_root=str(d), photo_roots=["/nowhere"], adcp=None, adcp_navd88=None, chatham=None, wis=None,
+                 ndbc=None, live_contours="/x/contour_points_timex.csv", setup_fitted_to=None,
+                 geotiff_epsg=sp.GEOTIFF_EPSG, gnssr_spline=None, gauge_csv=None, live_cron=str(sp.LIVE_CRON),
+                 pointing_log_dir=str(HERE / "archive"), pointing_frames=3, pointing_fail=sp.POINT_FAIL_DEG,
+                 dem_cell=sp.DEM_CELL, dem_min_points=sp.DEM_MIN_POINTS, dem_max_spread=sp.DEM_MAX_SPREAD,
+                 dem_max_hs=sp.DEM_MAX_HS, dem_max_day_offset=sp.DEM_MAX_DAY_OFFSET, keep_moved_days=False,
+                 no_download=False)
+    # -- the lock: a second build of the same date is refused while the first runs; a lock left by a
+    # build that is no longer running is taken over, and said so
+    out = d / "2026-09-29"
+    out.mkdir()
+    ok1, _ = sp.take_lock(out, a, "2026-09-29")
+    ok2, why2 = sp.take_lock(out, a, "2026-09-29")      # this process is alive and is a survey_products build
+    check(ok1 and not ok2 and "RUNNING" in why2, "a second build of the date is refused while the first runs")
+    sp.release_lock(out)
+    check(not (out / sp.LOCK_NAME).exists(), "the lock is released at the end")
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    (out / sp.LOCK_NAME).write_text('{"pid": %d, "host": "%s", "since_utc": "x", "command": "y"}'
+                                    % (dead.pid, sp.host_name()))
+    ok3, note3 = sp.take_lock(out, a, "2026-09-29")
+    check(ok3 and "not running" in note3, "a lock left by a build that died is taken over, and said so")
+    sp.release_lock(out)
+    (out / sp.LOCK_NAME).write_text('{"pid": 1, "host": "another-computer", "since_utc": "x", "command": "y"}')
+    ok4, why4 = sp.take_lock(out, a, "2026-09-29")
+    check(not ok4 and "another computer" in why4, "a lock held on another computer is not taken over")
+    (out / sp.LOCK_NAME).unlink()
+    # -- the window: a --steps compare --window run does not apply the window; the plan keeps the built one
+    cams = {c: {"first": "2026-09-30", "last": "2026-10-01", "hours": (0.0, 24.0), "hours_text": "0-24",
+                "table_first": "2026-09-26", "table_last": "2026-10-02", "table_hours_text": "0-24"}
+            for c in ("c1", "c2")}
+    plan = {"date": "2026-09-29", "era": "live", "out": out, "first": "2026-09-30", "last": "2026-10-01",
+            "cams": cams, "surveys": []}
+    sp.write_stamp(out, "archive_rows", {"src": "/station/contour_points_timex.csv",
+                                        "cams": {c: ["2026-09-26", "2026-10-02", [0.0, 24.0], "CACO05"]
+                                                 for c in ("c1", "c2")}})
+    st = {"not_applied": []}
+    a2 = cfg_args(**dict(vars(a), window=["2026-09-30", "2026-10-01"]))
+    quiet(sp.keep_built_window, plan, a2, ["compare"], st)
+    check(plan["first"] == "2026-09-26" and plan["last"] == "2026-10-02" and cams["c1"]["first"] == "2026-09-26"
+          and a2.window is None and st["not_applied"] and "NOT applied" in st["not_applied"][0],
+          "--steps compare --window: NOT applied; the plan, README and rebuild line keep the built window")
+    plan2 = dict(plan, first="2026-09-30", last="2026-10-01",
+                 cams={c: dict(v, first="2026-09-30", last="2026-10-01") for c, v in cams.items()})
+    st2 = {"not_applied": []}
+    quiet(sp.keep_built_window, plan2, a2, list(sp.STEPS), st2)
+    check(plan2["first"] == "2026-09-30" and not st2["not_applied"], "... a run of every step applies it")
+    # -- the inputs of the build: a --live-contours whose step failed is not the build's
+    b = sp.built_args(cfg_args(**dict(vars(a), live_contours="/nonexistent.csv")), plan)
+    na = sp.inputs_not_applied(plan, cfg_args(**dict(vars(a), live_contours="/nonexistent.csv")))
+    check(b.live_contours == "/station/contour_points_timex.csv" and na and "/nonexistent.csv" in na[0],
+          "a failed --live-contours: the rebuild line names the file the outputs came from, and says it")
+    # -- why a photo map is missing: the maps step's own record
+    (out / "maps").mkdir()
+    (out / "maps" / sp.MAP_STATUS).write_text('{"c2": {"drawn": false, "kind": "script failed", "why": '
+                                              '"daily_elevation_map.py FAILED (exit 1; see logs/map_c2.log); the photos '
+                                              'were found (70 in waterlines/c2/src)"}}')
+    check("FAILED (exit 1" in sp.map_missing_reason(plan, {}, "c2")
+          and "photo roots" in sp.map_missing_reason(plan, {}, "c1"),
+          "a missing photo map says why: the script failed (with its log), or no photo was found")
+    # -- the still-water reference: +0.02 - s x (setup - its mean), not 'LOW by the share'
+    wv = {"still_water_reference": {"quantified": True, "share": 0.4, "k": 0.0148, "typical_x": 7.0,
+                                    "typical_m": 0.1036, "how": "2026-07-09 .. 2026-10-06"},
+          "setup_in_window": {"daytime_median_m": 0.28}}
+    t = sp.still_water_caveat(0.037, wv, "adcp")
+    check("+0.02 m - s x (its setup - the mean setup" in t and "already in the datum chain" in t
+          and "+0.02 - (0.40 x 0.28 - 0.10) = +0.01 m" in t and "lack" not in t,
+          "still water: the mean part of the GNSS-R share is in the datum chain; this window +0.01 m")
+    pc = dict(sp.PRIOR_CHECKS[0], cameras=["c1", "c2"])
+    t = sp.prior_check_caveat({"era": "adcp"}, pc, [{"coef": 0.037}],
+                              {"waves": {"setup_in_window": {"daytime_median_m": 0.28}}})
+    check("comes on top" not in t and "holds the still-water-reference effect" in t,
+          "the earlier check's expectation already holds the still-water effect (ADCP-frame lines)")
+    # -- high waves in the window from the date's own forcing
+    fdir = out / "forcing"
+    fdir.mkdir()
+    with open(fdir / "waves.csv", "w") as f:
+        f.write("time_utc,epoch,wvht_m,dpd_s,source\n")
+        for h in range(0, 24 * 6):
+            ep = 1737158400 + h * 3600                 # 2025-01-18 00:00 UTC on
+            hs = 2.8 if 50 <= h <= 60 else 1.0          # 20 Jan 02:00-12:00
+            f.write(f"x,{ep},{hs},9,adcp\n")
+    pj = dict(plan, era="adcp", first="2025-01-18", last="2025-01-23", date="2025-01-23",
+              surveys=[{"name": "jan_lidar", "survey_type": "dsm", "survey_date": "2025-01-23"}])
+    ev = sp.wave_events(fdir, "2025-01-18", "2025-01-23")
+    cav = sp.wave_event_caveats(pj, {"frames_per_day": {"c1": {"2025-01-18": 9, "2025-01-19": 9, "2025-01-21": 9,
+                                                               "2025-01-23": 9}}}, "2025-01-18", "2025-01-23")
+    check(len(ev) == 1 and abs(ev[0]["peak"] - 2.8) < 1e-9 and len(cav) == 1 and "HIGH WAVES" in cav[0]
+          and "2025-01-18, 2025-01-19 before it" in cav[0] and "2025-01-21, 2025-01-23 after it" in cav[0]
+          and "the survey (2025-01-23) is after it" in cav[0] and "per-day rows" in cav[0],
+          "a high-wave event in the window: the frame days before and after it, the survey after it")
+    check(not sp.wave_event_caveats(dict(pj, first="2025-01-22", last="2025-01-23"), {}, "2025-01-22", "2025-01-23"),
+          "... and no caveat for a window without one")
+    # -- the summary: the reason of a C = 0 INDEPENDENT row comes from the build, wrapped at phrases
+    prov = {"setup": {"coef": 0.0, "fits": [{"coef": 0.0, "kind": "none"}]}}
+    cc = {"label": "INDEPENDENT", "label_reasons": [], "why": "RTK check shots of 29 Sep 2026 (the user first called "
+          "the date 27 Sep): not used by the calibration (GCPs of 13 Nov 2025), the search envelope or the water "
+          "level (GNSS-R). INDEPENDENT only for a build whose ..."}
+    r = sp.summary_reason(cc, prov)
+    check(r.startswith("C = 0: no setup, nothing fitted to this survey; RTK check shots of 29 Sep 2026: not used by")
+          and "INDEPENDENT only" not in r and sp.setup_short(prov) == "C = 0: no wave setup",
+          "summary: a C = 0 INDEPENDENT row says why from the build (C = 0), then the table's first sentence")
+    w = sp.wrap_phrases(r, 60, 2)
+    check(len(w) == 2 and w[-1].endswith("...") and all(len(x) <= 60 for x in w)
+          and " ".join(w).replace(" ...", "") in r.replace("\n", " "),
+          "the figure's reason: two lines, cut at a phrase boundary, never mid-word")
+    # -- paired C = 0 numbers on few frames are marked
+    wl = {"n": 16, "median": -0.127, "nmad": 0.098, "rmse": 0.19, "unit": "frames", "n_independent": 16,
+          "n_independent_unit": "frames", "method": "frames on RTK transects",
+          "without_setup": {"n": 12, "median": -0.33, "how": "re-projected",
+                            "paired": {"n": 12, "unit": "frames", "n_independent": 12, "n_independent_unit": "frames",
+                                       "without_setup_median": -0.33, "with_setup_median": -0.108,
+                                       "setup_effect_median": 0.175,
+                                       "by_camera": {"c1": {"n": 7, "n_independent": 7, "n_independent_unit": "frames",
+                                                            "without_setup_median": -0.389, "with_setup_median": -0.113},
+                                                     "c2": {"n": 5, "n_independent": 5, "n_independent_unit": "frames",
+                                                            "without_setup_median": -0.272,
+                                                            "with_setup_median": -0.102}}}}}
+    txt = "\n".join(sp.waterline_readme_lines(wl))
+    check("(n 7, too few frames)" in txt and "(n 5, too few frames)" in txt and "TOO FEW" not in txt.split("by camera c1")[0],
+          "the C = 0 sensitivity marks each camera's few frames (12 overall: an estimate)")
+    # -- synthetic inputs: a marker file in a photo root
+    root = d / "roots"
+    root.mkdir()
+    (root / sp.SYNTHETIC_MARKER).write_text("rendered test photos\n")
+    check(sp.run_synthetic(cfg_args(photo_roots=[str(root)], synthetic=None)) == "rendered test photos"
+          and sp.run_synthetic(cfg_args(photo_roots=["/nowhere"], synthetic=None)) is None,
+          "a SYNTHETIC_FIXTURE file in a photo root marks the build synthetic")
+
+
+def test_fix3(d):
+    print("exit code by severity, DEM day test, not-yet-built label, kept live rows, pointing, cameras, shares")
+    d = Path(d) / "fix3"
+    d.mkdir()
+    # -- --all: the worst date by severity, not the largest number
+    check(sp.worst_exit(["built", "failed", "partial"]) == 1 and sp.worst_exit(["partial", "busy"]) == 4
+          and sp.worst_exit(["built", "partial", "disabled"]) == 3 and sp.worst_exit(["built", "disabled"]) == 0
+          and sp.worst_exit([]) == 0 and sp.worst_exit(["built", "odd"]) == 1,
+          "--all: failed (1) > busy (4) > partial (3) > built (0); disabled dates do not count")
+    # -- the DEM's day test on two camera-days rejects both: not run, and said why
+    wf = d / "w.csv"
+    head = "source_file,camera,capture_time_utc,capture_epoch,easting_utm19,northing_utm19,offshore_hs_m\n"
+    rows = []
+    for day, h, hs in (("2025-03-06", 15, 1.0), ("2025-03-07", 15, 1.0), ("2025-03-08", 15, 2.5)):
+        t = datetime.fromisoformat(f"{day}T{h:02d}:00:00+00:00")
+        rows.append(f"f{day},c2,{day}T{h:02d}:00:00Z,{int(t.timestamp())},420000,4638000,{hs}")
+    wf.write_text(head + "\n".join(rows) + "\n")
+    plan = {"first": "2025-03-06", "last": "2025-03-08", "out": d}
+    a = SimpleNamespace(dem_max_hs=1.5, dem_max_day_offset=0.15)
+    check(sp.camera_days(plan, a, wf) == ["c2 2025-03-06", "c2 2025-03-07"],
+          "camera-days as the DEM's day test sees them (the Hs 2.5 m day left out by its wave filter)")
+    why = sp.day_test_off(plan, a, wf)
+    check("only 2 camera-day(s)" in why and "cannot tell which day is off" in why and "both be rejected" not in why
+          and "keeps them all" in why,
+          "fewer than 3 camera-days: the day test is not run, and why (dem_from_contours.py would keep them all)")
+    check(sp.day_test_off(plan, SimpleNamespace(dem_max_hs=0, dem_max_day_offset=0.15), wf) == ""
+          and sp.day_test_off(plan, SimpleNamespace(dem_max_hs=1.5, dem_max_day_offset=0), wf) == "",
+          "3 camera-days (no wave filter), or the test off by option: nothing to say")
+    cmd = sp.dem_cmds(dict(plan, date="2025-03-06", cams={"c2": {"station": "CACO04", "eo_file": "x_20250219_EO.yaml"}}),
+                      SimpleNamespace(dem_cell=2.0, dem_min_points=3, dem_max_spread=0.5, dem_max_hs=1.5,
+                                      dem_max_day_offset=0.15, geotiff_epsg=32619), day_test=False)[1]
+    check("--max-day-offset" not in [str(c) for c in cmd], "... and dem_from_contours.py is run without it")
+    log = d / "dem.log"
+    log.write_text("Day consistency (median offset from the DEM without that day, limit +/-0.15 m):\n"
+                   "   c2 2025-03-06   +0.190 m   (514 samples)  <-- REJECTED\n"
+                   "   c2 2025-03-07   -0.190 m   (408 samples)  <-- REJECTED\n"
+                   "   left out 2 camera-day(s), 38167 point(s)\n\nTraceback (most recent call last):\n"
+                   "ValueError: zero-size array to reduction operation minimum which has no identity\n")
+    check("rejected every camera-day (2 of 2)" in sp.dem_failure_reason(log),
+          "a DEM that failed because every camera-day was rejected says so, not a traceback")
+    # -- a not-yet-built date: its label with THIS run's C, as --dry-run gives it
+    cfg = sp.read_table(sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS)
+    srv = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    rtk = [s_ for s_ in srv if s_["date"] == "2026-09-29"][0]
+    lab, why = sp.label_when_built("2026-09-29", rtk, cfg, srv, cfg_args(survey_dirs=[str(d)]))
+    check(rtk["label"] == "INDEPENDENT" and lab == "CIRCULAR" and "fitted to this survey" in why,
+          "2026-09-29 not built yet, C = 0.037: CIRCULAR when built (the table says INDEPENDENT)")
+    lab0, _ = sp.label_when_built("2026-09-29", rtk, cfg, srv, cfg_args(survey_dirs=[str(d)], setup_coef=0.0))
+    check(lab0 == "INDEPENDENT", "... with C = 0: INDEPENDENT")
+    # -- live era: a window with no rows keeps the rows (and stamp) of the earlier build
+    src = d / "contours.csv"
+    lines_ = ["source_file,camera,capture_time_utc,tide_elevation_navd88,offshore_hs_m,offshore_tp_s"]
+    for h in (14, 15):
+        t = datetime(2026, 9, 29, h, 0, tzinfo=timezone.utc)
+        n = photo_name(t, "CACO05", "c2").replace(".jpg", "")
+        lines_ += [f"{n},c2,{t:%Y-%m-%dT%H:%M:%SZ},0.5,1.0,9.0"] * 2
+    src.write_text("\n".join(lines_) + "\n")
+    cams = {"c2": {"first": "2026-09-29", "last": "2026-09-29", "hours": (0.0, 24.0), "station": "CACO05"}}
+    pl = {"cams": cams, "out": d / "live", "first": "2026-09-29", "last": "2026-09-29", "date": "2026-09-29",
+          "era": "live"}
+    a = SimpleNamespace(live_contours=str(src), force=False)
+    quiet(sp.live_rows_file, pl, a, {})
+    t1 = sp.token(pl["out"], "archive_rows")
+    before = (pl["out"] / "waterlines" / "archive_rows.csv").read_text()
+    cams2 = {"c2": dict(cams["c2"], first="2026-11-01", last="2026-11-03")}
+    pl2 = dict(pl, cams=cams2, first="2026-11-01", last="2026-11-03")
+    try:
+        quiet(sp.live_rows_file, pl2, a, {})
+        failed = False
+    except sp.StepFailed as exc:
+        failed = "earlier build" in str(exc) and "kept" in str(exc)
+    check(failed and (pl["out"] / "waterlines" / "archive_rows.csv").read_text() == before
+          and sp.token(pl["out"], "archive_rows") == t1
+          and not (pl["out"] / "waterlines" / "archive_rows.csv.new").exists(),
+          "a live window with no rows fails WITHOUT wiping the earlier rows or their stamp")
+    bs = sp.built_settings(pl2)
+    check(bs["cams"]["c2"]["first"] == "2026-09-29", "... so the window on disk is still the one that built them")
+    # -- per-day rows: a step may be change OR a method error; frames placed against an event by TIME
+    check("change of the beach OR a method error" in sp.PER_DAY_ROWS_NOTE and "static synthetic beach"
+          in sp.PER_DAY_ROWS_NOTE and "not an error" not in sp.PER_DAY_ROWS_NOTE,
+          "per-day rows: a trend may be change OR a method error (the static fixture drifts too)")
+    import survey_compare as sc_
+    cont_ = {"cam": np.array(["c2"] * 4), "day": np.array(["2025-03-05", "2025-03-05", "2025-03-08", "2025-03-08"]),
+             "frame": np.array(["a", "a", "b", "b"]), "Z": np.array([0.3, 0.2, 0.7, 0.5]),
+             "Zt": np.array([0.1, 0.0, 0.1, -0.1])}
+    wr = sc_.waterline_rows(cont_, np.array([0.02, 0.04, -0.10, -0.12]), zref=np.array([-0.1, -0.05, -0.1, -0.05]))
+    dd = {r["group"]: r for r in wr if r["group_type"] == "waterline_day"}
+    check(abs(dd["2025-03-05 c2"]["survey_z_median"] + 0.075) < 1e-9 and abs(dd["2025-03-05 c2"]["setup_median"]
+                                                                         - 0.2) < 1e-9
+          and abs(dd["2025-03-08 c2"]["setup_median"] - 0.6) < 1e-9,
+          "per-day rows carry the survey elevation and the setup they were taken at (to compare days like for like)")
+    pe = d / "ev"
+    (pe / "forcing").mkdir(parents=True)
+    (pe / "waterlines").mkdir()
+    ep0 = int(datetime(2025, 1, 20, 3, 0, tzinfo=timezone.utc).timestamp())
+    with open(pe / "forcing" / "waves.csv", "w") as f:
+        f.write("time_utc,epoch,wvht_m,dpd_s,source\n")
+        for h in range(-24, 48):
+            f.write(f"x,{ep0 + h * 3600},{2.6 if h == 0 else 1.0},9,adcp\n")
+    with open(pe / "waterlines" / "contour_points_ground.csv", "w") as f:
+        f.write("source_file,camera,capture_time_utc,capture_epoch,offshore_hs_m\n")
+        for k, hh in enumerate((14, 15, 16)):          # same day as the 03:00 event, all hours after it
+            t = datetime(2025, 1, 20, hh, 0, tzinfo=timezone.utc)
+            f.write(f"fr{k},c1,{t:%Y-%m-%dT%H:%M:%SZ},{int(t.timestamp())},1.0\n")
+    pj = {"out": pe, "era": "adcp", "first": "2025-01-19", "last": "2025-01-21", "date": "2025-01-20",
+          "surveys": [{"name": "s", "survey_type": "dsm", "survey_date": "2025-01-20"}], "cams": {"c1": {}}}
+    cv = sp.wave_event_caveats(pj, {"frames_per_day": {"c1": {"2025-01-20": 3}}}, "2025-01-19", "2025-01-21")
+    check(len(cv) == 1 and "3 frame(s) after it" in cv[0] and "during it" not in cv[0]
+          and "on the same day as the event (its time is not known)" in cv[0],
+          "a one-hour event: frames taken hours after it are 'after it', not 'during'; the survey 'the same day'")
+    # -- cameras: no flag on too few values; the cause named only for the same times
+    few_h = {"waterlines": {"unit": "frames", "by_camera": {
+        "c1": {"n": 7, "median": -0.389, "frames": 7}, "c2": {"n": 5, "median": -0.272, "frames": 5}}}}
+    check(sp.camera_split(few_h) == "" and "too few to compare the cameras" in sp.camera_split_note(few_h),
+          "7 and 5 frames, 0.12 m apart: not flagged, 'too few to compare the cameras'")
+    many = {"waterlines": {"unit": "frames", "by_camera": {
+        "c1": {"n": 20, "median": -0.30, "frames": 20, "times": 20, "shared_times": 4, "setup_median": 0.40},
+        "c2": {"n": 15, "median": -0.15, "frames": 15, "times": 15, "shared_times": 4, "setup_median": 0.24}}}}
+    t_ = sp.camera_split(many)
+    check("different times" in t_ and "need not be the cameras" in t_ and "c1 0.40 m" in t_
+          and "the water level and setup are the same" not in t_,
+          "different frames: the split is not put on the cameras; each camera's median setup is given")
+    same = {"waterlines": {"unit": "frames", "by_camera": {
+        "c1": {"n": 20, "median": -0.30, "frames": 20, "times": 20, "shared_times": 19},
+        "c2": {"n": 20, "median": -0.15, "frames": 20, "times": 20, "shared_times": 19}}}}
+    check("same times" in sp.camera_split(same) and "pointing or lens model" in sp.camera_split(same),
+          "the same times: pointing or lens model")
+    check(sp.camera_split({"by_camera": {"c1": {"n": 1, "median": -0.36}, "c2": {"n": 2, "median": -0.20}}}) == "",
+          "DEM by camera on 1 vs 2 values: no flag")
+    # -- the pointing argument rests on what fitted nothing to the RTK
+    cp = d / "pt"
+    (cp / "compare").mkdir(parents=True)
+    with open(cp / "compare" / "2026-09-29_rtk_points.csv", "w") as f:
+        f.write("name,code,description,easting,northing,survey_z_navd88,camera,distance_from_camera_m\n")
+        for k, (z, dist) in enumerate(((1.18, 75.3), (1.26, 56.7), (1.68, 50.7), (1.17, 55.1), (3.0, 20.0))):
+            f.write(f"{k},P,Transect,0,0,{z},c1,{dist}\n")
+    prov_ = {"comparisons": [{"name": "rtk", "current": True, "label": "CIRCULAR", "headline": {"waterlines": {
+        "n": 16, "unit": "frames", "setup": "setup-corrected", "by_camera": {"c1": {"n": 10}},
+        "line_elevation_compared": {"p5": 1.01, "p95": 1.56, "max": 1.56},
+        "without_setup": {"paired": {"by_camera": {"c1": {"n": 7, "frames": 7, "without_setup_median": -0.389,
+                                                          "setup_effect_median": 0.2295}}}}}}}]}
+    sens = [{"range_m": "0-100", "cells": 300, "shift_m": 4.7, "dem_error_m": -0.41}]
+    txt = sp.pointing_vs_survey({"date": "2026-09-29", "out": cp}, "c1", (0.90, 0.23), sens, prov_,
+                                [{"coef": 0.037, "kind": "known"}])
+    check(txt and "absorbed into C" in txt and "repeat crossings" in txt and "-0.21 to -0.12 m" in txt
+          and "raises them by 0.18-0.27 m" in txt and "give C = 0.029-0.043" in txt and "agree best at" not in txt
+          and "outside this repository's code" in txt and "+0.006 to +0.034" in txt and "0.024-0.026" not in txt
+          and "30-51%" in txt and "cannot be ruled out" in txt and "which the RTK does not show" not in txt
+          and "the 0-100 m band" in txt and "too few" in txt,
+          "pointing vs lens: C = 0 lines minus the setup of the repeat-crossing C (0.029-0.043, both estimates, "
+          "said where they come from) leave -0.21..-0.12 m at ~55 m, 30-51% of the full offset's -0.41 m: a part "
+          "cannot be ruled out (and the C fitted to the RTK cannot say)")
+    check("OVERSTATED" not in txt, "... no survey-floor note when the build records none")
+    wl_ = prov_["comparisons"][0]["headline"]["waterlines"]
+    wl_["without_setup"]["above_survey_floor"] = {"frames_below_floor": 12, "frames_all": 12, "frames": 0}
+    txt2 = sp.pointing_vs_survey({"date": "2026-09-29", "out": cp}, "c1", (0.90, 0.23), sens, prov_,
+                                 [{"coef": 0.037, "kind": "known"}])
+    check(txt2 and "12 of 12 of those C = 0 frames lie below their transect's lowest shot" in txt2
+          and "OVERSTATED" in txt2,
+          "... C = 0 lines below where the survey stops: what is left (and the share of the offset) is OVERSTATED")
+    del wl_["without_setup"]["above_survey_floor"]
+    dsm = {"comparisons": [dict(prov_["comparisons"][0], headline={"waterlines": dict(
+        prov_["comparisons"][0]["headline"]["waterlines"], unit="points")})]}
+    check(sp.pointing_vs_survey({"date": "2026-09-29", "out": cp}, "c1", (0.90, 0.23), sens, dsm,
+                                [{"coef": 0.037, "kind": "known"}]) is None,
+          "... not on a DSM comparison, which pools every range from the camera")
+    # -- the summary figure: a CIRCULAR row grey, its C = 0 values as their own mark, synthetic rows tagged
+    check(sp.label_without_setup("INDEPENDENT", ["CIRCULAR: the setup coefficient C = 0.037 was fitted to this "
+                                                 "survey"]) == "INDEPENDENT"
+          and sp.label_without_setup("INDEPENDENT", ["PARTLY-CIRCULAR: the c1 search envelope was placed with this "
+                                                     "survey", "CIRCULAR: the setup coefficient C = 0.037 ..."])
+          == "PARTLY-CIRCULAR", "the C = 0 values' label: every reason but the setup coefficient's")
+    base = {"n": 2, "median_m": -0.19, "nmad_m": None, "waterlines_median_m": -0.127, "waterlines_nmad_m": 0.098,
+            "dem_by_camera": {}, "waterlines_by_camera": {"c1": -0.16, "c2": -0.12}, "waterlines_too_few": False,
+            "survey_compare_suggests": "", "label_reason": "x", "date": "2026-09-29", "survey": "rtk",
+            "c0_label": "INDEPENDENT", "c0_without_setup_median_m": -0.33, "c0_paired_n": 12,
+            "c0_paired_unit": "frames", "c0_too_few": False}
+    rows_ = [dict(base, label="CIRCULAR"), dict(base, label="INDEPENDENT", date="2025-01-23", survey="jan",
+                                                 synthetic="fixture", c0_label=None)]
+    sp.summary_figure(rows_, d / "summary.png")
+    check((d / "summary.png").stat().st_size > 10000, "the summary figure draws CIRCULAR, C = 0 and SYNTHETIC rows")
+    # -- C = 0 texts: LOW by a share of the setup, not by the setup
+    cv0 = sp.setup_caveats({"surveys": []}, None, {}, {}, [{"coef": 0.0, "kind": "none"}], "live")
+    check("0.6-0.8 x the setup" in cv0[0] and "by about the setup" not in cv0[0],
+          "C = 0: lines read LOW by roughly 0.6-0.8 x the setup, not 'by about the setup'")
+
+
+def test_dem_two_days(d):
+    print("dem_from_contours.py: two camera-days that disagree are both kept, never a crash")
+    d = Path(d) / "dem2"
+    d.mkdir()
+    g = d / "ground.csv"
+    lines_ = ["source_file,camera,capture_time_utc,capture_epoch,easting_utm19,northing_utm19,"
+              "tide_elevation_navd88,beach_elevation_navd88"]
+    for day, dz in (("2025-03-06", 0.0), ("2025-03-07", 0.3)):        # the second day reads 0.3 m higher
+        for h in (14, 15, 16, 17):
+            t = datetime.fromisoformat(f"{day}T{h:02d}:00:00+00:00")
+            f = f"f{day}_{h}"
+            for i in range(40):
+                e, n = 420000.0 + 2.0 * (i % 8) + 1.0, 4638000.0 + 2.0 * (i // 8) + 1.0
+                z = 1.0 - 0.05 * (e - 420000.0) + dz + 0.01 * (h - 15)
+                lines_.append(f"{f},c2,{t:%Y-%m-%dT%H:%M:%S}+00:00,{int(t.timestamp())},{e:.2f},{n:.2f},{z:.3f},{z:.3f}")
+    g.write_text("\n".join(lines_) + "\n")
+    r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(d / "dem"),
+                        "--max-day-offset", "0.15", "--no-plot"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       universal_newlines=True, cwd=str(d))
+    out = r.stdout
+    check(r.returncode == 0 and (d / "dem_dem.asc").exists() and "REJECTED" not in out
+          and "kept: fewer than 3 testable days" in out and "every day kept" in out,
+          f"two camera-days 0.3 m apart with --max-day-offset 0.15: both kept, DEM built (exit {r.returncode})")
+
+
+def test_setup_share(d):
+    print("a C = 0 build carries no setup: the DEM's share, its REMINDER and the maps say so")
+    import daily_elevation_map as dm
+    import dem_from_contours as dc
+    d = Path(d) / "share"
+    d.mkdir()
+    hdr = ("source_file,camera,capture_time_utc,capture_epoch,pixel_column,pixel_row,easting_utm19,northing_utm19,"
+           "tide_elevation_navd88,setup_correction_m,beach_elevation_navd88")
+    res = {}
+    for name, setup in (("c0", "0.0"), ("c037", "0.21"), ("mixed", None)):
+        lines_ = [hdr]
+        for h in range(14, 18):
+            t = datetime(2026, 9, 29, h, tzinfo=timezone.utc)
+            s_ = setup if setup is not None else ("" if h == 14 else "0.21")   # one frame with no wave record
+            for i in range(40):
+                e, n = 420000.0 + 2.0 * (i % 8) + 1.0, 4638000.0 + 2.0 * (i // 8) + 1.0
+                z = 1.0 - 0.05 * (e - 420000.0) + 0.01 * (h - 15)
+                lines_.append(f"f{h},c2,{t:%Y-%m-%dT%H:%M:%S}+00:00,{int(t.timestamp())},{100 + i},{500 + h},"
+                              f"{e:.2f},{n:.2f},{z:.3f},{s_},{z + float(s_ or 0):.3f}")
+        g = d / f"{name}.csv"
+        g.write_text("\n".join(lines_) + "\n")
+        st = {}
+        quiet(dc.load_points, str(g), stats=st)
+        r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(d / name), "--no-plot"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(d))
+        res[name] = (st["setup_share"], r.stdout)
+    check(res["c0"][0] == 0.0 and "no setup in" in res["c0"][1] and "include the wave setup" not in res["c0"][1],
+          "C = 0 (setup_correction_m 0.0 on every row): setup share 0, the REMINDER says the DEM has no setup")
+    check(res["c037"][0] == 1.0 and "include the wave setup" in res["c037"][1] and "reads LOW" not in res["c037"][1],
+          "C > 0 on every row: share 1, the REMINDER says the elevations include the setup (not 'reads LOW')")
+    check(abs(res["mixed"][0] - 0.75) < 1e-9 and "on 75% of the points (the rest: no wave record" in res["mixed"][1],
+          "one frame of four with no wave record: share 0.75, said so")
+    check(not dm.carries_setup("0.0") and not dm.carries_setup("") and not dm.carries_setup(None)
+          and dm.carries_setup("0.2134"), "elevation maps: a 0.0 (C = 0) or blank setup is water level only")
+    import waterline_consistency as wc
+    su = {k: wc.read_points(str(d / f"{k}.csv"))["setup_used"] for k in ("c0", "c037", "mixed")}
+    check(not su["c0"].any() and su["c037"].all() and su["mixed"].sum() == 3 and su["mixed"].size == 4,
+          "consistency diagnostic: its 'wave setup' label follows the lines' setup (none at C = 0, 3 of 4 mixed)")
+
+
+def test_fit_setup_flat(d):
+    print("dem_from_contours.py --fit-setup offers a C only when it beats C = 0 and the C in use")
+    d = Path(d) / "fitflat"
+    d.mkdir()
+    out = {}
+    wide, same = (5.0, 7.0, 9.0, 11.0, 13.0, 15.0), (9.9, 9.95, 10.0, 10.05, 10.1, 10.0)
+    # (name, sqrt(Hs L0) per frame, planted C, --setup-coef-in-use, setup_correction_m carried with this C)
+    cases = (("sharp", wide, 0.04, ["--setup-coef-in-use", "0.02"], None),
+             ("in_use", wide, 0.037, ["--setup-coef-in-use", "0.037"], None),
+             ("zero", wide, 0.0, ["--setup-coef-in-use", "0.037"], None),
+             ("flat", same, 0.04, ["--setup-coef-in-use", "0.08"], None),
+             ("carried", wide, 0.04, [], 0.06))
+    for name, phis, c_true, extra, carried in cases:
+        lines_ = ["source_file,camera,capture_time_utc,capture_epoch,easting_utm19,northing_utm19,"
+                  "tide_elevation_navd88,offshore_hs_m,offshore_tp_s" + (",setup_correction_m" if carried else "")]
+        for k, phi in enumerate(phis):          # every frame's line at beach 1.0 m = tide + C sqrt(Hs L0)
+            t = datetime(2026, 9, 29, 12 + k, tzinfo=timezone.utc)
+            hs = (phi / 8.0) ** 2 / (9.81 / (2 * np.pi))
+            for i in range(40):
+                e, n = 420000.0 + 2.0 * (i % 8) + 1.0, 4638000.0 + 2.0 * (i // 8) + 1.0
+                lines_.append(f"f{k},c2,{t:%Y-%m-%dT%H:%M:%S}+00:00,{int(t.timestamp())},{e:.2f},{n:.2f},"
+                              f"{1.0 - c_true * phi:.4f},{hs:.4f},8.0" + (f",{carried * phi:.4f}" if carried else ""))
+        g = d / f"{name}.csv"
+        g.write_text("\n".join(lines_) + "\n")
+        r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(d / name), "--fit-setup",
+                            "--no-plot"] + extra, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           universal_newlines=True, cwd=str(d))
+        out[name] = r.stdout
+    check("FLAT" not in out["sharp"] and "--setup-coef 0.04" in out["sharp"]
+          and "Beats C = 0 and the C in use (0.02)" in out["sharp"],
+          "waves that differ, planted C = 0.04, C in use 0.02: a sharp minimum at 0.04 that beats both, 'To apply' "
+          "given")
+    check("Not distinguishable from the C in use (0.037)" in out["in_use"] and "To apply" not in out["in_use"],
+          "planted C = the C in use: within the near-best band, no other C offered")
+    check("Not distinguishable from C = 0" in out["zero"] and "To apply" not in out["zero"],
+          "planted C = 0: C = 0 within the near-best band, no C offered")
+    check("a FLAT minimum: this fit alone does not pin C" in out["flat"] and "To apply" not in out["flat"],
+          "nearly the same waves in every frame: the fit says FLAT and does not offer a C to apply")
+    check("these contours carry a setup (C ~0.06)" in out["carried"]
+          and "C in use 0.06 (the contours' setup_correction_m)" in out["carried"]
+          and "--setup-coef 0.04" in out["carried"],
+          "contours that carry a setup: said so, and the C they carry is the C in use compared with")
+
+
+def test_c_change(d):
+    print("another C in the same folder is refused without --replace, and the docs give each C its own root")
+    d = Path(d) / "cchange"
+    out = d / "root" / "2025-01-23"
+    out.mkdir(parents=True)
+    plan = {"date": "2025-01-23", "era": "adcp", "out": out, "cams": {"c1": {}, "c2": {}}}
+    a0 = SimpleNamespace(setup_coef=0.0, setup_fitted_to=None, output_root=str(d / "root"))
+    check(sp.setup_replace_note(plan, a0, sp.STEPS) is None, "nothing built yet: nothing to replace")
+    sp.write_stamp(out, "merge", {"x": 1}, extra={"setup": {
+        c: {"coef": sp.SETUP_COEF, "fit": sp.fit_sig(sp.setup_fit_info(sp.SETUP_COEF))} for c in ("c1", "c2")}})
+    txt = sp.setup_replace_note(plan, a0, sp.STEPS)
+    check(txt and txt.startswith(f"the C = {sp.SETUP_COEF:g} product in {out} would be REPLACED")
+          and f"--output-root {d / 'root_c0'} for C = 0" in txt and "detection runs again" in txt
+          and "--replace" in txt,
+          "C = 0 over a C = 0.037 build: 'would be REPLACED', its own root named, detection reruns, --replace to force")
+    # the root a C belongs in: the base root for the station's C, <base>_c<C> otherwise -- also from a _c root
+    r = Path("/mnt/I2Rgus_Data/survey_products")
+    check(sp.root_for_c(r, 0) == Path(str(r) + "_c0") and sp.root_for_c(r, sp.SETUP_COEF) == r
+          and sp.root_for_c(Path(str(r) + "_c0"), sp.SETUP_COEF) == r
+          and sp.root_for_c(Path(str(r) + "_c0"), 0.05) == Path(str(r) + "_c0.05")
+          and sp.root_for_c(Path(str(r) + "_c0.034"), 0) == Path(str(r) + "_c0"),
+          "root for a C: survey_products -> _c0; survey_products_c0 + the station's C -> survey_products (never "
+          "survey_products_c0_c0.037)")
+    out_c0 = d / "root_c0" / "2026-09-29"
+    out_c0.mkdir(parents=True)
+    sp.write_stamp(out_c0, "merge", {"x": 1}, extra={"setup": {
+        c: {"coef": 0.0, "fit": sp.fit_sig(sp.setup_fit_info(0.0))} for c in ("c1", "c2")}})
+    a37 = SimpleNamespace(setup_coef=sp.SETUP_COEF, setup_fitted_to=None, output_root=str(d / "root_c0"))
+    t37 = sp.setup_replace_note(dict(plan, date="2026-09-29", era="live", out=out_c0), a37, sp.STEPS)
+    check(t37 and f"--output-root {d / 'root'} for C = {sp.SETUP_COEF:g}" in t37 and "root_c0_c" not in t37
+          and "NOTE" not in t37,
+          "a refresh without --setup-coef over a C = 0 root: the station-C product's root is the base root")
+    # a root whose name does not say what it holds: the advice never points back at the root that refused
+    check(sp.root_for_c(r, sp.SETUP_COEF, [0.0]) == Path(str(r) + "_c0.037")
+          and sp.root_for_c(Path(str(r) + "_c0"), 0, [sp.SETUP_COEF]) == Path(str(r) + "_c0_c0")
+          and sp.root_for_c(Path(str(r) + "_c0"), sp.SETUP_COEF, [0.0]) == r
+          and sp.root_for_c(r, 0, [sp.SETUP_COEF]) == Path(str(r) + "_c0"),
+          "root for a C, given what the root holds: a root named for that C but holding another -> a root "
+          "beside it; a root named for what it holds -> the name rule as before")
+    out_p = d / "plain" / "2026-09-29"                       # no suffix, its first build used --setup-coef 0
+    out_p.mkdir(parents=True)
+    sp.write_stamp(out_p, "merge", {"x": 1}, extra={"setup": {
+        c: {"coef": 0.0, "fit": sp.fit_sig(sp.setup_fit_info(0.0))} for c in ("c1", "c2")}})
+    ap_ = SimpleNamespace(setup_coef=sp.SETUP_COEF, setup_fitted_to=None, output_root=str(d / "plain"))
+    tp = sp.setup_replace_note(dict(plan, date="2026-09-29", era="live", out=out_p), ap_, sp.STEPS)
+    check(tp and f"--output-root {d / 'plain_c0.037'} for C = {sp.SETUP_COEF:g}" in tp
+          and f"--output-root {d / 'plain'} for" not in tp
+          and f"the name of {d / 'plain'} gives it to C = {sp.SETUP_COEF:g}, but it holds the C = 0 product" in tp
+          and f"--setup-coef 0 --output-root {d / 'plain_c0'}), then rerun here with --replace" in tp,
+          "a root without suffix holding C = 0, default C: refused, a root beside it named (not the same root), "
+          "and what it holds and how to free it")
+    out_m = d / "misplaced_c0" / "2026-09-29"                # a ..._c0 root holding C = 0.037
+    out_m.mkdir(parents=True)
+    sp.write_stamp(out_m, "merge", {"x": 1}, extra={"setup": {
+        c: {"coef": sp.SETUP_COEF, "fit": sp.fit_sig(sp.setup_fit_info(sp.SETUP_COEF))} for c in ("c1", "c2")}})
+    am_ = SimpleNamespace(setup_coef=0.0, setup_fitted_to=None, output_root=str(d / "misplaced_c0"))
+    tm = sp.setup_replace_note(dict(plan, date="2026-09-29", era="live", out=out_m), am_, sp.STEPS)
+    check(tm and f"--output-root {d / 'misplaced_c0_c0'} for C = 0" in tm
+          and f"--output-root {d / 'misplaced_c0'} for" not in tm
+          and f"but it holds the C = {sp.SETUP_COEF:g} product" in tm
+          and f"--output-root {d / 'misplaced'}), then rerun here with --replace" in tm,
+          "a ..._c0 root holding C = 0.037, --setup-coef 0: a root beside it, and where its C = 0.037 belongs")
+    cav_m = sp.setup_caveats({"date": "2026-09-29", "out": out_m, "surveys": [
+        {"name": "rtk", "path": "2026-09-29_Marconi_Checkshots.csv", "survey_type": "points",
+         "survey_date": "2026-09-29"}]}, SimpleNamespace(survey_dirs=[str(HERE / "surveys")], setup_fitted_to=None),
+        {}, {}, [dict(sp.setup_fit_info(sp.SETUP_COEF), cameras=["c1", "c2"])], "live")
+    circ_m = [c for c in cav_m if c.startswith("rtk: CIRCULAR")]
+    check(circ_m and f"--setup-coef 0 --output-root {d / 'misplaced_c0_c0'}" in circ_m[0]
+          and f"but it holds the C = {sp.SETUP_COEF:g} product" in circ_m[0],
+          "the CIRCULAR caveat in a ..._c0 root holding C = 0.037: the C = 0 build goes beside it, not here")
+    check(sp.root_name_note(d / "plain", 0.0, [sp.SETUP_COEF]) == ""
+          and sp.root_name_note(d / "root_c0", sp.SETUP_COEF, [0.0]) == ""
+          and sp.root_name_note(d / "plain", sp.SETUP_COEF, [sp.SETUP_COEF]) == "",
+          "no note where the name gives the root to what it holds, or the root holds the C asked for")
+    # exit codes: refused is 5 (not 2, a disabled date), and ranks after failed in --all
+    check(sp.EXIT_CODES["refused"] == 5 and sp.worst_exit(["built", "refused", "busy", "partial"]) == 5
+          and sp.worst_exit(["refused", "failed"]) == 1, "refused: exit 5; --all: failed > refused > busy > partial")
+    # a usage error has its own code (6), never 2 (a disabled date) and never a date result's
+    codes = {k: v for k, v in sp.EXIT_CODES.items() if k != "usage"}
+    check(sp.EXIT_CODES["usage"] == 6 and 6 not in codes.values(), "usage error: exit 6, used by no date result")
+    for bad_args in (["--date", "2025-01-23", "--steps", "bogus"], ["--date", "2025-01-23", "--setup-coef", "-1"],
+                     ["--date", "2025-01-23", "--window", "2025-01-23", "2025-01-18"],
+                     ["--date", "2025-01-23", "--utc-hours", "x"], ["--no-such-option"]):
+        r_ = subprocess.run([sys.executable, str(HERE / "survey_products.py")] + bad_args
+                            + ["--output-root", str(d / "usage")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            universal_newlines=True, cwd=str(d))
+        check(r_.returncode == 6 and "NOTHING built" in r_.stdout and not (d / "usage").exists(),
+              f"usage error {' '.join(bad_args)}: exit 6, nothing written (rc {r_.returncode})")
+    r_ = subprocess.run([sys.executable, str(HERE / "survey_products.py"), "--date", "2025-01-23", "--setup-coef",
+                         "0.05", "--output-root", str(d / "unk")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        universal_newlines=True, cwd=str(d))
+    check(r_.returncode == 5 and "where was this C fitted" in r_.stdout and not (d / "unk").exists(),
+          f"a C of unknown origin is refused with exit 5 (not argparse's 2), nothing written (rc {r_.returncode})")
+    # a full rebuild with another window in the same root: says it replaces, names a recheck root
+    st = d / "root_w" / "2025-01-23"
+    st.mkdir(parents=True)
+    sp.write_stamp(st, "detect_c1", {"cmd": "detect_original_view.py --start-date 2025-01-18 --end-date 2025-01-23 "
+                                            "--utc-hours 13.5-18"})
+    pw = {"date": "2025-01-23", "era": "adcp", "out": st, "first": "2025-01-20", "last": "2025-01-23",
+          "cams": {"c1": {"first": "2025-01-20", "last": "2025-01-23", "hours": (13.5, 18.0),
+                          "hours_text": "13.5-18"}}}
+    aw = SimpleNamespace(output_root=str(d / "root_w"))
+    tw = sp.window_replace_note(pw, aw, sp.STEPS)
+    check(tw and tw.startswith(f"replacing the product in {st} built for another window/hours")
+          and "c1 window 2025-01-20 .. 2025-01-23 (built: 2025-01-18 .. 2025-01-23)" in tw
+          and str(d / "root_w_recheck") in tw and sp.window_replace_note(pw, aw, ("compare",)) is None,
+          "another window, all steps: 'replacing the product ... built for another window', a recheck root named; "
+          "--steps compare keeps the built window (no note)")
+    check(sp.setup_replace_note(dict(plan, era="live"), a0, sp.STEPS) and
+          "detection runs again" not in sp.setup_replace_note(dict(plan, era="live"), a0, sp.STEPS),
+          "... the live era has no detection to rerun")
+    same = SimpleNamespace(setup_coef=sp.SETUP_COEF, setup_fitted_to=None, output_root=str(d / "root"))
+    check(sp.setup_replace_note(plan, same, sp.STEPS) is None
+          and sp.setup_replace_note(plan, a0, ("compare",)) is None,
+          "the same C, or a run that does not rebuild the waterlines (--steps compare): no warning")
+    # the product README's advice and the fit recipe build another C in its own root
+    sw = sp.still_water_caveat(sp.SETUP_COEF, {}, "adcp")
+    check("OWN --output-root" in sw and "--setup-coef 0 --output-root <root>_c0" in sw and "curve is noisy" in sw
+          and "both lie outside its near-best band" in sw and "+0.006 to +0.034" in sw
+          and "-0.004 to +0.008" not in sw and "Otherwise keep the station's C" in sw,
+          "the fit-C recipe: each build in its own root; --fit-setup offers a C only outside its near-best band, "
+          "with the bands it printed")
+    cav = sp.setup_caveats({"date": "2026-09-29", "out": out, "surveys": [
+        {"name": "rtk", "path": "2026-09-29_Marconi_Checkshots.csv", "survey_type": "points",
+         "survey_date": "2026-09-29"}]}, SimpleNamespace(survey_dirs=[str(HERE / "surveys")], setup_fitted_to=None),
+        {}, {}, [dict(sp.setup_fit_info(sp.SETUP_COEF), cameras=["c1", "c2"])], "live",
+        prov={"comparisons": [{"name": "rtk", "current": True, "headline": {"waterlines": {"above_survey_floor": {
+            "frames_all": 16, "frames": 7, "median": -0.069, "margin_m": 0.1, "frames_below_floor": 6}}}}]})
+    circ = [c for c in cav if c.startswith("rtk: CIRCULAR")]
+    check(circ and "--setup-coef 0 --output-root" in circ[0] and "root_c0" in circ[0]
+          and "would replace this product" in circ[0],
+          "the CIRCULAR caveat: a C = 0 build, with the command and its own root")
+    under = [c for c in cav if c.startswith(f"C = {sp.SETUP_COEF} is not pinned")]
+    check(under and "The Oct 2026 recheck" in under[0] and "not this build's" in under[0]
+          and "outside this repository's code" in under[0]
+          and "THIS BUILD's own check of that kind (rtk" in under[0] and "median -0.069 m on 7 frames" in under[0]
+          and "6 of 16 frames below the lowest shot" in under[0] and "read this build's" in under[0],
+          "the recheck's fixed numbers say where they come from, next to this build's own floor statistic")
+
+
+def test_filter_leaves_nothing_old(d):
+    print("filter step: last build's report and diagnostic plots never sit next to this build's")
+    d = Path(d) / "filt"
+    w = d / "waterlines"
+    w.mkdir(parents=True)
+    # a camera the new run leaves out, a report and a filtered copy from last build, and their .tmp copies
+    old = [w / "consistency_c1.png", w / "consistency_c2.png", w / "consistency_report.csv",
+           w / "consistency_report.csv.tmp", w / "contour_points_ground_filtered.csv",
+           w / "contour_points_ground_filtered.csv.tmp"]
+    for f in old:
+        f.write_text("last build\n")
+    keep = w / "contour_points_ground.csv"
+    keep.write_text("camera,capture_epoch\n")              # no pixel columns: the filter exits 1
+    plan = {"out": d, "first": "2026-09-26", "last": "2026-10-02"}
+    state = {}
+    res, _ = quiet(sp.step_filter, plan, SimpleNamespace(force=False), state)
+    gone = [f.name for f in old if f.exists()]
+    check(res == "failed" and state.get("filter_failed") and not gone and keep.exists(),
+          f"a failed filter run leaves none of last build's report, plots or filtered file (left: {gone})")
+    for f in old[:3]:
+        f.write_text("last build\n")
+    sp.remove_filter_outputs(w, w / "contour_points_ground_filtered.csv")
+    check(not any(f.exists() for f in old) and keep.exists(),
+          "before the filter runs: the old report and every consistency_<cam>.png are removed, the input kept")
+
+
+def test_one_setup_coef():
+    print("one setup coefficient for the station and the products")
+    import historical_forcing as hf
+    cron = sp.cron_settings(sp.LIVE_CRON).get("SETUP_COEF")
+    check(cron is not None and abs(float(cron) - sp.SETUP_COEF) < 1e-12 and abs(hf.SETUP_COEF - sp.SETUP_COEF) < 1e-12,
+          f"waterline_timex_cron.sh SETUP_COEF {cron}, survey_products {sp.SETUP_COEF}, historical_forcing "
+          f"{hf.SETUP_COEF}: the same C")
+    check(any(abs(k - sp.SETUP_COEF) < 1e-12 for k in sp.SETUP_FITS),
+          "the station's C has a SETUP_FITS entry (where it was fitted: which comparisons are CIRCULAR)")
+
+
+def test_py38():
+    print("Python 3.8 syntax")
+    import ast
+    for f in ("survey_products.py", "detect_original_view.py", "test_survey_products.py", "estimate_eo_rotation.py",
+              "survey_compare.py"):
+        src = (HERE / f).read_text()
+        try:
+            ast.parse(src, feature_version=(3, 8))
+        except TypeError:                        # Python 3.7 has no feature_version
+            ast.parse(src)
+        check(True, f"{f} parses as Python 3.8")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap.add_argument("--keep", default=None, help="write the outputs here and keep them")
+    ap.add_argument("--survey-dirs", nargs="+", default=[],
+                    help="more folders to look for the real 2026-09-29 RTK file in (after the station's)")
+    args = ap.parse_args()
+    RTK_DIRS.extend(args.survey_dirs)
+    d = args.keep or tempfile.mkdtemp(prefix="survey_products_test_")
+    Path(d).mkdir(parents=True, exist_ok=True)
+    try:
+        test_setup_identical(d)
+        test_collect_photos(d)
+        test_labels(d)
+        test_setup_in_use(d)
+        test_merge_drops_no_setup(d)
+        test_keep_moved_days(d)
+        test_live_rows(d)
+        test_config(d)
+        test_frames_per_day(d)
+        test_caveats(d)
+        test_stamps(d)
+        test_round2(d)
+        test_fix1(d)
+        test_fix2(d)
+        test_fix3(d)
+        test_dem_two_days(d)
+        test_filter_leaves_nothing_old(d)
+        test_setup_share(d)
+        test_c_change(d)
+        test_fit_setup_flat(d)
+        test_one_setup_coef()
+        test_py38()
+    finally:
+        if not args.keep:
+            shutil.rmtree(d, ignore_errors=True)
+    print("all survey_products tests passed"
+          + (f" ({len(SKIPPED)} skipped: {', '.join(SKIPPED)}; the real RTK file was not found)" if SKIPPED else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

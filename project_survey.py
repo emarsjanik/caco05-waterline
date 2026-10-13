@@ -11,7 +11,9 @@ an amount anyone can see.
 
 WHY. Waterline comparisons against the 23 Jan 2025 lidar put the Jan
 2025 lines 15-30 m off, and a pointing fit to the lidar wanted the same
-~22 deg pan change for both cameras. This checks a pointing on the photo
+~22 deg pan change for both cameras (the fit keeps the camera position; the
+23 Jan 2025 calibration has both cameras ~5.7 m away and turned ~15 deg,
+see calibration/calibration_history.csv). This checks a pointing on the photo
 itself, with no waterline detection or water level involved. Drawn on
 photos either side of 24 Jan 2025 it showed the cameras were re-aimed
 that day: the 23 Jan lidar fits the lidar-fitted pointing on 22 Jan and

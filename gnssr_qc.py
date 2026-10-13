@@ -224,13 +224,21 @@ def run_qc(ep, lv, reference=None, waves=None):
                     mark(i, FAIL, "reference")
 
     ok = flags < FAIL
+    # Neighbours are looked up in the sorted epochs: only readings within
+    # SPIKE_WINDOW_S can be one. The GNSS-R record now holds every year,
+    # and testing each reading against all the others grew as n^2 (4 runs
+    # an hour). The +1 s margin only widens the candidates; the window test
+    # is the exact one and the neighbours keep their order, so every flag
+    # is the same as before.
+    order = np.argsort(ep, kind="stable")
+    lo = np.searchsorted(ep[order], ep - (SPIKE_WINDOW_S + 1.0), side="left")
+    hi = np.searchsorted(ep[order], ep + (SPIKE_WINDOW_S + 1.0), side="right")
     for i in range(n):
         if not ok[i]:
             continue
-        near = ok & (np.abs(ep - ep[i]) <= SPIKE_WINDOW_S)
-        near[i] = False
-        before, after = near & (ep < ep[i]), near & (ep > ep[i])
-        if before.sum() < 2 or after.sum() < 2:
+        cand = np.sort(order[lo[i]:hi[i]])
+        near = cand[ok[cand] & (np.abs(ep[cand] - ep[i]) <= SPIKE_WINDOW_S) & (cand != i)]
+        if (ep[near] < ep[i]).sum() < 2 or (ep[near] > ep[i]).sum() < 2:
             continue                                   # not evaluated at edges and gaps
         tt = (ep[near] - ep[i]) / 3600.0
         coef = np.polyfit(tt, lv[near], 2)

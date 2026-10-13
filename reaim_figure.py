@@ -26,8 +26,12 @@ construction. The page says so; the independent test is the other photo.
 
 FOR CACO05, JAN 2025. The 23 Jan 2025 lidar, photos of 22 Jan (CACO03)
 and 25 Jan (CACO04); yellow = the 2025-02-19 calibration's aim (each
-photo's horizon-fitted pointing), cyan = the pointing fitted to the
-23 Jan lidar (~22 deg more pan):
+photo's horizon-fitted pointing), cyan = the station's own calibration of
+the old setup, made on the day of the lidar (CACO03_c2_20250123_EO.yaml:
+camera ~5.8 m away, turned ~15 deg). It was not fitted to the lidar, so
+both panels are independent tests. (The lidar-fitted pointing,
+CACO05_c2_2025-01-18_to_2025-01-23_lidar_EO.yaml, ~22 deg of pan with the
+position kept, agrees with it to ~1 m cross-shore.)
 
     python3 reaim_figure.py --camera c2 \\
         --survey /mnt/I2Rgus_Data/Chelsea_calibration/2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif \\
@@ -35,7 +39,7 @@ photo's horizon-fitted pointing), cyan = the pointing fitted to the
         --before <...Jan.22_17_00_00.GMT.2025.CACO03.c2.timex.jpg> \\
         --after  <...Jan.25_17_00_00.GMT.2025.CACO04.c2.timex.jpg> \\
         --calibration-eo CACO05_c2_2025-01-08_to_2025-01-23_EO.yaml CACO05_c2_2025-01-24_to_2025-02-15_EO.yaml \\
-        --fitted-eo CACO05_c2_2025-01-18_to_2025-01-23_lidar_EO.yaml
+        --fitted-eo CACO03_c2_20250123_EO.yaml
 
 --levels takes elevations in m NAVD88 and the word "water" (the photo's
 measured water level; default: water 3). The water level comes from the
@@ -68,6 +72,7 @@ COLOURS = ["#ffd400", "#00e5ff"]
 STYLES = ["-", (0, (6, 3)), (0, (1.5, 2.5)), (0, (8, 3, 1.5, 3))]
 EPOCH_RE = re.compile(r"^(\d{9,11})\.")
 STATION_RE = re.compile(r"\.(CACO\d+)\.c\d\.", re.I)
+STATION_CAL_RE = re.compile(r"^(CACO\d+)_c\d_(\d{8})_EO(?:-CV)?\.yaml$")
 FITTED_RE = re.compile(r"fit_eo_to_survey\.py:.*fitted to (\S+) using \d+ waterline frames "
                        r"(\d{4}-\d{2}-\d{2}) to (\d{4}-\d{2}-\d{2})")
 
@@ -124,6 +129,10 @@ def describe(files, cam, survey_name):
     if all(Path(f).name == cal or n.startswith(f"horizon_check.py: {cal}")
            for f, n in zip(files, notes)):
         return "2025-02-19 calibration's aim", None
+    setups = [STATION_CAL_RE.match(Path(f).name) for f in files]
+    if all(setups) and len({m.groups() for m in setups}) == 1:
+        st, d = setups[0].groups()
+        return f"{st} calibration of {d[:4]}-{d[4:6]}-{d[6:]}", None
     return " / ".join(dict.fromkeys(Path(f).name for f in files)), None
 
 

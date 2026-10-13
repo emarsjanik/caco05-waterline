@@ -66,6 +66,7 @@ REQUIRED_SCRIPTS = [
     "extract_elevation_contours.py",
     "georectify.py",
     "dem_from_contours.py",
+    "dem_figure.py",
     "daily_elevation_map.py",
 ]
 
@@ -497,7 +498,7 @@ def main():
     for name in made_map:
         say(f"    {name:<28} waterlines drawn on a photo, coloured by elevation")
     if made_dem:
-        say(f"    {'dem_dem.png':<28} DEM and repeatability, side by side")
+        say(f"    {'dem_dem.png':<28} DEM page: elevation, repeatability, profiles")
         say(f"    {'dem_dem.asc':<28} elevation grid (opens in QGIS)")
         say(f"    {'dem_spread.asc':<28} repeatability grid")
         say(f"    {'dem_count.asc':<28} samples per cell")

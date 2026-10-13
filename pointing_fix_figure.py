@@ -52,6 +52,15 @@ needed:
         --survey /mnt/I2Rgus_Data/Chelsea_calibration/2025005FA_Marconi_Mar_YSMP_Lidar_DSM_25cm.tif \\
         --after-eo calibration/CACO05_c2_2025-03-01_to_2025-03-10_lidar_EO.yaml --original-view
 
+    # independent: the station's own calibration of the old setup (calibration/README.md)
+    python3 pointing_fix_figure.py /mnt/I2Rgus_Data/Chelsea_calibration/original_view_c2/contour_points_ground.csv \\
+        --survey /mnt/I2Rgus_Data/Chelsea_calibration/2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif \\
+        --before-eo calibration/CACO05_c2_2025-01-08_to_2025-01-23_EO.yaml \\
+        --after-eo calibration/CACO03_c2_20250123_EO.yaml --original-view \\
+        --camera c2 --start-date 2025-01-18 --end-date 2025-01-23
+    The second pointing is then named 'CACO03 calibration of 2025-01-23' and the
+    page says it was not fitted to the survey; a camera move is reported too.
+
 --before-eo overrides the starting pointing; --resampled-with names the
 pointing the frames were redrawn with, if the contour file was made after
 chelsea_setups.csv already pointed at the fitted EO (then the lines were
@@ -179,7 +188,7 @@ def binned(dist, r):
 
 
 def figure(out_png, survey, cam_xy, P0, P1, r0, r1, dist, F, best_frame, s0, s1, b0, b1, sens,
-           title, subtitle, label):
+           title, subtitle, label, after_label="fitted pointing"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -232,7 +241,7 @@ def figure(out_png, survey, cam_xy, P0, P1, r0, r1, dist, F, best_frame, s0, s1,
     ax.plot(*cam_xy, marker="^", ms=10, color=INK, ls="none")
     from matplotlib.lines import Line2D
     handles = [Line2D([], [], color=BEFORE, marker="o", ls="none", ms=7, label="old pointing"),
-               Line2D([], [], color=AFTER, marker="o", ls="none", ms=7, label="fitted pointing"),
+               Line2D([], [], color=AFTER, marker="o", ls="none", ms=7, label=after_label),
                Line2D([], [], color=INK, marker="^", ls="none", ms=8, label="camera")]
     ax.set_xlim(min(e_lo, cam_xy[0] - 10), max(e_hi, cam_xy[0] + 10))
     ax.set_ylim(min(n_lo, cam_xy[1] - 10), max(n_hi, cam_xy[1] + 10))
@@ -248,7 +257,7 @@ def figure(out_png, survey, cam_xy, P0, P1, r0, r1, dist, F, best_frame, s0, s1,
     # --- B: residual distribution -------------------------------------------------------------
     ax = fig.add_subplot(gs[0, 1])
     bins = np.arange(-3.0, 3.0001, 0.1)
-    for r, s, col, name in ((r0, s0, BEFORE, "old pointing"), (r1, s1, AFTER, "fitted pointing")):
+    for r, s, col, name in ((r0, s0, BEFORE, "old pointing"), (r1, s1, AFTER, after_label)):
         x = np.clip(r[np.isfinite(r)], -3.0, 3.0)
         if len(x):
             ax.hist(x, bins=bins, histtype="step", lw=2, color=col,
@@ -266,7 +275,7 @@ def figure(out_png, survey, cam_xy, P0, P1, r0, r1, dist, F, best_frame, s0, s1,
     # --- C: by distance -----------------------------------------------------------------------
     ax = fig.add_subplot(gs[1, 1])
     centres = np.array([(a + b) / 2 for a, b in BANDS])
-    for rows, col, name, dx in ((b0, BEFORE, "old pointing", -6), (b1, AFTER, "fitted pointing", 6)):
+    for rows, col, name, dx in ((b0, BEFORE, "old pointing", -6), (b1, AFTER, after_label, 6)):
         n = np.array([x[0] for x in rows]); med = np.array([x[1] for x in rows])
         lo = np.array([x[2] for x in rows]); hi = np.array([x[3] for x in rows])
         good = np.isfinite(med)
@@ -295,7 +304,7 @@ def figure(out_png, survey, cam_xy, P0, P1, r0, r1, dist, F, best_frame, s0, s1,
 
     fig.suptitle(title, x=0.05, y=0.985, ha="left", fontsize=14, color=INK, weight="bold")
     fig.text(0.05, 0.94, subtitle, ha="left", va="top", fontsize=9.5, color=MUTED)
-    fig.text(0.05, 0.885, label, ha="left", va="top", fontsize=9.5,
+    fig.text(0.05, 0.868, label, ha="left", va="top", fontsize=9.5,
              color=INK, bbox=dict(boxstyle="round,pad=0.35", fc="#f3f2ec", ec=GRID))
     fig.savefig(out_png)
     plt.close(fig)
@@ -305,7 +314,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("contours", help="waterline points (process_chelsea.py / detect_original_view.py CSV)")
     ap.add_argument("--survey", required=True, help="lidar DSM (.tif or .asc), NAVD88")
-    ap.add_argument("--after-eo", required=True, help="the fitted pointing (fit_eo_to_survey.py output)")
+    ap.add_argument("--after-eo", required=True,
+                    help="the new pointing: a fit_eo_to_survey.py output, or a station calibration "
+                         "(e.g. CACO03_c2_20250123_EO.yaml)")
+    ap.add_argument("--after-label", default=None,
+                    help="what to call it on the page (default: 'fitted pointing' for a survey fit, "
+                         "'<setup> calibration of <date>' for a station calibration)")
     ap.add_argument("--before-eo", default=None,
                     help="the old pointing (default: the one named in --after-eo's note)")
     ap.add_argument("--resampled-with", default=None,
@@ -323,7 +337,12 @@ def main():
         sys.exit(f"{args.after_eo}: not found")
     note = parse_fit_note(eo_note(after_path))
     m = re.search(r"CACO05_(c\d)_(\d{4}-\d{2}-\d{2})_to_(\d{4}-\d{2}-\d{2})", after_path.name)
-    cam = args.camera or (m.group(1) if m else None)
+    mc = re.search(r"_(c\d)_", after_path.name)
+    cam = args.camera or (mc.group(1) if mc else None)
+    cal = re.match(r"^(CACO\d+)_c\d_(\d{4})(\d{2})(\d{2})_EO(?:-CV)?\.yaml$", after_path.name)
+    after_label = args.after_label or (
+        "fitted pointing" if note.get("survey") else
+        f"{cal.group(1)} calibration of {cal.group(2)}-{cal.group(3)}-{cal.group(4)}" if cal else after_path.stem)
     if cam not in ("c1", "c2"):
         sys.exit("--camera c1 or c2 (it could not be read from the EO file name)")
     d1 = args.start_date or (m.group(2) if m else note.get("dates", (None, None))[0])
@@ -373,23 +392,26 @@ def main():
     survey_name = Path(args.survey).name
     fitted_to_this = note.get("survey") == survey_name or survey_name in eo_note(after_path)
     if fitted_to_this:
-        label = ("CONSISTENCY CHECK, NOT AN INDEPENDENT ACCURACY NUMBER: the fitted pointing was fitted to "
+        label = (f"CONSISTENCY CHECK, NOT AN INDEPENDENT ACCURACY NUMBER: the {after_label} was fitted to "
                  f"this survey ({survey_name}).\nIt shows the offset is explained by the camera pointing. "
                  "For independent accuracy, compare against a survey the pointing was not fitted to.")
     else:
-        label = (f"INDEPENDENT CHECK: the fitted pointing was not fitted to {survey_name}"
-                 + (f" (it was fitted to {note['survey']})." if note.get("survey") else "."))
+        label = (f"INDEPENDENT CHECK: the {after_label} was not fitted to {survey_name}"
+                 + (f" (it was fitted to {note['survey']})." if note.get("survey") else
+                    " (a station calibration from its own ground control)." if cal else "."))
     title = f"Camera {cam} pointing correction, {d1} to {d2}: waterlines against the lidar"
     subtitle = (f"Same {len(Z)} waterline points from {len(names)} photos, placed with the old pointing "
-                f"({before_path.name}) and the fitted one ({after_path.name}).\n"
+                f"({before_path.name}) and the {after_label} ({after_path.name}).\n"
                 f"Old: azimuth {a0[0]:.2f}, tilt {a0[1]:.2f}, roll {a0[2]:.2f} deg.   "
-                f"Fitted: azimuth {a1[0]:.2f}, tilt {a1[1]:.2f}, roll {a1[2]:.2f} deg.   "
-                f"Change: azimuth {dA[0]:+.2f}, tilt {dA[1]:+.2f}, roll {dA[2]:+.2f} deg; "
+                f"{after_label[0].upper() + after_label[1:]}: azimuth {a1[0]:.2f}, tilt {a1[1]:.2f}, roll {a1[2]:.2f} deg.\n"
+                f"Change: azimuth {dA[0]:+.2f}, tilt {dA[1]:+.2f}, roll {dA[2]:+.2f} deg"
+                + (f", camera moved {np.hypot(*(eo_after[:2] - eo_before[:2])):.1f} m"
+                   if np.hypot(*(eo_after[:2] - eo_before[:2])) > 0.05 else "") + "; "
                 f"the lines move median {np.nanmedian(moved):.1f} m (p90 {np.nanpercentile(moved, 90):.1f} m).")
 
     stem = args.output or f"pointing_fix_{cam}_{d1}_to_{d2}"
     figure(stem + ".png", survey, (eo_after[0], eo_after[1]), (E0, N0), (E1, N1), r0, r1, dist, F, best,
-           s0, s1, b0, b1, sens, title, subtitle, label)
+           s0, s1, b0, b1, sens, title, subtitle, label, after_label=after_label)
 
     with open(stem + ".csv", "w", newline="") as f:
         w = csv.writer(f)
@@ -404,7 +426,7 @@ def main():
     print(title)
     print(subtitle)
     print(label)
-    for name, s in (("old pointing   ", s0), ("fitted pointing", s1)):
+    for name, s in (("old pointing", s0), (after_label, s1)):
         print(f"  {name}: median {s['median']:+.3f} m, NMAD {s['nmad']:.3f} m, RMSE {s['rmse']:.3f} m, "
               f"{s['on_pct']:.0f}% of points on the survey ({s['n']})")
     print(f"wrote {stem}.png and {stem}.csv")

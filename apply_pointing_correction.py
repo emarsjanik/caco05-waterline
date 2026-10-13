@@ -5,9 +5,18 @@ Carry A Survey-Fitted Pointing Correction To Other Periods Of The Same Aim
 fit_eo_to_survey.py solved one period's pointing against a lidar survey
 (Jan 18-23 2025 against the 23 Jan lidar): ~22 deg of pan on both
 cameras. That is not an error in the 2025-02-19 calibration. The cameras
-were re-aimed on 24 Jan 2025, the day after the lidar flew (station ID
+were re-set on 24 Jan 2025, the day after the lidar flew (station ID
 CACO03 -> CACO04 that evening; horizon_check.py sees new tilt and roll
-from that day), and the calibration was made on 19 Feb with the NEW aim.
+from that day), and the calibration was made on 19 Feb for the NEW setup.
+The station's own calibrations (calibration/calibration_history.csv) show
+what changed: CACO03 on 23 Jan 2025 had both cameras ~5.7 m from the
+CACO04 position and turned ~15 deg further; the fit, which keeps the
+camera position, made up for the move with the extra pan. Where a period
+has a calibration of its own, use it (point its chelsea_setups.csv row at
+the file) rather than a carried correction: Jan 18-23 2025 ->
+CACO03_<cam>_20250123_EO.yaml. Note also that the CACO03 cameras turned
+~13 deg between their 23 Oct 2024 and 23 Jan 2025 calibrations, so a
+correction measured in January does not hold for October.
 Every period before 24 Jan inherited a calibration of a different aim,
 and horizon_check.py, which only changes tilt and roll, cannot see a pan.
 Evidence: the 23 Jan lidar drawn on 22 Jan and 25 Jan photos
