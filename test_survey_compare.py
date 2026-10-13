@@ -18,8 +18,15 @@ fitted to the survey, an envelope placed with it, a GCP calibration
 dated the survey day and a long time gap.
 
 HOW. Every test writes into a temporary folder (--keep DIR to look at
-the outputs, figures included) and asserts on the returned headline and
-on the files.
+the outputs, figures included: a new folder inside DIR) and asserts on the
+returned headline and on the files.
+
+STATION FILES. None are read: the temporary folder is the current folder
+for the run, the station's survey folders (where survey_compare.py looks
+for the shots a setup coefficient was fitted to) are pointed at folders
+of the test's own, and every calibration file a test uses is copied next
+to its EO. The outcome is the same on the station NUC as in a clean
+checkout.
 """
 
 import os
@@ -296,6 +303,7 @@ def test_points(d):
     # the GCPs the calibration was solved from: PARTLY-CIRCULAR
     eo = Path(d) / "CACO03_c1_20250123_EO.yaml"
     shutil.copy(HERE / "calibration" / "CACO03_c1_20250123_EO.yaml", eo)
+    shutil.copy(HERE / "calibration" / "CACO03_c1_20240801_IO.yaml", Path(d) / "CACO03_c1_20240801_IO.yaml")
     h4, _ = quiet(sc.compare, str(dem_p), str(cirn), "points", "INDEPENDENT", "gcp test",
                   name="synth_gcp", output_dir=str(out), plot=False, camera_eo={"c1": eo})
     check(h4["suggested_label"] == "PARTLY-CIRCULAR" and h4["downgrade_warning"],
@@ -623,10 +631,43 @@ def test_setup_fit_label(d):
         check(f and f[0][0] == "CIRCULAR" and "carries one" in f[0][1], "... and one that does: CIRCULAR")
         other = shots(d / "other_day.csv", 9)
         check(not mine(dem_p, survey=other, date_="2026-10-15"), "other shots of another day: nothing")
+        # a re-export of the fitted shots (+4 mm east, another name, no date anywhere) is recognised by its
+        # coordinates when the fitted shots are in a station survey folder (here the test's own), and only then:
+        # never through a copy in the current folder, and the same from wherever the command is run
+        lines = rtk.read_text().splitlines()
+        def reexport(folder):
+            folder.mkdir(parents=True)
+            out = folder / "reexport.csv"
+            rows_ = list(csv.reader(lines))
+            for r in rows_[1:]:
+                r[3] = f"{float(r[3]) + 0.004:.3f}"
+            with open(out, "w", newline="") as f:
+                csv.writer(f).writerows(rows_)
+            return out
+        start = os.getcwd()
+        os.chdir(str(d / "bare"))
+        try:
+            shutil.copy(str(rtk), "fitted_shots.csv")        # a copy in the current folder: not the station's
+            f = mine(dem_p, survey=reexport(d / "rex_cwd"), date_=None)
+        finally:
+            os.chdir(start)
+        check(not f, "a re-export of the fitted shots, those shots only in the current folder: not recognised")
+        shutil.copy(str(rtk), str(Path(sp.DEFAULT_SURVEY_DIRS[0]) / "fitted_shots.csv"))
+        f = mine(dem_p, survey=reexport(d / "rex_here"), date_=None)
+        check(f and f[0][0] == "CIRCULAR" and "re-exported" in f[0][1],
+              "... the fitted shots in a station survey folder: CIRCULAR by the re-export's coordinates")
+        os.chdir(str(d / "rex_cwd"))
+        try:
+            f = mine(dem_p, survey=reexport(d / "rex_elsewhere"), date_=None)
+        finally:
+            os.chdir(start)
+        check(f and f[0][0] == "CIRCULAR" and "re-exported" in f[0][1], "... and the same run from another folder")
         h, _ = quiet(sc.compare, str(dem_p), str(rtk), "points", "INDEPENDENT", "claimed", name="sf",
                      output_dir=str(d / "out"), survey_date="2026-09-29", plot=False)
-        check(h["suggested_label"] == "CIRCULAR" and h["downgrade_warning"],
-              "survey_compare.py itself: INDEPENDENT passed for the fitted shots -> DOWNGRADE WARNING, CIRCULAR")
+        mine_ = [x for x in h["findings"] if x["suggested"] == "CIRCULAR" and "C = 0.0123" in x["text"]]
+        check(h["suggested_label"] == "CIRCULAR" and h["downgrade_warning"] and mine_,
+              "survey_compare.py itself: INDEPENDENT passed for the fitted shots -> DOWNGRADE WARNING, CIRCULAR "
+              "(by the test's fit C = 0.0123)")
     finally:
         del sp.SETUP_FITS[fake]
     check("--label CIRCULAR" in sc.__doc__ and "2026-09-27_rtk" not in sc.__doc__
@@ -638,7 +679,7 @@ def test_py38():
     print("Python 3.8 syntax")
     import ast
     for f in ("survey_compare.py", "test_survey_compare.py"):
-        src = (HERE / f).read_text()
+        src = (HERE / f).read_text(encoding="utf-8")
         try:
             ast.parse(src, feature_version=(3, 8))
         except TypeError:                        # Python 3.7 has no feature_version
@@ -648,10 +689,21 @@ def test_py38():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--keep", default=None, help="write the outputs here and keep them")
+    ap.add_argument("--keep", default=None, help="keep the outputs, in a new folder inside this one")
     args = ap.parse_args()
-    d = args.keep or tempfile.mkdtemp(prefix="survey_compare_test_")
-    Path(d).mkdir(parents=True, exist_ok=True)
+    if args.keep:                       # a new folder each run: never the files an earlier run left
+        Path(args.keep).mkdir(parents=True, exist_ok=True)
+    d = os.path.realpath(tempfile.mkdtemp(prefix="survey_compare_test_", dir=args.keep))
+    # the station's folders, where the setup fit's shots are looked for: the test's own, for the run
+    import survey_products as sp
+    station = (sp.CHELSEA, sp.WATERLINE, sp.DEFAULT_SURVEY_DIRS)
+    sp.CHELSEA, sp.WATERLINE = Path(d) / "station_chelsea", Path(d) / "station_waterline"
+    sp.DEFAULT_SURVEY_DIRS = [str(sp.CHELSEA), str(sp.WATERLINE)]
+    for x in sp.DEFAULT_SURVEY_DIRS:
+        Path(x).mkdir()
+    start = os.getcwd()
+    os.chdir(d)                         # a file name never finds a file of the folder the test was started from
+    print(f"test folder: {d} (the current folder during the run)")
     try:
         test_block_median(d)
         test_dem_at_points(d)
@@ -665,6 +717,8 @@ def main():
         test_setup_fit_label(d)
         test_py38()
     finally:
+        os.chdir(start)
+        sp.CHELSEA, sp.WATERLINE, sp.DEFAULT_SURVEY_DIRS = station
         if not args.keep:
             shutil.rmtree(d, ignore_errors=True)
     print("all survey_compare tests passed")
