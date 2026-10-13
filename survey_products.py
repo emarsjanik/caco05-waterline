@@ -615,9 +615,13 @@ def days_between(first, last):
     return [(a + timedelta(days=i)).isoformat() for i in range((b - a).days + 1)]
 
 
-def resolve_file(text, dirs):
-    """A path as given, else the first of `dirs` holding that file name; globs allowed.
-    -> list of Paths (empty when nothing matches)."""
+def resolve_file(text, dirs, typed=False):
+    """A file the tables name -> list of Paths (empty when nothing matches); globs allowed.
+    A bare file name (no folder in it) is looked for by that name in `dirs` only, never in the
+    folder the command is run from: what a build finds must not depend on where it was started
+    (a stray copy there would win over the station's file). A path with a folder (absolute, or
+    relative such as ./x.csv) is taken as given when it exists, else by its name in `dirs`.
+    typed=True: a file named on the command line, looked for as given (the current folder) first."""
     if not text:
         return []
     p = Path(text)
@@ -627,7 +631,8 @@ def resolve_file(text, dirs):
             if not hits:
                 hits = sorted(Path(d).glob(text))
         return hits
-    if p.exists():
+    bare = "/" not in text and os.sep not in text
+    if (typed or not bare) and p.exists():
         return [p]
     for d in dirs:
         q = Path(d) / p.name
@@ -2653,8 +2658,9 @@ def missing_survey_message(s, plan, args, note):
     disabled = plan.get("forced_disabled") or not any(c["enabled"] for c in plan["cams"].values())
     if s.get("path"):
         # a file was named: say exactly which, and where it was looked for
-        expect = (f"the file {s['path']} named in {args.surveys} (looked for as given, then by its name in "
-                  f"{', '.join(args.survey_dirs)}; --survey-dirs adds folders), or correct its path there")
+        expect = (f"the file {s['path']} named in {args.surveys} (looked for by its name in "
+                  f"{', '.join(args.survey_dirs)}, never in the folder the command runs from; a path with a "
+                  f"folder in it as given first; --survey-dirs adds folders), or correct its path there")
     elif s["survey_type"] == "points":
         expect = (f"{CHELSEA}/{s.get('survey_date') or plan['date']}_Marconi_Extrinsic_Targets_<cam>_xyz.csv "
                   f"(no header: num,E,N,Z in UTM 19N / NAVD88, like "
@@ -2709,7 +2715,7 @@ def setup_fit_info(coef, args=None):
         return {"coef": coef, "kind": "declared", "survey_stem": None,
                 "how": f"{given[5:].strip()} (declared with --setup-fitted-to: fitted to no survey)"}
     if given:
-        hits = resolve_file(given, getattr(args, "survey_dirs", []) or [])
+        hits = resolve_file(given, getattr(args, "survey_dirs", []) or [], typed=True)
         p = hits[0] if hits else None
         return {"coef": coef, "kind": "declared", "survey_stem": Path(given).stem, "survey_name": Path(given).name,
                 "survey_sha256": file_sha(p) if p else None,
@@ -3512,12 +3518,20 @@ def tilt_sensitivity(plan, cam, dtilt, droll):
 
 
 def survey_path_for(s, plan, args):
-    """The survey file of row s as found (or its name when it is not here): for the label checks."""
+    """The survey file of row s as found (or its name when it is not here): for the label checks.
+    A file not found keeps its name for the name rule, placed in the first survey folder (where it
+    was looked for and is not), so no check reads a file of that name in the current folder."""
+    dirs = getattr(args, "survey_dirs", None)
     try:
-        hits = resolve_survey(s, plan, args)[0] if getattr(args, "survey_dirs", None) is not None else []
+        hits = resolve_survey(s, plan, args)[0] if dirs is not None else []
     except Exception:
         hits = []
-    return hits[0] if hits else Path(s.get("path") or s["name"])
+    if hits:
+        return hits[0]
+    name = s.get("path") or s["name"]
+    if dirs and "/" not in name and os.sep not in name and not any(ch in name for ch in "*?["):
+        return Path(dirs[0]) / name
+    return Path(name)
 
 
 def prior_checks(plan):
@@ -4183,7 +4197,10 @@ def storm_caveats(plan, args, prov, first_used, last_used):
                 continue
             try:
                 from survey_compare import read_points, is_transect
-                q = read_points(survey_path_for(s, plan, args))
+                hits = resolve_survey(s, plan, args)[0] if getattr(args, "survey_dirs", None) is not None else []
+                if not hits:                     # not here: nothing to read (never a file of its name elsewhere)
+                    continue
+                q = read_points(hits[0])
                 tr = np.array([is_transect(x) for x in q["desc"]], bool)
                 n = q["N"][tr] if tr.sum() >= 3 else q["N"]
                 if len(n) and n.min() <= hi and n.max() >= lo:

@@ -422,6 +422,46 @@ def test_round2(d):
         skip("re-exported-RTK check")
 
 
+def test_cwd_never_searched(d):
+    print("file names in the tables: looked for in the survey folders, never in the current folder")
+    d = Path(d) / "cwd"
+    run_dir, sdir, empty = d / "run_here", d / "surveys", d / "empty"
+    for x in (run_dir, sdir, empty):
+        x.mkdir(parents=True)
+    start = os.getcwd()
+    os.chdir(str(run_dir))
+    try:
+        Path("stray.csv").write_text("x\n")
+        (sdir / "found.csv").write_text("x\n")
+        check(sp.resolve_file("stray.csv", [str(empty)]) == []
+              and sp.resolve_file("found.csv", [str(empty), str(sdir)]) == [sdir / "found.csv"],
+              "a bare file name: found in the folders given, not in the current folder")
+        check(sp.resolve_file("./stray.csv", [str(empty)]) == [Path("stray.csv")]
+              and sp.resolve_file("stray.csv", [str(empty)], typed=True) == [Path("stray.csv")],
+              "a path with a folder (./stray.csv), or a name typed on the command line: as given")
+        # a survey whose file sits only in the current folder: NOT FOUND (a missing part), its label goes by its
+        # name, and the storm caveat reads nothing of it; once in a survey folder it is read
+        row = {"name": "rtk", "survey_type": "points", "survey_date": "2026-09-29", "label": "INDEPENDENT", "why": "",
+               "path": "probe_shots.csv"}
+        Path("probe_shots.csv").write_text("Name,Easting,Northing,Elevation,Description\n" + "".join(
+            f"{k},420100.0,{4638380.0 + 30 * k:.1f},1.0,Transect\n" for k in range(5)))
+        a = SimpleNamespace(survey_dirs=[str(empty)])
+        miss = sp.missing_parts({"out": d, "date": "2026-09-29", "cams": {}, "surveys": [row]}, {}, a)
+        found = sp.survey_path_for(row, None, a)
+        pl = {"date": "2026-09-29", "era": "live", "first": "2026-09-26", "last": "2026-10-02", "out": d, "cams": {},
+              "surveys": [row]}
+        cav = sp.storm_caveats(pl, a, {}, "2026-09-26", "2026-10-02")
+        check(any(m.startswith("rtk: survey file") and "NOT FOUND" in m for m in miss) and not found.is_file()
+              and found.name == "probe_shots.csv" and len(cav) == 1 and "overlap that loss" not in cav[0],
+              "a survey file only in the current folder: NOT FOUND, labelled by its name, the storm caveat reads nothing")
+        shutil.copy("probe_shots.csv", str(sdir / "probe_shots.csv"))
+        cav = sp.storm_caveats(pl, SimpleNamespace(survey_dirs=[str(sdir)]), {}, "2026-09-26", "2026-10-02")
+        check(len(cav) == 1 and "The rtk transects span N 4638380-4638500: they overlap that loss." in cav[0],
+              "... once in a survey folder: found, and the storm caveat reads it")
+    finally:
+        os.chdir(start)
+
+
 def test_setup_in_use(d):
     print("the label and provenance use the C the waterlines were built with")
     d = Path(d) / "inuse"
@@ -1414,6 +1454,7 @@ def main():
         test_caveats(d)
         test_stamps(d)
         test_round2(d)
+        test_cwd_never_searched(d)
         test_fix1(d)
         test_fix2(d)
         test_fix3(d)

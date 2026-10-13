@@ -95,10 +95,13 @@ provenance.json. The detection checks first that the disk has room for it
 | `era` | where the water level and waves come from: `adcp` (Signature 1000, Dec 2024 - Mar 2025), `chatham` (no ADCP: NOAA Chatham 8447435 transferred to Marconi + WIS/NDBC waves converted to the ADCP's Hs; same code path, `historical_forcing.py`), `live` (the station's own archive: GNSS-R levels and the cron's waves) |
 | `notes` | why the row is as it is; printed when a date is refused |
 
-File names (`eo_file`, `envelope_survey`, survey `path`) are looked for as
-given, then by name in `--survey-dirs` (default: the Chelsea_calibration
-folder, the waterline folder and its calibration folder, the repository's
-`calibration/` and `surveys/`).
+File names (`envelope_survey`, survey `path`) are looked for by name in
+`--survey-dirs` (default: the Chelsea_calibration folder, the waterline
+folder and its calibration folder, the repository's `calibration/` and
+`surveys/`), and `eo_file` in `calibration/` (`--calibration`): never in the
+folder the command is run from, so a build finds the same files wherever it
+is started. A path with a folder in it (absolute, or e.g. `./x.csv`) is
+taken as given when it exists, else by its name in those folders.
 
 ### The dates now
 

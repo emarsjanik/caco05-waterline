@@ -1030,11 +1030,14 @@ def dem_setup(dem_path, dem_info=None):
     return None, None, "no provenance.json or info file next to the DEM says which C built it"
 
 
-def setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info=None):
+def setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info=None, dirs=()):
     """
     A survey that a setup coefficient was fitted to (survey_products.SETUP_FITS, matched as
     survey_products.py does: by content, file name, the shots' coordinates, then type and date)
     cannot test a DEM built with that C: CIRCULAR, unless the DEM says it carries no setup.
+    The fit's own shots (for the coordinates) are looked for in the survey's folder, `dirs` and the
+    station's survey folders (survey_products.DEFAULT_SURVEY_DIRS), as survey_products.py looks:
+    never in the current folder, so the label does not depend on where the command is run.
     -> findings as audit_label's.
     """
     try:
@@ -1044,8 +1047,9 @@ def setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info
     found = []
     built, has_setup, src = dem_setup(dem_path, dem_info)
     # where the fit's own shots may be, for the coordinate match (a re-export changes the bytes)
-    look = argparse.Namespace(survey_dirs=[str(Path(survey_path).resolve().parent), str(HERE / "surveys"),
-                                           str(HERE / "calibration")])
+    look = argparse.Namespace(survey_dirs=list(dict.fromkeys(
+        [str(Path(survey_path).resolve().parent)] + [str(d) for d in dirs]
+        + [str(d) for d in sp.DEFAULT_SURVEY_DIRS])))
     for coef, fit in sorted(sp.SETUP_FITS.items()):
         try:
             how, why = sp.survey_matches_fit(dict(fit, kind="known"),
@@ -1166,7 +1170,7 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
                     f"{k} = {v}" for k, v in env[:3]), "note"))
         break
     if setup_fits:
-        found += setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info)
+        found += setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info, dirs=dirs)
     return found
 
 
@@ -2645,7 +2649,9 @@ def main():
                          f"(default {TRANSECT_MIN_POINTS})")
     ap.add_argument("--eo-dirs", nargs="+", default=None,
                     help="folders where the files an EO's notes name are looked for (the fit a carried "
-                         "*_corr_EO.yaml came from); default: the EO's own folder and calibration/")
+                         "*_corr_EO.yaml came from), and the shots a setup coefficient was fitted to; default: "
+                         "the EO's own folder and calibration/ (the shots: the survey's folder and the station's "
+                         "survey folders)")
     ap.add_argument("--epsg", type=int, default=NOMINAL_EPSG,
                     help="horizontal EPSG written into the difference GeoTIFF (default 32619)")
     ap.add_argument("--synthetic", default=None, metavar="NOTE",
