@@ -884,8 +884,7 @@ def align(src, adcp, max_gap_s=1800.0):
 
 def fit_wave_sources(adcp, sources, coef):
     """For every source with an ADCP overlap: the Hs and Tp models, their week-out CV,
-    and the setup error they imply with coef (> 0: at 0 every model would tie; build_forcing
-    passes the station's C for a C = 0 build). Returns {source: {...}} with fitted models."""
+    and the setup error they imply. Returns {source: {...}} with fitted models."""
     out = {}
     for sname, src in sources.items():
         s, a = align(src, adcp)
@@ -1284,10 +1283,6 @@ def write_report(path, args_echo, wl_info, wv_info, fits, wl_df, wv_df, cur_line
     for line in cur_lines:
         P(line)
     P("")
-    judge = wv_info.get("models_judged_with_coef", wv_info["setup_coef"])
-    if fits and judge != wv_info["setup_coef"]:
-        P(f"This build applies no setup (C = {wv_info['setup_coef']}): the conversions below are chosen, and their")
-        P(f"setup errors given, with the station's C = {judge}, so its waves are those of a C = {judge} build.")
     for n, f in fits.items():
         if "hs_models" not in f:
             P(f"{n:<6}: {f.get('note')} ({f.get('overlap_hours')} h)")
@@ -1305,7 +1300,7 @@ def write_report(path, args_echo, wl_info, wv_info, fits, wl_df, wv_df, cur_line
         if rw:
             P(f"   unconverted (own Hs and Tp): setup bias {rw['bias_median_m']:+.3f} m (median), RMS "
               f"{rw['rms_m']:.3f} m against the ADCP's setup")
-        P(f"   -> uses Hs {f['hs_best']}, Tp {f['tp_best']}: setup (C={judge}) CV RMS "
+        P(f"   -> uses Hs {f['hs_best']}, Tp {f['tp_best']}: setup (C={wv_info['setup_coef']}) CV RMS "
           f"{sc['rms_m']:.3f} m, bias {sc['bias_m']:+.3f} m (ADCP setup median {f['setup_median_adcp_m']:.3f} m)")
     c = wv_info.get("combination", {})
     if c.get("sources"):
@@ -1655,13 +1650,7 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
     if adcp_w is None and sources:
         say("WARNING", "no ADCP wave record (sig1000_waves_ALL.csv): the hindcast/buoy cannot be "
                        "converted to the setup coefficient's Hs currency, so they are not used")
-    # The conversions (Hs model, Tp model, the Tp order of the combination) are chosen by the setup
-    # error they would cause. With C = 0 every candidate causes none, and min() would take whichever
-    # is listed first: a C = 0 build would then write other (worse converted) Hs and Tp than the
-    # station's build of the same period, and its DEM's Hs filter and wave caveats would differ. So
-    # they are judged with the station's C whenever this build applies no setup.
-    judge_coef = setup_coef or SETUP_COEF
-    fits = fit_wave_sources(adcp_w, sources, judge_coef) if adcp_w is not None else {}
+    fits = fit_wave_sources(adcp_w, sources, setup_coef) if adcp_w is not None else {}
     for n, f in fits.items():
         if "setup_cv" in f:
             say(f"  {n}", f"Hs {f['hs_best']} CV RMS {f['hs_models'][f['hs_best']]['rms_m']:.3f} m, Tp "
@@ -1672,7 +1661,7 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
         s, a = align(sources["wis"], adcp_w)
         fits["wis"]["_setup_bias"] = float(np.nanmedian(setup_m(a["hs"], a["tp"], setup_coef)
                                                         - setup_m(a["hs"], s["tp"], setup_coef)))
-    combo = combine_sources(fits, judge_coef)
+    combo = combine_sources(fits, setup_coef)
     wv_df, wv_uncov = waves(t0, t1, adcp_w, sources, fits, combo, max_gap_s)
     swr = gnssr_setup_share(setup_coef, gnssr_spline, gauge_archive, waves_archive) if setup_coef else None
     if swr and swr.get("quantified"):
@@ -1686,8 +1675,7 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
         say("  combined", f"Hs {'+'.join(combo['sources'])} CV RMS {combo['hs_blend_cv']['rms_m']:.3f} m, "
             f"Tp from {combo['tp_order'][0]} -> setup CV RMS {combo['setup_blend_cv']['rms_m']:.3f} m, bias "
             f"{combo['setup_blend_cv']['bias_m']:+.3f} m ({combo['common_hours']} h shared)")
-    wv_info = {"setup_coef": setup_coef, "models_judged_with_coef": judge_coef,
-               "sources_used": {k: int(v) for k, v in wv_df["source"].value_counts().items()},
+    wv_info = {"setup_coef": setup_coef, "sources_used": {k: int(v) for k, v in wv_df["source"].value_counts().items()},
                "daytime_rows_by_source": count_daytime(wv_df, t0, t1),
                "source_labels": {k: readable_source(k) for k in dict.fromkeys(wv_df["source"])},
                "uncovered_spans": wv_uncov, "combination": combo,

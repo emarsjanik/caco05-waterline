@@ -37,9 +37,15 @@ python3 dem_figure.py --self-test                # ends "SELF-TEST PASSED"
 python3 daily_elevation_map.py --self-test       # ends "SELF-TEST PASSED"
 python3 test_survey_products.py                  # ends "all survey_products tests passed" (see below)
 python3 test_survey_compare.py                   # ends "all survey_compare tests passed"
-python3 test_historical_forcing.py               # ends "76/76 checks passed"
+python3 test_historical_forcing.py               # ends "74/74 checks passed"
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
+
+What a survey-date build reruns after this pull: a step reruns when a script in its signature
+changes. This PR changes none of the forcing, pointing, detection, filter, DEM or photo-map
+scripts; it changes `survey_compare.py`, so the next build of a date already built skips
+the forcing, pointing, detection, filter, DEM and photo maps, and reruns only its plan-view
+map and its comparisons (a minute or two per date).
 
 `view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file
 is unchanged by this PR, and the survey products use only its `ground_to_pixel`, which
@@ -576,11 +582,14 @@ only if it holds over several weeks of different waves; then change it in all th
   the direction-aware form (r 0.84, CV RMS 0.330 m), which wins; WIS Tp scaled by 1.061.
   NDBC 44013: `0.827 x Hs + 0.151 m` or direction-aware (r 0.87). Combined setup CV RMS
   0.079 m [REAL], 534 h of December overlap for WIS. Not used by the two enabled 2025 dates
-  (ADCP waves throughout). Source: `historical_forcing.py`, `forcing_report.txt`. The
-  conversions are chosen by the setup error they cause; a `--setup-coef 0` build (no setup,
-  so no error to choose by) chooses them with the station's C = 0.037, so its waves are those
-  of the C = 0.037 build ([SYNTH] `test_historical_forcing.py`, `C = 0: the same wave
-  conversions and rows`).
+  (ADCP waves throughout). Source: `historical_forcing.py`, `forcing_report.txt`.
+* Known limit, not fixed in this PR: the conversions are chosen by the setup error they cause,
+  so a `--setup-coef 0` build of hours without the ADCP (no setup, no error to choose by)
+  takes the first conversion listed (Hs linear, Tp raw), not those of the C = 0.037 build.
+  Only a C = 0 build of a `chatham`-era date is concerned, and every such date is switched off;
+  the fix (judge them with the station's C) belongs with the change that switches one on, as
+  it changes `historical_forcing.py`, and so reruns the forcing and the detection (~50 min per
+  two-camera week) of every date already built.
 
 ### 4.6 Camera pointing (calibrations) and the sea-horizon check
 
