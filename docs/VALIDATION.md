@@ -366,7 +366,26 @@ there (no pointing check, no photo maps); with two real 7 Oct photos standing in
 line).
 
 **[NUC]** The station has the 26-28 Sep rows (the storm's last day included) and the photos,
-so the numbers there will differ from the sandbox's; the product should be `complete`.
+so the numbers there will differ from the sandbox's; the product should be `complete`. After a
+pull that changes the pointing rule, the same command reruns the pointing step (its version
+number changed) and every step whose inputs that changes; each camera's table is followed by
+each day's why.
+
+**[NUC] Which days the first NUC build left out, and its README caveats (fixed Oct 2026).** Its
+pointing step left out c1 26-28 Sep and c2 26-27 Sep, c2's on a misread horizon: under the rule
+of section 4.6 c2 26-27 Sep are kept and c1 26-28 Sep are left out with their measured reason
+(UNCONFIRMED, DIFFERENT POINTING, UNCONFIRMED). Its README also said things the DEM did not do.
+The STORM caveat said "the frames of 2026-09-28 ... are gridded with the rest", but the DEM gridded
+29 Sep - 2 Oct only (c1 28 Sep was left out by the pointing step, every c2 28 Sep frame by the
+DEM's wave filter, Hs > 1.5 m); the three HIGH WAVES caveats (27 Sep 11:30, 27 Sep 20:30,
+28 Sep 20:00) counted every waterline ("95 after", "4 during") and said the DEM grids "both
+sides together", where it gridded 86 frames, all after; and the note on the per-day rows was
+printed four times. Both caveats now read the DEM's own record (`dem/<date>_info.json`: its
+window, wave filter and rejected camera-days, against the waterline file it read): the STORM
+caveat names the tail days the DEM grids and, for each day it does not, why; the HIGH WAVES
+caveat counts the frames it gridded and those it left out, before, between, during and after;
+spans less than 48 h apart are one caveat; the note is printed once ([SYNTH]
+`test_survey_products.py`, test_storm_and_wave_caveats, on a copy of that window's layout).
 
 ```
 python3 survey_products.py --date 2026-09-29        # ~1-2 min (52-79 s here): no detection, reads the station's contour file
@@ -647,8 +666,91 @@ only if it holds over several weeks of different waves; then change it in all th
     fixture build reports it like any other offset, under its SYNTHETIC FIXTURE banner, and it
     says nothing about the real cameras.
   * Sensitivity: 0.1 deg of tilt moves a line ~6-9 m at 250-350 m range, ~0.13-0.17 m of DEM.
+* **Which days the pointing check leaves out (the rule of Oct 2026).** The NUC's first
+  2026-09-29 build left out c2 26-27 Sep as DIFFERENT POINTING because the horizon read a
+  2.6-3.3 deg change of tilt, although 73 and 375 matched features measured a turn of at most
+  0.07 deg. On the real 17:00 UTC frames of 26-28 Sep (sent from the NUC; for c2 26/27 Sep the
+  very frames its feature match used) no horizon is visible: the edge picked is the top of a foam
+  or fog band 187-233 px below the predicted horizon, near the end of the +/-250 px search, and the
+  tilt + roll fit explains it to 1.0-7.5 px (on CACO05 the horizon is inside the frame on 9 of the
+  22 columns only, so any smooth edge fits) [REAL]. The step now decides each day from both
+  methods (`survey_products.py` pointing_verdicts, its constants and their comments). The numbers
+  below come from a scratch investigation (not code here) on the only real frames there are: the
+  six storm frames, 7 Oct 2026 16:00 c1/c2 and CACO03 c1 21 Jan 2025 15:00, exact rotations of
+  them, planted rotations and synthetic weather [REAL frames, SYNTH changes, SCRATCH analysis].
+  * **Matched features decide, both ways, at 40 inliers** (pointing_check.py's own minimum; the
+    trust threshold measured): on real pairs with a known answer the rotation erred by <= 0.063 deg
+    (69 results at >= 40 inliers); on 402 planted 0.05-2.5 deg rotations by <= 0.053 deg (a frame
+    against itself) and <= 0.101 deg (against another day; 40-59 inliers: <= 0.10 deg on 45
+    trials); no matched trial under 0.45 deg was called MOVED (0 of 229), every one of 0.55 deg or
+    more was (157 of 157). Below 40 the errors grow (20-39 inliers: up to 0.18 deg; 10-19: 0.58;
+    under 10: anything). A turn over 0.5 deg is a DIFFERENT POINTING; 0.1 deg or less keeps the
+    day ('matches') whatever the horizon reads, and the why gives both readings. An earlier
+    proposal to require 60 inliers was not taken: it was chosen to make c1 27 Sep (48 inliers)
+    weak, but that day's -1.21 deg of pan is real: tracked dune landmarks and a more sensitive
+    match read -1.20 to -1.25 deg on 26-28 Sep, and the camera was back by 29 Sep.
+  * **Window dirt** is the one known way a confident match is wrong (drops at the same pixels in
+    both frames match at zero turn): a near-zero winner with a runner-up consensus of 40+ inliers
+    turned more than 0.3 deg from it is 'ambiguous' and decides nothing (planted heavy drops: 17 of
+    120 trials read 0.00 deg on 388-1573 inliers, each with a runner-up of 64-561 at the true turn;
+    without dirt the runner-up had <= 35 inliers on 551 trials and the real pairs).
+  * **A horizon reading counts only on a clear edge**: prominence (its gradient over the median of
+    its search) >= 12, the strongest rival edge 20+ px away <= 0.65 of it, sky over sea on >= 2/3
+    of the columns, and > 50 px from the end of the search. The six storm frames read 2.2-6.7 /
+    0.57-0.96 / 0.00-0.22 (26-27 Sep) / 15-62 px (26-27 Sep) and each fails two tests or more; the
+    real clear frames 61-85 / 0.06-0.24 / >= 0.89 / 174-214 px; exact rotations of the clear frames
+    by up to 2 deg of tilt or roll pass (not clear: c2 tilted -2 deg, whose horizon leaves the top of
+    the frame, and +3 deg of tilt on c2 and the Jan c1, where it reaches the end of the search;
+    matched features measure such turns). On synthetic weather put on the clear frames, the tests
+    remove 135 of 206 false jumps; a horizon-like fog front can still pass, which is why matched
+    features overrule the horizon. The fit residual (FIT_OK_PX 8 px) is not tightened: the NUC's
+    storm days fitted to 1.6-5.0 px against 0.2-0.4 px on its clear days, but single storm frames
+    fit to 0.97 px and the fixture's rendered horizon to 1.4 px.
+  * **Misread days are not clear days.** Only clear readings (less any that matched features
+    contradict, while they are a minority) make the window's median tilt/roll, its offset against
+    the calibration and the README's 'N day(s) with a clear horizon'. NUC c1: 4 clear days, +0.93/
+    +0.24 deg, 42.5 px (it was 7 days, +0.96/+0.23, the three storm misreads included); c2: 4 days,
+    +0.54/-0.68 deg, 32.5 px (was 6, +0.56/-0.64). A window with more misread days than clear ones
+    no longer flags its clear days. With no clear day at all the readings are compared with each
+    other only and no offset against the calibration is reported.
+  * **Without matched features** a jump of tilt or roll over 0.3 deg from the window is a
+    DIFFERENT POINTING only on a clear edge that two or more days share (real re-aims persist; the
+    storm misreads changed by 0.6-3.1 deg from day to day); otherwise the day is **UNCONFIRMED**:
+    a change one method reported that nothing could confirm or rule out. UNCONFIRMED days are left
+    out like DIFFERENT POINTING ones (`--keep-moved-days` keeps both); only measured DIFFERENT
+    POINTING days count towards 'most days differ from the reference'.
+  * **The NUC's 2026-09-29 table under the rule** (`test_survey_products.py`,
+    test_pointing_verdicts, on the NUC's rows with the edge numbers of the real frames): c1 26 and
+    28 Sep UNCONFIRMED (no matched features, a misread horizon), 27 Sep DIFFERENT POINTING (the
+    features' -1.21 deg of pan on 48 inliers; the horizon's +4.82 deg named a misread), 29 Sep -
+    2 Oct matches; c2 every day matches (26/27 Sep kept, the horizon overruled; 28 Sep: its fit
+    failed, 393 features decide). Left out: c1 26-28 Sep, as before, with the measured reason; c2
+    none (was 26-27 Sep).
+  * **The six real frames end to end** (a sandbox build of 2026-09-29 with them and a 7 Oct frame
+    standing in for 29 Sep as its reference): c1 26-28 Sep UNCONFIRMED (2-9 inliers against 7 Oct; the
+    NUC's 29 Sep reference gave 48 on 27 Sep), c2 26 Sep UNCONFIRMED (25 inliers against 7 Oct; 73
+    against the NUC's 29 Sep), c2 27/28 Sep matches (102 / 69 inliers, <= 0.08 deg).
+  * [NUC] With c2 26-27 Sep kept, their live rows reach the detection, and the DEM unless its wave
+    filter (offshore Hs > 1.5 m) drops them: the 2026-09-29 numbers of section 3.3 may move.
+  * [SYNTH] The sandbox fixture's rendered horizon sits near the limits: Jan c1 and Mar c2 pass
+    (prominence 14.9-22, rival 0.49-0.62), Jan c2 does not (prominence 6.5-8.0), so the fixture's
+    Jan c2 days now read 'unchecked' (were 'horizon only') and its rendered offset is no longer
+    reported as one. Nothing is left out on either fixture date, as before.
+  * **Sandbox rebuilds with this rule** (the commands of section 3, fresh output roots; outputs
+    outside this repository): 2025-01-23 and 2025-03-06 [SYNTH] and 2026-09-29 with and without the
+    7 Oct stand-in photos [REAL rows] give the same left-out days (none) and the same headline
+    numbers as section 3 (every DEM - survey and waterlines - survey value). What differs: the
+    pointing CSVs carry the edge and runner-up columns; Jan c2 'unchecked' (above); a day with no
+    second photo says so, not 'features unmatched'; the HIGH WAVES caveats count the frames the DEM
+    gridded (Jan: 40 before, 60 after, the 20 during left out by its wave filter, where it said "the
+    DEM grids the frames of both sides together: ... 20 during"; Mar: 36 after, not 40, and 4 left
+    out); the 2026-09-29 STORM caveat says the DEM grids no frame of 26-28 Sep (the sandbox rows
+    start 29 Sep). The pointing step took 29 s (Jan) and 39 s (Mar, on a loaded machine) against
+    41 and 26 s before: the second consensus and the edge numbers cost little.
 * **Re-check.** Each product README, `sea horizon vs the calibration` and the KNOWN CAVEATS
-  pointing block; `pointing/pointing_<cam>.csv`.
+  pointing block; `pointing/pointing_<cam>.csv` (with the edge numbers `horizon_edge`,
+  `horizon_prominence`, `horizon_rival`, `horizon_sky_above`, `horizon_to_limit_px`, and the
+  match's `runner_up_inliers`, `runner_up_d`); the step prints each day's why under its table.
 
 ### 4.7 Detector edge position
 
@@ -731,6 +833,12 @@ copy of today's pictures made before the pull (section 1).
 * **The ADCP-era still-water share s.** Measured by `historical_forcing.py` on the NUC.
 * **The 2026 pointing.** A sea-horizon (or GCP) check of the CACO05 20251113 calibration would
   tell lens model from pointing.
+* **The pointing rule on real winter photos.** Its thresholds rest on six storm frames of one
+  storm, three real clear frames and their rotations (section 4.6). The real Jan and Mar 2025
+  horizons and feature matches are on the NUC only: each build's `pointing/pointing_<cam>.csv`
+  gives the edge numbers and inliers per day. The NUC's edge numbers are 3-frame medians, where
+  the storm values above are single 17:00 frames. Why c1 turned ~1.2 deg on 26-28 Sep 2026 and
+  was back by 29 Sep (wind load, or a slip reset) is not known.
 * **The detector's rate on the NUC10i3.** Measured here at 20-25 s per photo on a 2.8 GHz
   Xeon; the NUC prints its own rate.
 * **Reviews.** The waterline work had three review rounds (the last: all lenses "ship"), the

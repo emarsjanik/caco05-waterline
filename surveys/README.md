@@ -382,10 +382,16 @@ in the configuration with no product yet are listed as such.
 
 Beach change: besides the storms measured on the station (the 25-26 Sep 2026
 storm), each README looks at the date's own forcing: a span of the window with
-offshore Hs >= 2.0 m gets a HIGH WAVES caveat counting the frames before,
-during and after it (by capture time), where the survey lies, and the days
-the DEM left out entirely for their waves (2025-01-23: Hs 2.9 m on 20 Jan,
-between the early frames and the lidar flight). The per-day rows of
+offshore Hs >= 2.0 m gets a HIGH WAVES caveat counting the frames the DEM
+gridded before, between, during and after it (by capture time; from the DEM's
+own record, `dem/<date>_info.json`: its window, wave filter and rejected
+camera-days), the frames it left out and why, and where the survey lies
+(2025-01-23: Hs 2.9 m on 20 Jan, between the early frames and the lidar
+flight); spans less than 48 h apart are one caveat. The STORM caveat says the
+same of the storm's tail before the survey: which days the DEM grids, and for
+each day it does not, why (left out by the pointing check, every frame taken
+by its wave filter or day test, or no waterline). The note on the per-day
+rows below is given once for all of them. The per-day rows of
 waterlines - survey show whether the lines moved, but a step or trend there
 may be change of the beach OR a method error that depends on the conditions:
 on the static synthetic fixture (every day rendered from one lidar) the
@@ -403,7 +409,32 @@ Pointing: each camera's sea horizon over the window is compared with where
 its calibration puts it; the constant tilt/roll is printed for every camera
 and, above 0.05 deg, given with its DEM sensitivity per range band (0.1 deg
 of tilt is ~0.13-0.17 m of DEM at 250-350 m). Only day-to-day CHANGES of
-pointing (`horizon_check.py`, 12 px) leave days out. The predicted horizon
+pointing leave days out, decided per day from two measurements
+(`survey_products.py` pointing_verdicts; the thresholds and where they were
+measured: docs/VALIDATION.md 4.6):
+
+* features matched against the reference frame on 40 or more points
+  (pointing_check.py) are good to ~0.1 deg: a turn over 0.5 deg is a
+  DIFFERENT POINTING, one of 0.1-0.5 deg a small change (DIFFERENT POINTING
+  when a clear horizon jumps too); a turn of 0.1 deg or less keeps the day whatever the
+  horizon reads (the why gives both numbers), unless a second match
+  consensus of 40+ points turned elsewhere (dirt on the housing window
+  matches at zero turn: 'ambiguous');
+* a sea-horizon reading counts only on a CLEAR edge: one sharp edge (12x the
+  median gradient of its +/-250 px search or more, no rival over 0.65 of it),
+  bright sky over darker sea on 2/3 of the columns or more, and more than
+  50 px from the end of the search. In a storm the strongest edge is the top
+  of a foam or fog band (26-27 Sep 2026: 187-233 px below the horizon, fitted
+  to 1-7.5 px), and the fit residual cannot tell. A misread never enters the
+  window's median, offset or clear-day count;
+* without matched features, a jump of tilt or roll over 0.3 deg from the
+  window's median is a DIFFERENT POINTING only on a clear edge two or more
+  days share; otherwise the day is UNCONFIRMED.
+
+DIFFERENT POINTING and UNCONFIRMED days are both left out of the detection
+(`--keep-moved-days` keeps them); the printed table, the CSV
+(`pointing/pointing_<cam>.csv`: the edge numbers, the inliers, the
+runner-up) and the README give each day's verdict and why. The predicted horizon
 (`estimate_eo_rotation.horizon_rows`) holds the full Earth-curvature dip with
 standard refraction (k = 0.13): a perfectly calibrated camera reads 0.00 deg
 (+/-0.01 for k from 0 to 0.25). Until Oct 2026 it held half the dip, which
