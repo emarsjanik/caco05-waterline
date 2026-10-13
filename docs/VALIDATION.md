@@ -78,7 +78,10 @@ What was asked for in the tables (23 Oct 2024 and 19 Mar 2025 switched off, the 
 repository, the Oct GCPs PARTLY-CIRCULAR, every row with all its columns) is checked on the
 tables as the repository shipped them with the test: read with git as of the last commit of
 `test_survey_products.py`, not of HEAD, so the owner's edits never reach it, even when they
-are committed on the station to pull past them.
+are committed on the station to pull past them. A commit that changes the shipped tables
+therefore changes the test's expectations with them; when `surveys/*.csv` at HEAD differ from
+the shipped ones, the test says so (`(surveys/... changed in N later commit(s) ...)`): those
+later tables are then checked only for what the product needs (above).
 
 The checks of a pointing fit that is not on the computer (a correction carried from a lidar
 fit that cannot be found must be CIRCULAR as a rule) name that fit after the test's own

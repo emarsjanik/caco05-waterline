@@ -51,8 +51,10 @@ What was asked for in the tables (the dates switched off, windows, the 29 Sep
 RTK row and its text, envelopes, calibrations in the repository, the Oct GCP
 label) is checked on the tables as the repository shipped them with this
 test (git, as of the last commit of this file), so the owner's edits, even
-committed on the station, never reach it. A check that cannot run is
-skipped, counted and said why.
+committed on the station, never reach it; when the tables at HEAD differ
+from those, it says so (a commit that changes the shipped tables changes
+this test with them). A check that cannot run is skipped, counted and said
+why.
 """
 
 import os
@@ -789,28 +791,92 @@ def test_table_commas(d):
                                                             if reason else "read whole, no override"))
 
 
-def git_out(*words):
-    """git run on the code's checkout -> (stdout text, "") or (None, why not)."""
+def git_out(*words, repo=None):
+    """git run on the code's checkout (or `repo`) -> (stdout text, "") or (None, why not)."""
+    repo = HERE if repo is None else repo
     try:
-        r = subprocess.run(["git", "-C", str(HERE)] + list(words), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        r = subprocess.run(["git", "-C", str(repo)] + list(words), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            timeout=20)
     except (OSError, subprocess.SubprocessError) as exc:
         return None, f"git cannot be run here ({exc})"
     if r.returncode != 0:
         err = r.stderr.decode("utf-8", "replace").strip().splitlines()
-        return None, f"git cannot read a checkout at {HERE}" + (f" ({err[0][:120]})" if err else "")
+        return None, f"git cannot read a checkout at {repo}" + (f" ({err[0][:120]})" if err else "")
     return r.stdout.decode("utf-8", "replace"), ""
 
 
-def shipped_commit():
+def shipped_commit(repo=None):
     """The commit the repository shipped this test in: the last one that changed test_survey_products.py.
     -> (commit, "") or (None, why not). The tables are read as of that commit, not of HEAD: on the station
     the owner edits them, and may commit the edits to pull past them; neither reaches the checks of what
     was asked for (a merge that brings upstream code in leaves this file as upstream wrote it)."""
-    out, why = git_out("log", "-1", "--format=%H", "--", "test_survey_products.py")
+    out, why = git_out("log", "-1", "--format=%H", "--", "test_survey_products.py", repo=repo)
     if out is None or not out.strip():
-        return None, why or f"git has no commit of test_survey_products.py in a checkout at {HERE}"
+        return None, why or f"git has no commit of test_survey_products.py in a checkout at {repo or HERE}"
     return out.strip(), ""
+
+
+TABLES = ("surveys/survey_dates.csv", "surveys/surveys.csv")
+
+
+def tables_changed_after(commit, repo=None):
+    """The tables at HEAD against those of `commit` -> (names that differ, the later commits that changed
+    them, newest first), or (None, why not). A commit that changes the shipped tables without this test leaves
+    test_shipped_tables checking the older ones: it says so."""
+    names, why = git_out("diff", "--name-only", commit, "HEAD", "--", *TABLES, repo=repo)
+    if names is None:
+        return None, why
+    later, why = git_out("log", "--format=%h", f"{commit}..HEAD", "--", *TABLES, repo=repo)
+    if later is None:
+        return None, why
+    return sorted(names.split()), later.split()
+
+
+def test_tables_changed_note(d):
+    """tables_changed_after on a git repository of the test's own (the code's checkout is not touched): a
+    commit that changes only the tables after the test's last commit is found, and one that changes the
+    test with them is not."""
+    print("the shipped-tables checks say when the tables changed after this test (a git repository of its own)")
+    repo = Path(d) / "tables_git"
+    (repo / "surveys").mkdir(parents=True)
+    home = Path(d) / "tables_git_home"            # git's own settings: none of the computer's (hooks, signing)
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(HOME=str(home), XDG_CONFIG_HOME=str(home), GIT_CONFIG_NOSYSTEM="1")
+
+    def commit(msg, **files):
+        for name, text in files.items():
+            (repo / name).write_text(text)
+        for words in (["add", "-A"], ["-c", "user.name=test", "-c", "user.email=test@invalid", "-c",
+                                      "commit.gpgsign=false", "commit", "-q", "-m", msg]):
+            subprocess.run(["git", "-C", str(repo)] + words, env=env, check=True, timeout=20,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        subprocess.run(["git", "init", "-q", str(repo)], env=env, check=True, timeout=20,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        commit("shipped", **{"test_survey_products.py": "v1\n", "surveys/survey_dates.csv": "a\n",
+                             "surveys/surveys.csv": "b\n"})
+        shipped = shipped_commit(repo)[0]
+        commit("code only", **{"survey_products.py": "x\n"})
+        same = tables_changed_after(shipped, repo)
+        commit("tables only", **{"surveys/survey_dates.csv": "a2\n"})
+        later = tables_changed_after(shipped, repo)
+        commit("test with them", **{"test_survey_products.py": "v2\n", "surveys/surveys.csv": "b2\n"})
+        shipped2 = shipped_commit(repo)[0]
+        after = tables_changed_after(shipped2, repo)
+    except (OSError, subprocess.SubprocessError) as exc:
+        err = getattr(exc, "stderr", None)
+        skip("tables-changed note check", f"git cannot make a repository here ({exc}"
+             + (f": {err.decode('utf-8', 'replace').strip()[:120]}" if err else "") + ")")
+        return
+
+    def got(r):                                   # without the commit ids, which differ from run to run
+        return r if r[0] is None else f"{r[0]}, {len(r[1])} commit(s)"
+    check(same == ([], []), f"a later commit of the code only: nothing said (got {got(same)})")
+    check(later[0] == ["surveys/survey_dates.csv"] and len(later[1]) == 1,
+          f"then a commit of the tables only: the table named, with that one commit (got {got(later)})")
+    check(shipped2 != shipped and after == ([], []),
+          f"the test changed with the tables: its new commit is the shipped one, nothing said (got {got(after)})")
 
 
 def test_shipped_tables(d):
@@ -826,6 +892,14 @@ def test_shipped_tables(d):
         skip("shipped-tables checks", why)
         return
     print(f"  (surveys/*.csv and calibration/ as of commit {commit[:12]}, the last commit of this test)")
+    changed, later = tables_changed_after(commit)
+    if changed is None:
+        print(f"  (whether the tables changed after it is not known: {later})")
+    elif changed:
+        print(f"  ({', '.join(changed)} changed after it, in {len(later)} later commit(s) ({', '.join(later[:6])}"
+              f"{', ...' if len(later) > 6 else ''}): what was asked for is checked below on the tables as of "
+              f"{commit[:12]}, not on those; a commit that changes the shipped tables changes this test with them. "
+              f"The tables as they are now are checked for what the product needs, last)")
     texts = {}
     for name in ("survey_dates.csv", "surveys.csv"):
         out, why = git_out("show", f"{commit}:./surveys/{name}")
@@ -1905,6 +1979,7 @@ def main():
         test_py38()
         # the tables last: the repository's as shipped, then the station's as they are now, so a table the
         # owner has edited cannot stop the checks of the code before they have run
+        test_tables_changed_note(d)
         test_shipped_tables(d)
         test_station_tables(d)
     finally:
