@@ -25,13 +25,26 @@ the parts that decide them are tested by construction:
     and were made with the same settings.
 
 HOW. Everything is written into a temporary folder (--keep DIR to look) and
-asserted on. Runs in ~5 s.
+asserted on (--keep DIR: kept, in a new folder inside DIR). Runs in ~5 s.
+
+STATION FILES. The checks run inside their own temporary folder (also the
+current folder for the run, so a file name never finds a file of the folder
+the test was started from), on fixture tables, survey files and folders of
+their own: the outcome is the same on the station NUC as in a clean
+checkout. Three kinds of check read the station's own state, and say so:
+the validation of surveys/survey_dates.csv and surveys/surveys.csv as they
+are now (every row readable, every disabled date refused, every calibration
+there: a failure there is a real problem of the tables), the two checks
+on the real 2026-09-29 RTK file, run when it is found, and the commit a
+stamp records, checked when the code is a git checkout. A check that cannot
+run is skipped, counted and said why.
 """
 
 import os
 import io
 import sys
 import csv
+import json
 import shutil
 import argparse
 import tempfile
@@ -66,26 +79,43 @@ def check(cond, msg):
 # where the real 2026-09-29 RTK file is looked for: the station's survey folders, as survey_products
 # looks (main() adds --survey-dirs); checks that need it are skipped, and counted, when it is not found
 RTK_DIRS = list(sp.DEFAULT_SURVEY_DIRS)
-SKIPPED = []
+SKIPPED = []          # (what, why)
+# main(): the test's own folders, used wherever a check needs an output root or survey folders
+# ('out': an output root where nothing is built; 'surveys': an empty survey folder)
+TEST_DIRS = {}
 
 
 def real_rtk():
-    """The real RTK file the station's C was fitted to, found as survey_products finds it (the path
-    surveys.csv gives, looked for in the survey folders) and confirmed by its sha256; else None."""
+    """The real RTK file the station's C was fitted to, looked for as survey_products looks (the name
+    surveys.csv gives, in the survey folders) and confirmed by its sha256.
+    -> (path, "") or (None, why it cannot be used)."""
     fit = sp.SETUP_FITS[sp.SETUP_COEF]
     rows = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
-    names = [r["path"] for r in rows if Path(r.get("path") or "").stem == fit["survey_stem"]]
-    for n in names or [fit["survey_stem"] + ".csv"]:
-        for f in sp.resolve_file(n, RTK_DIRS):
-            if f.is_file() and sp.sha256(f) == fit["survey_sha256"]:
-                return f
-    return None
+    names = [Path(r["path"]).name for r in rows if Path(r.get("path") or "").stem == fit["survey_stem"]]
+    names = names or [fit["survey_stem"] + ".csv"]
+    differ, unreadable = [], []
+    for n in names:
+        for x in RTK_DIRS:
+            f = Path(x) / n
+            if not f.is_file():
+                continue
+            try:
+                if sp.sha256(f) == fit["survey_sha256"]:
+                    return f, ""
+                differ.append(str(f))
+            except OSError as exc:
+                unreadable.append(f"{f} ({exc.strerror or exc})")
+    if unreadable:
+        return None, f"the real RTK file is here but cannot be read: {', '.join(unreadable)}"
+    if differ:
+        return None, (f"found {', '.join(differ)}, but its sha256 is not the one C = {sp.SETUP_COEF} was fitted to "
+                      f"(SETUP_FITS): re-saved or edited? The file as surveyed is needed")
+    return None, f"the real RTK file {names[0]} is not in {', '.join(RTK_DIRS)}; --survey-dirs adds folders"
 
 
-def skip(what):
-    SKIPPED.append(what)
-    print(f"  skip  {what} (the real RTK file {sp.SETUP_FITS[sp.SETUP_COEF]['survey_stem']}.csv is not in "
-          f"{', '.join(RTK_DIRS)}; --survey-dirs adds folders)")
+def skip(what, why):
+    SKIPPED.append((what, why))
+    print(f"  skip  {what} ({why})")
 
 
 def photo_name(t, station, cam):
@@ -206,7 +236,15 @@ def plan_for(d, era="adcp", env="2025005FA_Marconi_Mar_YSMP_Lidar_DSM_25cm.tif",
     eo_path.write_text(eo_text or (HERE / "calibration" / "CACO03_c1_20250123_EO.yaml").read_text())
     return {"date": "2025-01-23", "era": era, "first": "2025-01-18", "last": "2025-01-23", "surveys": [],
             "out": d, "cams": {"c1": {"eo_file": eo, "eo_path": eo_path,
-                                      "envelope_path": Path(env) if env else None, "envelope_survey": env}}}
+                                      "envelope_path": d / env if env else None, "envelope_survey": env}}}
+
+
+def named(d, name):
+    """A survey known by its name only: a path in the test's folder where no such file is (a bare name
+    would be looked for in the current folder, the station's when the test runs from there)."""
+    p = Path(d) / "not_here" / name
+    assert not p.exists()
+    return p
 
 
 def test_labels(d):
@@ -215,38 +253,40 @@ def test_labels(d):
     d.mkdir()
     args = SimpleNamespace(setup_coef=0.037)
     jan = {"name": "jan_lidar", "survey_type": "dsm", "survey_date": "2025-01-23", "label": "INDEPENDENT", "why": ""}
-    lab, why = sp.honest_label(jan, plan_for(d), args, Path("2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif"))
+    janf = named(d, "2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif")
+    rtkf = named(d, "2026-09-29_Marconi_Checkshots.csv")
+    lab, why = sp.honest_label(jan, plan_for(d), args, janf)
     check(lab == "INDEPENDENT", "Jan lidar, envelope from the Mar lidar, GCP calibration: INDEPENDENT")
-    lab, why = sp.honest_label(jan, plan_for(d, env="2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif"), args,
-                               Path("2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif"))
+    lab, why = sp.honest_label(jan, plan_for(d, env="2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif"), args, janf)
     check(lab == "PARTLY-CIRCULAR", "envelope placed with the compared lidar: PARTLY-CIRCULAR")
     fitted = ("# fit_eo_to_survey.py: fitted to 2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif\n"
               + (HERE / "calibration" / "CACO03_c1_20250123_EO.yaml").read_text())
     lab, why = sp.honest_label(jan, plan_for(d, eo="CACO05_c1_2025-01-18_to_2025-01-23_lidar_EO.yaml",
-                                             eo_text=fitted), args,
-                               Path("2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif"))
+                                             eo_text=fitted), args, janf)
     check(lab == "CIRCULAR", "pointing fitted to the compared lidar: CIRCULAR")
     rtk = {"name": "rtk_2026-09-29", "survey_type": "points", "survey_date": "2026-09-29",
            "label": "INDEPENDENT", "why": ""}
     p = plan_for(d, era="live", env=None, eo="CACO05_c1_20251113_EO-CV.yaml")
-    lab, why = sp.honest_label(rtk, p, args, Path("2026-09-29_Marconi_Checkshots.csv"))
-    check(lab == "CIRCULAR" and "setup" in why[0], "RTK with C = 0.037 (fitted to it): CIRCULAR")
+    lab, why = sp.honest_label(rtk, p, args, rtkf)
+    check(lab == "CIRCULAR" and "setup" in why[0] and "file name" in why[0],
+          "RTK with C = 0.037 (fitted to it): CIRCULAR (by its name)")
     # a C of unknown origin is never INDEPENDENT; a C declared fitted to no survey keeps the label
     for c in (0.035, 0.05, 0.0371):
-        lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=c), Path("2026-09-29_Marconi_Checkshots.csv"))
+        lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=c), rtkf)
         check(lab == "PARTLY-CIRCULAR" and "unknown origin" in why[0], f"RTK with C = {c} of unknown origin: PARTLY-CIRCULAR")
     lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=0.035, setup_fitted_to="none:repeat crossings"),
-                               Path("2026-09-29_Marconi_Checkshots.csv"))
+                               rtkf)
     check(lab == "INDEPENDENT", "RTK with a C declared fitted to no survey (--setup-fitted-to none:...): INDEPENDENT")
-    # the RTK file under another name is recognised by its content
+    # the real RTK file under another name is recognised by its content (station-independent: test_fit_recognised)
     real = Path(d) / "rtk_copy.csv"
-    rtk_src = real_rtk()
+    rtk_src, rtk_why = real_rtk()
     if rtk_src:
         shutil.copy(str(rtk_src), str(real))
         lab, why = sp.honest_label(dict(rtk, survey_date=""), p, args, real)
-        check(lab == "CIRCULAR" and "same content" in why[0], "the RTK shots renamed (rtk_copy.csv): still CIRCULAR, by sha256")
+        check(lab == "CIRCULAR" and "same content" in why[0],
+              "the real RTK shots renamed (rtk_copy.csv): still CIRCULAR, by sha256 (station file)")
     else:
-        skip("renamed-RTK check")
+        skip("renamed-RTK check", rtk_why)
     other = Path(d) / "another_rtk.csv"
     other.write_text("Name,Easting,Northing,Elevation,Description\n1,420100,4638400,1.2,Transect\n")
     v = sp.Verdict(rtk)
@@ -258,7 +298,7 @@ def test_labels(d):
     check(v.label == "INDEPENDENT" and v.overridden and "CIRCULAR" in v.overridden[0],
           "... overruled only by label_override_reason, and the overruled downgrade is kept")
     v = sp.Verdict(dict(rtk, label_override_reason="anything"))
-    sp.honest_label(rtk, p, args, real if real.exists() else Path("2026-09-29_Marconi_Checkshots.csv"), verdict=v)
+    sp.honest_label(rtk, p, args, real if real.exists() else rtkf, verdict=v)
     check(v.label == "CIRCULAR", "the same shots (content or name) cannot be overruled")
     # a C declared fitted to a survey file: CIRCULAR against that file
     lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=0.05, setup_fitted_to=str(other),
@@ -266,9 +306,9 @@ def test_labels(d):
     check(lab == "CIRCULAR", "a C declared fitted to this very file: CIRCULAR")
     gcp = {"name": "oct_gcps", "survey_type": "points", "survey_date": "2024-10-23", "label": "INDEPENDENT", "why": ""}
     p = plan_for(d, eo="CACO03_c1_20241023_EO.yaml")
-    lab, why = sp.honest_label(gcp, p, args, Path("2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv"))
+    lab, why = sp.honest_label(gcp, p, args, named(d, "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv"))
     check(lab == "PARTLY-CIRCULAR", "GCPs of the calibration day, even if the table said INDEPENDENT")
-    lab, why = sp.honest_label(gcp, p, args, Path("2024-10-23_control.csv"))
+    lab, why = sp.honest_label(gcp, p, args, named(d, "2024-10-23_control.csv"))
     check(lab == "PARTLY-CIRCULAR", "a point survey of the calibration day under any name ('_control.csv'): PARTLY-CIRCULAR")
 
 
@@ -279,7 +319,7 @@ def test_round2(d):
     args = SimpleNamespace(setup_coef=0.037)
     jan = {"name": "jan_lidar", "survey_type": "dsm", "survey_date": "2025-01-23", "label": "INDEPENDENT", "why": ""}
     mar = dict(jan, name="mar_lidar", survey_date="2025-03-06")
-    janf, marf = (Path("2025005FA_Marconi_%s_YSMP_Lidar_DSM_25cm.tif" % m) for m in ("Jan", "Mar"))
+    janf, marf = (named(d, "2025005FA_Marconi_%s_YSMP_Lidar_DSM_25cm.tif" % m) for m in ("Jan", "Mar"))
     base = (HERE / "calibration" / "CACO03_c1_20250123_EO.yaml").read_text()
     # apply_pointing_correction.py carries a lidar fit's change to another period (*_corr_EO.yaml)
     (d / "CACO05_c1_selftest_2025-01-18_to_2025-01-22_lidar_EO.yaml").write_text(
@@ -305,7 +345,7 @@ def test_round2(d):
     # expect now. pointing_fix_figure.py printed lidar - water level = c1 +0.46, c2 +0.15: the lines
     # read LOW (waterline - lidar c1 -0.46, c2 -0.15), the sign a line without setup must have.
     plan = {"era": "adcp", "date": "2025-01-23", "first": "2025-01-18", "last": "2025-01-23", "out": d,
-            "surveys": [dict(jan, path=str(janf))],
+            "surveys": [dict(jan, path=janf.name)],
             "cams": {c: {"eo_file": "CACO03_%s_20250123_EO.yaml" % c, "first": "2025-01-18", "last": "2025-01-23"}
                      for c in ("c1", "c2")}}
     pc0 = sp.PRIOR_CHECKS[0]
@@ -380,10 +420,10 @@ def test_round2(d):
     # a row with no file yet (the Oct GCPs) is not
     empty = d / "no_surveys_here"
     empty.mkdir()
-    named = dict(jan, path=str(janf.name))
+    named_row = dict(jan, path=janf.name)
     nofile = {"name": "oct_gcps", "survey_type": "points", "survey_date": "2024-10-23", "label": "PARTLY-CIRCULAR",
               "why": "", "path": ""}
-    miss = sp.missing_parts({"out": d, "date": "2025-01-23", "cams": {}, "surveys": [named, nofile]}, {},
+    miss = sp.missing_parts({"out": d, "date": "2025-01-23", "cams": {}, "surveys": [named_row, nofile]}, {},
                             SimpleNamespace(survey_dirs=[str(empty)]))
     check(any(m.startswith("jan_lidar: survey file") and "NOT FOUND" in m for m in miss)
           and not any(m.startswith("oct_gcps") for m in miss),
@@ -405,8 +445,9 @@ def test_round2(d):
     b = sp.built_args(later, {"out": d, "date": "2025-01-23", "cams": {"c1": {}}})
     check(b.dem_cell == 2.0 and b.dem_max_hs == 1.5 and b.geotiff_epsg == 32619 and later.dem_cell == 1.0,
           "the 'rebuild everything' line takes the DEM settings the DEM was built with, not this run's")
-    # a re-export of the RTK the station's C was fitted to, entered under another date: same shots
-    rtk_src = real_rtk()
+    # a re-export of the real RTK the station's C was fitted to, entered under another date: same shots
+    # (station-independent: test_fit_recognised)
+    rtk_src, rtk_why = real_rtk()
     if rtk_src:
         lines = rtk_src.read_text().splitlines()
         lines[1] = lines[1].replace(",", ", ", 1)
@@ -416,10 +457,71 @@ def test_round2(d):
                "why": ""}
         pl = plan_for(d, era="live", env=None, eo="CACO05_c1_20251113_EO-CV.yaml")
         lab, why = sp.honest_label(rtk, pl, SimpleNamespace(setup_coef=0.037, survey_dirs=[str(rtk_src.parent)]), rex)
-        check(lab == "CIRCULAR" and "re-exported" in why[0], "a byte-changed re-export under another date: CIRCULAR "
-                                                               "by its coordinates")
+        check(lab == "CIRCULAR" and "re-exported" in why[0], "a byte-changed re-export of the real RTK under another "
+                                                               "date: CIRCULAR by its coordinates (station file)")
     else:
-        skip("re-exported-RTK check")
+        skip("re-exported-RTK check", rtk_why)
+
+
+def test_fit_recognised(d):
+    print("the survey a setup coefficient was fitted to: by content, by its coordinates, by name (a test fit)")
+    d = Path(d) / "fitrec"
+    station, elsewhere = d / "station", d / "elsewhere"
+    for x in (station, elsewhere):
+        x.mkdir(parents=True)
+    rng = np.random.RandomState(29)
+    E, N = 420050.0 + rng.uniform(0, 80, 40), 4638300.0 + rng.uniform(0, 150, 40)
+
+    def shots(path, dE=0.0, dated=True):
+        """Emlid-like RTK shots; dE moves every point east; dated: with its 'Averaging start' column."""
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Name", "Code", "Code description", "Easting", "Northing", "Elevation", "Description",
+                        "CS name"] + (["Averaging start"] if dated else []))
+            for k in range(len(E)):
+                w.writerow([str(k + 1), "T", "Transect", f"{E[k] + dE:.3f}", f"{N[k]:.3f}",
+                            f"{0.5 + 0.03 * (420130.0 - E[k]):.3f}", "Transect",
+                            "NAD83(2011) / UTM zone 19N + NAVD88(GEOID18) height"]
+                           + (["2026-10-15 14:00:00 UTC-04:00"] if dated else []))
+        return path
+    fitted = shots(station / "selftest_fit_shots.csv")
+    fake = 0.0123                                 # a fit made for this test only, to these shots
+    sp.SETUP_FITS[fake] = {"survey_stem": "selftest_fit_shots", "survey_sha256": sp.sha256(fitted),
+                           "survey_type": "points", "survey_date": "2026-10-15", "how": "a fit for this test only"}
+    try:
+        p = plan_for(d, era="live", env=None, eo="CACO05_c1_20251113_EO-CV.yaml")
+        here = SimpleNamespace(setup_coef=fake, survey_dirs=[str(station)])
+        fits = [dict(sp.setup_fit_info(fake, here), cameras=["c1"])]
+        s = {"name": "shots", "survey_type": "points", "survey_date": "", "label": "INDEPENDENT", "why": ""}
+
+        def label(path, args=here):
+            return sp.honest_label(s, p, args, path, fits=fits)
+        renamed = elsewhere / "renamed_export.csv"
+        shutil.copy(str(fitted), str(renamed))
+        lab, why = label(renamed)
+        check(lab == "CIRCULAR" and "same content (sha256)" in why[0],
+              "the fitted shots under another name: CIRCULAR, by their content")
+        rex = shots(elsewhere / "reexport.csv", dE=0.004, dated=False)
+        lab, why = label(rex)
+        check(lab == "CIRCULAR" and "40 of its 40 points lie within 0.05 m" in why[0] and "re-exported" in why[0],
+              "a byte-changed re-export (+4 mm east, another name, no date in it): CIRCULAR by its coordinates")
+        lab, why = label(shots(elsewhere / "another_survey.csv", dE=1.0, dated=False))
+        check(lab == "INDEPENDENT" and not why, "another survey (every point 1 m away), no date: INDEPENDENT")
+        lab, why = label(named(d, "selftest_fit_shots.csv"))
+        check(lab == "CIRCULAR" and "file name selftest_fit_shots.csv" in why[0],
+              "the fit's file name, the file itself not here: CIRCULAR by its name")
+        # the fit's own shots are looked for in the survey folders only: a copy in the current folder is not used
+        start = os.getcwd()
+        os.chdir(str(elsewhere))
+        try:
+            shutil.copy(str(fitted), "selftest_fit_shots.csv")
+            lab, why = label(rex, SimpleNamespace(setup_coef=fake, survey_dirs=[str(TEST_DIRS["surveys"])]))
+        finally:
+            os.chdir(start)
+        check(lab == "INDEPENDENT", "... the same re-export, the fit's shots in no survey folder (a copy in the "
+                                    "current folder): its coordinates cannot be compared, nothing is recognised")
+    finally:
+        del sp.SETUP_FITS[fake]
 
 
 def test_cwd_never_searched(d):
@@ -477,7 +579,7 @@ def test_setup_in_use(d):
     fits, src = sp.setup_in_use(p, later)
     check([f["coef"] for f in fits] == [0.037] and src.startswith("the waterlines"),
           "a later --setup-coef 0.02 --steps compare: the C in use is the one the waterlines carry (0.037)")
-    lab, why = sp.honest_label(rtk, p, later, Path("2026-09-29_Marconi_Checkshots.csv"))
+    lab, why = sp.honest_label(rtk, p, later, named(d, "2026-09-29_Marconi_Checkshots.csv"))
     check(lab == "CIRCULAR", "... so the RTK comparison stays CIRCULAR")
     check(abs(sp.implied_c(0.3541, 0.65, 9.5) - 0.037) < 2e-4, "C implied by a row's own setup, Hs and Tp")
 
@@ -505,63 +607,85 @@ def test_merge_drops_no_setup(d):
 
 
 def cfg_args(**kw):
+    """Options as survey_products' command line gives them, with the test's own output root (nothing is
+    built there) and survey folder (empty) instead of the station's."""
     a = dict(config=str(sp.DEFAULT_CONFIG), surveys=str(sp.DEFAULT_SURVEYS), force_disabled=False, window=None,
-             utc_hours=None, calibration=str(HERE / "calibration"), survey_dirs=sp.DEFAULT_SURVEY_DIRS,
-             output_root="/tmp/none", setup_coef=sp.SETUP_COEF)
+             utc_hours=None, calibration=str(HERE / "calibration"), survey_dirs=[str(TEST_DIRS["surveys"])],
+             output_root=str(TEST_DIRS["out"]), setup_coef=sp.SETUP_COEF)
     a.update(kw)
     return SimpleNamespace(**a)
 
 
+# Fixture tables: the behaviour of the configuration (a date switched off, a camera switched off, the
+# window, the labels, GCPs that arrive later) is tested on these, not on surveys/*.csv, which the owner
+# edits on the station as surveys/README.md says (switch a date on, give the GCP file's path).
+FIXTURE_DATES = """date,camera,enabled,station,first_day,last_day,eo_file,envelope_survey,utc_hours,era,notes
+2024-10-23,c1,0,CACO03,2024-10-20,2024-10-26,CACO03_c1_20241023_EO.yaml,2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif,13.5-18,chatham,"switched off (a test row), with a comma"
+2024-10-23,c2,0,CACO03,2024-10-20,2024-10-26,CACO03_c2_20241023_EO.yaml,2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif,13.5-18,chatham,"switched off (a test row), with a comma"
+2025-01-23,c1,1,CACO03,2025-01-18,2025-01-23,CACO03_c1_20250123_EO.yaml,2025005FA_Marconi_Mar_YSMP_Lidar_DSM_25cm.tif,13.5-18,adcp,
+2025-01-23,c2,1,CACO03,2025-01-18,2025-01-23,CACO03_c2_20250123_EO.yaml,2025005FA_Marconi_Mar_YSMP_Lidar_DSM_25cm.tif,13.5-18,adcp,
+2025-03-06,c1,0,CACO04,2025-03-03,2025-03-09,CACO04_c1_20250219_EO.yaml,2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif,13.5-18,adcp,no c1 photos (a test row)
+2025-03-06,c2,1,CACO04,2025-03-03,2025-03-09,CACO04_c2_20250219_EO.yaml,2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif,13.5-18,adcp,
+2026-09-29,c1,1,CACO05,2026-09-26,2026-10-02,CACO05_c1_20251113_EO-CV.yaml,,0-24,live,
+2026-09-29,c2,1,CACO05,2026-09-26,2026-10-02,CACO05_c2_20251113_EO-CV.yaml,,0-24,live,
+"""
+FIXTURE_SURVEYS = """date,name,path,survey_type,survey_date,label,why,label_override_reason
+2024-10-23,oct_gcps,,points,2024-10-23,PARTLY-CIRCULAR,"GCPs of the calibration day, file not here yet (a test row)",
+2025-01-23,jan_lidar,2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif,dsm,2025-01-23,INDEPENDENT,a test row,
+2026-09-29,rtk_2026-09-29,2026-09-29_Marconi_Checkshots.csv,points,2026-09-29,INDEPENDENT,a test row,
+"""
+
+
+def fixture_tables(d):
+    """-> (cfg rows, survey rows, cfg_args keywords naming the two fixture tables written into d/tables)."""
+    t = Path(d) / "tables"
+    t.mkdir(parents=True, exist_ok=True)
+    (t / "survey_dates.csv").write_text(FIXTURE_DATES)
+    (t / "surveys.csv").write_text(FIXTURE_SURVEYS)
+    return (sp.read_table(t / "survey_dates.csv", sp.CONFIG_FIELDS), sp.read_table(t / "surveys.csv", sp.SURVEY_FIELDS),
+            {"config": str(t / "survey_dates.csv"), "surveys": str(t / "surveys.csv")})
+
+
+def is_enabled(row):
+    return row["enabled"] in ("1", "yes", "true", "True")
+
+
 def test_config(d):
-    print("the configuration tables")
-    cfg = sp.read_table(sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS)
-    srv = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
-    for date in ("2024-10-23", "2025-03-19"):
-        plan, out = quiet(sp.build_plan, date, cfg, srv, cfg_args())
-        check(plan is None and "DISABLED" in out, f"{date} is refused (disabled at the user's request)")
-        plan, out = quiet(sp.build_plan, date, cfg, srv, cfg_args(force_disabled=True))
-        check(plan is not None, f"{date} builds with --force-disabled")
-    plan, _ = quiet(sp.build_plan, "2025-03-06", cfg, srv, cfg_args())
-    check(list(plan["cams"]) == ["c2"] and plan["cams"]["c2"]["station"] == "CACO04", "2025-03-06: c2 only, CACO04")
-    plan, _ = quiet(sp.build_plan, "2026-09-29", cfg, srv, cfg_args())
+    print("the configuration: its behaviour on fixture tables")
+    d = Path(d) / "config"
+    d.mkdir()
+    cfg, srv, tabs = fixture_tables(d)
+    plan, out = quiet(sp.build_plan, "2024-10-23", cfg, srv, cfg_args(**tabs))
+    check(plan is None and "DISABLED" in out and "switched off (a test row), with a comma" in out,
+          "a date with no enabled row is refused, with the reason from its notes")
+    plan, out = quiet(sp.build_plan, "2024-10-23", cfg, srv, cfg_args(force_disabled=True, **tabs))
+    check(plan is not None and plan["forced_disabled"] and list(plan["cams"]) == ["c1", "c2"],
+          "... and builds with --force-disabled")
+    plan, _ = quiet(sp.build_plan, "2025-03-06", cfg, srv, cfg_args(**tabs))
+    check(list(plan["cams"]) == ["c2"] and plan["cams"]["c2"]["station"] == "CACO04",
+          "a camera switched off: the date is built with the other only, and its station ID (2025-03-06: c2, CACO04)")
+    plan, _ = quiet(sp.build_plan, "2026-09-29", cfg, srv, cfg_args(**tabs))
     check(plan["first"] == "2026-09-26" and plan["last"] == "2026-10-02" and plan["era"] == "live"
           and [s["name"] for s in plan["surveys"]] == ["rtk_2026-09-29"],
-          "2026-09-29 (the user first called it 27 Sep): window 26 Sep - 2 Oct, the 29 Sep RTK")
-    check(not [r for r in cfg if r["date"] == "2026-09-27"], "no 2026-09-27 product left in the table")
-    rtk_row = [s for s in srv if s["name"] == "rtk_2026-09-29"][0]
-    check(rtk_row["label"] == "INDEPENDENT" and "CIRCULAR" in rtk_row["why"] and "C = 0.037" in rtk_row["why"]
-          and "calm low-tide RTK" in rtk_row["why"] and "+1.2 m" in rtk_row["why"],
-          "the 2026 RTK row: INDEPENDENT as a table label, saying the setup rule makes it CIRCULAR with C = 0.037, "
-          "where the check is and what an independent check needs")
-    rtk_file = Path(sp.DEFAULT_SURVEY_DIRS[0]) / rtk_row["path"]
-    pl, _ = quiet(sp.build_plan, "2026-09-29", cfg, srv, cfg_args())
-    lab, why = sp.honest_label(rtk_row, pl, SimpleNamespace(setup_coef=sp.SETUP_COEF), rtk_file)
-    check(lab == "CIRCULAR" and "setup coefficient C = 0.037 was fitted to this survey" in why[0],
-          "... a default build (C = 0.037): CIRCULAR by the setup rule (the file's name, or its content when here)")
-    lab, why = sp.honest_label(rtk_row, pl, SimpleNamespace(setup_coef=0.0), rtk_file)
-    check(lab == "INDEPENDENT" and not why, "... a C = 0 build (fitted to nothing): INDEPENDENT")
-    plan, _ = quiet(sp.build_plan, "2025-01-23", cfg, srv, cfg_args())
+          "the window, era and surveys of a date come from its rows (2026-09-29: 26 Sep - 2 Oct, live, the 29 Sep RTK)")
+    plan, _ = quiet(sp.build_plan, "2025-01-23", cfg, srv, cfg_args(**tabs))
     check(plan["last"] == "2025-01-23" and all(c["station"] == "CACO03" for c in plan["cams"].values()),
           "2025-01-23: CACO03 only, 24 Jan (the re-set) outside the window")
-    for r in cfg:
-        if r["era"] == "live":
-            continue
-        for s in srv:
-            if s["date"] == r["date"] and s["path"]:
-                check(Path(s["path"]).name != Path(r["envelope_survey"]).name,
-                      f"{r['date']} {r['camera']}: envelope {r['envelope_survey'][:28]}... is not the compared survey")
-    for r in cfg:
-        eo = HERE / "calibration" / r["eo_file"]
-        check(eo.exists(), f"{r['date']} {r['camera']}: calibration {r['eo_file']} exists")
-    labels = {s["name"]: s["label"] for s in srv}
-    check(labels["oct_gcps"] == "PARTLY-CIRCULAR" and not [s for s in srv if s["name"] == "oct_gcps"][0]["path"],
-          "Oct GCPs: PARTLY-CIRCULAR, path empty until the file arrives")
+    # the RTK the station's C was fitted to, known here by its name only (content: test_fit_recognised)
+    rtk_row = [s for s in srv if s["name"] == "rtk_2026-09-29"][0]
+    rtk_file = Path(TEST_DIRS["surveys"]) / rtk_row["path"]
+    pl, _ = quiet(sp.build_plan, "2026-09-29", cfg, srv, cfg_args(**tabs))
+    lab, why = sp.honest_label(rtk_row, pl, SimpleNamespace(setup_coef=sp.SETUP_COEF), rtk_file)
+    check(lab == "CIRCULAR" and "setup coefficient C = 0.037 was fitted to this survey (file name" in why[0],
+          "... a default build (C = 0.037): CIRCULAR by the setup rule (here by the file's name)")
+    lab, why = sp.honest_label(rtk_row, pl, SimpleNamespace(setup_coef=0.0), rtk_file)
+    check(lab == "INDEPENDENT" and not why, "... a C = 0 build (fitted to nothing): INDEPENDENT")
     # The GCP files arrive later, one per camera, under the survey date's name: picked up by
     # themselves and merged, a target both cameras saw counted once.
     oct_ = [s for s in srv if s["name"] == "oct_gcps"][0]
     sdir = Path(d) / "gcp_arrive"
     sdir.mkdir()
-    a = cfg_args(survey_dirs=[str(sdir)])
+    a = cfg_args(survey_dirs=[str(sdir)], **tabs)
     paths, note = sp.resolve_survey(oct_, None, a)
     check(not paths and "no survey file" in note, "Oct GCPs not there yet: skipped, with the reason")
     (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv").write_text(
@@ -572,6 +696,48 @@ def test_config(d):
     check(len(paths) == 2 and "found" in note, "Oct GCPs arrive: both camera files found by their date")
     rows = [ln for ln in Path(sp.merged_points(paths, sdir / "merged.csv")).read_text().splitlines() if ln]
     check(len(rows) == 3, f"Oct GCPs merged: 3 targets, the one both cameras saw once (got {len(rows)})")
+
+
+def test_station_tables(d):
+    print("the station's own tables (surveys/*.csv as they are now): validated, whatever the owner switched on")
+    cfg = sp.read_table(sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS)
+    srv = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    dates = sorted({r["date"] for r in cfg})
+    off = [x for x in dates if not any(is_enabled(r) for r in cfg if r["date"] == x)]
+    for x in dates:
+        try:
+            plan, out = quiet(sp.build_plan, x, cfg, srv, cfg_args())
+            forced = quiet(sp.build_plan, x, cfg, srv, cfg_args(force_disabled=True))[0] if x in off else None
+        except SystemExit as exc:
+            check(False, f"{x}: its rows cannot be built ({exc})")
+        if x in off:
+            check(plan is None and "DISABLED" in out and forced is not None,
+                  f"{x}: switched off in the table: refused, and builds with --force-disabled")
+        else:
+            check(plan is not None and plan["cams"], f"{x}: switched on: its plan is built")
+    for r in cfg:
+        if r["era"] == "live":
+            continue
+        for s in srv:
+            if s["date"] == r["date"] and s["path"]:
+                check(Path(s["path"]).name != Path(r["envelope_survey"]).name,
+                      f"{r['date']} {r['camera']}: envelope {r['envelope_survey'][:28]}... is not the compared survey")
+    for r in cfg:
+        eo = HERE / "calibration" / r["eo_file"]
+        check(eo.exists(), f"{r['date']} {r['camera']}: calibration {r['eo_file']} exists")
+    check(all(s["survey_date"] == s["date"] for s in srv if s.get("survey_date")),
+          "every survey's date is its product's date (the 29 Sep 2026 RTK is the 2026-09-29 product, not 27 Sep)")
+    rtk_row = [s for s in srv if s["name"] == "rtk_2026-09-29"][0]
+    check(rtk_row["label"] == "INDEPENDENT" and "CIRCULAR" in rtk_row["why"] and "C = 0.037" in rtk_row["why"]
+          and "calm low-tide RTK" in rtk_row["why"] and "+1.2 m" in rtk_row["why"],
+          "the 2026 RTK row: INDEPENDENT as a table label, saying the setup rule makes it CIRCULAR with C = 0.037, "
+          "where the check is and what an independent check needs")
+    # points surveyed on a calibration's own day may be the GCPs it was solved from (the Oct GCPs)
+    gcps = [s for s in srv if s["survey_type"] == "points"
+            and any(sp.eo_date(r["eo_file"]) == s["survey_date"] for r in cfg if r["date"] == s["date"])]
+    check(gcps and all(s["label"] in ("PARTLY-CIRCULAR", "CIRCULAR") for s in gcps),
+          f"GCP rows (points of their calibration's day: {', '.join(s['name'] for s in gcps)}): PARTLY-CIRCULAR, "
+          f"whether or not their file has arrived")
 
 
 def test_table_commas(d):
@@ -680,8 +846,21 @@ def test_stamps(d):
     check("waterline_consistency.py" in sp.scripts_sig("filter") and sp.scripts_sig("filter")["waterline_consistency.py"],
           "the script's sha256 is part of the step's signature")
     st = sp.read_stamp(d, "merge")
-    check(st["software"]["scripts"].get("survey_products.py") and "commit" in st["software"],
-          "each stamp records the commit and the sha256 of the scripts that built it")
+    check(st["software"]["scripts"].get("survey_products.py") == sp.script_sha("survey_products.py"),
+          "each stamp records the sha256 of the scripts that built it")
+    # the commit: whether git can read this code's checkout is the computer's business (a copy that is not
+    # a checkout, a user git refuses: 'dubious ownership'), so it is checked when it can be, and said when not
+    try:
+        r = subprocess.run(["git", "-C", str(HERE), "rev-parse", "HEAD"], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, universal_newlines=True, timeout=20)
+        head = r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        head = ""
+    if len(head) == 40:
+        check(st["software"]["commit"] == head, "each stamp records the commit of the code that built it")
+    else:
+        check(st["software"]["commit"] is None, "no commit here: the stamp says none (not a made-up one)")
+        skip("commit check", f"git cannot read a checkout at {HERE}: the stamps record no commit, only the sha256s")
 
 
 def test_keep_moved_days(d):
@@ -823,12 +1002,33 @@ def test_fix2(d):
                  dem_max_hs=sp.DEM_MAX_HS, dem_max_day_offset=sp.DEM_MAX_DAY_OFFSET, keep_moved_days=False,
                  no_download=False)
     # -- the lock: a second build of the same date is refused while the first runs; a lock left by a
-    # build that is no longer running is taken over, and said so
+    # build that is no longer running is taken over, and said so. 'The first' is a process of its own whose
+    # command line is a survey_products build's (as /proc shows it), whatever runs this test
     out = d / "2026-09-29"
     out.mkdir()
     ok1, _ = sp.take_lock(out, a, "2026-09-29")
-    ok2, why2 = sp.take_lock(out, a, "2026-09-29")      # this process is alive and is a survey_products build
-    check(ok1 and not ok2 and "RUNNING" in why2, "a second build of the date is refused while the first runs")
+    held = sp.load_json(out / sp.LOCK_NAME) or {}
+    first = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", "survey_products.py", "--date",
+                              "2026-09-29"])
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    try:
+        lock = dict(held, pid=first.pid)
+        (out / sp.LOCK_NAME).write_text(json.dumps(lock))
+        ok2, why2 = sp.take_lock(out, a, "2026-09-29")
+        check(ok1 and held.get("pid") == os.getpid() and not ok2 and "RUNNING" in why2,
+              "a second build of the date is refused while the first runs")
+        if Path(f"/proc/{other.pid}/cmdline").exists():
+            (out / sp.LOCK_NAME).write_text(json.dumps(dict(held, pid=other.pid)))
+            ok5, note5 = sp.take_lock(out, a, "2026-09-29")
+            check(ok5 and "not running" in note5,
+                  "a lock whose pid is now another program (not a survey_products build): taken over, and said so")
+        else:
+            skip("pid-reused lock check", "no /proc here: a live pid is all that can be told")
+    finally:
+        for proc in (first, other):
+            proc.kill()
+            proc.wait()
+    (out / sp.LOCK_NAME).write_text(json.dumps(held))      # this run's own lock again
     sp.release_lock(out)
     check(not (out / sp.LOCK_NAME).exists(), "the lock is released at the end")
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -985,14 +1185,13 @@ def test_fix3(d):
                    "ValueError: zero-size array to reduction operation minimum which has no identity\n")
     check("rejected every camera-day (2 of 2)" in sp.dem_failure_reason(log),
           "a DEM that failed because every camera-day was rejected says so, not a traceback")
-    # -- a not-yet-built date: its label with THIS run's C, as --dry-run gives it
-    cfg = sp.read_table(sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS)
-    srv = sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    # -- a not-yet-built date: its label with THIS run's C, as --dry-run gives it (fixture tables)
+    cfg, srv, tabs = fixture_tables(d)
     rtk = [s_ for s_ in srv if s_["date"] == "2026-09-29"][0]
-    lab, why = sp.label_when_built("2026-09-29", rtk, cfg, srv, cfg_args(survey_dirs=[str(d)]))
+    lab, why = sp.label_when_built("2026-09-29", rtk, cfg, srv, cfg_args(survey_dirs=[str(d)], **tabs))
     check(rtk["label"] == "INDEPENDENT" and lab == "CIRCULAR" and "fitted to this survey" in why,
           "2026-09-29 not built yet, C = 0.037: CIRCULAR when built (the table says INDEPENDENT)")
-    lab0, _ = sp.label_when_built("2026-09-29", rtk, cfg, srv, cfg_args(survey_dirs=[str(d)], setup_coef=0.0))
+    lab0, _ = sp.label_when_built("2026-09-29", rtk, cfg, srv, cfg_args(survey_dirs=[str(d)], setup_coef=0.0, **tabs))
     check(lab0 == "INDEPENDENT", "... with C = 0: INDEPENDENT")
     # -- live era: a window with no rows keeps the rows (and stamp) of the earlier build
     src = d / "contours.csv"
@@ -1305,7 +1504,7 @@ def test_c_change(d):
           "a ..._c0 root holding C = 0.037, --setup-coef 0: a root beside it, and where its C = 0.037 belongs")
     cav_m = sp.setup_caveats({"date": "2026-09-29", "out": out_m, "surveys": [
         {"name": "rtk", "path": "2026-09-29_Marconi_Checkshots.csv", "survey_type": "points",
-         "survey_date": "2026-09-29"}]}, SimpleNamespace(survey_dirs=[str(HERE / "surveys")], setup_fitted_to=None),
+         "survey_date": "2026-09-29"}]}, SimpleNamespace(survey_dirs=[str(TEST_DIRS["surveys"])], setup_fitted_to=None),
         {}, {}, [dict(sp.setup_fit_info(sp.SETUP_COEF), cameras=["c1", "c2"])], "live")
     circ_m = [c for c in cav_m if c.startswith("rtk: CIRCULAR")]
     check(circ_m and f"--setup-coef 0 --output-root {d / 'misplaced_c0_c0'}" in circ_m[0]
@@ -1365,7 +1564,7 @@ def test_c_change(d):
           "with the bands it printed")
     cav = sp.setup_caveats({"date": "2026-09-29", "out": out, "surveys": [
         {"name": "rtk", "path": "2026-09-29_Marconi_Checkshots.csv", "survey_type": "points",
-         "survey_date": "2026-09-29"}]}, SimpleNamespace(survey_dirs=[str(HERE / "surveys")], setup_fitted_to=None),
+         "survey_date": "2026-09-29"}]}, SimpleNamespace(survey_dirs=[str(TEST_DIRS["surveys"])], setup_fitted_to=None),
         {}, {}, [dict(sp.setup_fit_info(sp.SETUP_COEF), cameras=["c1", "c2"])], "live",
         prov={"comparisons": [{"name": "rtk", "current": True, "headline": {"waterlines": {"above_survey_floor": {
             "frames_all": 16, "frames": 7, "median": -0.069, "margin_m": 0.1, "frames_below_floor": 6}}}}]})
@@ -1423,7 +1622,7 @@ def test_py38():
     import ast
     for f in ("survey_products.py", "detect_original_view.py", "test_survey_products.py", "estimate_eo_rotation.py",
               "survey_compare.py"):
-        src = (HERE / f).read_text()
+        src = (HERE / f).read_text(encoding="utf-8")
         try:
             ast.parse(src, feature_version=(3, 8))
         except TypeError:                        # Python 3.7 has no feature_version
@@ -1433,13 +1632,19 @@ def test_py38():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--keep", default=None, help="write the outputs here and keep them")
+    ap.add_argument("--keep", default=None, help="keep the outputs, in a new folder inside this one")
     ap.add_argument("--survey-dirs", nargs="+", default=[],
                     help="more folders to look for the real 2026-09-29 RTK file in (after the station's)")
     args = ap.parse_args()
-    RTK_DIRS.extend(args.survey_dirs)
-    d = args.keep or tempfile.mkdtemp(prefix="survey_products_test_")
-    Path(d).mkdir(parents=True, exist_ok=True)
+    RTK_DIRS.extend(os.path.abspath(x) for x in args.survey_dirs)
+    if args.keep:                       # a new folder each run: never the files an earlier run left
+        Path(args.keep).mkdir(parents=True, exist_ok=True)
+    d = os.path.realpath(tempfile.mkdtemp(prefix="survey_products_test_", dir=args.keep))
+    TEST_DIRS.update(out=Path(d) / "no_output_root", surveys=Path(d) / "no_surveys")
+    TEST_DIRS["surveys"].mkdir()
+    start = os.getcwd()
+    os.chdir(d)                         # a file name never finds a file of the folder the test was started from
+    print(f"test folder: {d} (the current folder during the run)")
     try:
         test_setup_identical(d)
         test_collect_photos(d)
@@ -1449,11 +1654,13 @@ def main():
         test_keep_moved_days(d)
         test_live_rows(d)
         test_config(d)
+        test_station_tables(d)
         test_table_commas(d)
         test_frames_per_day(d)
         test_caveats(d)
         test_stamps(d)
         test_round2(d)
+        test_fit_recognised(d)
         test_cwd_never_searched(d)
         test_fix1(d)
         test_fix2(d)
@@ -1466,10 +1673,14 @@ def main():
         test_one_setup_coef()
         test_py38()
     finally:
+        os.chdir(start)
         if not args.keep:
             shutil.rmtree(d, ignore_errors=True)
-    print("all survey_products tests passed"
-          + (f" ({len(SKIPPED)} skipped: {', '.join(SKIPPED)}; the real RTK file was not found)" if SKIPPED else ""))
+    why = {}
+    for what, reason in SKIPPED:
+        why.setdefault(reason, []).append(what)
+    print("all survey_products tests passed" + (f" ({len(SKIPPED)} skipped: " + "; ".join(
+        f"{', '.join(w)}: {r}" for r, w in why.items()) + ")" if SKIPPED else ""))
     return 0
 
 

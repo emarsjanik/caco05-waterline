@@ -45,14 +45,29 @@ cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see sect
 is unchanged by this PR, and the survey products use only its `ground_to_pixel`, which
 does not need scipy.
 
-Two checks of `test_survey_products.py` (the RTK file renamed, and re-exported under another
-date, must still be CIRCULAR) need the real `2026-09-29_Marconi_Checkshots.csv`. The test
-looks for it as the survey products do (the name `surveys/surveys.csv` gives, in the station's
-survey folders: `Chelsea_calibration`, `waterline`, `waterline/calibration`, the repo's
-`calibration` and `surveys`; `--survey-dirs <folder>` adds one) and confirms it by its
-sha256. If it is not found, the two checks print `skip` and the last line reads
-`all survey_products tests passed (2 skipped: ...; the real RTK file was not found)`: put the
-file in one of those folders, or pass `--survey-dirs`, to run them.
+The self-tests give the same result on the NUC as in a clean checkout: they run on fixtures
+and folders of their own, in a temporary folder that is also their current folder, with the
+station's search folders and archive files switched off (`test_historical_forcing.py`'s last
+check confirms that no build named a station file). What they read of the station is said:
+`test_survey_products.py` validates `surveys/survey_dates.csv` and `surveys/surveys.csv` as
+they are (every row readable, every date switched off refused, every date switched on planned,
+every calibration there), whatever the owner has switched on or filled in, and the following
+two kinds of check depend on the computer and are skipped, counted and explained when they
+cannot run.
+
+Two checks of `test_survey_products.py` (the real RTK file renamed, and re-exported under
+another date, must still be CIRCULAR) need the real `2026-09-29_Marconi_Checkshots.csv` (the
+same rules are also checked, everywhere, on a test fit of the test's own). The test looks for
+it as the survey products do (the name `surveys/surveys.csv` gives, in the station's survey
+folders: `Chelsea_calibration`, `waterline`, `waterline/calibration`, the repo's
+`calibration` and `surveys`; `--survey-dirs <folder>` adds one) and confirms it by its sha256.
+If it is not found, the two checks print `skip` and the last line reads
+`all survey_products tests passed (2 skipped: renamed-RTK check, re-exported-RTK check: the
+real RTK file 2026-09-29_Marconi_Checkshots.csv is not in ...)`: put the file in one of those
+folders, or pass `--survey-dirs`, to run them. A file of that name whose sha256 differs (e.g.
+re-saved with other line endings) is named as such. The commit a build stamp records is
+checked when git can read the code's checkout; otherwise `skipped: commit check: git cannot
+read a checkout at ...`.
 
 After the next cron run (12:30, 19:25 or 20:55 local):
 
