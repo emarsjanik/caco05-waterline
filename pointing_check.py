@@ -166,10 +166,35 @@ class Reference:
         self.R = cirn_angles_to_R(*self.eo[3:6])
 
 
-def measure(img, refs, io, min_inliers=40):
-    """-> dict with the best reference's result."""
+def rotation_angle_deg(R1, R2):
+    """Angle (deg) of the rotation that takes R1 to R2."""
+    c = (np.trace(R2 @ R1.T) - 1.0) / 2.0
+    return float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
+
+
+def runner_up(world, cam, inl):
+    """The second-largest consensus of the matches: the same RANSAC again on the matches outside
+    the first one's inliers. Dirt or drops on the housing window that sit at the same pixels in the
+    reference and the new frame match at ZERO rotation whatever the camera did, and can outnumber
+    the scene: they then win, and the scene's true rotation is the runner-up (Oct 2026, planted
+    0.3-2 deg turns of real frames under heavy soft drops: 17 of 120 read ~0.00 deg on 388-1573
+    inliers, each with a runner-up of 64-561 inliers at the true turn; without dirt, on 551 matched
+    trials and on the real CACO05 pairs, the runner-up had at most 35 inliers).
+    -> (inliers, R), or (0, None) with fewer than 8 matches left."""
+    rest = ~inl
+    if rest.sum() < 8:
+        return 0, None
+    R2, inl2 = solve_rotation(world[rest], cam[rest])
+    return int(inl2.sum()), R2
+
+
+def measure(img, refs, io, min_inliers=40, second=False):
+    """-> dict with the best reference's result. second=True adds the runner-up consensus of the
+    best reference's matches (runner_up()): 'runner_up_inliers', 'runner_up_deg' (its angle from
+    the best rotation) and 'runner_up_d' (its azimuth/tilt/roll change from the reference, deg,
+    as d_*). The best result itself is unchanged (the same RANSAC, the same seed)."""
     f = features(img)
-    best = None
+    best, geom = None, None
     for ref in refs:
         p_ref, p_new = match(ref.feat, f)
         if len(p_ref) < 8:
@@ -186,6 +211,16 @@ def measure(img, refs, io, min_inliers=40):
                     "residual_deg": float(np.median(ang_err(R, world[inl], cam[inl]))) if n_in else np.nan,
                     "d_azimuth": d[0], "d_tilt": d[1], "d_roll": d[2],
                     "eo": np.r_[ref.eo[:3], az, tilt, roll], "eo_ref": ref.eo_name}
+            geom = (world, cam, inl, R, ref)
+    if second and best is not None:
+        world, cam, inl, R, ref = geom
+        n2, R2 = runner_up(world, cam, inl)
+        best["runner_up_inliers"] = n2
+        if R2 is not None:
+            d2 = np.degrees(np.array(R_to_angles(R2)) - ref.eo[3:6])
+            d2[0] = (d2[0] + 180) % 360 - 180
+            best["runner_up_deg"] = rotation_angle_deg(R, R2)
+            best["runner_up_d"] = [float(x) for x in d2]
     if best is None or best["inliers"] < min_inliers:
         return {"status": "unmatched", **(best or {"matches": 0, "inliers": 0})}
     return best
