@@ -563,15 +563,24 @@ def main():
     station_dirs, hf.SEARCH_DIRS = hf.SEARCH_DIRS, [NO_STATION]
     try:
         (work / "fixture").mkdir()
-        fx = build_fixture(args.adcp, work / "fixture")
-        run_group("linear", test_linear_recovery, fx)
-        run_group("harmonic", test_harmonic_recovery, fx)
-        run_group("e2e", test_end_to_end, fx, work / "e2e")
-        run_group("adcp-only", test_adcp_only, fx, work / "adcp_only")
-        run_group("partial and errors", test_partial_and_errors, fx, work / "errors")
-        run_group("download", test_download_fallback, fx, work / "download")
+        # the fixture too: if it cannot be built, a FAIL line, the groups that need it are named as not run,
+        # the others still run, and the summary line is printed
+        fx = run_group("fixture", build_fixture, args.adcp, work / "fixture")
+        need_fx = [("linear", test_linear_recovery, (fx,)),
+                   ("harmonic", test_harmonic_recovery, (fx,)),
+                   ("e2e", test_end_to_end, (fx, work / "e2e")),
+                   ("adcp-only", test_adcp_only, (fx, work / "adcp_only")),
+                   ("partial and errors", test_partial_and_errors, (fx, work / "errors")),
+                   ("download", test_download_fallback, (fx, work / "download"))]
+        if fx is None:
+            check("the groups that need the fixture", False,
+                  f"not run (no fixture): {', '.join(n for n, _, _ in need_fx)}, search")
+        else:
+            for name, fn, a in need_fx:
+                run_group(name, fn, *a)
         run_group("still water", test_still_water_share, work / "still_water")
-        run_group("search", test_station_search, fx, work / "search")
+        if fx is not None:
+            run_group("search", test_station_search, fx, work / "search")
         run_group("isolation", test_isolation, work)
     finally:
         hf.SEARCH_DIRS = station_dirs
