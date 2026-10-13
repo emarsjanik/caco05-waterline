@@ -282,10 +282,10 @@ def test_round2(d):
     janf, marf = (Path("2025005FA_Marconi_%s_YSMP_Lidar_DSM_25cm.tif" % m) for m in ("Jan", "Mar"))
     base = (HERE / "calibration" / "CACO03_c1_20250123_EO.yaml").read_text()
     # apply_pointing_correction.py carries a lidar fit's change to another period (*_corr_EO.yaml)
-    (d / "CACO05_c1_2025-01-18_to_2025-01-22_lidar_EO.yaml").write_text(
+    (d / "CACO05_c1_selftest_2025-01-18_to_2025-01-22_lidar_EO.yaml").write_text(
         "# fit_eo_to_survey.py: fitted to 2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif\n" + base)
     corr = ("# apply_pointing_correction.py: CACO04_c1_20250219_EO.yaml + (+0.120, -0.310, +0.020) deg from "
-            "CACO05_c1_2025-01-18_to_2025-01-22_lidar_EO.yaml; 2024-10-01..2025-01-17\n" + base)
+            "CACO05_c1_selftest_2025-01-18_to_2025-01-22_lidar_EO.yaml; 2024-10-01..2025-01-17\n" + base)
     p = plan_for(d, eo="CACO05_c1_20250219_corr_EO.yaml", eo_text=corr)
     v = sp.Verdict(dict(jan, label_override_reason="anything"))
     sp.honest_label(jan, p, args, janf, verdict=v)
@@ -294,7 +294,7 @@ def test_round2(d):
     pm = plan_for(d, eo="CACO05_c1_20250219_corr_EO.yaml", eo_text=corr, env=janf.name)   # Mar: envelope from Jan
     lab, why = sp.honest_label(mar, pm, args, marf)
     check(lab == "INDEPENDENT", "... against the Mar lidar (another survey): INDEPENDENT")
-    (d / "CACO05_c1_2025-01-18_to_2025-01-22_lidar_EO.yaml").unlink()
+    (d / "CACO05_c1_selftest_2025-01-18_to_2025-01-22_lidar_EO.yaml").unlink()
     v = sp.Verdict(dict(mar, label_override_reason="the fit was to the Jan lidar (operator's notes)"))
     sp.honest_label(mar, pm, args, marf, verdict=v)
     check(v.label == "INDEPENDENT" and v.overridden and "cannot be resolved" in v.overridden[0],
