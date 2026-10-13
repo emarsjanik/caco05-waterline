@@ -53,7 +53,10 @@ check confirms that no build named a station file). What they read of the statio
 they are (every row readable, every date switched off refused, every date switched on planned,
 every calibration there), whatever the owner has switched on or filled in, and the following
 two kinds of check depend on the computer and are skipped, counted and explained when they
-cannot run.
+cannot run. The checks of a pointing fit that is not on the computer (a correction carried
+from a lidar fit that cannot be found must be CIRCULAR as a rule) name that fit after the
+test's own temporary folder: the products also look for such a fit in the repository's
+`calibration/`, where the station keeps its own fits, and no station file can have that name.
 
 Two checks of `test_survey_products.py` (the real RTK file renamed, and re-exported under
 another date, must still be CIRCULAR) need the real `2026-09-29_Marconi_Checkshots.csv` (the

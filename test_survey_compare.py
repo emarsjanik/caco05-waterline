@@ -344,11 +344,15 @@ def test_label_checks(d):
     check(h["suggested_label"] == "CIRCULAR" and f_ and f_[0]["kind"] == "chain" and "carries" in f_[0]["text"],
           "a pointing carried from a fit to this survey (*_corr_EO.yaml) -> CIRCULAR, a chain fact")
     lost = cal / "CACO05_c2_20250219_corr_EO.yaml"
-    lost.write_text(corr.read_text().replace(fit.name, "CACO05_c2_gone_lidar_EO.yaml"))
+    # the fit it names: a name unique to this run, as the label also looks in the repository's calibration/,
+    # where the station keeps its own fits
+    gone = f"CACO05_c2_gone_{Path(d).name}_lidar_EO.yaml"
+    lost.write_text(corr.read_text().replace(fit.name, gone))
     shutil.copy(HERE / "calibration" / "CACO05_c2_20240801_IO.yaml", cal / "CACO05_c2_20240801_IO.yaml")
     sh = sc.audit_label("INDEPENDENT", str(lid), "dsm", "2025-01-23", sc.load_cameras({"c2": lost}, {}), None,
                         str(dem_p))
-    check(any(x[0] == "CIRCULAR" and x[2] == "rule" and "cannot be" in x[1] for x in sh),
+    check(any(x[0] == "CIRCULAR" and x[2] == "rule" and "cannot be" in x[1] for x in sh)
+          and not (HERE / "calibration" / gone).exists(),
           "its fit not on this computer: CIRCULAR as a rule that can misfire")
     other = cal / "CACO05_c1_2025-03-01_to_2025-03-06_lidar_EO.yaml"
     other.write_text(fit.read_text().replace(lid.name, "2025005FA_Marconi_Mar_YSMP_Lidar_DSM_25cm.tif"))
