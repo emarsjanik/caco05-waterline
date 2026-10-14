@@ -5451,8 +5451,12 @@ def gcpfree_disclosure(plan, args, pcs):
                                                        f"'{h['rule']}'" for h in hist) if len(hist) > 1 else ""),
              (f"A (the table's calibration) DEM built {utc_text(t['a_dem'])} ({a['root']}/{plan['date']}"
               + (f"; variant {a['variant']}" if a.get("variant") not in (None, "table") else "") + ")"
-              if a["found"] else f"A (the table's calibration): no product found at {a['root']}/{plan['date']} (its "
-                                 f"build time is not stated here; give --a-root)"),
+              if a["found"] and t["a_dem"] else
+              f"A (the table's calibration): its product at {a['root']}/{plan['date']} has no finished DEM yet (being "
+              f"built, or failed): its build time is not stated here (build this README again once it has one)"
+              if a["found"] else
+              f"A (the table's calibration): no product found at {a['root']}/{plan['date']} (its build time is not "
+              f"stated here; give --a-root)"),
              f"B run {pc.get('run_id')}: {utc_text(t['b_run'])} to {utc_text(t['b_end'])}",
              f"B committed: {', '.join(sorted({str((p.get('committed') or {}).get('commit'))[:10] for p in pcs.values()}))}, "
              f"{utc_text(t['b_commit'])}"]
