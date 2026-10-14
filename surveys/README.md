@@ -571,13 +571,17 @@ python3 survey_products.py --date 2025-01-23 --dry-run   # inputs found, labels,
 python3 survey_products.py --date 2025-01-23             # then 2025-03-06, 2026-09-29, --summary
 python3 survey_products.py --date 2024-10-23 --dry-run   # BLIND, calibration A: forcing files, held check
 python3 survey_products.py --date 2024-10-23             # A, default root
-# B: once gcpfree_eo.py (the pre-registered GCP-free procedure) has written the two B files
-#    (it writes a camera's file only when its checks pass: DELIVERED or DELIVERED-WIDER):
+python3 survey_products.py --date 2024-10-23 --share     # -> survey_products/share/2024-10-23_A_official_calibration.tgz
+# B, LATER (after the owner has pre-registered the outcome rule; below, "23 Oct 2024: BLIND"):
+#   gcpfree_eo.py writes calibration/gcpfree/runs/<run id>/ (a B file only for a camera it delivers)
 python3 survey_products.py --date 2024-10-23 \
-    --eo c1=calibration/CACO03_c1_20241023_gcpfree_EO.yaml c2=calibration/CACO03_c2_20241023_gcpfree_EO.yaml \
+    --eo c1=calibration/gcpfree/runs/<run id>/CACO03_c1_gcpfree-oct2024_EO.yaml \
+         c2=calibration/gcpfree/runs/<run id>/CACO03_c2_gcpfree-oct2024_EO.yaml \
     --calibration-variant gcpfree \
     --output-root /mnt/I2Rgus_Data/survey_products_gcpfree --dry-run   # then without --dry-run
 python3 survey_products.py --summary --output-root /mnt/I2Rgus_Data/survey_products_gcpfree
+python3 survey_products.py --date 2024-10-23 --share --output-root /mnt/I2Rgus_Data/survey_products_gcpfree
+#   -> survey_products_gcpfree/share/2024-10-23_B_gcpfree.tgz
 ```
 
 One setup coefficient per output root: a run that would rebuild a date with
@@ -631,59 +635,133 @@ Two DEMs are delivered, each in its own root (one calibration per root):
 * **B, a calibration made without them**: the 23 Jan 2025 GCP solution of the
   same mount (`CACO03_<cam>_20250123_EO.yaml`) turned back to the October
   pointing by matching Jan and Oct photos (c2 directly, or through the Dec
-  2024 photos), its camera position that of the Jan solution. Computed on the
-  NUC by the pre-registered GCP-free procedure (`gcpfree_eo.py`, its own
-  document), never against A's numbers; it writes
-  `calibration/CACO03_<cam>_20241023_gcpfree_EO.yaml`. Then
-  `python3 survey_products.py --date 2024-10-23 --eo c1=calibration/CACO03_c1_20241023_gcpfree_EO.yaml c2=calibration/CACO03_c2_20241023_gcpfree_EO.yaml --calibration-variant gcpfree --output-root /mnt/I2Rgus_Data/survey_products_gcpfree`
-  (an `--eo` path is recorded as an absolute path).
-  The README traces each file to the GCPs it rests on: INDEPENDENT of his GCPs.
+  2024 photos; or, if Chris sends CACO03 photos of 25-29 Aug 2024, the Aug
+  2024 solution turned by matching Aug and Oct photos), its camera position
+  that of the solution it was turned from. Computed on the NUC by the
+  PRE-REGISTERED GCP-free procedure, `gcpfree_eo.py` (its docstring is the
+  procedure), never against A's numbers: it refuses to read calibration A,
+  any GCP or target file and the calibration history (by name and by the
+  name a link points to), and the Jan, Aug and lens files unless their
+  content is the archived one. Expected (stated before any run): c1 NOT
+  DELIVERED from Jan photos (its Jan and Oct views share no fixed feature),
+  c2 uncertain; Aug photos are the route most likely to work.
+  The README traces each file to the GCPs it rests on: INDEPENDENT of his
+  GCPs only when the procedure made it (below).
 
-What a B file must carry (`gcpfree_eo.py` writes it so; `--dry-run` shows
-what `survey_products.py` reads from it). Only comment lines are read for
-this, and every claim is checked against the files:
-* the reference it was turned from: `gcpfree_eo.py`'s `# Reference EO:
-  <reference>.yaml (...) sha256 <hex>` (the reference found here must have
-  that sha256), `# Position (x, y, z) kept from <reference>.yaml` (its x, y, z
-  must be the reference's) and `pan change <deg> deg from <reference>.yaml`
-  (its azimuth must differ from the reference's by that); or, as
-  `estimate_eo_rotation.py` writes it, `# ... <reference>.yaml rotated by
-  <angle> deg ...` (the first named is the one whose position it keeps; an
-  intermediate file, e.g. a Dec 2024 step of c2, lies next to the file
-  naming it). A claim that is not true, or a reference that cannot be traced
-  to a GCP solution, makes the origin NOT KNOWN, and the check is then never
-  called INDEPENDENT (the run warns before it builds);
-* its pre-registered acceptance: `gcpfree_eo.py`'s first comment line
-  `# CALIBRATION B (GCP-FREE) ..., camera <cam>: DELIVERED (...)` (= PASS) or
-  `DELIVERED-WIDER (<why: the larger uncertainty>)` (= PASS-WIDER: built, the
-  uncertainty on every output); `NOT DELIVERED` (= FAIL: `gcpfree_eo.py`
-  writes no file then, and a file saying so is refused, exit 5). Another
-  procedure may write `# acceptance: PASS | PASS-WIDER <uncertainty> | FAIL
-  <why>`. B is then not delivered; the table's calibration is never built in
-  its place under B's name. On a blind date a file stating no acceptance is
-  refused too: B is never built from a calibration whose checks were not run.
+### B, step by step (later, on the NUC)
 
-B needs a delivered file for every camera the date builds (`--eo` must name
-both; one variant is one calibration for every camera). If `gcpfree_eo.py`
-does not deliver a camera (it then writes no file for it), B is not
-delivered: Chris gets A alone, with the procedure's report saying why. A
-one-camera B is not part of this change.
+1. **The owner pre-registers the outcome rule** for the likely case that
+   only one camera passes the procedure's gates (c2): `both-or-none` (no B
+   unless both cameras are delivered: Chris gets A alone, with the reports)
+   or `per-camera` (a c2-only B DEM; its README names c1 NOT DELIVERED with
+   the procedure's report). Nobody else chooses it, and it is chosen before
+   any run:
+   `python3 gcpfree_eo.py --preregister --outcome-if-one-camera <both-or-none|per-camera> --decided-by "<name>"`
+   then `git add calibration/gcpfree/PREREGISTERED.txt && git commit`.
+   Every run (a trial too) refuses without it, uncommitted, changed since its
+   commit, naming another `gcpfree_eo.py` or module sha256, or once any run
+   was made under another version of it.
+2. `python3 test_gcpfree_eo.py` (synthetic, in a temporary folder, ~15 min)
+   and `python3 gcpfree_eo.py --dry-run` (the pre-registration, the photos
+   per day, the Jan 2025 EO against the visible horizon on 23 Jan; reads no
+   Oct photo, writes nothing).
+3. **The delivery run**: `python3 gcpfree_eo.py` (the station's three photo
+   folders, both cameras; ~10-30 min a camera). It writes
+   `calibration/gcpfree/runs/<UTC run id>/`: per camera its report
+   (`CACO03_<cam>_gcpfree-oct2024_report.json/.txt`), a B file
+   (`CACO03_<cam>_gcpfree-oct2024_EO.yaml`) only for a camera DELIVERED
+   under the rule, and `run.json`. **Commit that folder at once and write
+   down each B file's sha256, before calibration A is built or compared
+   with anything.** No run ever writes over another; a second delivery run
+   is refused (B is fixed by the first), except one with `--aug-dir` (below).
+   Bad input is refused (exit 2), never turned into a verdict: no Oct or Jan
+   photo for a camera, a missing photo folder.
+4. Build B with the cameras it delivered (`--eo c2=...` alone for a c2-only
+   B: a camera is left out only when its report in the same run folder says
+   NOT DELIVERED), `--calibration-variant gcpfree`, in its own root (commands
+   above); `--share` it.
+5. Only then compare A and B (`dem_change.py`): a report, nothing is tuned
+   to it.
+
+**If Chris sends Aug 2024 photos** (named as the station names them,
+`<epoch>.<Day>.<Mon>.<dd>_<HH>_<MM>_<SS>.GMT.<YYYY>.CACO03.<cam>.timex.jpg`,
+full frame): `python3 gcpfree_eo.py --aug-dir <folder>` is the ONE more
+delivery run allowed, and only when the first left a camera NOT DELIVERED.
+It solves only those cameras; a camera delivered in the first run keeps that
+run's verdict and B. Fixed now, before any run: when the first run delivered
+no camera, this run's B is the B (`--calibration-variant gcpfree`); otherwise
+it is a SECOND, separately labelled product (`--calibration-variant
+gcpfree-aug`, root `/mnt/I2Rgus_Data/survey_products_gcpfree-aug`, archive
+`2024-10-23_B2_gcpfree_aug.tgz`) and the first run's B stays the delivered
+one. The B file and its report name the variant; `survey_products.py`
+refuses any other.
+
+### What makes a B file the pre-registered procedure's
+
+`survey_products.py` pins the procedure (`GCPFREE_PINS`: the sha256 of
+`gcpfree_eo.py` and of every module it runs). A turned calibration is
+called INDEPENDENT of his GCPs only when all of these hold; otherwise its
+README says `NOT the pre-registered procedure` (why) and labels his check
+PARTLY-CIRCULAR, never INDEPENDENT:
+* its `# Made by gcpfree_eo.py (sha256 H) ...; report <file>.json` line
+  names a pinned `gcpfree_eo.py`;
+* that report lies beside it (the same run folder) and records the same B
+  (angles and position), the same verdict, DELIVERED, the B file's sha256,
+  a delivery run (not a trial) with the pinned modules; `run.json` beside
+  it records the file;
+* its `# Variant: ... --calibration-variant <name>` line is the report's;
+* its `# Solved by gcpfree_eo.py: <reference>.yaml rotated by <angle> deg`
+  line is true of its numbers, and its `# Reference EO: <reference>.yaml
+  (...) sha256 <hex>`, `# Position (x, y, z) kept from <reference>.yaml` and
+  `pan change <deg> deg from <reference>.yaml` claims are true of the files
+  (each reference found next to it or in the calibration folder, and traced
+  to a GCP solution it knows by name and sha256).
+A calibration turned by hand (e.g. with `estimate_eo_rotation.py`, its
+`rotated by` line and an `# acceptance:` line added) is traced the same way
+but is never INDEPENDENT on a blind date: such a turn could have been chosen
+after seeing A. The names `gcpfree` and `gcpfree-aug` are the procedure's:
+no other calibration is built under them (exit 5), all of a B's cameras come
+from one run, and a run's B is built only as the variant it names.
+
+The procedure's verdict is its first comment line, `# CALIBRATION B
+(GCP-FREE) ..., camera <cam>: DELIVERED (...)` (= PASS) or
+`DELIVERED-WIDER (<why>)` (= PASS-WIDER: built, the reason on every output);
+`NOT DELIVERED` (= FAIL) writes no file, and a file saying so is refused
+(exit 5); the table's calibration is never built in its place under B's
+name. On a blind date a file stating no acceptance is refused too.
+
+B's README gives its two STATED uncertainty terms, neither a validated
+bound on real photos (both come from synthetic tests): the rotation, max(2 x
+the solve's spread, 4 px) on the beach part of the frame; and the inherited
+camera position, the largest DEM effect of five synthetic
+position-inheritance cases (c1 DEM |dz| median 0.011 m, p90 0.026 m; c2
+0.018 m, 0.086 m), while the mount's GCP solutions of Aug 2024 and Jan 2025
+put the camera 0.36 m (c1) / 1.23 m (c2) apart. It also says the run, the
+outcome rule, the pre-registration's commits, the photo folders and whether
+the B file is committed to git; and that the pointing step's sea-horizon
+check of the October photos against B is independent of the photo matches.
 
 Refused before anything is written (exit 5): a `--calibration-variant` build
 in a root not named `<root>_<variant>`, a table build in a root holding a
 variant (and the reverse), an `--eo` path that does not exist (it is taken
 as given: never a file of the same name elsewhere, never the table's), an
-acceptance FAIL. A B file changed since B was built is a rebuild refused
-without `--replace` (stamps record each calibration's sha256). B's README also
-says that its camera position is the Jan solution's while the mount's GCP
-solutions of Aug 2024 and Jan 2025 put the cameras up to 0.59 m apart in
-height (c2; nothing of the solution from the held GCPs is used by B's build), and
-that the pointing step's sea-horizon check of the October photos against B is
-independent of the photo matches.
+acceptance FAIL, a camera left out that the procedure delivered, B files of
+two runs, a B under another variant name than its run's. A B file changed
+since B was built is a rebuild refused without `--replace` (stamps record
+each calibration's sha256).
 
-Send Chris, per root: `2024-10-23/dem/2024-10-23_dem.tif` (+ `_spread`,
-`_count`), the DEM page, `README.txt` and `provenance.json`. The GeoTIFFs are
-EPSG:6348 (NAD83(2011) / UTM 19N) + NAVD88.
+**Telling A and B apart once shared.** B's DEM files carry the variant in
+their names (`2024-10-23_gcpfree_dem.tif`, `_spread`, `_count`, the page);
+A's are `2024-10-23_dem.tif`. Every GeoTIFF's description (ImageDescription)
+names the calibration: the table's or the variant, each camera's EO file and
+sha256 prefix, and his check's label. `--share` packs each into one archive
+named by its calibration, `2024-10-23_A_official_calibration.tgz` and
+`2024-10-23_B_gcpfree.tgz` (+ `.sha256`), with README, provenance, GeoTIFFs
+(EPSG:6348, NAD83(2011) / UTM 19N + NAVD88), the DEM page, the maps, the
+calibration files used, for B the procedure's reports and `run.json` (and the
+report of a camera it did not deliver), and a MANIFEST of every file's
+sha256; never written over (`--replace`), and a B that is no longer the
+procedure's is refused.
 
 The October date also needs its forcing files, which are NOT downloaded:
 * WIS ST63064 hourly waves (`WIS_ST63064_2024-10_to_2025-03.csv`) and/or
