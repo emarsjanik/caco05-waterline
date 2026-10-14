@@ -28,15 +28,18 @@ the records, reversed dates, bad dates and missing files must raise
 ForcingError with a message that says what to do; the NOAA download
 fallback must be used only when needed (tested with a stand-in fetch).
 
-STATION FILES. Nothing here depends on what the computer holds: every build
-is cut off from the station's files for the whole run (the search folders
-point at an empty folder of the test's own, and the GNSS-R spline, gauge and
-waves archive of the setup-share check at files that do not exist), so it
-runs on the fixture alone and gives the same result on the station NUC as
-in a clean checkout. The search itself (an input not given is found by its
-default name in the first search folder holding one) is tested on folders
-of the test's own, and a last check confirms that no build named a file
-outside the test's folder.
+STATION FILES. Nothing here depends on what the computer holds: the run
+works in a temporary folder that is also its current folder, and every
+build is cut off from the station's files for the whole run (the search
+folders point at an empty folder of the test's own, and the GNSS-R spline,
+gauge and waves archive of the setup-share check at files that do not
+exist), so it runs on the fixture alone and gives the same result on the
+station NUC as in a clean checkout. The search itself (an input not given
+is found by its default name in the first search folder holding one) is
+tested on folders of the test's own, and a last check confirms that no
+build named a file outside the test's folder. The command line is run
+twice: once through main() with the search cut off as above, and once as
+the script itself on an error raised before any input is looked for.
 
 No pytest needed. Runs in ~40 s here (about two minutes on the station NUC).
 
@@ -377,6 +380,18 @@ def test_partial_and_errors(fx, out):
     check("cli: exit 2 with an ERROR line", p.returncode == 2 and p.stderr.startswith("ERROR:")
           and "Traceback" not in p.stderr and len(searched) == 2 and all("not found" in ln for ln in searched),
           f"rc {p.returncode}: {p.stderr.strip()[:120]}")
+    # ... and the script itself, through its own entry point (`sys.exit(main())`): survey_products' forcing step
+    # stops on its exit code alone after 'too few wave hours', whose files exist. An error build_forcing raises
+    # before it makes the output folder or looks for any input, so no station file can be reached: the folder
+    # not made is part of the check (should the order change, this check would no longer be cut off)
+    real_out = Path(out) / "cli_script"
+    p = subprocess.run([sys.executable, str(HERE / "historical_forcing.py"), "--start", "2025-02-10", "--end",
+                        "2025-02-01", "--output-dir", str(real_out), "--no-download", "--no-plot"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=300)
+    check("cli: historical_forcing.py itself exits 2 with an ERROR line, before any input is looked for",
+          p.returncode == 2 and p.stderr.startswith("ERROR:") and "before" in p.stderr
+          and "Traceback" not in p.stderr and not real_out.exists(),
+          f"rc {p.returncode}: {p.stderr.strip()[:120]}; output folder made: {real_out.exists()}")
 
 
 def test_still_water_share(out):
@@ -545,11 +560,14 @@ def main():
     if not Path(args.adcp).exists():
         print(f"ERROR: ADCP record {args.adcp} not found (give --adcp)")
         return 2
+    args.adcp = str(Path(args.adcp).resolve())      # the run's current folder is its work folder (below)
     if args.keep:                       # a new folder each run: never the files an earlier run left
         Path(args.keep).mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="hf_test_", dir=args.keep)).resolve()
     t = pd.Timestamp.now()
-    print(f"work folder       : {work}")
+    start_dir = os.getcwd()
+    os.chdir(str(work))                 # a file name never finds a file of the folder the test was started from
+    print(f"work folder       : {work} (the current folder during the run)")
     print("fixture           : synthetic Chatham (a 1.35, lag -54 min, b -0.05, 1 cm noise, 36 h hole), "
           "synthetic WIS, ADCP with 2025-02-18..24 cut")
     print("station files     : none used (search folders and setup-share files pointed at the empty "
@@ -584,6 +602,7 @@ def main():
         run_group("isolation", test_isolation, work)
     finally:
         hf.SEARCH_DIRS = station_dirs
+        os.chdir(start_dir)
     n_fail = sum(1 for _, ok in RESULTS if not ok)
     print(f"\n{len(RESULTS) - n_fail}/{len(RESULTS)} checks passed in "
           f"{(pd.Timestamp.now() - t).total_seconds():.0f} s" + (f"; {n_fail} FAILED" if n_fail else ""))

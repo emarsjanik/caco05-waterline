@@ -37,7 +37,7 @@ python3 dem_figure.py --self-test                # ends "SELF-TEST PASSED"
 python3 daily_elevation_map.py --self-test       # ends "SELF-TEST PASSED"
 python3 test_survey_products.py                  # ends "all survey_products tests passed" (see below)
 python3 test_survey_compare.py                   # ends "all survey_compare tests passed"
-python3 test_historical_forcing.py               # ends "74/74 checks passed"
+python3 test_historical_forcing.py               # ends "75/75 checks passed"
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
@@ -54,9 +54,12 @@ is unchanged by this PR, and the survey products use only its `ground_to_pixel`,
 does not need scipy.
 
 The self-tests give the same result on the NUC as in a clean checkout: they run on fixtures
-and folders of their own, in a temporary folder that is also their current folder, with the
-station's search folders and archive files switched off (`test_historical_forcing.py`'s last
-check confirms that no build named a station file). What they read of the station is said.
+and folders of their own, with the station's search folders and archive files switched off
+(`test_historical_forcing.py`'s last check confirms that no build named a station file). The
+three `test_*.py` files run in a temporary folder that is also their current folder; the three
+`--self-test` runs write only into temporary folders of their own and look for nothing in the
+current folder but matplotlib's own `matplotlibrc` (checked with strace). What they read of
+the station is said.
 
 `test_survey_products.py` checks `surveys/survey_dates.csv` and `surveys/surveys.csv` as the
 owner has them now last of all, so a table problem cannot hide the results of the code's
