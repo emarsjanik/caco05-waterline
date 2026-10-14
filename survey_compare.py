@@ -463,12 +463,14 @@ def subset_contours(c, m):
     return out
 
 
-def dem_frame_selection(cont, info):
+def dem_frame_selection(cont, info, inside=None):
     """
     Which waterline points belong to frames the DEM gridded, from the DEM's own STEM_info.json
     (dem_from_contours.py): its wave filter (a frame with offshore Hs > max_hs is left out; one
     with no wave record is kept, as there) and the camera-days its day-consistency check rejected
     (local days, as it counts them). Its date window is applied when the lines are read.
+    inside: the points that are compared (the photo dates; None: all), over which the frames kept
+    are counted against the DEM's own count.
     -> (mask over the points or None, {reason: [frames left out]}, note).
     """
     if not info:
@@ -499,9 +501,10 @@ def dem_frame_selection(cont, info):
     other = int(filt.get("excluded_frames") or 0) + int(filt.get("frames_rejected") or 0)
     if other:
         notes.append(f"the DEM also left out {other} frame(s) by name or by a frame-offset test: not "
-                     f"reproduced here, so they are still compared")
+                     f"reproduced here, so any of them inside the photo dates is still compared")
     kept = {}
-    for f_, c_ in set(zip(cont["frame"][keep].tolist(), cont["cam"][keep].tolist())):
+    cmp_ = keep if inside is None else keep & inside
+    for f_, c_ in set(zip(cont["frame"][cmp_].tolist(), cont["cam"][cmp_].tolist())):
         kept[c_] = kept.get(c_, 0) + 1
     dem_n = {k: int(v) for k, v in (info.get("frames") or {}).items()}
     if dem_n and kept != dem_n:
@@ -1814,14 +1817,15 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         # the statistics are those of the frames the DEM gridded; the frames it left out (high waves,
         # rejected camera-days: the largest setups, where C and the still water err most) are
         # reported apart, so the lines and the DEM are judged on the same frames
-        sel, out_why, sel_note = dem_frame_selection(cont, dem_info)
+        sel, out_why, sel_note = dem_frame_selection(cont, dem_info, inside)
         if sel is not None and not sel.all():
             cont_out = subset_contours(cont, ~sel)
             cont = subset_contours(cont, sel & inside)
-        elif not inside.all():
-            cont = subset_contours(cont, inside)
             print(f"waterlines        : {len(set(cont_out['frame'].tolist()))} frame(s) the DEM left out are "
                   f"compared apart (" + "; ".join(f"{k}: {len(v)}" for k, v in out_why.items()) + ")")
+        elif not inside.all():
+            # nothing the DEM left out: only the lines outside the photo dates (read for that search) go
+            cont = subset_contours(cont, inside)
         if sel_note:
             print(f"NOTE: {sel_note}")
     cell_cam = cell_majority_camera(cont, xll, ytop, cell, nrows, ncols) \

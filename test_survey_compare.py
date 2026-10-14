@@ -726,8 +726,34 @@ def test_left_out_frames_window(d):
           and "it left out 8 frame(s) (8 with offshore Hs > 1.5 m)" in txt,
           f"FRAMES: the DEM's 16 gridded frames (20-23 Jan) and the 8 it left out on 18-19 Jan, before its first "
           f"gridded day, as its own record counts them (was 0) ({fs['dem_frames']}, {fs['left_out_frames']})")
-    check(abs(h["waterlines"]["median"] + 0.1) < 0.01 and "480 georectified points 2025-01-20 to 2025-01-23" in log,
-          "the statistics stay those of the gridded days' frames")
+    check(abs(h["waterlines"]["median"] + 0.1) < 0.01 and "480 georectified points 2025-01-20 to 2025-01-23" in log
+          and "8 frame(s) the DEM left out are compared apart (offshore Hs > 1.5 m: 8)" in log,
+          "the statistics stay those of the gridded days' frames, and the log names the frames compared apart")
+    # -- a calm week (nothing over the wave filter) whose DEM window is wider than its gridded days (a DEM
+    # built with a frame-offset test or --exclude, or --photo-dates narrower than its window): the lines
+    # outside the photo dates are read for that search, then dropped; nothing is 'left out' here (review 2:
+    # this crashed, TypeError on cont_out)
+    rows = list(csv.reader(open(cp)))
+    with open(cp, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(rows[0])
+        for r_ in rows[1:]:
+            w.writerow(r_[:5] + ["0.8"] + r_[6:])
+    info["filters"].update(rough_frames=0, frames_rejected=8)
+    Path(str(dem_p).replace("_dem.asc", "_info.json")).write_text(json.dumps(info))
+    out2 = Path(d) / "out_calm"
+    try:
+        h, log = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "test", name="calm",
+                       output_dir=str(out2), survey_date="2025-01-23", photo_dates=("2025-01-20", "2025-01-23"),
+                       contours=str(cp))
+    finally:
+        Path(str(dem_p).replace("_dem.asc", "_info.json")).unlink()
+    fs = h["waterlines"]["frame_set"]
+    check(fs["dem_frames"] == 16 and fs["left_out_frames"] == 0 and h["waterlines"].get("frames") == 16
+          and abs(h["waterlines"]["median"] + 0.1) < 0.01 and "compared apart" not in log
+          and "480 georectified points 2025-01-20 to 2025-01-23" in log and "not the same set" not in log,
+          f"a calm week, lines outside the photo dates and nothing over the wave filter: no crash, the 16 frames of "
+          f"20-23 Jan compared (as many per camera as the DEM gridded), none compared apart ({fs})")
 
 
 def test_py38():
