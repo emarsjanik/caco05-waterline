@@ -28,13 +28,18 @@ one way with time. These checks plant the answer and ask for it back:
   * days the test cannot judge (two days that only see each other, the
     last two days that disagree): the one-pass verdict, and a WARNING;
     every day disagreeing: every day rejected, exit 4, as before;
+  * the WARNING and <stem>_info.json describe the final DEM: a day left
+    out unjudged and later taken back, or kept unjudged and within the
+    limit in the end, is not named; one the kept days judge in the end
+    is not either; one kept unjudged is tried again, and left out once
+    the test can judge it; no other log line holds the word WARNING;
   * a steady trend: the WARNING, and what the test trims; days without a
-    trend: the WARNING stays rare;
+    trend, or one bad day at an end: the WARNING stays rare;
   * the station's 7-day c1/c2 pattern of 5-11 Oct 2026, replayed;
   * fewer than 3 days: none left out;
   * the offsets equal the one-pass code's, whatever the order of the
-    samples, ties are broken by name, and random scenarios keep the
-    test's bookkeeping;
+    samples, ties are broken by name, and random scenarios (stretches of
+    beach, and two-camera tidal windows) keep the test's bookkeeping;
   * run time: a quarter-year archive with many days left out in seconds
     (--year: a year, 730 camera-days);
   * the command line: the log block survey_products.py reads, and
@@ -410,8 +415,9 @@ def test_take_back():
 def test_trend():
     print("a steady trend: WARNING, and what the test trims")
     dt, one = run(scenario_trend(), sigma=NUC_SIGMA, seed=5)
-    tr = dfc.day_trends({k: v[0] for k, v in dt["final"].items()}, LIMIT)
-    check(len(tr) == 1 and tr[0]["camera"] == "c1" and tr[0]["spearman_rho"] == 1.0 and tr[0]["days"] == 7,
+    tr = dfc.day_trends({k: v[0] for k, v in dt["final"].items()}, LIMIT, left_out=dt["rejected"])
+    check(len(tr) == 1 and tr[0]["camera"] == "c1" and tr[0]["spearman_rho"] == 1.0 and tr[0]["days"] == 7
+          and tr[0]["without"] is None,
           f"c1 flagged: rho {tr[0]['spearman_rho'] if tr else '-'}, range {tr[0]['range_m'] if tr else '-'} m "
           f"over 7 days; c2 not")
     c1 = sorted(k for k in dt["first"] if k.startswith("c1"))
@@ -439,36 +445,72 @@ def test_trend():
 def test_trend_rule():
     print("the trend rule: what |rho| it asks for, and how often it fires with no trend")
     need = {n: dfc.trend_rho_needed(n) for n in range(5, 10)}
-    check([round(need[n], 3) for n in range(5, 10)] == [1.0, 0.943, 0.893, 0.833, 0.8],
+    check([round(need[n], 3) for n in range(5, 10)] == [1.0, 0.886, 0.821, 0.81, 0.8],
           f"|rho| needed: 5 days 1.00 (strictly monotonic), 6 {need[6]:.3f}, 7 {need[7]:.3f}, 8 {need[8]:.3f}, "
           f"from 9 on > 0.8")
     from itertools import permutations
+    smallest = {}
+    for n in (7, 8):
+        q = np.array(list(permutations(range(n))), dtype=np.int64)
+        r = np.unique(np.round(1.0 - 6.0 * ((q - np.arange(n)) ** 2).sum(axis=1) / (n * (n * n - 1.0)), 9))
+        smallest[n] = float(r[r > dfc.DAY_TREND_MIN_RHO][0])
+    check(abs(need[7] - smallest[7]) < 1e-9 and abs(need[8] - smallest[8]) < 1e-9,
+          "from 7 days on that is |rho| > 0.8 itself (the rule asked for): the smallest rho above 0.8 that 7 or 8 "
+          "days can give")
     p = np.array(list(permutations(range(9))), dtype=np.int64)
     rho9 = 1.0 - 6.0 * ((p - np.arange(9)) ** 2).sum(axis=1) / (9 * 80.0)
     vals = np.unique(np.round(rho9, 9))
     exact9 = min(v for v in vals if (rho9 >= v - 1e-9).mean() <= dfc.DAY_TREND_ALPHA)
     check(exact9 < dfc.DAY_TREND_MIN_RHO,
-          f"9 days, all 362880 orders: the 1 % value is {exact9:.3f}, below 0.8, so from 9 days on the 0.8 "
-          f"floor is the stricter (the 1 % value falls as days are added)")
-    two_swaps = {f"c1 2026-10-{i:02d}": o for i, o in enumerate([-0.1, -0.2, 0.05, 0.0, 0.15, 0.2], 5)}
+          f"9 days, all 362880 orders: the {100 * dfc.DAY_TREND_ALPHA:g} % value is {exact9:.3f}, below 0.8, so "
+          f"from 9 days on the 0.8 floor is the stricter (the value falls as days are added)")
+    five_swap = {f"c1 2026-10-{i:02d}": o for i, o in enumerate([-0.1, -0.2, 0.0, 0.05, 0.2], 5)}
+    six_cycle = {f"c1 2026-10-{i:02d}": o for i, o in enumerate([-0.1, 0.0, -0.2, 0.05, 0.15, 0.2], 5)}
     rising = {f"c1 2026-10-{i:02d}": o for i, o in enumerate([-0.2, -0.1, 0.0, 0.05, 0.1, 0.2], 5)}
-    check(dfc.day_trends(two_swaps, LIMIT) == [] and len(dfc.day_trends(two_swaps, LIMIT, alpha=1.0)) == 1
+    check(dfc.day_trends(five_swap, LIMIT) == [] and dfc.day_trends(six_cycle, LIMIT) == []
+          and len(dfc.day_trends(five_swap, LIMIT, alpha=1.0)) == 1
+          and len(dfc.day_trends(six_cycle, LIMIT, alpha=1.0)) == 1
           and abs(dfc.day_trends(rising, LIMIT)[0]["chance"] - 1 / 720.0) < 1e-12
           and "which days in random order reach 1 time in 720;" in dfc.day_trend_warning(
               dfc.day_trends(rising, LIMIT)[0], LIMIT, [])[0],
-          "6 days rising with two pairs swapped (rho 0.89, reached by 1.7 % of random orders): no warning "
-          "(|rho| > 0.8 alone warned); strictly rising: WARNING, chance 1/720")
+          "5 days rising with one pair swapped (rho 0.90, reached by 4.2 % of random orders) and 6 days with "
+          "three rotated (rho 0.83, 2.9 %): no warning (|rho| > 0.8 alone warned); strictly rising: WARNING, "
+          "chance 1/720")
+    # the review's planted trend on the station's data (+0.06 m/day on c1, 29 Sep - 5 Oct): the final offsets
+    # it gave, the two low-end days left out; DAY_TREND_ALPHA 0.01 (rho 0.89 needed over 7 days) missed it
+    planted = dict(zip(["c1 2026-09-29", "c1 2026-09-30"] + [f"c1 2026-10-0{d}" for d in range(1, 6)],
+                       [-0.245, -0.151, -0.130, -0.067, 0.103, -0.010, -0.023]))
+    tr = dfc.day_trends(planted, LIMIT, left_out=["c1 2026-09-29", "c1 2026-09-30"])
+    check(len(tr) == 1 and tr[0]["spearman_rho"] == 0.857 and tr[0]["without"] is None
+          and dfc.day_trends(planted, LIMIT, alpha=0.01) == [],
+          f"a 0.35 m trend trimmed at its low end (two days left out), rho +0.86 over 7 days: WARNING "
+          f"(chance {tr[0]['chance'] if tr else 0:.4f}; at 1 % it was missed)")
+    # one bad day at an end ranks first or last and lifts rho: alone it makes no trend
+    lone = dict(zip([f"c1 2026-10-{d:02d}" for d in range(5, 12)], [0.0, -0.02, 0.02, 0.01, 0.04, 0.03, 0.40]))
+    t_all = dfc.day_trends(lone, LIMIT)
+    check(len(t_all) == 1 and dfc.day_trends(lone, LIMIT, left_out=["c1 2026-10-11"]) == [],
+          f"6 days within 0.04 m (rho 0.83 among them) and 11 Oct +0.40 m, left out: rho over all 7 is "
+          f"{t_all[0]['spearman_rho'] if t_all else 0:+.2f}, but without the one day left out at the end the "
+          f"6 others do not reach 0.89: no warning")
     # no trend: independent day biases, two cameras, 7 days, as the NUC's c2 (sd ~0.08 m)
     rng = np.random.RandomState(12)
-    n, fired, old = 4000, 0, 0
+    n, fired, end_on, end_off = 4000, 0, 0, 0
     days = [f"2026-10-{d:02d}" for d in range(5, 12)]
+    tail7 = dfc.spearman_tail(need[7], 7)
+    bound = 1 - (1 - 2 * tail7) ** 2
     for _ in range(n):
         off = {f"{c} {d}": float(rng.normal(0, 0.08)) for c in ("c1", "c2") for d in days}
         fired += bool(dfc.day_trends(off, LIMIT))
-        old += bool(dfc.day_trends(off, LIMIT, alpha=1.0))           # |rho| > 0.8 alone (d28b5ec)
-    check(fired / n < 0.03 and old / n > 2 * fired / n,
+        one = {f"c1 {d}": float(rng.normal(0, 0.04)) for d in days}
+        one["c1 2026-10-11"] = 0.40                                     # a bad last day, left out
+        end_on += bool(dfc.day_trends(one, LIMIT, left_out=["c1 2026-10-11"]))
+        end_off += bool(dfc.day_trends(one, LIMIT))
+    check(fired / n <= bound,
           f"{n} 7-day windows of two cameras with no trend (day biases sd 0.08 m): WARNING in "
-          f"{100.0 * fired / n:.1f} % (|rho| > 0.8 alone: {100.0 * old / n:.1f} %)")
+          f"{100.0 * fired / n:.1f} % (at most {100 * bound:.1f} %: each camera {100 * tail7:.1f} % a direction)")
+    check(end_on / n < 0.025 and end_off / n > 2.5 * end_on / n,
+          f"one camera, 6 good days and a bad last day (+0.40 m) left out: WARNING in {100.0 * end_on / n:.1f} % "
+          f"(the 6 others by chance); counting that day in the rho, {100.0 * end_off / n:.1f} %")
 
 
 def test_nuc_7day():
@@ -482,10 +524,14 @@ def test_nuc_7day():
     check(dt["rejected"] == ["c1 2026-10-05", "c2 2026-10-08"] and not dt["taken_back"],
           f"iterative: the same two left out ({', '.join(s[0] for s in dt['steps'])}, in that order): "
           f"11 Oct c1 is {dt['final']['c1 2026-10-11'][0]:+.3f} m from the kept days, within the limit")
-    tr = dfc.day_trends({k: v[0] for k, v in dt["final"].items()}, LIMIT)
+    tr = dfc.day_trends({k: v[0] for k, v in dt["final"].items()}, LIMIT, left_out=dt["rejected"])
     check([t["camera"] for t in tr] == ["c1"] and tr[0]["spearman_rho"] == 1.0,
           f"so the WARNING carries it: c1 rho {tr[0]['spearman_rho']:+.2f}, range {tr[0]['range_m']:.2f} m "
           f"(5 Oct left out, 11 Oct kept: the trend trimmed at its low end only); none for c2")
+    w = tr[0]["without"]
+    check(w is not None and w["day"] == "c1 2026-10-05" and w["days"] == 5 and w["spearman_rho"] == 1.0,
+          "5 Oct is c1's one day left out, at an end: the trend must stand without it, and does (the other "
+          "5 days rise strictly, rho +1.00)")
     check(all(abs(dt["final"][k][0]) <= LIMIT for k in dt["final"] if k not in dt["rejected"]),
           "every kept day within the limit of the kept days")
 
@@ -580,8 +626,13 @@ def test_cannot_judge():
           f"three days 0, +0.4, -0.4 m: {dt['steps'][0][0][3:]} left out, then two that disagree: the first "
           f"pass's verdict, 6 Mar kept and {dt['steps'][1][0][3:]} left out, as one pass")
     head = dfc.day_test_warning(dt, LIMIT)[0]
-    check("kept over the limit without being judged: c2 2025-03-06" in head
-          and "kept untested" not in head, f"WARNING: {head[9:100]}...")
+    rec = {x["day"]: x for x in dfc.day_test_record(dt, LIMIT, [])["day_test"]["not_judged"]}
+    check("kept untested: c2 2025-03-06" in head and "kept over the limit" not in head
+          and dt["untested"] == ["c2 2025-03-06"] and not dt["over_kept"]
+          and rec["c2 2025-03-06"]["verdict"] == "kept untested" and rec["c2 2025-03-06"]["final_offset_m"] is None
+          and rec["c2 2025-03-06"]["first_pass_verdict"] == "kept",
+          f"6 Mar ends the only day kept, so untested: the WARNING says so, not 'kept over the limit' "
+          f"({head[9:110]}...)")
     # every day disagrees: every day rejected (one pass too), so the command line exits 4 as before
     days = [(f"c1 2026-10-0{d}", 0.4 * (d - 1), range(100), 3) for d in range(1, 5)]
     dt, one = run(days)
@@ -592,6 +643,118 @@ def test_cannot_judge():
     rep = dfc.day_test_report(dt, LIMIT, 1200)
     check(sum("REJECTED" in x for x in rep[1:5]) == 4, "every day's line says REJECTED (survey_products "
                                                          "reads 'rejected every camera-day' from that)")
+
+
+def scenario_taken_back_unjudged():
+    """Two c2 days 0.4 m high -- 1 Oct on cells 50-99 (two frames a cell), 2 Oct on 20-59 (three) --
+    and two good ones: 3 Oct on 0-49 (one frame), 4 Oct on 30-79 (three). 2 Oct goes first; 3 Oct then
+    has too few comparable samples left, so only 1 and 4 Oct are testable and the test cannot tell which
+    is off: both keep the first pass's verdict, over the limit (4 Oct read -0.40 m against a DEM the
+    high days made), and are left out. Against the kept day (3 Oct) 4 Oct is within the limit: taken
+    back. (The review's seed 204 of fuzz2, in small.)"""
+    return [("c2 2026-10-01", 0.4, range(50, 100), 2), ("c2 2026-10-02", 0.4, range(20, 60), 3),
+            ("c2 2026-10-03", 0.0, range(0, 50), 1), ("c2 2026-10-04", 0.0, range(30, 80), 3)]
+
+
+def scenario_kept_unjudged():
+    """1 Oct 0.2 m low on cells 10-49 (three frames a cell), 2 Oct 0.2 m high on 20-69 (three), and two
+    good days: 3 Oct on 30-49 (one frame; under 30 comparable samples, not testable) and 4 Oct on 10-49
+    (two). 2 Oct goes first; then 1 and 4 Oct only see each other: 1 Oct (over in the first pass) is left
+    out, 4 Oct (within it) kept -- and in the end 4 Oct is within the limit of the kept days. (The
+    review's seed 20 of fuzz2, in small.)"""
+    return [("c2 2026-10-01", -0.2, range(10, 50), 3), ("c2 2026-10-02", 0.2, range(20, 70), 3),
+            ("c2 2026-10-03", 0.0, range(30, 50), 1), ("c2 2026-10-04", 0.0, range(10, 50), 2)]
+
+
+def test_unjudged_fate():
+    print("days the test could not judge: the WARNING and <stem>_info.json say where they ended up")
+    for sigma in (0.02, 0.0):
+        pc, pv, pk = pairs(scenario_taken_back_unjudged(), sigma=sigma)
+        dt = dfc.day_consistency(pc, pv, pk, LIMIT, 1)
+        nj = {r["day"]: r for r in dt["not_judged"]}
+        check(dt["rejected"] == ["c2 2026-10-01", "c2 2026-10-02"] and dt["taken_back"] == ["c2 2026-10-04"]
+              and sorted(nj) == ["c2 2026-10-01", "c2 2026-10-04"] and all(r["left_out"] for r in nj.values())
+              and dt["untested"] == ["c2 2026-10-03"] and not check_invariants(dt),
+              f"noise {sigma} m: 1 and 4 Oct left out unjudged, 4 Oct taken back "
+              f"({dt['final']['c2 2026-10-04'][0]:+.3f} m from the kept days), 3 Oct kept untested")
+    head, lines = dfc.day_test_warning(dt, LIMIT)
+    check(warning_names(head) == {"left out without being judged": ["c2 2026-10-01"],
+                                  "kept untested": ["c2 2026-10-03"]},
+          f"the WARNING names 1 Oct left out and 3 Oct untested, not 4 Oct, which is in the DEM ({head[9:]})")
+    rec = {x["day"]: x for x in dfc.day_test_record(dt, LIMIT, [])["day_test"]["not_judged"]}
+    r4 = rec["c2 2026-10-04"]
+    check(r4["verdict"] == "taken back" and r4["first_pass_verdict"] == "left out"
+          and r4["final_offset_m"] is not None and rec["c2 2026-10-01"]["verdict"] == "left out",
+          "<stem>_info.json: day_test.not_judged gives 4 Oct verdict 'taken back' (first pass: 'left out') "
+          "and its final offset")
+    row = [x for x in dfc.day_test_report(dt, LIMIT, 1) if x.startswith("   c2 2026-10-04")][0]
+    check("taken back" in row and "REJECTED" not in row and "WARNING" not in row, f"its line: '{row.strip()}'")
+    pc, pv, pk = pairs(scenario_kept_unjudged(), sigma=0.02)
+    dt = dfc.day_consistency(pc, pv, pk, LIMIT, 1)
+    nj = {r["day"]: r for r in dt["not_judged"]}
+    o4 = dt["final"]["c2 2026-10-04"][0]
+    check(dt["rejected"] == ["c2 2026-10-01", "c2 2026-10-02"] and "c2 2026-10-04" in nj
+          and not nj["c2 2026-10-04"]["left_out"] and abs(o4) <= LIMIT and not dt["over_kept"]
+          and not dt["untested"] and not check_invariants(dt),
+          f"4 Oct, kept unjudged, ends {o4:+.3f} m from the kept days: within the limit")
+    head, lines = dfc.day_test_warning(dt, LIMIT)
+    rec = {x["day"]: x for x in dfc.day_test_record(dt, LIMIT, [])["day_test"]["not_judged"]}
+    rep = dfc.day_test_report(dt, LIMIT, 1)
+    check(warning_names(head) == {"left out without being judged": ["c2 2026-10-01"]}
+          and rec["c2 2026-10-04"]["verdict"] == "kept within the limit"
+          and not any("WARNING" in x for x in rep),
+          "the WARNING names 1 Oct only, not 'kept over the limit: 4 Oct'; its record says 'kept within the "
+          "limit'; no report line holds the word WARNING")
+    # left out unjudged, but the kept days judge it in the end: not named either. 1 Oct (good, two
+    # frames a cell) and 4 Oct (0.2 m low, three) share cells 10-49, where only 1 Oct also meets 2 Oct
+    # (cells 40-49); 2 and 3 Oct (good) cover 40-79. 1 and 4 Oct cannot be judged (each one's DEM is
+    # the other alone) and were over the limit in the first pass: both left out. Against the kept days
+    # 4 Oct is 0.2 m low where 2 Oct, which 3 Oct confirms, meets it: judged in the end. 1 Oct has too
+    # few comparable samples left: still left out unjudged.
+    days = [("c2 2026-10-01", 0.0, range(10, 50), 2), ("c2 2026-10-02", 0.0, range(40, 80), 3),
+            ("c2 2026-10-03", 0.0, range(60, 80), 2), ("c2 2026-10-04", -0.2, range(10, 50), 3)]
+    for sigma in (0.02, 0.0):
+        pc, pv, pk = pairs(days, sigma=sigma)
+        dt = dfc.day_consistency(pc, pv, pk, LIMIT, 1)
+        nj = {r["day"]: r for r in dt["not_judged"]}
+        head = dfc.day_test_warning(dt, LIMIT)[0]
+        t = dfc.day_test_record(dt, LIMIT, [])
+        how = {x["day"]: x["how"] for x in t["day_test"]["rejected"]}
+        row = [x for x in dfc.day_test_report(dt, LIMIT, 1) if x.startswith("   c2 2026-10-04")][0]
+        check(dt["rejected"] == ["c2 2026-10-01", "c2 2026-10-04"] and sorted(nj) == dt["rejected"]
+              and nj["c2 2026-10-04"]["judged_in_end"] and not nj["c2 2026-10-01"]["judged_in_end"]
+              and warning_names(head) == {"left out without being judged": ["c2 2026-10-01"]}
+              and how == {"c2 2026-10-01": "not judged", "c2 2026-10-04": "left out"}
+              and t["camera_days_rejected_offsets_m"]["c2 2026-10-01"] is not None
+              and "the kept days judge it over the limit in the end" in row and not check_invariants(dt),
+              f"noise {sigma} m: 4 Oct, left out unjudged, is judged against the kept days in the end "
+              f"({dt['final']['c2 2026-10-04'][0]:+.3f} m): the WARNING names 1 Oct only; 1 Oct, with no "
+              f"kept day to compare, still gets an offset in camera_days_rejected_offsets_m (the one it was "
+              f"left out at, {t['camera_days_rejected_offsets_m']['c2 2026-10-01']:+.3f} m)")
+
+
+def test_set_aside_retried():
+    print("a day kept unjudged is tried again later")
+    # 4 Oct (0.4 m low, cells 20-69) goes first. 6 Oct (0.2 m low, 40-69) then reads -0.21 m, but its
+    # DEM is 2 Oct alone (50-89) in most of its cells, unconfirmed: set aside, kept (within the limit in
+    # the first pass, where 4 Oct made its DEM); 2 Oct, as unjudged, is left out (over the limit in the
+    # first pass). Without 2 Oct, 6 Oct's DEM is 1 and 5 Oct (good, cells 0-49): judged and left out --
+    # d28b5ec/86985d3 kept it over the limit, 'without being judged', for good.
+    days = [("c2 2026-10-01", 0.0, range(10, 50), 2), ("c2 2026-10-02", 0.0, range(50, 90), 3),
+            ("c2 2026-10-03", -0.2, range(20, 40), 1), ("c2 2026-10-04", -0.4, range(20, 70), 3),
+            ("c2 2026-10-05", 0.0, range(0, 50), 3), ("c2 2026-10-06", -0.2, range(40, 70), 3)]
+    for sigma in (0.02, 0.0):
+        pc, pv, pk = pairs(days, sigma=sigma)
+        dt = dfc.day_consistency(pc, pv, pk, LIMIT, 1)
+        order = " ".join(x.strip() for x in dfc.day_test_report(dt, LIMIT, 1)).split("order left out:")[1]
+        check(dt["judged_later"] == ["c2 2026-10-06"] and "c2 2026-10-06" in dt["rejected"]
+              and [s[0] for s in dt["steps"]] == ["c2 2026-10-04", "c2 2026-10-02", "c2 2026-10-06"]
+              and [r["day"] for r in dt["not_judged"]] == ["c2 2026-10-02"] and not dt["over_kept"]
+              and "c2 2026-10-06 (-0.2" in order and "set aside unjudged at an earlier step" in order
+              and warning_names(dfc.day_test_warning(dt, LIMIT)[0]) == {
+                  "left out without being judged": ["c2 2026-10-02"]} and not check_invariants(dt),
+              f"noise {sigma} m: 6 Oct, set aside, is judged once 2 Oct is out, and left out "
+              f"({dt['final']['c2 2026-10-06'][0]:+.3f} m); no day is kept over the limit")
 
 
 def test_deterministic():
@@ -661,8 +824,14 @@ def test_cli(d):
     rej_lines = [ln for ln in day_lines if "REJECTED" in ln]
     check(len(rej_lines) == len(rej) and all(any(k in ln for ln in rej_lines) for k in rej),
           "the lines marked REJECTED are exactly the days left out")
-    check(sum(ln.startswith("WARNING") for ln in out.splitlines()) == 1
-          and "c1's camera-day offsets run one way with time over 7 days" in out, "one WARNING line, for c1")
+    check(sum("WARNING" in ln for ln in out.splitlines()) == 1
+          and "c1's camera-day offsets run one way with time over 7 days" in out,
+          "one line holds the word WARNING (the station status counts them), for c1")
+    check([x["day"] for x in t["rejected"]] == rej
+          and all(x["how"] in ("left out", "not judged", "refused take-back") and x["offset_at_step_m"] is not None
+                  for x in t["rejected"])
+          and t["warning"] is None and "|rho| needed by days 5: 1.00" in t["trend_rule"],
+          "day_test.rejected: each day left out, how and its offsets; the trend rule in words")
     check("rejected every camera-day" not in sp.dem_failure_reason(Path(d) / "dem.log"),
           "survey_products.dem_failure_reason reads the block (no 'every camera-day rejected')")
     # the reader of the info file, as before
@@ -670,6 +839,12 @@ def test_cli(d):
     _, _, left = dem_figure.title_lines(info, {"filled": 1, "blanked": 0, "no_value": 0}, "TEST", 0.5, 3, 2.0)
     check(any(f"{len(rej)} camera-days off the rest by > {LIMIT:g} m" in x for x in left),
           "the page (dem_figure.title_lines) still counts them")
+    h = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), "--help"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(d)).stdout
+    h = " ".join(h.split())
+    check("|rho| needed by days 5: 1.00, 6: 0.89, 7: 0.82, 8: 0.81" in h
+          and "a lone day left out at either end" in h,
+          "--help states the trend rule as applied (the |rho| it asks by number of days, the lone end day)")
     # no test: the info file says so
     r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(Path(d) / "plain"),
                         "--no-plot"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
@@ -705,15 +880,63 @@ def check_invariants(dt, limit=LIMIT):
     if sorted(dt["over_kept"]) != sorted(k for k in fin if k not in rej and np.isfinite(fin[k][0])
                                          and abs(fin[k][0]) > limit):
         return "over_kept"
+    if not set(dt["over_kept"]) <= set(nj):
+        return "a day kept over the limit was judged"
+    for k, r in nj.items():
+        if r["judged_in_end"] and not (k in rej and np.isfinite(fin[k][0]) and abs(fin[k][0]) > limit):
+            return f"{k}: judged in the end, but not left out over the limit of the kept days"
+    if sorted(dt["untested"]) != sorted(k for k in fin if k not in rej and np.isfinite(first[k][0])
+                                        and not np.isfinite(fin[k][0])):
+        return "untested: every kept day testable in the first pass and not at the end"
+    # the WARNING describes the final DEM: what it names left out is left out, what it names kept
+    # over the limit is kept over it, what it names untested is untested -- and it names all of them
     head, lines = dfc.day_test_warning(dt, limit)
-    if bool(head) != bool(dt["not_judged"] or dt["untested"]) or sum("WARNING" in x for x in lines) > 1:
-        return "one WARNING line exactly when a day was not judged or is kept untested"
+    named = warning_names(head)
+    want = {"left out without being judged": sorted(k for k in nj if k in rej and not nj[k]["judged_in_end"]),
+            "kept over the limit without being judged": sorted(dt["over_kept"]),
+            "kept untested": sorted(dt["untested"])}
+    if named != {k: v for k, v in want.items() if v}:
+        return f"the WARNING names {named}, the final DEM has {want}"
+    if sum("WARNING" in x for x in lines) > 1:
+        return "one WARNING line"
     rep = dfc.day_test_report(dt, limit, 1 if rej else None)
     if sum("REJECTED" in x for x in rep) != len(rej) or not rep[0].startswith("Day consistency"):
         return "the report's REJECTED lines"
-    json.dumps(dfc.day_test_record(dt, limit, dfc.day_trends({k: v[0] for k, v in fin.items()}, limit)),
-               allow_nan=False)
+    if any("WARNING" in x for x in rep):
+        return "a report line holds the word WARNING (the station status counts it)"
+    trends = dfc.day_trends({k: v[0] for k, v in fin.items()}, limit, left_out=dt["rejected"])
+    rec = dfc.day_test_record(dt, limit, trends)
+    json.dumps(rec, allow_nan=False)
+    t = rec["day_test"]
+    for x in t["not_judged"]:
+        k = x["day"]
+        fate = ("left out" if k in rej else "taken back" if k in back else "kept over the limit"
+                if k in dt["over_kept"] else "kept untested" if k in dt["untested"] else "kept within the limit")
+        fo = None if not np.isfinite(fin[k][0]) else round(fin[k][0], 4)
+        if x["verdict"] != fate or x["final_offset_m"] != fo:
+            return f"{k}: the record's verdict {x['verdict']!r}, the final DEM's {fate!r}"
+    if (sorted(rec["camera_days_rejected_offsets_m"]) != sorted(rej)
+            or any(v is None for v in rec["camera_days_rejected_offsets_m"].values())
+            or [x["day"] for x in t["rejected"]] != dt["rejected"]
+            or any(x["how"] != ("not judged" if x["day"] in nj and not nj[x["day"]]["judged_in_end"] else
+                                "left out" if x["day"] in nj else "refused take-back" if x["day"] in refused
+                                else "left out") for x in t["rejected"])):
+        return "the record's rejected days (each with an offset and how)"
+    if t["warning"] != (head or None):
+        return "the record's warning is the printed one"
     return ""
+
+
+def warning_names(head):
+    """{what: [days]} from the day test's WARNING line."""
+    if not head:
+        return {}
+    body = head.split(" -- ", 1)[1].rstrip(".")
+    out = {}
+    for part in body.split("; "):
+        what, days = part.split(": ", 1)
+        out[what] = sorted(days.split(", "))
+    return out
 
 
 def random_days(seed):
@@ -730,26 +953,72 @@ def random_days(seed):
     return days, float(rng.choice([0.02, 0.12]))
 
 
-def test_random(n=150):
-    print(f"{n} random windows: the bookkeeping holds, the result does not depend on the sample order")
-    bad, stats = [], {"left out": 0, "taken back": 0, "refused": 0, "not judged": 0, "untested": 0}
-    for seed in range(n):
-        days, sigma = random_days(seed)
-        pc, pv, pk = pairs(days, sigma=sigma, seed=seed)
-        dt = dfc.day_consistency(pc, pv, pk, LIMIT, MIN_FRAMES)
-        p = np.random.RandomState(seed + 1000).permutation(len(pc))
-        why = check_invariants(dt)
-        if not why and dt != dfc.day_consistency(pc[p], pv[p], pk[p], LIMIT, MIN_FRAMES):
-            why = "order dependent"
-        if why:
-            bad.append(f"seed {seed}: {why}")
-        stats["left out"] += len(dt["steps"])
-        stats["taken back"] += len(dt["taken_back"])
-        stats["refused"] += len(dt["refused"])
-        stats["not judged"] += len(dt["not_judged"])
-        stats["untested"] += len(dt["untested"])
-    check(not bad, "invariants hold (" + ", ".join(f"{k} {v}" for k, v in stats.items()) + ")"
-          + ("" if not bad else ": " + "; ".join(bad[:5])))
+def tidal_days(seed):
+    """A window as the cameras see it (after the review's fuzz2): two cameras on overlapping stretches
+    of beach (c1 cells 0-119, c2 100-299), 3-14 days each (or 1-3 for a camera seen little), each day
+    reaching a random stretch, as the tide allows, with 1-5 frames that each catch 80 % of its cells; a
+    fifth of the days off by 1.2-4 x the limit, the rest within a quarter of it; noise 0.03-0.12 m, a
+    limit of 0.1-0.2 m, values rounded to 1 cm in a quarter of the windows (ties).
+    -> (pair_cell, pair_vals, pair_key, limit, min_frames)"""
+    rng = np.random.RandomState(seed)
+    ndays = int(rng.randint(3, 15))
+    limit = float(rng.choice([0.1, 0.15, 0.2]))
+    sigma = float(rng.choice([0.03, 0.08, 0.12]))
+    days = []
+    for cam, lo, hi in (("c1", 0, 120), ("c2", 100, 300)):
+        nd = int(rng.randint(1, 4)) if rng.rand() < 0.15 else ndays
+        start = int(rng.randint(0, 3))
+        for d in range(nd):
+            off = rng.rand() < 0.2
+            b = rng.choice([-1, 1]) * rng.uniform(1.2 * limit, 4 * limit) if off else rng.normal(0, limit / 4)
+            a = int(rng.randint(lo, hi - 30))
+            w = int(rng.randint(20, hi - a + 1))
+            days.append((f"{cam} 2026-10-{start + d + 1:02d}", b, np.arange(a, min(hi, a + w)),
+                         int(rng.randint(1, 6))))
+    pc, pv, pk = [], [], []
+    for key, b, cells, nf in days:
+        for _ in range(nf):
+            sub = cells[rng.rand(len(cells)) < 0.8]
+            pc.append(sub)
+            pv.append(0.01 * sub + b + rng.normal(0, sigma, len(sub)))
+            pk.append(np.array([key] * len(sub)))
+    pc, pv, pk = np.concatenate(pc), np.concatenate(pv), np.concatenate(pk)
+    if seed % 4 == 0:
+        pv = np.round(pv, 2)
+    return pc, pv, pk, limit, int(rng.choice([1, 3]))
+
+
+def test_random(n=200):
+    print(f"{n} random windows of two kinds: the bookkeeping holds, the WARNING and the record describe the "
+          f"final DEM, the result does not depend on the sample order")
+    keys = ("left out", "taken back", "refused", "not judged", "not judged, taken back", "judged in the end",
+            "untested", "warnings")
+    for kind in ("stretches", "tidal"):
+        bad, stats = [], {k: 0 for k in keys}
+        for seed in range(n):
+            if kind == "stretches":
+                days, sigma = random_days(seed)
+                pc, pv, pk = pairs(days, sigma=sigma, seed=seed)
+                limit, mf = LIMIT, MIN_FRAMES
+            else:
+                pc, pv, pk, limit, mf = tidal_days(seed)
+            dt = dfc.day_consistency(pc, pv, pk, limit, mf)
+            p = np.random.RandomState(seed + 1000).permutation(len(pc))
+            why = check_invariants(dt, limit)
+            if not why and dt != dfc.day_consistency(pc[p], pv[p], pk[p], limit, mf):
+                why = "order dependent"
+            if why:
+                bad.append(f"seed {seed}: {why}")
+            stats["left out"] += len(dt["steps"])
+            stats["taken back"] += len(dt["taken_back"])
+            stats["refused"] += len(dt["refused"])
+            stats["not judged"] += len(dt["not_judged"])
+            stats["not judged, taken back"] += sum(r["day"] in dt["taken_back"] for r in dt["not_judged"])
+            stats["judged in the end"] += sum(r["judged_in_end"] for r in dt["not_judged"])
+            stats["untested"] += len(dt["untested"])
+            stats["warnings"] += bool(dfc.day_test_warning(dt, limit)[0])
+        check(not bad, f"{kind}: invariants hold (" + ", ".join(f"{k} {v}" for k, v in stats.items()) + ")"
+              + ("" if not bad else ": " + "; ".join(bad[:5])))
 
 
 def archive(ndays, npre, seed=1):
@@ -863,6 +1132,29 @@ def test_cli_cannot_judge(d):
           "one WARNING line: the last two days could not be judged")
     check("rejected every camera-day (4 of 4)" in sp.dem_failure_reason(Path(d) / "apart.log"),
           "survey_products.dem_failure_reason reads it as before ('rejected every camera-day')")
+    # three days at 0, +0.4, -0.4 m: 12 or 13 Sep goes (whichever the noise puts further out), then the
+    # other two cannot be judged; the off one (over in the first pass) is left out, 11 Sep kept -- the
+    # only day left, so untested
+    frames = [(day, 12 + r, 5 * x, x, b + rng.normal(0, 0.02))
+              for day, b in ((11, 0.0), (12, 0.4), (13, -0.4)) for r in range(3) for x in range(10)]
+    g, stem = Path(d) / "three.csv", Path(d) / "three"
+    ground_file(g, frames)
+    r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(stem),
+                        "--max-day-offset", str(LIMIT), "--no-plot"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(d))
+    (Path(d) / "three.log").write_text(r.stdout)
+    warn = [ln for ln in r.stdout.splitlines() if "WARNING" in ln]
+    t = json.loads(Path(f"{stem}_info.json").read_text())["filters"]["day_test"]
+    nj = {x["day"]: x for x in t["not_judged"]}
+    row = [ln for ln in r.stdout.splitlines() if ln.startswith("   c2 2026-09-11")][0]
+    second = t["left_out_order"][1] if len(t["left_out_order"]) == 2 else None
+    check(r.returncode == 0 and len(warn) == 1 and second in ("c2 2026-09-12", "c2 2026-09-13")
+          and warn[0].endswith(f"left out without being judged: {second}; kept untested: c2 2026-09-11.")
+          and "see the warning below" in row and t["warning"] == warn[0]
+          and nj["c2 2026-09-11"]["verdict"] == "kept untested" and nj[second]["verdict"] == "left out"
+          and t["kept_untested"] == ["c2 2026-09-11"] and t["kept_over_limit"] == [],
+          f"3 days 0, +0.4, -0.4 m: one line holds the word WARNING (11 Sep's own line says 'see the warning "
+          f"below'); it and <stem>_info.json name {second} left out and 11 Sep kept untested")
 
 
 def test_py38():
@@ -902,6 +1194,8 @@ def main():
         test_too_few()
         test_fringe()
         test_cannot_judge()
+        test_unjudged_fate()
+        test_set_aside_retried()
         test_deterministic()
         test_random()
         test_timing(args.year)

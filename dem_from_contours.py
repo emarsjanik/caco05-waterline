@@ -61,10 +61,15 @@ the kept days. One pass let the days it rejected shape the DEM it judged
 the others by (day_consistency() has the details). A day is left out
 only where the test can tell which day is off; days over the limit it
 cannot judge (two days that only see each other, the last two days)
-keep the one-pass verdict, and a WARNING names them. A camera whose day
-offsets run one way with time gets a WARNING too: real change, or an
-error drifting with time (pointing, lens, a detection bias that follows
-the tides or waves), and the test then trims an end of it.
+keep the one-pass verdict, and a WARNING names those the final DEM leaves
+out, or keeps over the limit or untested. A camera whose day offsets run
+one way with time gets a WARNING too: real change, or an error drifting
+with time (pointing, lens, a detection bias that follows the tides or
+waves), and the test then trims an end of it. The rule: 5 or more
+testable days, a range over the limit, Spearman's rho of offset against
+date above 0.8 and, up to 8 days, one that days in random order reach
+at most 2 % of the time (5 days need 1.00, 6 days 0.89); a lone day left
+out at either end cannot make the trend alone.
 
 THE PAGE IS ALWAYS THIS RUN'S. The old dem_out_dem.png is removed first
 (unless --no-plot); a window with too few cells, or no points at all,
@@ -639,19 +644,29 @@ DAY_TEST_MIN_DAYS = 3
 # on a steady trend the same end tends to go again. The warning is the remedy; the synthetic Mar
 # 2025 fixture (static beach, c2 drifting +0.07 to -0.09 m over 3-9 Mar with the detector) gets it
 # too. The rule (day_trends): >= DAY_TREND_MIN_DAYS testable days, max - min offset above the
-# limit, and Spearman's rho of offset against date so far from 0 that days in random order reach
-# it, in that direction, at most DAY_TREND_ALPHA of the time (exact, from every order of the days,
-# up to 8 days: 5 days need rho 1.00, 6 days 0.94, 7 days 0.89, 8 days 0.83) and above
-# DAY_TREND_MIN_RHO (from 9 days on that is the stricter). On simulated 7-day windows with no trend
-# (two cameras, day biases of sd 0.06-0.08 m, as the NUC's c2) this fires on about 2 % of them;
-# |rho| > 0.8 alone fired on about 6 %, and each WARNING turns the station status to WARN.
+# limit, |Spearman rho| of offset against date above DAY_TREND_MIN_RHO (the rule asked for) and,
+# up to 8 days, so far from 0 that days in random order reach it, in that direction, at most
+# DAY_TREND_ALPHA of the time (exact, from every order of the days). That asks rho 1.00 over 5 days
+# (0.90, one pair swapped, comes 4 % of the time by chance) and 0.89 over 6; from 7 days on it is
+# |rho| > 0.8 itself (0.82 over 7 days, 0.81 over 8). And a lone day the test left out at either
+# end of a camera's days cannot make the trend by itself (one bad day at an end ranks first or
+# last and lifts rho): the camera's other days must run the same way, at the rho their number asks
+# for -- so with 5 days and one end left out, the 4 others cannot carry a warning.
+# On simulated full-pipeline 7-day windows (two cameras, limit 0.15 m, 1000 of each kind) with no
+# trend this fires on 2-5 % of them (day biases of sd 0.04-0.08 m), with one bad day (0.4 m) at an
+# end of one camera's days on 4-5 % (8-9 % with that day counted in the rho); a trend of 0.03-0.06
+# m/day on one camera (day noise 0.03-0.08 m) is flagged in 68-85 %. DAY_TREND_ALPHA = 0.01 (rho
+# 0.89 over 7 days) fired on 1-3 % with no trend but flagged only 46-70 % of those trends, and
+# missed a 0.35 m trend planted on the station's own data (rho +0.86 over 7 days, the two days at
+# its low end trimmed). Each WARNING turns the station status to WARN.
 DAY_TREND_MIN_DAYS = 5
 DAY_TREND_MIN_RHO = 0.8
-DAY_TREND_ALPHA = 0.01
+DAY_TREND_ALPHA = 0.02
 DAY_TEST_METHOD = ("iterative: the camera-day furthest over the limit is left out and the others' "
                    "offsets are recomputed without it, until none is over; a day is left out only "
                    "when the test can judge it (where it is compared its DEM holds two or more other "
-                   "kept days, or one that the others confirm), else it keeps the first pass's verdict; "
+                   "kept days, or one that the others confirm), else it keeps the first pass's verdict "
+                   "(a day kept so is tried again in later rounds); "
                    "each left-out day is then tried again against the DEM of the kept days and taken "
                    "back, one at a time (the closest first), when it is within the limit and puts no "
                    "kept day over it")
@@ -710,37 +725,70 @@ def trend_rho_needed(n, alpha=DAY_TREND_ALPHA, min_rho=DAY_TREND_MIN_RHO):
     return ok[0] if ok else None
 
 
+def day_trend_rule(alpha=DAY_TREND_ALPHA, min_rho=DAY_TREND_MIN_RHO):
+    """The trend rule in words, with the |rho| it asks for by number of days."""
+    need = ", ".join(f"{n}: {trend_rho_needed(n, alpha, min_rho):.2f}" if trend_rho_needed(n, alpha, min_rho)
+                     else f"{n}: never" for n in range(DAY_TREND_MIN_DAYS, 9))
+    return (f">= {DAY_TREND_MIN_DAYS} testable days, range > the limit, |Spearman rho| > {min_rho:g} and (up "
+            f"to 8 days) reached by days in random order at most {100 * alpha:g} % of the time in that "
+            f"direction (|rho| needed by days {need}; from 9, > {min_rho:g}); a lone day left out at either "
+            f"end of a camera's days cannot make it alone: the other days must pass too")
+
+
 def day_trends(offsets, limit, min_days=DAY_TREND_MIN_DAYS, min_rho=DAY_TREND_MIN_RHO,
-               alpha=DAY_TREND_ALPHA):
+               alpha=DAY_TREND_ALPHA, left_out=()):
     """
     Cameras whose camera-day offsets run one way with time. offsets: {"<camera> <YYYY-MM-DD>":
-    offset (NaN = not testable)}. A camera is listed when it has >= min_days testable days,
-    max - min offset > limit, |Spearman rho| of offset against date > min_rho, and (up to 8 days)
-    days in random order reach that |rho| in that direction at most `alpha` of the time.
+    offset (NaN = not testable)}; left_out: the days the test left out. A camera is listed when it
+    has >= min_days testable days, max - min offset > limit, |Spearman rho| of offset against date
+    > min_rho, and (up to 8 days) days in random order reach that |rho| in that direction at most
+    `alpha` of the time. When exactly one of its testable days was left out and that day is its
+    first or last, the other days must pass the rho part too, in the same direction (one bad day
+    at an end is no trend): their rho and chance are given as without.
     -> [{camera, days, spearman_rho, chance (that one-sided probability; None from 9 days),
-    range_m, first: (day, offset), last: (day, offset)}], cameras sorted.
+    range_m, first: (day, offset), last: (day, offset), without: None or {day, days, spearman_rho,
+    chance}}], cameras sorted.
     """
+    def passes(y, sign=None):
+        rho = spearman(np.arange(len(y)), y)
+        if not (np.isfinite(rho) and abs(rho) > min_rho) or (sign is not None and rho * sign <= 0):
+            return None
+        chance = spearman_tail(abs(rho), len(y))
+        return None if chance is not None and chance > alpha else (rho, chance)
+
     by_cam = {}
     for k, off in offsets.items():
         if off is not None and np.isfinite(off):
             cam, day = k.split(" ", 1)
             by_cam.setdefault(cam, []).append((day, float(off)))
+    gone = {}
+    for k in left_out:
+        cam, day = k.split(" ", 1)
+        gone.setdefault(cam, set()).add(day)
     out = []
     for cam in sorted(by_cam):
         days = sorted(by_cam[cam])
         if len(days) < min_days:
             continue
         y = np.array([o for _, o in days])
-        rho = spearman(np.arange(len(days)), y)
         span = float(y.max() - y.min())
-        if not (np.isfinite(rho) and abs(rho) > min_rho and span > limit):
+        hit = passes(y) if span > limit else None
+        if hit is None:
             continue
-        chance = spearman_tail(abs(rho), len(days))
-        if chance is not None and chance > alpha:
-            continue
+        rho, chance = hit
+        without = None
+        out_days = [i for i, (d, _) in enumerate(days) if d in gone.get(cam, ())]
+        if len(out_days) == 1 and out_days[0] in (0, len(days) - 1):
+            i = out_days[0]
+            rest = np.delete(y, i)
+            hit2 = passes(rest, np.sign(rho)) if len(rest) >= min_days else None
+            if hit2 is None:
+                continue
+            without = {"day": f"{cam} {days[i][0]}", "days": len(rest), "spearman_rho": round(hit2[0], 3),
+                       "chance": hit2[1]}
         out.append({"camera": cam, "days": len(days), "spearman_rho": round(rho, 3),
-                    "chance": chance,
-                    "range_m": round(span, 3), "first": days[0], "last": days[-1]})
+                    "chance": chance, "range_m": round(span, 3), "first": days[0], "last": days[-1],
+                    "without": without})
     return out
 
 
@@ -761,7 +809,9 @@ def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs
        other, a day whose cells only a day as far off reaches, the last two days. Days over the
        limit that cannot be judged keep the FIRST PASS's verdict -- the one-pass test's outcome:
        left out (all at once) if over the limit there, kept if within it (not_judged; the command
-       line prints a WARNING) -- and the loop goes on with the other days.
+       line prints a WARNING) -- and the loop goes on with the other days. A day kept so is tried
+       again in later rounds: once the test can judge it, it is left out like any other (and is
+       no longer listed as not judged).
     3. Take back: every left-out day is measured against the DEM of the kept days. Of those
        within the limit, the closest (smallest |offset|; ties by key) is taken back if that puts
        no kept day over the limit that was within it (else the next closest is tried); then all
@@ -771,22 +821,36 @@ def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs
     4. Final offsets: kept days against the DEM of the other kept days; left-out days against
        the DEM of the kept days. Every kept, testable day is then within the limit but those
        step 2 kept unjudged (over_kept); a day testable in the first pass whose comparison days
-       were all left out is kept untested (untested; not_judged days are not listed again).
+       were all left out is kept untested (untested; a not_judged day kept too). A day kept
+       untested keeps its place whatever its first-pass offset: that offset was measured against
+       days since left out (the one-pass test would have rejected it when over the limit).
+
+    A not_judged entry records the step where the day was set aside; where it ended up (left
+    out, taken back, kept over or within the limit, untested) is in rejected, taken_back,
+    over_kept and untested, and day_test_fate() says it. A day left out unjudged that the final
+    DEM can judge (over the limit of the kept days, and judge() against them says so) is marked
+    judged_in_end: its verdict no longer rests on the first pass alone.
+    With the days split into two groups of about equal weight (say three at 0 m and three at
+    +0.6 m on the same cells), the first day left out decides which group stays -- whichever the
+    noise puts further out -- where one pass rejected both; nothing warns of that: read a day
+    left out at little over the limit, or a camera's days left out together, with care.
 
     Day offsets never depend on the order of the samples (medians), and every choice above is
     made by |offset| then key, so the result is deterministic.
     -> dict: first, final ({key: (offset or NaN, samples)}, keys sorted), steps ([(key, offset,
-    samples)] in the order left out), not_judged ([{day, offset (then), first, left_out (bool),
-    why}]), retests ([[(key, offset, samples)] per round, against the kept days]), refused ([(key,
-    offset, [kept days it would put over])]), taken_back (keys in order), rejected (sorted keys),
-    untested, over_kept (sorted keys), too_few (bool), testable (first-pass count).
+    samples)] in the order left out), not_judged ([{day, offset (then), first, left_out (bool:
+    the first pass's verdict, applied then), why, judged_in_end (bool)}]), judged_later (days set
+    aside, kept, then judged and left out at a later step), retests ([[(key, offset, samples)] per
+    round, against the kept days]), refused ([(key, offset, [kept days it would put over])]), taken_back
+    (keys in order), rejected (sorted keys), untested, over_kept (sorted keys), too_few (bool),
+    testable (first-pass count).
     """
     loo = LeaveOneOut(pair_cell, pair_vals, pair_key, min_frames, min_pairs)
     names = loo.names.tolist()
     idx = loo.index
     first = loo.offsets()
     testable = [k for k in names if np.isfinite(first[k][0])]
-    out = {"first": first, "final": dict(first), "steps": [], "not_judged": [], "retests": [],
+    out = {"first": first, "final": dict(first), "steps": [], "not_judged": [], "judged_later": [], "retests": [],
            "refused": [], "taken_back": [], "rejected": [], "untested": [], "over_kept": [],
            "too_few": len(testable) < min_days, "testable": len(testable)}
     if out["too_few"]:
@@ -803,13 +867,12 @@ def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs
     settled = set()                         # over the limit, not judged, kept by the first pass
     while True:
         test = [k for k in names if kept[idx[k]] and np.isfinite(cur[k][0])]
-        bad = sorted((k for k in test if over(cur[k][0]) and k not in settled),
-                     key=lambda k: rank(k, cur[k][0]))
+        bad = sorted((k for k in test if over(cur[k][0])), key=lambda k: rank(k, cur[k][0]))
         if not bad:
             break
         worst, why = None, {}
         if len(test) >= min_days:
-            for k in bad:                   # judged lazily, furthest first
+            for k in bad:                   # judged lazily, furthest first (a day set aside too)
                 j = loo.judge(k, kept, limit)
                 if j["judged"]:
                     worst = k
@@ -818,8 +881,15 @@ def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs
         if worst is not None:
             out["steps"].append((worst,) + tuple(cur[worst]))
             kept[idx[worst]] = False
+            if worst in settled:            # set aside unjudged earlier, judged now
+                settled.discard(worst)
+                out["not_judged"] = [r for r in out["not_judged"] if r["day"] != worst]
+                out["judged_later"].append(worst)
         else:
-            for k in sorted(bad, key=lambda k: idx[k]):
+            new = [k for k in bad if k not in settled]
+            if not new:                     # every day over the limit already set aside
+                break
+            for k in sorted(new, key=lambda k: idx[k]):
                 j = why.get(k)
                 if j is None:
                     reason = (f"only {len(test)} testable camera-day(s) kept: its DEM is the other "
@@ -837,6 +907,8 @@ def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs
                     kept[idx[k]] = False
                 else:
                     settled.add(k)
+            if not any(over(first[k][0]) for k in new):
+                break                       # none left out: the next round would see the same
         cur = loo.offsets(kept, kept)
 
     dropped = [s[0] for s in out["steps"]]
@@ -874,11 +946,31 @@ def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs
         final.update({k: away[k] for k in dropped})
         out["final"] = {k: final[k] for k in names}
     fin = out["final"]
-    unjudged = {r["day"] for r in out["not_judged"]}
     out["untested"] = [k for k in names if kept[idx[k]] and np.isfinite(first[k][0])
-                       and not np.isfinite(fin[k][0]) and k not in unjudged]
+                       and not np.isfinite(fin[k][0])]
     out["over_kept"] = [k for k in names if kept[idx[k]] and over(fin[k][0])]
+    # a day left out unjudged that the final DEM can judge -- over the limit of the kept days, and
+    # where it is compared they are two or more days or one the others confirm: judged in the end
+    ntest = sum(1 for k in names if kept[idx[k]] and np.isfinite(fin[k][0]))
+    for r in out["not_judged"]:
+        k = r["day"]
+        r["judged_in_end"] = bool(k in out["rejected"] and over(fin[k][0]) and ntest + 1 >= min_days
+                                  and loo.judge(k, kept, limit)["judged"])
     return out
+
+
+def day_test_fate(dt, day):
+    """Where a camera-day of a day_consistency result ended up: 'left out', 'taken back', 'kept
+    over the limit', 'kept untested' or 'kept within the limit' (or not testable)."""
+    if day in dt["rejected"]:
+        return "left out"
+    if day in dt["taken_back"]:
+        return "taken back"
+    if day in dt["over_kept"]:
+        return "kept over the limit"
+    if day in dt["untested"]:
+        return "kept untested"
+    return "kept within the limit" if np.isfinite(dt["final"][day][0]) else "kept, not testable"
 
 
 def _off(x):
@@ -892,7 +984,8 @@ def day_test_report(dt, limit, n_left_points=None):
     with its key and its first-pass offset, '<-- REJECTED' on the days left out, then 'left out
     N camera-day(s), M point(s)'. When the test left any day out on the way (or could not judge
     one), each line also gives the final offset, and the lines after the block say in what order
-    and why. The WARNING for days it could not judge is day_test_warning's.
+    and why. The WARNING for days it could not judge is day_test_warning's, and these lines never
+    hold that word (the station status counts the lines that do: one per warning).
     n_left_points: points of the rejected days (None: no 'left out' line).
     """
     first, final = dt["first"], dt["final"]
@@ -902,6 +995,9 @@ def day_test_report(dt, limit, n_left_points=None):
     back = set(dt["taken_back"])
     rej = set(dt["rejected"])
     refused = {r[0] for r in dt["refused"]}
+    untested = set(dt["untested"])
+    over_kept = set(dt["over_kept"])
+    later = set(dt.get("judged_later", ()))
     lines = [f"Day consistency (median offset from the DEM without that day, limit +/-{limit} m):"]
     for k in sorted(first):
         off, n = first[k]
@@ -913,6 +1009,9 @@ def day_test_report(dt, limit, n_left_points=None):
                 note = f"  (off by more than the limit -- kept: fewer than {DAY_TEST_MIN_DAYS} testable days)"
             else:
                 note = ""
+        elif k in rej and k in nj and nj[k].get("judged_in_end"):
+            note = ("  <-- REJECTED (left out unjudged, as the first pass had it; the kept days judge it "
+                    "over the limit in the end)")
         elif k in rej and k in nj:
             note = "  <-- REJECTED (not judged: over the limit in the first pass)"
         elif k in rej and k in refused:
@@ -920,14 +1019,24 @@ def day_test_report(dt, limit, n_left_points=None):
                     f"not taken back: see below)")
         elif k in rej:
             note = f"  <-- REJECTED (left out {ordinal(order[k])})"
+        elif k in back and k in nj:
+            note = ("  (not judged: over the limit in the first pass, left out; taken back: within the "
+                    "limit of the kept days)")
         elif k in back:
             note = f"  (left out {ordinal(order[k])}, taken back: within the limit of the kept days)"
+        elif k in nj and k in over_kept:
+            note = ("  (not judged: within the limit in the first pass, kept -- over the limit of the "
+                    "kept days; see the warning below)")
+        elif k in nj and k in untested:
+            note = ("  (not judged: within the limit in the first pass, kept -- too few comparable "
+                    "samples left, untested; see the warning below)")
         elif k in nj:
-            note = "  (not judged -- kept: within the limit in the first pass; see the WARNING)"
+            note = ("  (not judged: within the limit in the first pass, kept -- within the limit of "
+                    "the kept days in the end)")
         elif not np.isfinite(off):
             note = "  (too few comparable samples -- kept)"
-        elif not np.isfinite(fo):
-            note = "  (too few comparable samples left -- kept untested; see the WARNING)"
+        elif k in untested:
+            note = "  (too few comparable samples left -- kept untested; see the warning below)"
         elif abs(fo) > limit:
             note = "  (over the limit -- kept)"
         else:
@@ -947,13 +1056,23 @@ def day_test_report(dt, limit, n_left_points=None):
                    f"left out against the DEM of the kept days)")
     if dt["steps"]:
         lines += _wrap("order left out: " + ", ".join(
-            _unit(f"{i + 1}. {k} ({_off(o)} at that step{', not judged' if k in nj else ''})")
+            _unit(f"{i + 1}. {k} ({_off(o)} at that step{', not judged' if k in nj else ''}"
+                  f"{', set aside unjudged at an earlier step' if k in later else ''})")
             for i, (k, o, n) in enumerate(dt["steps"])))
     for r in dt["not_judged"]:
-        lines += _wrap(f"not judged: {_unit(r['day'])} ({_off(r['offset'])} at that step, first pass "
+        k = r["day"]
+        fate = day_test_fate(dt, k)
+        end = {"left out": (f"; in the end over the limit of the kept days ({_off(final[k][0])}), which "
+                            f"can judge it" if r.get("judged_in_end") else ""),
+               "taken back": f", then taken back: within the limit of the kept days ({_off(final[k][0])})",
+               "kept over the limit": f"; in the end still over the limit of the kept days ({_off(final[k][0])})",
+               "kept untested": "; in the end untested (too few comparable samples left)",
+               "kept within the limit": f"; in the end within the limit of the kept days ({_off(final[k][0])})",
+               }.get(fate, "")
+        lines += _wrap(f"not judged: {_unit(k)} ({_off(r['offset'])} at that step, first pass "
                        f"{_off(r['first'])}): {r['why']}; "
                        + ("left out, as the first pass had it" if r["left_out"] else
-                          "kept, as the first pass had it"))
+                          "kept, as the first pass had it") + end)
     for k, o, pushed in dt["refused"]:
         lines += _wrap(f"not taken back: {_unit(k)} ({_off(o)} from the kept days, within the limit) "
                        f"would put {', '.join(_unit(j) for j in pushed)} over the limit")
@@ -969,21 +1088,34 @@ def day_test_report(dt, limit, n_left_points=None):
     return lines
 
 
+def day_test_unjudged(dt):
+    """The days the WARNING names, as the final DEM has them: (left out without being judged --
+    still left out; kept over the limit of the kept days without being judged; kept untested).
+    A day set aside unjudged that was taken back, or that ended within the limit of the kept
+    days, is in the DEM and agrees with it; one left out that the kept days can judge in the end
+    (judged_in_end) is off them, judged: neither is named."""
+    nj = {r["day"] for r in dt["not_judged"]}
+    late = {r["day"] for r in dt["not_judged"] if r.get("judged_in_end")}
+    gone = [k for k in sorted(nj) if k in dt["rejected"] and k not in late]
+    stay = [k for k in dt["over_kept"] if k in nj]
+    return gone, stay, list(dt["untested"])
+
+
 def day_test_warning(dt, limit):
     """The WARNING (one line, the station status counts them; details on the lines after it) when
-    the test could not judge days over the limit, or kept a day untested: '' and [] otherwise.
+    the final DEM leaves out a day the test could not judge, keeps one over the limit that it
+    could not judge, or keeps a day untested: '' and [] otherwise.
     -> (the WARNING line, [its lines])"""
     if dt["too_few"]:
         return "", []
-    gone = [r["day"] for r in dt["not_judged"] if r["left_out"]]
-    stay = [r["day"] for r in dt["not_judged"] if not r["left_out"]]
+    gone, stay, untested = day_test_unjudged(dt)
     parts = []
     if gone:
         parts.append(f"left out without being judged: {', '.join(gone)}")
     if stay:
         parts.append(f"kept over the limit without being judged: {', '.join(stay)}")
-    if dt["untested"]:
-        parts.append(f"kept untested: {', '.join(dt['untested'])}")
+    if untested:
+        parts.append(f"kept untested: {', '.join(untested)}")
     if not parts:
         return "", []
     head = "WARNING: the day test could not judge every camera-day -- " + "; ".join(parts) + "."
@@ -995,10 +1127,10 @@ def day_test_warning(dt, limit):
                    f"left out; within it, kept)")
     if stay:
         why.append(f"Kept although over the limit of the kept days: {', '.join(_unit(k) for k in stay)}")
-    if dt["untested"]:
+    if untested:
         why.append(f"Kept without a check, as every day they were compared with was left out: "
-                   f"{', '.join(_unit(k) for k in dt['untested'])}")
-    if stay or dt["untested"]:
+                   f"{', '.join(_unit(k) for k in untested)}")
+    if stay or untested:
         why.append("Read the DEM with care where these days lie (the lines above give their offsets)")
     return head, [head] + _wrap(". ".join(why) + ".")
 
@@ -1025,11 +1157,15 @@ def day_trend_warning(t, limit, rejected):
     cam = t["camera"]
     gone = [k for k in rejected if k.split(" ", 1)[0] == cam]
     (d0, o0), (d1, o1) = t["first"], t["last"]
-    chance = (f", which days in random order reach 1 time in {int(round(1 / t['chance'])):,}"
-              if t.get("chance") else "")
+
+    def chance(c):
+        return f", which days in random order reach 1 time in {int(round(1 / c)):,}" if c else ""
+    w = t.get("without")
+    rest = (f"; without {w['day']}, the one day left out, at an end, the other {w['days']} days give "
+            f"rho {w['spearman_rho']:+.2f}{chance(w.get('chance'))}") if w else ""
     return [f"WARNING: {cam}'s camera-day offsets run one way with time over {t['days']} days "
-            f"(Spearman rho {t['spearman_rho']:+.2f}{chance}; {o0:+.3f} m on {d0} to {o1:+.3f} m on {d1}, "
-            f"a range of {t['range_m']:.2f} m > the {limit:g} m limit)."] + _wrap(
+            f"(Spearman rho {t['spearman_rho']:+.2f}{chance(t.get('chance'))}; {o0:+.3f} m on {d0} to "
+            f"{o1:+.3f} m on {d1}, a range of {t['range_m']:.2f} m > the {limit:g} m limit{rest})."] + _wrap(
             "Real beach change through the window, or an error that drifts with time (the camera's "
             "pointing or lens, a detection bias that follows the tides or the waves), gives this pattern; "
             "the day test then trims the end(s) furthest out"
@@ -1039,12 +1175,45 @@ def day_trend_warning(t, limit, rejected):
 
 def day_test_record(dt, limit, trends):
     """What <stem>_info.json keeps of the day test (filters), so a page can name the days left out
-    and say why. Offsets in m (None = not testable), rounded to 0.1 mm."""
+    and say why. It describes the final DEM: each day the test could not judge with where it ended
+    up, the WARNING as printed. Offsets in m (None = not testable), rounded to 0.1 mm."""
     def r(x):
         return round(float(x), 4) if x is not None and np.isfinite(x) else None
     warning, _ = day_test_warning(dt, limit)
+    step = {s[0]: s[1] for s in dt["steps"]}
+    order = {s[0]: i + 1 for i, s in enumerate(dt["steps"])}
+    nj = {x["day"]: x for x in dt["not_judged"]}
+    refused = {k: p for k, _, p in dt["refused"]}
+
+    def rejected_row(k):
+        fin = r(dt["final"][k][0])
+        if k in nj and nj[k].get("judged_in_end"):
+            how = "left out"
+            why = (f"over the limit in the first pass ({_off(dt['first'][k][0]).strip()}) and left out "
+                   f"unjudged; in the end off the DEM of the kept days by more than the limit, which can "
+                   f"judge it")
+        elif k in nj:
+            how = "not judged"
+            why = (f"over the limit in the first pass ({_off(dt['first'][k][0]).strip()} from the DEM of every "
+                   f"other day); the test could not judge it, so the first pass's verdict stands"
+                   + (f"; within the limit of the kept days now, but taking it back would put "
+                      f"{', '.join(refused[k])} over the limit" if k in refused else ""))
+        elif k in refused:
+            how = "refused take-back"
+            why = (f"left out {ordinal(order[k])}; within the limit of the kept days, but taking it back "
+                   f"would put {', '.join(refused[k])} over the limit")
+        else:
+            how = "left out"
+            why = (f"left out {ordinal(order[k])}: off the DEM of the other kept days by more than the limit")
+        return {"day": k, "how": how, "offset_m": fin, "offset_at_step_m": r(step.get(k)),
+                "first_pass_offset_m": r(dt["first"][k][0]), "why": why}
+    rows = [rejected_row(k) for k in dt["rejected"]]
     return {
-        "camera_days_rejected_offsets_m": {k: r(dt["final"][k][0]) for k in dt["rejected"]},
+        # each day left out: its offset from the DEM of the kept days; where no kept day is
+        # comparable with it, the offset it was left out at (over the limit then, from the DEM of
+        # the days kept at that step). day_test.rejected gives both, the first pass's, and why.
+        "camera_days_rejected_offsets_m": {x["day"]: x["offset_m"] if x["offset_m"] is not None
+                                           else x["offset_at_step_m"] for x in rows},
         "day_test": {
             "method": DAY_TEST_METHOD if not dt["too_few"] else
             f"not applied: fewer than {DAY_TEST_MIN_DAYS} testable camera-days, every day kept",
@@ -1053,13 +1222,24 @@ def day_test_record(dt, limit, trends):
             "final_offsets_m": {k: r(v[0]) for k, v in dt["final"].items()},
             "samples": {k: int(v[1]) for k, v in dt["first"].items()},
             "left_out_order": [s[0] for s in dt["steps"]],
+            # how: 'left out' (judged off the other kept days), 'not judged' (the first pass's
+            # verdict) or 'refused take-back' (within the limit of the kept days, but taking it
+            # back would put a kept day over): only 'left out' is 'off the rest by > the limit'
+            "rejected": rows,
             "taken_back": list(dt["taken_back"]),
             # left out within the limit of the kept days: taking it back would put these over
             "refused_take_back": [{"day": k, "offset_m": r(o), "would_push": list(p)}
                                   for k, o, p in dt["refused"]],
-            # over the limit where the test could not tell which day is off: the first pass decided
+            # over the limit at a step where the test could not tell which day is off: the first
+            # pass's verdict was applied then (first_pass_verdict); verdict is where the day ended
+            # up: 'left out', 'taken back' (within the limit of the kept days), 'kept over the
+            # limit', 'kept untested' or 'kept within the limit'. The warning names those left out
+            # (unless the kept days judge them in the end: judged_in_end), kept over the limit, or
+            # kept untested
             "not_judged": [{"day": x["day"], "offset_m": r(x["offset"]), "first_pass_offset_m": r(x["first"]),
-                            "verdict": "left out" if x["left_out"] else "kept", "why": x["why"]}
+                            "first_pass_verdict": "left out" if x["left_out"] else "kept",
+                            "verdict": day_test_fate(dt, x["day"]), "final_offset_m": r(dt["final"][x["day"]][0]),
+                            "judged_in_end": bool(x.get("judged_in_end")), "why": x["why"]}
                            for x in dt["not_judged"]],
             "kept_untested": list(dt["untested"]),
             "kept_over_limit": list(dt["over_kept"]),
@@ -1068,11 +1248,15 @@ def day_test_record(dt, limit, trends):
                                 "chance": None if t.get("chance") is None else round(t["chance"], 6),
                                 "range_m": t["range_m"], "first_day": t["first"][0],
                                 "first_offset_m": r(t["first"][1]), "last_day": t["last"][0],
-                                "last_offset_m": r(t["last"][1])} for t in trends],
+                                "last_offset_m": r(t["last"][1]),
+                                "without": None if not t.get("without") else {
+                                    "day": t["without"]["day"], "days": t["without"]["days"],
+                                    "spearman_rho": t["without"]["spearman_rho"],
+                                    "chance": None if t["without"].get("chance") is None
+                                    else round(t["without"]["chance"], 6)}}
+                               for t in trends],
             "trend_from": "final offsets",
-            "trend_rule": (f">= {DAY_TREND_MIN_DAYS} testable days, range > the limit, |Spearman rho| > "
-                           f"{DAY_TREND_MIN_RHO:g} and (up to 8 days) reached by days in random order at "
-                           f"most {100 * DAY_TREND_ALPHA:g} % of the time in that direction"),
+            "trend_rule": day_trend_rule(),
         },
     }
 
@@ -1312,8 +1496,8 @@ def main():
                          "off); later on, days over the limit it cannot judge that way keep "
                          "the one-pass verdict, with a WARNING. Prints the first-pass and "
                          "final offsets, and a WARNING when a camera's offsets run one way "
-                         "with time over 5 or more days (real change, or an error drifting "
-                         "with time: the test then trims an end).")
+                         "with time (real change, or an error drifting with time: the test "
+                         "then trims an end): " + day_trend_rule().replace("%", "%%") + ".")
     ap.add_argument("--max-frame-offset", type=float, default=None,
                     help="Leave out single frames whose samples sit, on median, more than this "
                          "many metres from the DEM built without that frame (e.g. 0.2). Runs "
@@ -1543,7 +1727,8 @@ def main():
             print(line)
         # a camera whose day offsets run one way with time: the test may be trimming real change
         # (or the ends of an error drifting with time), so the DEM is not one surface -- say so
-        trends = day_trends({k: v[0] for k, v in dt["final"].items()}, args.max_day_offset)
+        trends = day_trends({k: v[0] for k, v in dt["final"].items()}, args.max_day_offset,
+                            left_out=dt["rejected"])
         for t in trends:
             for line in day_trend_warning(t, args.max_day_offset, dt["rejected"]):
                 print(line)
