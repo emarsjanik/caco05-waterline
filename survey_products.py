@@ -7232,6 +7232,14 @@ def per_day_rows_note(plan):
     return PER_DAY_ROWS_NOTE_BLIND if plan.get("blind") else PER_DAY_ROWS_NOTE
 
 
+def blind_caveats(plan, cav):
+    """The caveats as a BLIND product says them: PER_DAY_ROWS_NOTE (which points at the comparison's per-day
+    rows) becomes PER_DAY_ROWS_NOTE_BLIND wherever a caveat carries it. Unchanged otherwise."""
+    if not plan.get("blind"):
+        return cav
+    return [c.replace(PER_DAY_ROWS_NOTE, PER_DAY_ROWS_NOTE_BLIND) if isinstance(c, str) else c for c in cav]
+
+
 def frame_epochs(plan):
     """{camera: {source_file: capture epoch}} of the waterlines in use (for placing frames against an
     event by time, not by calendar day)."""
@@ -7791,7 +7799,7 @@ def write_provenance(plan, args, state, final=True):
         "software": software_of_outputs(out),
     }
     prov["frames_per_day"] = frames_per_day(waterline_file(plan, quiet_=True))
-    prov["caveats"] = collect_caveats(plan, args, state, forcing, prov)
+    prov["caveats"] = blind_caveats(plan, collect_caveats(plan, args, state, forcing, prov))
     tmp = out / "provenance.json.tmp"
     tmp.write_text(json.dumps(clean_json(prov), indent=1, default=str, allow_nan=False) + "\n")
     os.replace(str(tmp), str(out / "provenance.json"))
