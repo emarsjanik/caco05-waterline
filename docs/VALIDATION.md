@@ -694,14 +694,26 @@ only if it holds over several weeks of different waves; then change it in all th
     measures the day's change from the reference directly: a change of tilt or roll over 0.3 deg
     (the step's tilt/roll tolerance, as for the horizon) or of pan over 0.5 deg (pointing_check's)
     is a DIFFERENT POINTING whatever the horizon reads; a smaller turn is a 'small change', kept (a
-    review probe: 1500 inliers at +0.15 deg against a clear-looking +2.0 deg jump). Below 100
-    inliers (PRECISE_INLIERS) a match reads tilt and roll to ~0.1 deg only (the same planted
-    rotations against another day: <= 0.101 deg at 40-59 inliers, 28 trials; <= 0.093 at 60-99,
-    35; <= 0.060 at 100-199, 10): there a CLEAR horizon that reads a change over 0.3 deg and agrees
-    with the features within 0.3 deg makes the day DIFFERENT POINTING too (review 3: 0.28 deg read on
-    50 inliers, the clear horizon at +0.37, was a 'small change', kept; the deployed rule left it
-    out). At 100 inliers or more the features decide on their own, so a clear window's +0.30 deg
-    stays one verdict whatever the horizon's last hundredth. A turn of
+    review probe: 1500 inliers at +0.15 deg against a clear-looking +2.0 deg jump). A match reads
+    tilt and roll to ~0.1 deg (MATCH_ERR_DEG; the same planted rotations against another day: <= 0.101
+    deg at 40-59 inliers, 28 trials; <= 0.093 at 60-99, 35; <= 0.060 at 100-199, 10; this last bound
+    rests on 10 trials only), and a clear horizon scatters about as much from day to day at rest (the
+    NUC's clear days of 29 Sep - 2 Oct, their features within 0.02 deg: c1 +0.90 to +0.96 deg of tilt,
+    +0.16 to +0.26 of roll): a CLEAR horizon that reads a change over 0.3 deg and agrees with the
+    features within 0.1 deg in tilt and in roll makes the day DIFFERENT POINTING too, at any inlier
+    count (review 3: 0.28 deg read on 50 inliers, the clear
+    horizon at +0.37, was a 'small change', kept; the deployed rule left it out). Review 3's fix cut
+    this at 100 inliers and confirmed within 0.3 deg; review 4 found it not monotonic: on 50 inliers a
+    0.05 deg tilt was confirmed by a clear +0.34 and not by +0.40, and at 150 inliers 0.29 deg was never
+    confirmed by a clear +0.36. A horizon further than 0.1 deg from the features is not the change
+    they measured, and the features decide: a jump of 0.34 or 0.40 against 0.05 is a 'small change'
+    alike, and the band where a horizon confirms is the features' own error, whatever the inlier
+    count. What it does not do: a real change of 0.3-0.4 deg read 0.1-0.2 deg apart by the two (each
+    within its own scatter) is judged by the features alone (DIFFERENT POINTING if they read over 0.3).
+    The cost is at the tolerance itself: a true 0.30 deg tilt (review 4's T03_L2, round 3's T03) read 0.30
+    by the features and 0.300-0.303 by the clear horizon is now DIFFERENT POINTING on the days where
+    the horizon reads over 0.300 (round 3's T03: c1 1/2 Oct, c2 2 Oct; review 4's T03_L2: c2 2 Oct),
+    a 'small change' on the others: a day lost at a change equal to the tolerance. A turn of
     0.1 deg or less keeps the day ('matches') whatever a horizon reading that is NOT a clear horizon
     says, and the why gives both readings, as long as the turn is more than its own noise (window
     dirt, below); against a CLEAR horizon edge that jumps a zero turn is not enough: the day is
@@ -713,7 +725,7 @@ only if it holds over several weeks of different waves; then change it in all th
     them out for the misread horizon's jump); and in a clear window the same 0.300 deg read by the
     features was a 'small change' on one day and DIFFERENT POINTING on the next, as the horizon read
     0.298 or 0.300 deg. A turned match's tilt/roll is now judged on its own (with a clear horizon's
-    confirmation below 100 inliers, above). An earlier
+    confirmation within 0.1 deg, above). An earlier
     proposal to require 60 inliers was not taken: it was chosen to make c1 27 Sep (48 inliers)
     weak, but that day's -1.21 deg of pan is real: tracked dune landmarks and a more sensitive
     match read -1.20 to -1.25 deg on 26-28 Sep, and the camera was back by 29 Sep.
@@ -820,32 +832,48 @@ only if it holds over several weeks of different waves; then change it in all th
     DIFFERENT POINTING only on a clear edge that two or more days share, none of them contradicted
     (real re-aims persist; the storm misreads changed by 0.6-3.1 deg from day to day); otherwise the
     day is **UNCONFIRMED**: a change one method reported that nothing could confirm or rule out. A
-    day on which nothing could be read (no horizon fitted, features unmatched) next to a day
-    measured to differ, or UNCONFIRMED on more than a horizon reading that is not clear (a
-    clear-looking jump, an ambiguous match), is UNCONFIRMED too, as are runs of such days from it:
-    nothing shows the camera back (review 2's simR, the real storm frames as 17:00 with perturbed
+    day nothing could read ('unchecked': no feature reading, and no horizon fitted, or one fitted
+    that is not a clear horizon) next to a FIRM day is UNCONFIRMED too, as are runs of such days from
+    it: nothing shows the camera back (review 2's simR, the real storm frames as 17:00 with perturbed
     copies as 16:30/17:30: c1 28 Sep's 3-frame fit failed at 14.6 px, and the day was 'unchecked',
     kept and gridded while c1 was turned -1.2 deg; on the NUC its fit held, 3.5 px, and the day was
-    UNCONFIRMED anyway). A misread horizon alone never shows a day moved, so a single day
-    UNCONFIRMED on one never reaches past itself: in review 3's fog week (one misread fog edge with
-    unmatched features on 19 Jan between matching days, the fits failing on 20-22 Jan) the first
-    form of this rule left out 19-22 Jan, 4 of 7 days, where the same days next to a matching day
-    stayed kept; now 20-22 Jan are 'unchecked', kept, as by the deployed rule. Misread horizons on
-    two or more days running are a storm, during which a camera can turn (c1 turned -1.2 deg over
-    the three storm days of 26-28 Sep 2026), and a day nothing read next to them is UNCONFIRMED:
-    without this, review 3's own storm scenarios (S_*: the real storm frames as 26-28 Sep, c1 and c2
-    turned 0.3-1.0 deg on all three days by exact ray rotations; c1 26/27 Sep misread with features
-    unmatched, 28 Sep's fit failed) kept c1 28 Sep, turned, in 8 of 9, and DIRT2's c1 28 Sep (c1
-    turned -1.2 deg, its match blind, its fit failed) was kept too. What stays: one misread day
-    followed by days nothing could read (S_T10, c1 tilted 1.0 deg on 26-28 Sep: 26 Sep misread, the
-    fits of 27 and 28 Sep failed at 105 and 40 px; DIRT2_ST10's c1, turned -1.2 deg: fits failed at
-    20 and 17 px, matches blind at 0.5 and 3.5): 27/28 Sep 'unchecked', kept, as by the deployed rule
-    (the previous form of this rule left them out). The rows cannot tell this from the fog week, and
-    the costs differ: a fog week's calm days are what the DEM grids, while a storm's frames mostly
-    fall to the DEM's own wave filter (offshore Hs > 1.5 m: on the NUC every c2 frame of 26-28 Sep)
-    and its 0.15 m day test. Never the reference day itself: the others are measured against its
-    frame, so a neighbour that differs from it says nothing of it. An 'unchecked' day whose horizon fitted within 0.3 deg of the
-    reference on an edge that is not clear stays kept.
+    UNCONFIRMED anyway). Firm: a day measured to differ; UNCONFIRMED on more than a horizon reading
+    that is not clear (a clear-looking jump, an ambiguous match); or UNCONFIRMED on such a misread
+    horizon alone in a STORM. A misread horizon alone never shows a day moved, so on a calm day one
+    never reaches past itself: in review 3's fog week (one misread fog edge with unmatched features on
+    19 Jan between matching days, the fits failing on 20-22 Jan) an earlier form of this rule left out
+    19-22 Jan, 4 of 7 days, where the same days next to a matching day stayed kept; 20-22 Jan are
+    'unchecked', kept, as by the deployed rule. In a storm a camera can turn (c1 turned -1.2 deg over
+    the three storm days of 26-28 Sep 2026) while foam or spray hides both the horizon and the land,
+    and the storm's days come misread or unread in any order. A storm is a run of consecutive days,
+    each left out on its own readings or read by nothing, that holds a firm day of the first two
+    kinds, misread horizons on two days or more, or a storm day: inside a known storm (STORMS) or with
+    offshore Hs over 1.5 m (STORM_HS_M, the DEM's own limit) in the forcing's waves, which the forcing
+    step writes before the pointing step (`storm_days_of`; without them, the STORMS days only; the
+    window's storm days are part of the pointing step's signature, so a new wave record reruns the
+    verdicts when it changes them). Review 3's fix asked for two misread days side by side; review 4
+    found two shapes it kept, turned (exact ray rotations of the six real storm frames, `--steps
+    pointing` on the station-floor venv): ST10_S3 (c1 tilted +1.0 deg on 26-28 Sep: 26 Sep misread,
+    the fits of 27/28 Sep failed at 33.0 / 10.7 px with 6 / 2 inliers) and S2728_T10_FOG (+1.0 deg on
+    27-28 Sep with the land fogged: c1 misread, unread, misread; c2 misread, unread, unread): both are
+    now left out (26 Sep is inside the 25-26 Sep storm; c1 26 and 28 Sep are two misread days in one
+    run), and the NUC's own c1 rows with 27 Sep made unread (fit failed, no features) leave out 26-28
+    Sep (pinned in the test, with ST10-like rows: 'unchecked' on calm days, UNCONFIRMED with STORMS or
+    the waves over 1.5 m on a day of the run). What a storm costs on calm-looking rows: a misread day
+    with Hs over 1.5 m (2026-09-29 itself read 1.52 m at its peak) passes UNCONFIRMED to the days
+    nothing read next to it, lost days, and the DEM's wave filter leaves many of their frames out
+    anyway. A 'horizon only' day (a clear horizon at the reference's pointing, no feature reading)
+    shows tilt and roll back but never the pan: next to a day that measured a pan over 0.5 deg (or an
+    ambiguous match whose runner-up put one forward), it is UNCONFIRMED too (review 4, P10_30_FOG01:
+    a 1.0 deg pan on 30 Sep and 1 Oct, 1 Oct fogged over the land; 30 Sep measured, +1.00 / +1.02 deg
+    on 1851 / 4239 inliers, 1 Oct 'horizon only', kept on both cameras; P10_L2_FOG02 the same on 1-2
+    Oct; by review 4's estimate a 1 deg pan moves ground points ~3.8 m at 150-400 m, ~0.1-0.4 m of
+    DEM at beach slopes of 0.05-0.1). Next to a measured tilt or roll with no pan, a clear horizon at the reference's shows
+    the camera back, and the day stays 'horizon only' (pinned). Without a reference day between, a
+    window whose features match on one day only and show a pan takes in every 'horizon only' day
+    connected to it: nothing measured the pan anywhere else. Never the reference day itself: the
+    others are measured against its frame, so a neighbour that differs from it says nothing of it,
+    and runs stop there. The row's `next_to` column names the day a run starts at.
     UNCONFIRMED days are left out like DIFFERENT POINTING ones (`--keep-moved-days` keeps both),
     whatever share of the window they are. **'Most days differ from the reference' no longer keeps
     days.** That guard (older than this rule) kept EVERY day when more than half of the measured
@@ -860,7 +888,13 @@ only if it holds over several weeks of different waves; then change it in all th
     tilt and roll, 0.5 deg of pan) and outnumber the days at the reference's pointing, the step and
     the README name that other pointing: the window holds two, and the product rests on the
     reference's; if the reference day is the odd one out, that is the wrong one, which only the
-    photos tell (`--keep-moved-days` keeps both). When the days left out are more than half of the
+    photos tell (`--keep-moved-days` keeps both). The warning and the build's missing part give the
+    way to build on the other pointing instead: a `--window` over the other pointing's days on one
+    side of the reference day (the side with more of them), in another output root, makes the day
+    nearest the survey in it the reference (review 4, REF_T06: 29 Sep, the survey day and the
+    reference, tilted 0.6 deg; every other day measured -0.60 deg and left out, the product resting
+    on the one moved day: `--window 2026-09-30 2026-10-02`). Refusing to grid such a window until the
+    owner chooses is not done (an owner's ruling). When the days left out are more than half of the
     window's, the step and the README say so with the count, how many of them rest on a horizon
     reading alone that is not a clear horizon, how many are left out only for the day next to them,
     and the options there are: `--keep-moved-days` keeps every such day, and there is no per-day option
@@ -883,7 +917,16 @@ only if it holds over several weeks of different waves; then change it in all th
     with other pointing results or with `--keep-moved-days` and that its record does not say which
     (review 3: such a stamp that left out no day, after `--steps pointing` with this rule flagged
     c2 26 Sep, made the README say 'KEPT in the detection (--keep-moved-days)' while the step said
-    'LEFT OUT of the detection').
+    'LEFT OUT of the detection'). `--keep-moved-days` leaves out no day, so it is offered as the
+    reason only for a stamp that left out none; one that left days out ran with other pointing
+    results, and the README says that alone. Days these results keep against the horizon are 'kept'
+    only once the detection has run with them: after a pointing-only rerun over a deployed build that
+    left c2 26/27 Sep out on the old rule, the README said 'kept, although the sea-horizon check alone
+    would have left them out' for the days the detection on disk had left out, and the STORM caveat
+    called them '(matches) left out by the pointing check' (review 4); it now says these results keep
+    them and the detection on disk left them out, kept once it runs again, and the STORM caveat says
+    'left out by an earlier pointing result'. The documented full command reruns the detection and
+    its README matched a fresh build's (review 4).
   * **The NUC's 2026-09-29 table under the rule** (`test_survey_products.py`,
     test_pointing_verdicts, on the NUC's rows with the edge numbers of the real frames): c1 26 and
     28 Sep UNCONFIRMED (no matched features, a misread horizon), 27 Sep DIFFERENT POINTING (the
@@ -891,11 +934,13 @@ only if it holds over several weeks of different waves; then change it in all th
     2 Oct matches; c2 every day matches (26/27 Sep kept, the horizon overruled; 28 Sep: its fit
     failed, 393 features decide). Left out: c1 26-28 Sep, as before, with the measured reason; c2
     none (was 26-27 Sep). The NUC's rows predate `turn_sigma`; with the values the real storm frames
-    project for c2 26-28 Sep (~17 / ~9 / ~9, the window-dirt bullet above) the verdicts are the same,
-    and at a dirt-like 2.0 c2 26/27 Sep would be UNCONFIRMED and left out, as the deployed rule left
-    them out, and 28 Sep (its fit failed) with them, next to two misread days (both pinned in the
-    test): one day more than the deployed rule, a day lost, not a wrong one. A value under 4 loses a
-    feature reading; it never keeps a day the deployed rule left out.
+    project for c2 26-28 Sep (~17 / ~9 / ~9, the window-dirt bullet above) the verdicts are the same.
+    If 26 and 27 Sep read under 4, both are UNCONFIRMED and left out, as the deployed rule left them
+    out; 28 Sep (its fit failed) follows them only if its own match also reads under 4: at its
+    projected ~9 its 393-inlier match is a reading and the day matches (3 / 3 / 8.4: 26-27 Sep left
+    out; 2.0 on all three: 26-28 Sep left out, one day more than the deployed rule, a day lost, not a
+    wrong one; all three cases pinned in the test). A value under 4 loses a feature reading; it never
+    keeps a day the deployed rule left out.
   * **The six real frames end to end** (a sandbox build of 2026-09-29 with them and a 7 Oct frame
     standing in for 29 Sep as its reference): c1 26-28 Sep UNCONFIRMED (2-9 inliers against 7 Oct; the
     NUC's 29 Sep reference gave 48 on 27 Sep), c2 26 Sep UNCONFIRMED (25 inliers against 7 Oct; 73
@@ -936,7 +981,9 @@ only if it holds over several weeks of different waves; then change it in all th
     deg of tilt or roll: 27 Sep DIFFERENT POINTING, 28 Sep a 'small change', kept). +0.30 deg: 27 Sep
     read 0.303, DIFFERENT POINTING, 28 Sep 0.297, a small change (deployed: the same). A 0.4 deg pan:
     a small change on both days (the pan is judged by 0.5 deg). A clear-window 0.3 deg tilt on 1-2 Oct
-    (T03): a small change on both days on both cameras (deployed: the same); 0.6 deg (T06):
+    (T03): a small change on both days on both cameras (deployed: the same; since review 4, whose clear
+    horizon confirms within 0.1 deg at any inlier count, DIFFERENT POINTING where the horizon read just
+    over 0.3: c1 1/2 Oct and c2 2 Oct, recomputed from the rows); 0.6 deg (T06):
     DIFFERENT POINTING. DIRT2 (c1 turned -1.2 deg on 26-28 Sep, under the drops): c1 27/28 Sep read
     0.00 deg on 50 / 66 inliers at turn_sigma 1.3 / 2.2, UNCONFIRMED and left out with 26 Sep
     (deployed: 28 Sep 'matches', kept); c2, at rest, 26/27 Sep 'matches' at 5.7 / 6.6 and 28 Sep
@@ -976,7 +1023,8 @@ only if it holds over several weeks of different waves; then change it in all th
     guard had kept every day (6 right, 1 wrong). S_* (c1 and c2 turned 0.3-1.0 deg on all three
     storm days): c1 28 Sep, its fit failed (8.3-50.5 px) and its features unmatched, stays UNCONFIRMED
     next to 26/27 Sep, misread two days running, in 8 of 9; S_T10, where 27 Sep's fit failed too,
-    keeps 27/28 Sep (above). A NUC-like window (turn_full: c1 as on the NUC, and an exact +0.45 deg
+    kept 27/28 Sep under review 3's rule (its photo set is gone; review 4's ST10_S3, the same shape,
+    is now left out, above). A NUC-like window (turn_full: c1 as on the NUC, and an exact +0.45 deg
     roll on 30 Sep and 1 Oct read on 2103-2286 inliers): 3 of 5 measured days differ, not in one way
     (a -1.21 deg pan, a +0.45 deg roll): no other pointing; the guard had kept all 7, now 5 are left
     out (pinned in the test, with H_T06). End to end (the review runner's full build of that window,
@@ -986,7 +1034,27 @@ only if it holds over several weeks of different waves; then change it in all th
     c2 26 Sep: the README says the detection left out no day where these results leave out those,
     by other pointing results or `--keep-moved-days`, never 'KEPT in the detection
     (--keep-moved-days)'. A turned match under 100 inliers that reads 0.28 deg with a clear horizon
-    at +0.37 is DIFFERENT POINTING (it was a 'small change').
+    at +0.37 is DIFFERENT POINTING (it was a 'small change'; since review 4 at any inlier count, the
+    two agreeing within 0.1 deg).
+  * **Review 4 scenarios** (the review's 40 photo sets: the six real storm frames as 26-28 Sep, the
+    real 7 Oct 16:00 frame with the NUC's day-to-day turns as 29 Sep - 2 Oct, exact ray rotations of
+    0.3-1.0 deg of tilt, roll or pan on storm and clear days, fogged land; `--steps pointing`, the
+    station-floor venv, no forcing built, so the storm days are the STORMS ones, 25-26 Sep) [REAL
+    frames, SYNTH changes]. Their measured rows were judged again with this rule, and the eight sets
+    it changes or that test it (ST10_S3, S2728_T10_FOG, P10_30_FOG01, P10_L2_FOG02, T03_L2, REF_T06,
+    T06_30_FOG01, base) were run again end to end: the same verdicts. Turned days kept on either
+    camera, over the 33 sets whose turns the review's summary lists: 27 by review 3's rule, 17 by
+    this one; the 10 now left out are ST10_S3 c1 27/28 Sep,
+    S2728_T10_FOG c1 27 and c2 27/28 Sep (storm runs), P10_30_FOG01 1 Oct and P10_L2_FOG02 2 Oct on
+    both cameras ('horizon only' next to a measured pan), and T03_L2 c2 2 Oct (a 0.30 deg tilt, the
+    tolerance itself, confirmed by a clear horizon reading 0.303). The 17 still kept: STAY_T06_27
+    (10: the camera moved on 27 Sep and stayed, the reference with it: one pointing, the
+    reference's), REF_T06's reference day (2: the product rests on it, the build partial, with the
+    `--window` that builds on the other pointing), and 0.30 deg turns at the tolerance (ST03_S3 c2
+    27/28 Sep, T03_L2 c1 1/2 Oct and c2 1 Oct). No unturned day outside the storm is newly left out.
+    A pointing-only rerun over a deployed build (the review's synthB_dep, which left c2 26/27 Sep out
+    on the deployed rule) now writes a README that says what the detection on disk did and keeps
+    nothing it left out.
   * [NUC] With c2 26-27 Sep kept, their live rows reach the detection, and the DEM unless its wave
     filter (offshore Hs > 1.5 m) drops them: the 2026-09-29 numbers of section 3.3 may move.
   * [SYNTH] The sandbox fixture's rendered horizon sits near the limits: Jan c1 and Mar c2 pass
@@ -1018,7 +1086,15 @@ only if it holds over several weeks of different waves; then change it in all th
     the live roots; the storm build c1 26-28 Sep and c2 26 Sep) and every headline line identical.
     The Mar README now says why the pan was not measured on its 'horizon only' days (their features
     matched within their own noise), and the stand-in and storm builds' WHAT THIS IS line adds the
-    DEM's own count (85 of the 90 waterline frames, on 29 Sep - 2 Oct).
+    DEM's own count (85 of the 90 waterline frames, on 29 Sep - 2 Oct). Rebuilt again with the rule
+    of review 4 (POINTING_VERSION 10; the same roots and commands, the Jan and Mar detection up to
+    date): the same left-out days and every headline line identical; the pointing CSVs add
+    `next_to`, the pointing JSON the window's storm days (Jan 19-20, Mar 6-7: offshore Hs over 1.5 m;
+    the 2026 roots 26 Sep, inside STORMS, and 29 Sep, 1.52 m), which change no verdict there (no
+    misread day with unread neighbours, no measured pan next to a 'horizon only' day). The review
+    runner's full builds of the storm window (real, synth and synthB photos, its synthetic storm
+    waterlines) give the same left-out days and headlines; one why adds the measured pan it names
+    ('a pan of -1.22 deg, which no horizon sees').
 * **Re-check.** Each product README, `sea horizon vs the calibration` and the KNOWN CAVEATS
   pointing block; `pointing/pointing_<cam>.csv` (with the edge numbers `horizon_edge`,
   `horizon_prominence`, `horizon_rival`, `horizon_sky_above`, `horizon_to_limit_px`, and the
@@ -1119,10 +1195,18 @@ copy of today's pictures made before the pull (section 1).
   writes the real `turn_sigma` of its storm days (projected ~17 / ~9 / ~9 for c2 26 / 27 / 28 Sep; 27 and
   28 Sep have the least margin; real frames here read 28 Sep closest to the limit, 5.3-6.5). Read
   them in `pointing_c2.csv` before relying on c2 26-28 Sep. Below 4 the error is not a harmful one:
-  c2 26/27 Sep would be UNCONFIRMED and left out, as the deployed rule left them out, and with both
-  under 4 also 28 Sep, whose fit failed (days lost, not wrong ones). Not caught: a
-  dirt consensus of thousands of inliers reading above the threshold, and dirt hiding a pan under a
-  clear horizon that does not jump.
+  c2 26/27 Sep would be UNCONFIRMED and left out, as the deployed rule left them out, and 28 Sep,
+  whose fit failed, with them only if its own match also reads under 4 (days lost, not wrong ones).
+  Not caught: a dirt consensus of thousands of inliers reading above the threshold, and dirt hiding
+  a pan under a clear horizon that does not jump.
+* **Storms the rows cannot see.** A storm is told from a calm fog spell by the wave record (offshore
+  Hs over 1.5 m on a day of the run, or a STORMS entry) or by two misread days in one run of days
+  left out or unread. A storm whose every day nothing could read (review 2's DIRT: c1 26-28 Sep,
+  turned -1.2 deg, the drops breaking every horizon fit and match) is still kept: no day of it is left
+  out on its own readings. Leaving such days out on the wave record alone, or keeping calm misread
+  days' neighbours whatever the waves, is the owner's call; the 1.5 m threshold is the DEM's own,
+  not measured as a storm signal for camera turns (the one storm seen: 1.95 / 3.71 / 2.11 m at its
+  peak on 26 / 27 / 28 Sep 2026).
 * **The detector's rate on the NUC10i3.** Measured here at 20-25 s per photo on a 2.8 GHz
   Xeon; the NUC prints its own rate.
 * **Reviews.** The waterline work had three review rounds (the last: all lenses "ship"), the

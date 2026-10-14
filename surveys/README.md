@@ -418,10 +418,10 @@ measured: docs/VALIDATION.md 4.6):
   (dirt matches at zero turn): a change of tilt or roll over 0.3 deg (the
   step's tilt/roll tolerance; 0.1 deg of tilt is ~0.13-0.17 m of DEM) or of
   pan over 0.5 deg is a DIFFERENT POINTING, whatever the horizon reads; a
-  smaller turn over 0.1 deg is a small change (kept), unless the match has
-  fewer than 100 points (tilt and roll to ~0.1 deg only) and a CLEAR horizon
-  reads a change over 0.3 deg that the features confirm within 0.3 deg (then
-  DIFFERENT POINTING); a turn of 0.1 deg or
+  smaller turn over 0.1 deg is a small change (kept), unless a CLEAR horizon
+  reads a change over 0.3 deg that the features confirm within their own
+  ~0.1 deg (then DIFFERENT POINTING, whatever the number of points); a turn
+  of 0.1 deg or
   less keeps the day against a horizon reading that is not clear (the why
   gives both numbers), but against a CLEAR horizon edge that jumps the day
   is UNCONFIRMED: dirt on the housing window matches at zero turn when fog
@@ -447,14 +447,20 @@ measured: docs/VALIDATION.md 4.6):
 * without matched features, a jump of tilt or roll over 0.3 deg from the
   reference is a DIFFERENT POINTING only on a clear edge two or more days
   share; otherwise the day is UNCONFIRMED. A day nothing could read (no
-  horizon fitted, no matched features) next to a day measured to differ, or
-  UNCONFIRMED on more than a horizon reading that is not clear (a
-  clear-looking jump, an ambiguous match), is UNCONFIRMED too, and so are
-  runs of such days from it: nothing shows the camera back. So is such a day
-  next to misread horizons on two or more days running (a storm, during
-  which a camera can turn: c1, 26-28 Sep 2026); a single misread day never
-  reaches past itself, and nothing reaches the reference day (the others are
-  measured against it).
+  matched features, and no horizon fitted or one that is not clear) next to
+  a day measured to differ, or UNCONFIRMED on more than a horizon reading
+  that is not clear (a clear-looking jump, an ambiguous match), is
+  UNCONFIRMED too, and so are runs of such days from it: nothing shows the
+  camera back. So is such a day in a storm: a run of days, each left out on
+  its own readings or read by nothing, that holds misread horizons on two
+  days or more, or a day with offshore Hs over 1.5 m in the date's own
+  forcing (the DEM's limit) or inside a known storm (a camera can turn then:
+  c1, 26-28 Sep 2026). On calm days a single misread day never reaches past
+  itself. A day whose clear horizon shows tilt and roll back but that has no
+  feature reading ('horizon only') is UNCONFIRMED next to a day that measured
+  a pan over 0.5 deg: no horizon sees a pan. Nothing reaches the reference
+  day (the others are measured against it); the CSV's `next_to` names the
+  day a run starts at.
 
 DIFFERENT POINTING and UNCONFIRMED days are both left out of the detection
 (`--keep-moved-days` keeps them), whatever share of the window they are:
@@ -462,7 +468,8 @@ when the days left out are most of the window, the step and the README say
 so with the count; when the days measured to differ agree with each other
 and outnumber those at the reference's pointing, they name that other
 pointing (the window holds two, and the reference may be the odd one out:
-look at the photos), and the build's status is partial. Until Oct 2026
+look at the photos), give the `--window` that builds on the other pointing
+instead (in another output root), and the build's status is partial. Until Oct 2026
 more than half of the measured days differing kept EVERY day, which put two
 pointings and the unconfirmed storm days in one product. There is no option that leaves out or keeps single
 days (`--window FIRST LAST` narrows the photo days). The README takes which
@@ -471,7 +478,8 @@ later `--steps compare` run without the option does not change it; a record
 of an older build that does not say whether it ran with `--keep-moved-days`
 is never read as having done so); a build whose detection has not run, or
 ran with other pointing results (the pointing step run again on its own),
-says so. Window dirt is caught only by these two tests (a second consensus, a
+says so, and calls days kept only once the detection has run with these
+results. Window dirt is caught only by these two tests (a second consensus, a
 turn within the match's noise): a dirt consensus of thousands of points may
 read above the noise test, and dirt under a clear horizon that does not jump
 can hide a pan (docs/VALIDATION.md 4.6). The printed table, the CSV
