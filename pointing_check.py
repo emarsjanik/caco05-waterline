@@ -255,7 +255,17 @@ def measure(img, refs, io, min_inliers=40, second=False):
 # ------------------------------------------------------------- commands
 
 def self_test(image=None):
-    """Rotate a frame by known angles (exact for a camera that only rotates) and recover them."""
+    """Rotate a frame by known angles (exact for a camera that only rotates) and recover them. The rotated frames
+    are made by view_reproject.reproject_image, which needs scipy (its edge fill): on the station's Python 3.8
+    (no scipy) the self-test says so and stops cleanly, exit 0 and the word SKIPPED, with nothing checked. The
+    survey products' pointing step never calls it."""
+    try:
+        import scipy.ndimage  # noqa: F401
+    except ImportError:
+        print("pointing_check.py --self-test SKIPPED (nothing checked): it rotates the frame with "
+              "view_reproject.reproject_image, which needs scipy, not installed here (the station's Python 3.8 has "
+              "none); run it on a computer with scipy. The pointing step of survey_products.py does not need it.")
+        return 0
     from view_reproject import reproject_image
     io = load_intrinsics(CAL / "CACO05_c2_20240801_IO.yaml")
     eo = load_extrinsics(CAL / "CACO05_c2_20251113_EO-CV.yaml")

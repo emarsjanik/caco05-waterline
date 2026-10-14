@@ -43,16 +43,25 @@ cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see sect
 ```
 
 What a survey-date build reruns after this pull: a step reruns when a script in its signature
-changes. This PR changes none of the forcing, pointing, detection, filter, DEM or photo-map
-scripts; it changes `survey_compare.py`, so the next build of a date already built skips
-the forcing, pointing, detection, filter, DEM and photo maps, and reruns only its plan-view
-map and its comparisons (a minute or two per date). Checked on a 2026-09-29 build made with
-PR #87's code, then rebuilt after copying in the files this PR changes: every step up to the
-DEM skipped, the plan-view map and the comparison rebuilt (12 s), a further run skipped all.
+changes, and everything after it with it. This PR changes `historical_forcing.py` (forcing),
+`pointing_check.py` and the pointing rule (`POINTING_VERSION` 10: pointing), `dem_from_contours.py`,
+`dem_figure.py` and `asc_to_geotiff.py` (DEM) and `survey_compare.py` (plan-view map, compare).
+So the next build of a 2025 date reruns every step once, its forcing first and so its detection
+too: here, under load, a full rebuild took ~38 min for 2025-01-23 (two cameras, a week) and ~20 min
+for 2025-03-06 (c2). The live 2026-09-29 date keeps its forcing (the live forcing does not use
+`historical_forcing.py`), reruns its pointing check, and reruns its detection (a georectification
+of the station's own rows, minutes) only if the new rule leaves out other days than the detection
+on disk did; then its DEM, plan view and comparisons. The GeoTIFFs are then tagged EPSG:6348
+(section 4.8), and a further run skips every step. (PR #87's own note, that its pull reran only
+the plan-view map and the comparisons, was checked on a 2026-09-29 build then.)
 
 `view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file
 is unchanged by this PR, and the survey products use only its `ground_to_pixel`, which
-does not need scipy.
+does not need scipy. **Do not run `pointing_check.py --self-test` on the NUC**: it rotates a frame
+with `view_reproject.reproject_image`, which needs scipy; without scipy it now says `SKIPPED
+(nothing checked)` and exits 0 (it needs `--image <a c2 frame>` too). The survey products'
+pointing step does not use it. Here, with scipy, on the real 7 Oct 2026 16:00 c2 frame: four
+planted turns (up to 2.5 deg of pan) recovered to 0.000 deg, PASS.
 
 The self-tests give the same result on the NUC as in a clean checkout: they run on fixtures
 and folders of their own, with the station's search folders and archive files switched off
@@ -1078,7 +1087,11 @@ only if it holds over several weeks of different waves; then change it in all th
     called them '(matches) left out by the pointing check' (review 4); it now says these results keep
     them and the detection on disk left them out, kept once it runs again, and the STORM caveat says
     'left out by an earlier pointing result'. The documented full command reruns the detection and
-    its README matched a fresh build's (review 4).
+    its README matched a fresh build's (review 4). The console of a pointing-only run (`--steps
+    pointing`) said 'LEFT OUT of the detection' as if done; it now says 'to be LEFT OUT of the
+    detection ... when the detection runs again with these results', with what the detection on
+    disk left out (or that none has run), and 'LEFT OUT' only when the run includes the detection
+    (`test_pointing_verdicts`).
   * **The NUC's 2026-09-29 table under the rule** (`test_survey_products.py`,
     test_pointing_verdicts, on the NUC's rows with the edge numbers of the real frames): c1 26 and
     28 Sep UNCONFIRMED (no matched features, a misread horizon), 27 Sep DIFFERENT POINTING (the

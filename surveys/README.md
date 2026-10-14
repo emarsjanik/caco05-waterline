@@ -501,6 +501,18 @@ measured: docs/VALIDATION.md 4.6):
   day (the others are measured against it); the CSV's `next_to` names the
   day a run starts at.
 
+Three choices the rule leaves to the owner, stated rather than decided
+(docs/VALIDATION.md 4.6): (1) a storm whose every day nothing could read
+(the drops or spray breaking every horizon fit and match) is KEPT: no day of
+it is left out on its own readings, and leaving such days out on the wave
+record alone is the owner's call (the 1.5 m threshold is the DEM's own,
+never measured as a sign that a camera turned); (2) when the reference day
+itself is the one that moved, the build is partial with a warning that gives
+the `--window` building on the other pointing (in another root), and it is
+not refused until the owner chooses; (3) a change of exactly the 0.3 deg
+tolerance is DIFFERENT POINTING on the days a clear horizon reads it just
+over 0.300, a 'small change' on the others: days are lost at the boundary.
+
 DIFFERENT POINTING and UNCONFIRMED days are both left out of the detection
 (`--keep-moved-days` keeps them), whatever share of the window they are:
 when the days left out are most of the window, the step and the README say
