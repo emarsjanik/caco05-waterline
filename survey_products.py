@@ -318,6 +318,14 @@ STORMS = [
 # DEM is built like the station's own.
 DEM_CELL, DEM_MIN_POINTS, DEM_MAX_SPREAD, DEM_MAX_HS, DEM_MAX_DAY_OFFSET = 2.0, 3, 0.5, 1.5, 0.15
 
+# Offshore Hs (m) over which a day counts as a storm for the pointing check (storm_days_of): the live
+# cron's DEM_MAX_HS, from which the DEM leaves frames out for their waves (fixed here, not --dem-max-hs,
+# whose 0 keeps every frame). A camera can be turned in a storm (c1 turned -1.2 deg over 26-28 Sep 2026,
+# offshore Hs 1.95 / 3.71 / 2.11 m at its peak on those days), while foam and spray hide the sea horizon:
+# a day UNCONFIRMED on a misread horizon in a storm passes UNCONFIRMED to the days next to it that
+# nothing could read (pointing_verdicts), where one misread fog edge on a calm day does not.
+STORM_HS_M = DEM_MAX_HS
+
 # Pointing check thresholds (pointing_check.py --warn/--fail).
 POINT_WARN_DEG, POINT_FAIL_DEG = 0.1, 0.5
 
@@ -352,13 +360,17 @@ POINT_WARN_DEG, POINT_FAIL_DEG = 0.1, 0.5
 # winner (POINT_WARN_DEG - POINT_FAIL_DEG) is the scene, not dirt, and measures the day's change from
 # the reference directly: its tilt or roll is judged by the step's tilt/roll tolerance RUN_TOL_DEG
 # (over it: DIFFERENT POINTING, whatever the horizon reads; 0.1 deg of tilt is ~0.13-0.17 m of DEM),
-# its pan by POINT_FAIL_DEG (no horizon sees a pan); a smaller turn is a 'small change', kept. Below
-# PRECISE_INLIERS a match reads tilt and roll to ~0.1 deg only (the planted rotations against another
-# day: <= 0.101 deg at 40-59 inliers, 28 trials; <= 0.093 at 60-99, 35; <= 0.060 at 100-199, 10), so
-# a change of 0.2-0.3 deg it reads may be one over RUN_TOL_DEG: there a CLEAR horizon that reads the
-# change over RUN_TOL_DEG and agrees with the features within it (not contradicted) makes the day a
-# DIFFERENT POINTING (review 3: 0.28 deg on 50 inliers against a clear horizon's 0.37 was a 'small
-# change', kept). At PRECISE_INLIERS or more the features are judged on their own.
+# its pan by POINT_FAIL_DEG (no horizon sees a pan); a smaller turn is a 'small change', kept. A match
+# reads tilt and roll to MATCH_ERR_DEG only (the planted rotations against another day: <= 0.101 deg at
+# 40-59 inliers, 28 trials; <= 0.093 at 60-99, 35; <= 0.060 at 100-199, 10), so a change of 0.2-0.3 deg
+# it reads may be one over RUN_TOL_DEG (a clear horizon scatters about as much from day to day at rest: the
+# NUC's clear days of 29 Sep - 2 Oct 2026, their features within 0.02 deg, read c1 +0.90 to +0.96 deg of
+# tilt and +0.16 to +0.26 of roll): a CLEAR horizon that reads the change over RUN_TOL_DEG and agrees with
+# the features within MATCH_ERR_DEG in tilt and in roll makes the day a DIFFERENT POINTING, whatever the
+# inlier count (review 3: 0.28 deg on 50 inliers against a clear horizon's 0.37 was a 'small change',
+# kept). A clear horizon further from the features than their own error is not the change they measured,
+# and the features decide (review 4: with review 3's cut at 100 inliers and agreement within RUN_TOL_DEG,
+# 0.34 confirmed a 0.05 deg tilt on 50 inliers while 0.40 did not, and 0.36 never confirmed 0.29 on 150).
 # Dirt also matches when the scene does NOT match at all (fog, spray over the land), and then no
 # runner-up shows it: its consensus sits at exactly zero turn, as it moves with the camera, while a
 # match of the scene between two days reads the camera's own small turns. pointing_check.turn_sigma
@@ -374,7 +386,7 @@ POINT_WARN_DEG, POINT_FAIL_DEG = 0.1, 0.5
 # 64-292 inliers) 15.6-18.5. A zero-turn match below TURN_SIGMA_MIN is therefore no reading
 # (blind_match, features_trusted); the reference day's own frames are exempt.
 MATCH_INLIERS = 40
-PRECISE_INLIERS = 100
+MATCH_ERR_DEG = 0.1
 AMBIGUOUS_INLIERS = 40
 TURN_SIGMA_MIN = 4.0
 AMBIGUOUS_DEG = 0.3
@@ -424,7 +436,9 @@ HORIZON_LIMIT_PX = 50
 # POINTING is MEASURED (matched features, or a clear horizon whose change two or more days share);
 # UNCONFIRMED is a change one method reported that nothing could confirm or rule out (a horizon jump
 # with no matched features, on one day or on an edge that is not a clear horizon; a zero-turn match
-# against a clear horizon jump; an ambiguous match). When the days left out are most of the window,
+# against a clear horizon jump; an ambiguous match), or a day nothing could read, or only a clear
+# horizon next to a measured pan, next to a day left out on firm evidence or in a storm (pointing_verdicts:
+# nothing shows the camera back). When the days left out are most of the window,
 # the step and the README say so with the count (pointing_majority_note).
 LEFT_OUT_VERDICTS = ("DIFFERENT POINTING", "UNCONFIRMED")
 
@@ -1303,6 +1317,37 @@ def survey_day(plan):
     return days[0] if days else plan["date"]
 
 
+def storm_days_of(plan, days):
+    """{day: why} of the days (of `days`, 'YYYY-MM-DD') that count as a storm for the pointing check
+    (pointing_verdicts): inside a known storm (STORMS), or with an offshore Hs over STORM_HS_M in the
+    forcing's waves (forcing/waves.csv, which the forcing step writes before the pointing step; without
+    it, the STORMS days only). Days by UTC, as the photos are named."""
+    days = sorted(set(days))
+    out = {}
+    for d in days:
+        for sev in STORMS:
+            if sev["first"] <= d <= sev["last"]:
+                out[d] = f"inside {sev['name']}"
+    peak = {}
+    try:
+        with open(Path(plan["out"]) / "forcing" / "waves.csv", newline="") as f:
+            for r in csv.DictReader(f):
+                try:
+                    e, h = float(r["epoch"]), float(r["wvht_m"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if h == h:
+                    d = datetime.fromtimestamp(e, tz=timezone.utc).strftime("%Y-%m-%d")
+                    peak[d] = max(h, peak.get(d, h))
+    except OSError:
+        pass
+    for d in days:
+        if peak.get(d, 0.0) > STORM_HS_M:
+            t = f"offshore Hs up to {peak[d]:.2f} m, over {STORM_HS_M:g} m (forcing/waves.csv)"
+            out[d] = f"{out[d]}; {t}" if d in out else t
+    return out
+
+
 def check_pointing(plan, cam, photos, args):
     """
     Per day: the sea horizon against the calibration (tilt and roll; horizon_check.py's fit) with
@@ -1378,9 +1423,10 @@ def check_pointing(plan, cam, photos, args):
             m = pc.measure(img, [ref], io, min_inliers=MATCH_INLIERS, second=True) if img is not None else None
         r.update(feature_record(m, probe, args.pointing_fail))
         rows.append(r)
+    storms = storm_days_of(plan, days)
     info = {"reference_frame": ref_src.name, "reference_day": ref_day, "reference_kind": ref_kind,
-            "calibration": c["eo_file"]}
-    info.update(pointing_verdicts(rows, fail=args.pointing_fail, ref_day=ref_day))
+            "calibration": c["eo_file"], "storm_days": storms}
+    info.update(pointing_verdicts(rows, fail=args.pointing_fail, ref_day=ref_day, storm_days=storms))
     # where the calibration puts the horizon: at the top edge of the frame (or off it) the lens model
     # is extrapolated far beyond its GCPs, and a constant offset there says little about the pointing
     fin = np.isfinite(pred)
@@ -1575,25 +1621,30 @@ def features_trusted(r, ref=None):
 
 def horizon_alone(r):
     """An UNCONFIRMED day whose only evidence is a horizon reading that is not a clear horizon (no
-    feature reading, not even an ambiguous one): such a reading alone never shows a day moved."""
+    feature reading, not even an ambiguous one): such a reading alone never shows a day moved. Not a day
+    taken in for the day next to it (unread_next_to)."""
     return (r.get("verdict") == "UNCONFIRMED" and not features_trusted(r) and r.get("features") != "ambiguous"
-            and r.get("horizon") in ("matches", "off the calibration") and bool(horizon_doubts(r)))
+            and r.get("horizon") in ("matches", "off the calibration") and bool(horizon_doubts(r))
+            and not r.get("next_to"))
 
 
 def unread_next_to(r):
-    """An UNCONFIRMED day on which nothing could be read (no horizon fitted, no feature reading): it is
-    UNCONFIRMED only for the day next to it (pointing_verdicts: a day measured to differ, UNCONFIRMED on
-    more than a horizon reading that is not a clear horizon, or on such a reading in a storm of two days or
-    more, or a run of such days from one)."""
+    """An UNCONFIRMED day taken in for the day next to it (pointing_verdicts): nothing could read it (no
+    feature reading, and no horizon fitted or one that is not a clear horizon), or only a clear horizon,
+    which cannot see the pan its neighbour turned by; its 'next_to' names the day its run starts at. A row
+    of an older build without that column: UNCONFIRMED with no horizon fitted and no feature reading."""
+    if "next_to" in r:
+        return r.get("verdict") == "UNCONFIRMED" and bool(r.get("next_to"))
     return (r.get("verdict") == "UNCONFIRMED" and not features_trusted(r) and r.get("features") != "ambiguous"
             and r.get("horizon") not in ("matches", "off the calibration"))
 
 
-def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=None):
+def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=None, storm_days=None):
     """
     Each day's verdict and why from what check_pointing measured: a pure function of the rows'
     columns (completed in place; rows of an older build without the edge numbers count as clear).
     ref_day: the day of the reference frame the features are measured against (None: not known).
+    storm_days: {day: why} of the window's storm days (storm_days_of; None: none known).
     -> the window's horizon numbers for check_pointing's info.
 
     The two methods are put on one footing first. The features measure each day's turn from the
@@ -1631,8 +1682,8 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
       moved (warn - fail)             the features' own change of tilt or roll more than RUN_TOL_DEG:
                                       DIFFERENT POINTING, whatever the horizon reads (a turned match is
                                       the scene, not dirt, and measures the change from the reference
-                                      directly); under PRECISE_INLIERS, also a clear horizon jump that
-                                      agrees with the features within RUN_TOL_DEG; else small change (a
+                                      directly); also a clear horizon jump that agrees with the features
+                                      within MATCH_ERR_DEG (their own error); else small change (a
                                       horizon jump is overruled)
       ambiguous (window dirt?)        as 'none' (a runner-up turn over fail   small change (UNCONFIRMED
                                       in pan or RUN_TOL_DEG in tilt/roll:     if the runner-up is
@@ -1647,17 +1698,21 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
     except on the reference day, whose own frames match at zero turn by nature. A row of an older
     build without turn_sigma counts as a reading.
 
-    A turned match ('moved') under PRECISE_INLIERS reads tilt and roll to ~0.1 deg only: its tilt/roll
-    within RUN_TOL_DEG, a CLEAR horizon that reads more than RUN_TOL_DEG and agrees with the features
-    within it (not contradicted) makes the day DIFFERENT POINTING too.
+    A turned match ('moved') reads tilt and roll to ~MATCH_ERR_DEG only: its tilt/roll within
+    RUN_TOL_DEG, a CLEAR horizon that reads more than RUN_TOL_DEG and agrees with the features within
+    MATCH_ERR_DEG in tilt and in roll makes the day DIFFERENT POINTING too, at any inlier count.
 
-    An 'unchecked' day on which nothing could be read (no horizon fitted, no feature reading) next to a
-    DIFFERENT POINTING day, or an UNCONFIRMED one with more behind it than a horizon reading that is not a
-    clear horizon, or one UNCONFIRMED on such a reading alone (horizon_alone) next to another day left out
-    (a storm of two days or more), is UNCONFIRMED too: nothing shows the camera back. A single day
-    UNCONFIRMED on a misread horizon alone never reaches past itself. Runs of such days take it from
-    their neighbour, either side, as long as the run starts at such a day (unread_next_to). Never the
-    reference day itself.
+    A day nothing could read ('unchecked': no feature reading, and no horizon fitted or one that is not
+    a clear horizon) next to a FIRM day is UNCONFIRMED too: nothing shows the camera back. Firm: a
+    DIFFERENT POINTING day, an UNCONFIRMED one with more behind it than a horizon reading that is not a
+    clear horizon, or one UNCONFIRMED on such a reading alone (horizon_alone) in a storm: a run of
+    consecutive days each left out on its own readings or read by nothing that holds a firm day of the
+    first kinds, such misread horizons on two days or more, or a day of storm_days ({day: why}: inside
+    STORMS or offshore Hs over STORM_HS_M; storm_days_of). A day UNCONFIRMED on a misread horizon alone
+    on a calm day never reaches past itself. A 'horizon only' day (a clear horizon, no feature reading)
+    is taken in only when the firm day measured a pan over fail (its horizon cannot see the pan). Runs of
+    such days take it from their neighbour, either side, as long as the run starts at a firm day; the
+    row's 'next_to' names that day (unread_next_to). Never the reference day itself.
 
     The window's other pointing ('other_pointing'): when every day measured to differ agrees with the
     others (within RUN_TOL_DEG in tilt and roll, fail in pan) and they outnumber the days measured at
@@ -1845,19 +1900,23 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
                 r["why"] = (f"{ftxt}: a change of tilt or roll of more than {tol} deg (a match of {MATCH_INLIERS} or "
                             f"more features is good to ~0.1 deg, and a turned match is the scene, not dirt on the "
                             f"window); {hstate}")
-            elif jump and clear_ and not disagree and n < PRECISE_INLIERS:
-                # few inliers read tilt/roll to ~0.1 deg only: a clear horizon that the features confirm within
-                # tol tells whether the change is over tol
+            elif jump and clear_ and abs(h0 - at - ft) <= MATCH_ERR_DEG and abs(h1 - ar - fr) <= MATCH_ERR_DEG:
+                # a match reads tilt/roll to ~MATCH_ERR_DEG: a clear horizon the features confirm within that
+                # error tells whether the change is over tol
                 r["verdict"] = "DIFFERENT POINTING"
-                r["why"] = (f"{ftxt}: tilt and roll within {tol} deg by the features, but a match of fewer than "
-                            f"{PRECISE_INLIERS} features reads them to ~0.1 deg only; the horizon read {h0:+.2f}/"
-                            f"{h1:+.2f} deg (tilt/roll against the calibration) {where}, on a clear horizon edge: a "
-                            f"change of {h0 - at:+.2f}/{h1 - ar:+.2f} deg, more than {tol} deg, which the features "
-                            f"confirm within {tol} deg: a change of tilt or roll of more than {tol} deg")
+                r["why"] = (f"{ftxt}: tilt and roll within {tol} deg by the features, which read them to "
+                            f"~{MATCH_ERR_DEG:g} deg only; the horizon read {h0:+.2f}/{h1:+.2f} deg (tilt/roll against "
+                            f"the calibration) {where}, on a clear horizon edge: a change of {h0 - at:+.2f}/"
+                            f"{h1 - ar:+.2f} deg, more than {tol} deg, which the features confirm within "
+                            f"{MATCH_ERR_DEG:g} deg: a change of tilt or roll of more than {tol} deg")
             else:
                 r["verdict"] = "small change"
                 r["why"] = (f"{ftxt}: a turn of {warn}-{fail} deg with tilt and roll within {tol} deg (the features "
-                            f"measure the change from the reference)" + (f"; {hstate}" if jump or disagree else ""))
+                            f"measure the change from the reference)" + (f"; {hstate}" if jump or disagree else "")
+                            + (f"; that is {h0 - at:+.2f}/{h1 - ar:+.2f} deg from the reference's, more than "
+                               f"{MATCH_ERR_DEG:g} deg (the features' own error) from their {ft:+.2f}/{fr:+.2f}: not "
+                               f"the change they measured, so the features decide"
+                               if jump and clear_ and not disagree else ""))
                 if jump:
                     overruled.append(r["date"])
         else:
@@ -1914,62 +1973,130 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
             else:
                 r["verdict"] = "unchecked"
                 r["why"] = f"neither the features nor the horizon gave a reading ({ftxt}; {hstate})"
-    # a day on which nothing could be read (no horizon fitted, no feature reading) next to a day left out for
-    # its pointing on firm evidence: nothing shows the camera back, so it is not kept as if it matched (review
-    # 2, simR: c1 turned -1.2 deg on 26-28 Sep, 28 Sep's 3-frame horizon fit failed at 14.6 px and its features
-    # did not match; it was 'unchecked', kept, and its frames gridded). Firm: a day measured to differ;
-    # UNCONFIRMED on more than a horizon reading that is not a clear horizon (a clear-looking jump, an
-    # ambiguous match); or UNCONFIRMED on such a reading alone (horizon_alone) next to another day left out on
-    # its own readings: a storm of two days or more, during which a camera can turn (c1 turned -1.2 deg over
-    # the three storm days of 26-28 Sep 2026; review 3's S_* scenarios, real frames turned 0.3-1.0 deg on all
-    # three, c1 26/27 Sep misread and unmatched and 28 Sep's fit failed: 28 Sep is kept unless the run reaches
-    # it). One such day alone never reaches past itself (review 3: one misread fog edge between matching days
-    # left out the run of four fog days after it). Runs of such days take it from their neighbour, either side
-    # (the step cannot tell when the camera turned or came back), as long as the run starts at a firm day.
-    # Never the reference day: the others are measured against its frame, so a neighbour that differs from
-    # it says nothing of it.
+    # Days nothing could read are taken in with the days left out next to them: nothing shows the camera back,
+    # so such a day is not kept as if it matched (review 2, simR: c1 turned -1.2 deg on 26-28 Sep, 28 Sep's
+    # 3-frame horizon fit failed at 14.6 px and its features did not match; it was 'unchecked', kept, and its
+    # frames gridded).
+    #   UNREAD ('unchecked'): no feature reading, and no horizon fitted or a fitted one that is not a clear
+    #     horizon (one that falls within tol of the anchor by chance reads no more than a failed fit; review 4).
+    #   PAN UNREAD ('horizon only'): a clear horizon at the anchor and no feature reading: it shows tilt and roll
+    #     back, never the pan (review 4, P10_30_FOG01: a 1.0 deg pan measured on 30 Sep, 1 Oct fogged over the
+    #     land and 'horizon only', kept with the pan on both cameras).
+    #   FIRM, the days a run starts at: a day measured to differ; UNCONFIRMED on more than a horizon reading that
+    #     is not a clear horizon (a clear-looking jump, an ambiguous match); or UNCONFIRMED on such a reading
+    #     alone (horizon_alone) in a STORM: a run of consecutive days each left out on its own readings or unread
+    #     that holds a firm day of the first kinds, misread horizons on two days or more, or a storm day
+    #     (storm_days: inside STORMS, or offshore Hs over STORM_HS_M in the forcing's waves). A camera can turn in
+    #     a storm (c1 turned -1.2 deg over 26-28 Sep 2026) while foam or spray hides the horizon and the land, and
+    #     its days then come misread or unread in any order (review 4: real storm frames turned 1.0 deg, ST10_S3
+    #     misread, unread, unread; S2728_T10_FOG misread, unread, misread: the unread days were kept, turned).
+    #     One misread fog edge on a calm day never reaches past itself (review 3: it left out the run of four
+    #     fog days after it).
+    # An unread day next to a firm day, or to a day taken in, is UNCONFIRMED; a pan-unread one only when the
+    # day its run starts at measured a pan over fail (or an ambiguous match put one forward). Runs go either
+    # side (the step cannot tell when the camera turned or came back). Never the reference day: the others are
+    # measured against its frame, so a neighbour that differs from it says nothing of it.
     order = sorted(rows, key=lambda r: str(r.get("date") or ""))
+    storm_days = dict(storm_days or {})
+    for r in order:
+        r["next_to"] = ""
     own_out = set(id(o) for o in order if o.get("verdict") in LEFT_OUT_VERDICTS)     # on their own readings
-    storm_run = set()
-    for k, o in enumerate(order):
-        if id(o) in own_out and horizon_alone(o) and any(
-                0 <= j < len(order) and id(order[j]) in own_out for j in (k - 1, k + 1)):
-            storm_run.add(id(o))
+    unread = set(id(o) for o in order if o.get("verdict") == "unchecked" and o is not ref)
+    pan_unread = set(id(o) for o in order if o.get("verdict") == "horizon only" and o is not ref)
+
+    def pan_of(o):
+        """the pan a day's features measured, or its ambiguous match's runner-up put forward (None: neither)"""
+        if trusted(o) and o.get("features") in ("moved", "MOVED"):
+            return float(o["d_azimuth_deg"])
+        if o.get("features") == "ambiguous" and o.get("verdict") == "UNCONFIRMED":
+            p = [x for x in str(o.get("runner_up_d") or "").split("/") if x.strip()]
+            return float(p[0]) if p else None
+        return None
+
+    def pan_over(o):
+        p = pan_of(o)
+        return p is not None and abs(p) > fail
+
+    storm = {}                   # id(a day UNCONFIRMED on a misread horizon in a storm) -> what makes it one
+    k = 0
+    while k < len(order):
+        j = k
+        while j < len(order) and (id(order[j]) in own_out or id(order[j]) in unread):
+            j += 1
+        run = order[k:j]
+        mis = [o for o in run if id(o) in own_out and horizon_alone(o)]
+        hard = [o for o in run if id(o) in own_out and not horizon_alone(o)]
+        wav = [o["date"] for o in run if o.get("date") in storm_days]
+        if mis and (hard or wav or len(mis) >= 2):
+            why_ = ("; ".join(f"{d_}: {storm_days[d_]}" for d_ in wav[:2]) if wav else
+                    f"misread horizons on {', '.join(o['date'] for o in mis)}, in one run of days left out or "
+                    f"unread" if len(mis) >= 2 else
+                    f"in one run of days left out or unread with {hard[0]['date']}, left out on more than a "
+                    f"misread horizon")
+            for o in mis:
+                storm[id(o)] = why_
+        k = max(j, k + 1)
 
     def firm(o):
         return (o.get("verdict") == "DIFFERENT POINTING"
-                or (o.get("verdict") == "UNCONFIRMED" and (not horizon_alone(o) or id(o) in storm_run)))
+                or (o.get("verdict") == "UNCONFIRMED" and (not horizon_alone(o) or id(o) in storm)))
 
     def firm_text(o):
+        p = pan_of(o)
+        pan_ = (f" (a pan of {p:+.2f} deg, which no horizon sees)" if p is not None and abs(p) > fail else "")
         if o.get("verdict") == "DIFFERENT POINTING":
-            return "was measured to differ from the reference"
+            return "was measured to differ from the reference" + pan_
         if horizon_alone(o):
-            return ("is UNCONFIRMED on a misread horizon next to another day left out (a storm of two days or "
-                    "more, during which a camera can turn: c1 turned -1.2 deg over 26-28 Sep 2026)")
-        return ("is UNCONFIRMED on an ambiguous feature match (the camera may have turned)"
+            return (f"is UNCONFIRMED on a misread horizon in a storm ({storm[id(o)]}; a camera can turn in one: c1 "
+                    f"turned -1.2 deg over 26-28 Sep 2026)")
+        return (f"is UNCONFIRMED on an ambiguous feature match (the camera may have turned{pan_})"
                 if o.get("features") == "ambiguous" else "is UNCONFIRMED on a horizon jump on a clear-looking edge")
 
-    blind = [r for r in order if r.get("verdict") == "unchecked" and id(r) not in is_fitted and not trusted(r)
-             and r is not ref]
-    run_of = {}                  # id(a day taken into a run) -> the firm day the run starts at
+    src_of, pan_src = {}, {}     # id(a day taken in) -> the firm day its run starts at; -> one with a pan over fail
     grown = True
     while grown:
         grown = False
-        for r in blind:
-            if r.get("verdict") != "unchecked":
+        for i, r in enumerate(order):
+            if id(r) not in unread and id(r) not in pan_unread:
                 continue
-            i = next(k for k, o in enumerate(order) if o is r)
-            nb = sorted((order[k] for k in (i - 1, i + 1) if 0 <= k < len(order) and firm(order[k])),
-                        key=lambda o: run_of.get(id(o), o).get("verdict") != "DIFFERENT POINTING")
-            if nb:
-                src = run_of.get(id(nb[0]), nb[0])
-                run_of[id(r)] = src
-                r["verdict"] = "UNCONFIRMED"
-                r["why"] = (f"{r['why']}; and "
-                            + (f"the day next to it, {src['date']}, {firm_text(src)}" if src is nb[0] else
-                               f"it is in a run of such days next to {src['date']}, which {firm_text(src)}")
-                            + ": nothing shows the camera back, so the pointing could not be confirmed either way")
+            got, gotp = [], []
+            for k in (i - 1, i + 1):
+                if not 0 <= k < len(order):
+                    continue
+                o = order[k]
+                if id(o) in src_of:
+                    got.append(src_of[id(o)])
+                    if id(o) in pan_src:
+                        gotp.append(pan_src[id(o)])
+                elif firm(o):
+                    got.append(o)
+                    if pan_over(o):
+                        gotp.append(o)
+            if id(r) in pan_unread:
+                got = gotp           # its clear horizon shows tilt and roll back, never the pan
+            if not got:
+                continue
+            if id(r) not in src_of:
+                src_of[id(r)] = sorted(got, key=lambda o: o.get("verdict") != "DIFFERENT POINTING")[0]
                 grown = True
+            if gotp and id(r) not in pan_src:
+                pan_src[id(r)] = gotp[0]
+                grown = True
+    for i, r in enumerate(order):
+        src = src_of.get(id(r))
+        if src is None:
+            continue
+        nb = any(0 <= k < len(order) and order[k] is src for k in (i - 1, i + 1))
+        hz_only = id(r) in pan_unread
+        r["verdict"], r["next_to"] = "UNCONFIRMED", src["date"]
+        r["why"] = (r["why"].replace(": nothing measured the pointing (kept)", ": nothing measured the pointing")
+                    + "; and "
+                    + (f"the day next to it, {src['date']}, {firm_text(src)}" if nb else
+                       f"it is in a run of days nothing could read{', or only the horizon,' if hz_only else ''} "
+                       f"next to {src['date']}, which {firm_text(src)}")
+                    + (": its clear horizon shows tilt and roll back but cannot see the pan, so nothing shows the "
+                       "camera back; the pointing could not be confirmed either way" if hz_only else
+                       ": nothing shows the camera back, so the pointing could not be confirmed either way"))
     # the window's other pointing: every day measured to differ agrees with the others, and they outnumber the
     # days measured at the reference's pointing (the reference itself may be the odd one out)
     def change(r):
@@ -2083,9 +2210,12 @@ def pointing_offset(info, eo_file, rate=True):
 # 7 (each day judged against the reference; a zero turn never overrules a clear horizon jump),
 # 8 (a turned match's tilt/roll judged by RUN_TOL_DEG; a zero turn within its own noise shows nothing;
 # the reference day's confirmed group anchors; a day nothing read next to a left-out day is UNCONFIRMED),
-# 9 (that day only next to a firm one, never a horizon reading alone; a turned match under PRECISE_INLIERS
-# with a clear horizon over RUN_TOL_DEG; 'most days differ' no longer keeps days: the other pointing named).
-POINTING_VERSION = 9
+# 9 (that day only next to a firm one, never a horizon reading alone; a turned match under 100 inliers
+# with a clear horizon over RUN_TOL_DEG; 'most days differ' no longer keeps days: the other pointing named),
+# 10 (storms: a run of days left out or unread with two misread days, a firm day or a storm day by the
+# waves or STORMS; a fitted horizon that is not clear reads nothing; a 'horizon only' day next to a
+# measured pan; a turned match confirmed by a clear horizon within MATCH_ERR_DEG at any inlier count).
+POINTING_VERSION = 10
 
 
 def pointing_sig(plan, cam, args, photos):
@@ -2093,6 +2223,9 @@ def pointing_sig(plan, cam, args, photos):
     return {"eo": c["eo_file"], "eo_file": file_sig(c["eo_path"]),
             "photos": hashlib.sha1("\n".join(p.name for p in photos).encode()).hexdigest(),
             "frames": args.pointing_frames, "fail": args.pointing_fail, "v": POINTING_VERSION,
+            # the window's storm days (from the forcing's waves): a new wave record reruns the verdicts only
+            # when it changes them
+            "storm_days": storm_days_of(plan, per_day(photos)),
             "scripts": scripts_sig("pointing")}
 
 
@@ -2134,14 +2267,14 @@ def step_pointing(plan, args, state):
         lo = pointing_leave_out(rows)
         # Only what was MEASURED is stored; whether those days are left out is decided when the
         # detection runs (--keep-moved-days), so changing that option takes effect on a rerun.
-        warn_ = other_pointing_warning(info, lo, pdir)
+        warn_ = other_pointing_warning(info, lo, pdir, plan["date"])
         if warn_:
             info["warning"] = warn_
         fields = ["camera", "date", "photos", "verdict", "why", "horizon", "horizon_offset_px",
                   "horizon_dtilt_deg", "horizon_droll_deg", "horizon_fit_px", "horizon_frames", "horizon_edge",
                   "horizon_prominence", "horizon_rival", "horizon_sky_above", "horizon_to_limit_px", "features",
                   "feature_frame", "inliers", "d_azimuth_deg", "d_tilt_deg", "d_roll_deg", "turn_sigma",
-                  "runner_up_inliers", "runner_up_d"]
+                  "runner_up_inliers", "runner_up_d", "next_to"]
         with open(csv_out, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             w.writeheader()
@@ -2190,7 +2323,30 @@ def pointing_leave_out(rows):
             "leave_out": True}
 
 
-def other_pointing_warning(info, lo, where):
+def other_pointing_window(op, ref_day):
+    """(FIRST, LAST) of a --window that holds the other pointing's days (pointing_verdicts' 'other_pointing')
+    on one side of the reference day and leaves that day out (the side with more of them; ties: after it),
+    or None. A build with that window takes the day nearest the survey in it as its reference."""
+    if not op or not ref_day:
+        return None
+    before = sorted(d for d in op.get("days") or [] if d < ref_day)
+    after = sorted(d for d in op.get("days") or [] if d > ref_day)
+    side = after if len(after) >= len(before) else before
+    return (side[0], side[-1]) if side else None
+
+
+def other_pointing_rebuild(op, ref_day, date=None):
+    """The concrete way to build on the window's other pointing instead of the reference's, or ''."""
+    w = other_pointing_window(op, ref_day)
+    if not w:
+        return ""
+    return (f"to build on the other pointing instead, leave the reference day out: survey_products.py"
+            + (f" --date {date}" if date else "") + f" --window {w[0]} {w[1]} --output-root <another root> (all "
+            f"steps; the day nearest the survey in that window becomes the reference; in this root it would "
+            f"replace this build)")
+
+
+def other_pointing_warning(info, lo, where, date=None):
     """The step's (and the README's) warning when every day measured to differ from the reference
     agrees with the others and they outnumber the days measured at the reference's pointing
     (pointing_verdicts' 'other_pointing'): the window holds two pointings and the reference's is the
@@ -2210,8 +2366,11 @@ def other_pointing_warning(info, lo, where):
             + ". The detection leaves the other "
             f"pointing's days out by default, so the product rests on the reference's pointing; if the "
             f"reference day itself is the odd one out, that is the wrong one: look at the photos ({where}). "
-            f"--keep-moved-days keeps every day (both pointings, the UNCONFIRMED days too), and --window FIRST "
-            f"LAST narrows the photo days; there is no option that keeps only some days")
+            + ((other_pointing_rebuild(op, info.get("reference_day"), date)[:1].upper()
+                + other_pointing_rebuild(op, info.get("reference_day"), date)[1:] + ". ")
+               if other_pointing_window(op, info.get("reference_day")) else "")
+            + "--keep-moved-days keeps every day (both pointings, the UNCONFIRMED days too), and --window FIRST "
+            "LAST narrows the photo days; there is no option that keeps only some days")
 
 
 def skip_days_of(res, args):
@@ -2251,10 +2410,10 @@ def pointing_majority_note(res, args, skip=None, ran=True):
                f"a clear horizon, with no feature reading: such a reading never shows a day moved, but in a storm "
                f"the camera can turn on those very days (c1, 26-28 Sep 2026: -1.2 deg of pan)" if alone else "")
             + (f". {len(nxt)} of them ({', '.join(nxt)}) {'is' if len(nxt) == 1 else 'are'} UNCONFIRMED only because "
-               f"nothing could read {'it' if len(nxt) == 1 else 'them'} (no "
-               f"horizon fitted, no feature reading) next to a day left out (measured to differ, unconfirmed on "
-               f"more than a misread horizon, or misread in a storm of two days or more): nothing shows the camera "
-               f"back" if nxt else "")
+               f"nothing could read {'it' if len(nxt) == 1 else 'them'} (no feature reading, and no clear horizon; "
+               f"or only a clear horizon, next to a measured pan it cannot see) next to a day left out (measured to "
+               f"differ, unconfirmed on more than a misread horizon, or misread in a storm: two misread days, or "
+               f"high waves): nothing shows the camera back" if nxt else "")
             + ". Look at the photos and the pointing CSV; --keep-moved-days keeps every such day (there is no "
               "option that keeps only some; --window FIRST LAST narrows the photo days)")
 
@@ -2370,9 +2529,12 @@ def pointing_skip_days(plan, state, cam, args, photos):
         want = normal(pointing_sig(plan, cam, args, photos))
         if not st or st.get("sig") != want:
             older = bool(st) and (st.get("sig") or {}).get("v") != want.get("v")
+            storms_ = bool(st) and (st.get("sig") or {}).get("storm_days") != want.get("storm_days")
             raise StepFailed(f"{cam}: the pointing check in {js} was made "
                              + (f"by an older version of the check (v{(st.get('sig') or {}).get('v')}; this code "
                                 f"decides by v{want.get('v')}: which days are left out may differ)" if older else
+                                "for other storm days (the forcing's waves changed since: they decide whether a "
+                                "day nothing read next to a misread one is left out)" if storms_ else
                                 "for other photos or another calibration")
                              + "; run the pointing step again (--steps pointing,detect,...)")
         res = json.loads(js.read_text())
@@ -4261,7 +4423,9 @@ def missing_parts(plan, state, args=None):
                            f"the product holds both (the other's {', '.join(inside)} kept)" if inside else
                            "the product rests on the reference's, the smaller group")
                         + f"; if the reference day is the odd one out, that is the wrong one: look at the photos "
-                          f"(pointing/pointing_{cam}.csv)")
+                          f"(pointing/pointing_{cam}.csv)"
+                        + (f"; {other_pointing_rebuild(op, (res.get('info') or {}).get('reference_day'), plan['date'])}"
+                           if other_pointing_window(op, (res.get("info") or {}).get("reference_day")) else ""))
         if not (out / "maps" / f"{plan['date']}_waterlines_{cam}.png").exists():
             miss.append(f"{cam}: no waterline map on the photos ({map_missing_reason(plan, state, cam)})")
     return miss
@@ -4801,9 +4965,11 @@ def collect_caveats(plan, args, state, forcing, prov):
                 cav.append(f"{cam}: the detection left out " + (", ".join(skip) if skip else "no day")
                            + ", where these pointing results leave out "
                            + (", ".join(skip_days_of(res, None)) or "no day")
+                           # --keep-moved-days leaves out no day: it can explain a detection that left out
+                           # none, never one that left days out (review 4)
                            + (" by default: it ran with other pointing results (the pointing step was run again "
                               "since) or with --keep-moved-days (its record, of an older build, does not say which)"
-                              if kmd_ is None else
+                              if kmd_ is None and not skip else
                               ": it ran with other pointing results (the pointing step was run again since)")
                            + "; run the detection again (--steps detect and the steps after it) to apply these.")
             if diff_:
@@ -4829,9 +4995,19 @@ def collect_caveats(plan, args, state, forcing, prov):
             cav.append(f"{cam}: {note_}.")
         over = [d_ for d_, r_ in sorted(byday.items()) if r_.get("verdict") not in LEFT_OUT_VERDICTS
                 and d_ in (res.get("horizon_overruled_days") or info.get("horizon_overruled_days") or [])]
-        if over:
+        if over and ran_:
             cav.append(f"{cam}: kept, although the sea-horizon check alone would have left them out (matched "
                        f"features measured no turn, or not the one the horizon read): {with_why(over)}.")
+        elif over:
+            # the detection on disk did not run with these results: what it did is said above, and these days
+            # are kept only once it runs again (review 4: a pointing-only rerun on a deployed build listed days
+            # the detection on disk had left out as 'kept')
+            gone = [d_ for d_ in over if d_ in skip] if dst is not None else []
+            cav.append(f"{cam}: these pointing results keep {', '.join(over)}, although the sea-horizon check alone "
+                       f"would leave them out (matched features measured no turn, or not the one the horizon read)"
+                       + (f"; the detection on disk left out {', '.join(gone)}, so they are kept once it runs again"
+                          if gone else "")
+                       + f": {with_why(over)}.")
         if info.get("fitted_horizon_days") and not info.get("clear_horizon_days"):
             px_ = info.get("fitted_horizon_offset_px")
             cav.append(f"{cam}: no day of the window showed a clear sea horizon (the edge read as the horizon was "
@@ -5226,7 +5402,12 @@ def storm_caveats(plan, args, prov, first_used, last_used, note=True):
                         grid.append(f"{cam} {d} ({n} frame{'s' if n != 1 else ''})")
                         continue
                     whys = sorted({w_ for _, dd, w_ in lo_ if dd == d})
-                    if d in skip:
+                    if d in skip and verdict.get(d) and verdict[d] not in LEFT_OUT_VERDICTS:
+                        # the detection ran with other pointing results: today's verdict keeps the day
+                        k_ = ("left out by an earlier pointing result (the pointing step was run again since; see "
+                              "the pointing caveats)")
+                        lab = f"{cam} {d} ({verdict[d]})"
+                    elif d in skip:
                         k_ = "left out by the pointing check (see the pointing caveats)"
                         lab = f"{cam} {d}" + (f" ({verdict[d]})" if verdict.get(d) else "")
                     elif whys:
