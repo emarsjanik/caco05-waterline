@@ -68,8 +68,11 @@ with time (pointing, lens, a detection bias that follows the tides or
 waves), and the test then trims an end of it. The rule: 5 or more
 testable days, a range over the limit, Spearman's rho of offset against
 date above 0.8 and, up to 8 days, one that days in random order reach
-at most 2 % of the time (5 days need 1.00, 6 days 0.89); a lone day left
-out at either end cannot make the trend alone.
+at most 2 % of the time (5 days need 1.00, 6 days 0.89). When the one
+day the test left out of a camera's days is its first or last, the other
+days must still run the same way (rho above 0.8, however few they are);
+if on their own they would not warn, the WARNING says the trend rests on
+that day.
 
 THE PAGE IS ALWAYS THIS RUN'S. The old dem_out_dem.png is removed first
 (unless --no-plot); a window with too few cells, or no points at all,
@@ -435,8 +438,11 @@ class LeaveOneOut:
     order of the samples and equal those of the one-pass loop this replaced. offsets() gives the
     offsets of many keys at once, without a loop over the keys (the iterative day test recomputes
     every kept day after each one it leaves out: on a synthetic year of camera-days, 730 days and
-    167 left out, one key at a time took 23 min on the station's Python 3.8 / numpy 1.17, this about
-    a minute); offset() gives one key's, the same to the bit.
+    167 left out, 668k samples, one key at a time took 23 min on the station's Python 3.8 / numpy
+    1.17, this about a minute; the time grows with samples x rounds, and at the station's density,
+    1.5M samples for 730 days with 98 left out, it took about 2.5 min of CPU there, 3.6-5.3 min on
+    a loaded machine, against 5-8 s for one pass);
+    offset() gives one key's, the same to the bit.
     """
 
     def __init__(self, pair_cell, pair_vals, pair_key, min_frames, min_pairs=30):
@@ -650,18 +656,29 @@ DAY_TEST_MIN_DAYS = 3
 # (0.90, one pair swapped, comes 4 % of the time by chance) and 0.89 over 6; from 7 days on it is
 # |rho| > 0.8 itself (0.82 over 7 days, 0.81 over 8). And a lone day the test left out at either
 # end of a camera's days cannot make the trend by itself (one bad day at an end ranks first or
-# last and lifts rho): the camera's other days must run the same way, at the rho their number asks
-# for -- so with 5 days and one end left out, the 4 others cannot carry a warning.
-# On simulated full-pipeline 7-day windows (two cameras, limit 0.15 m, 1000 of each kind) with no
-# trend this fires on 2-5 % of them (day biases of sd 0.04-0.08 m), with one bad day (0.4 m) at an
-# end of one camera's days on 4-5 % (8-9 % with that day counted in the rho); a trend of 0.03-0.06
-# m/day on one camera (day noise 0.03-0.08 m) is flagged in 68-85 %. DAY_TREND_ALPHA = 0.01 (rho
-# 0.89 over 7 days) fired on 1-3 % with no trend but flagged only 46-70 % of those trends, and
-# missed a 0.35 m trend planted on the station's own data (rho +0.86 over 7 days, the two days at
-# its low end trimmed). Each WARNING turns the station status to WARN.
+# last and lifts rho): the camera's other days must still run the same way, |rho| >
+# DAY_TREND_REST_RHO in that direction, whatever their number -- not the chance part, which the 4
+# days left of 5 can never pass (asking for it, before 14 Oct 2026, hid every 5-day trend trimmed at
+# one end: the station's 7-day c1 seen on one day fewer gave -0.241 ... +0.111 m, strictly rising,
+# 5 Oct left out, and no warning). When the other days would not warn on their own the WARNING says
+# the trend rests on the day left out (the end of the trend, or a bad day that lies beyond it).
+# Simulated full-pipeline windows (limit 0.15 m, fixed seeds), the share that warns -- 7-day
+# windows, two cameras (1000 of each kind): no trend (day biases sd 0.04-0.08 m) 2-6 %; one bad day
+# (0.4 m) at an end of one camera's days 3-6 % (7-10 % with no end-day rule, 2-5 % with the chance
+# part asked of the other days, as before); a trend of 0.03-0.06 m/day on one camera (day noise
+# 0.03-0.08 m) 67-87 % (65-86 % before). A camera seen on 5 of the 7 days (c2 steady; 400-1000 of
+# each kind): a trend of 0.04-0.08 m/day (an end trimmed in 61-99 % of them) 31-68 % (15-61 %
+# before), one bad end day 4-6 % (0-1 %), no trend 1 %; on 6 days: trend 62-94 % (45-91 %), bad
+# end day 6 % (0-4 %), no trend 1 %. DAY_TREND_ALPHA = 0.01 (rho 0.89 over 7 days) flagged only
+# 46-70 % of the 7-day trends and missed a 0.35 m trend planted on the station's own data (rho
+# +0.86 over 7 days, the two days at its low end trimmed); 0.05 is the rule asked for itself from 5
+# days on (|rho| > 0.8: 0.90 over 5 days, 0.83 over 6), which flags 51-91 % of those 5-day trends
+# and 70-97 % of the 6-day ones, at 6-7 % with a bad end day and 2-5 % with no trend. Each WARNING
+# turns the station status to WARN.
 DAY_TREND_MIN_DAYS = 5
 DAY_TREND_MIN_RHO = 0.8
 DAY_TREND_ALPHA = 0.02
+DAY_TREND_REST_RHO = 0.8
 DAY_TEST_METHOD = ("iterative: the camera-day furthest over the limit is left out and the others' "
                    "offsets are recomputed without it, until none is over; a day is left out only "
                    "when the test can judge it (where it is compared its DEM holds two or more other "
@@ -698,62 +715,88 @@ def spearman(x, y):
     return float((rx * ry).sum() / den) if den > 0 else np.nan
 
 
+_SPEARMAN_PERMS = {}
 _SPEARMAN_NULL = {}
 
 
-def spearman_tail(rho, n):
-    """The chance that n values in random order (no ties) give Spearman's rho >= `rho`: exact, from
-    all n! orders, for n <= 8 (8! = 40320); None for larger n."""
+def spearman_null(n, y=None):
+    """Spearman's rho of n values against time in each of their n! orders (n <= 8: 8! = 40320), as
+    spearman() computes it (Pearson's r of the ranks, ties averaged). y: the values, whose ties the
+    orders keep (the exact null for that tie pattern); None: n distinct values."""
+    r = np.arange(1.0, n + 1) if y is None else ranks(y)
+    key = (n, tuple(np.sort(r).tolist()))
+    if key not in _SPEARMAN_NULL:
+        if n not in _SPEARMAN_PERMS:
+            from itertools import permutations
+            _SPEARMAN_PERMS[n] = np.array(list(permutations(range(n))), dtype=np.int64)
+        rc = r - r.mean()
+        t = np.arange(n) - (n - 1) / 2.0
+        den = np.sqrt((rc ** 2).sum() * (t ** 2).sum())
+        _SPEARMAN_NULL[key] = (rc[_SPEARMAN_PERMS[n]].dot(t) / den if den > 0
+                               else np.zeros(len(_SPEARMAN_PERMS[n])))
+    return _SPEARMAN_NULL[key]
+
+
+def spearman_tail(rho, n, y=None):
+    """The chance that n values in random order give Spearman's rho >= `rho` against time: exact,
+    from all n! orders, for n <= 8; None for larger n. y: the values themselves -- with ties among
+    them the orders keep the tie pattern, so the tail is the exact one for those values (5 days
+    with one tied pair cannot reach rho 1; their largest rho, 0.97, comes in 2 orders of 120, the
+    tied pair either way, where the table for distinct values said 1 in 120); without y, n distinct
+    values. The null is symmetric (reversing an order turns rho into -rho), so the same chance holds
+    for rho <= -`rho`."""
     if n > 8:
         return None
-    if n not in _SPEARMAN_NULL:
-        from itertools import permutations
-        p = np.array(list(permutations(range(n))), dtype=np.int64)
-        _SPEARMAN_NULL[n] = 1.0 - 6.0 * ((p - np.arange(n)) ** 2).sum(axis=1) / (n * (n * n - 1.0))
-    return float((_SPEARMAN_NULL[n] >= rho - 1e-9).mean())
+    return float((spearman_null(n, y) >= rho - 1e-9).mean())
 
 
 def trend_rho_needed(n, alpha=DAY_TREND_ALPHA, min_rho=DAY_TREND_MIN_RHO):
     """What day_trends asks of |rho| over n days: up to 8 days the smallest rho that n days in
     random order reach at most `alpha` of the time and above min_rho (flagged when |rho| >= it;
-    None: n days cannot reach it); from 9 days on min_rho (flagged when |rho| > it)."""
+    None: n days cannot reach it); from 9 days on min_rho (flagged when |rho| > it). For days
+    without ties; with ties the chance is computed for their pattern (spearman_tail)."""
     if n > 8:
         return min_rho
-    spearman_tail(1.0, n)                                 # fills the table for n
-    ok = [float(v) for v in np.unique(np.round(_SPEARMAN_NULL[n], 9))
+    ok = [float(v) for v in np.unique(np.round(spearman_null(n), 9))
           if v > min_rho and spearman_tail(v, n) <= alpha]
     return ok[0] if ok else None
 
 
-def day_trend_rule(alpha=DAY_TREND_ALPHA, min_rho=DAY_TREND_MIN_RHO):
+def day_trend_rule(alpha=DAY_TREND_ALPHA, min_rho=DAY_TREND_MIN_RHO, rest_rho=DAY_TREND_REST_RHO):
     """The trend rule in words, with the |rho| it asks for by number of days."""
     need = ", ".join(f"{n}: {trend_rho_needed(n, alpha, min_rho):.2f}" if trend_rho_needed(n, alpha, min_rho)
                      else f"{n}: never" for n in range(DAY_TREND_MIN_DAYS, 9))
     return (f">= {DAY_TREND_MIN_DAYS} testable days, range > the limit, |Spearman rho| > {min_rho:g} and (up "
             f"to 8 days) reached by days in random order at most {100 * alpha:g} % of the time in that "
-            f"direction (|rho| needed by days {need}; from 9, > {min_rho:g}); a lone day left out at either "
-            f"end of a camera's days cannot make it alone: the other days must pass too")
+            f"direction (|rho| needed by days without ties {need}; from 9, > {min_rho:g}); when the one day "
+            f"left out of a camera's days is its first or last, the other days must run the same way, "
+            f"|rho| > {rest_rho:g} (any number of days), and the WARNING says when the trend rests on that day")
 
 
 def day_trends(offsets, limit, min_days=DAY_TREND_MIN_DAYS, min_rho=DAY_TREND_MIN_RHO,
-               alpha=DAY_TREND_ALPHA, left_out=()):
+               alpha=DAY_TREND_ALPHA, left_out=(), rest_rho=DAY_TREND_REST_RHO):
     """
     Cameras whose camera-day offsets run one way with time. offsets: {"<camera> <YYYY-MM-DD>":
     offset (NaN = not testable)}; left_out: the days the test left out. A camera is listed when it
     has >= min_days testable days, max - min offset > limit, |Spearman rho| of offset against date
     > min_rho, and (up to 8 days) days in random order reach that |rho| in that direction at most
-    `alpha` of the time. When exactly one of its testable days was left out and that day is its
-    first or last, the other days must pass the rho part too, in the same direction (one bad day
-    at an end is no trend): their rho and chance are given as without.
+    `alpha` of the time (exact, for the days' own ties: spearman_tail).
+    When exactly one of its testable days was left out and that day is its first or last, the
+    trend may rest on that day (one bad day at an end ranks first or last and lifts rho): the
+    camera's other days must still run the same way, |rho| > rest_rho in that direction -- the rho
+    the rule asks for, without the chance part and whatever their number (the 4 days left of 5
+    can never reach a 2 % chance, so asking for it hid every 5-day trend trimmed at one end). They
+    are given as without, with whether they pass the whole rule on their own (alone); when they
+    do not, the trend rests on that day as much as on them, and the WARNING says so.
     -> [{camera, days, spearman_rho, chance (that one-sided probability; None from 9 days),
     range_m, first: (day, offset), last: (day, offset), without: None or {day, days, spearman_rho,
-    chance}}], cameras sorted.
+    chance (None from 9 days), range_m, alone}}], cameras sorted.
     """
     def passes(y, sign=None):
         rho = spearman(np.arange(len(y)), y)
         if not (np.isfinite(rho) and abs(rho) > min_rho) or (sign is not None and rho * sign <= 0):
             return None
-        chance = spearman_tail(abs(rho), len(y))
+        chance = spearman_tail(abs(rho), len(y), y)
         return None if chance is not None and chance > alpha else (rho, chance)
 
     by_cam = {}
@@ -781,11 +824,14 @@ def day_trends(offsets, limit, min_days=DAY_TREND_MIN_DAYS, min_rho=DAY_TREND_MI
         if len(out_days) == 1 and out_days[0] in (0, len(days) - 1):
             i = out_days[0]
             rest = np.delete(y, i)
-            hit2 = passes(rest, np.sign(rho)) if len(rest) >= min_days else None
-            if hit2 is None:
-                continue
-            without = {"day": f"{cam} {days[i][0]}", "days": len(rest), "spearman_rho": round(hit2[0], 3),
-                       "chance": hit2[1]}
+            rho2 = spearman(np.arange(len(rest)), rest)
+            if not (np.isfinite(rho2) and rho2 * np.sign(rho) > rest_rho):
+                continue                    # the other days do not run that way: one bad end day
+            alone = len(rest) >= min_days and float(rest.max() - rest.min()) > limit and \
+                passes(rest, np.sign(rho)) is not None
+            without = {"day": f"{cam} {days[i][0]}", "days": len(rest), "spearman_rho": round(rho2, 3),
+                       "chance": spearman_tail(abs(rho2), len(rest), rest),
+                       "range_m": round(float(rest.max() - rest.min()), 3), "alone": bool(alone)}
         out.append({"camera": cam, "days": len(days), "spearman_rho": round(rho, 3),
                     "chance": chance, "range_m": round(span, 3), "first": days[0], "last": days[-1],
                     "without": without})
@@ -820,10 +866,13 @@ def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs
        kept set only grows here, so this ends.
     4. Final offsets: kept days against the DEM of the other kept days; left-out days against
        the DEM of the kept days. Every kept, testable day is then within the limit but those
-       step 2 kept unjudged (over_kept); a day testable in the first pass whose comparison days
-       were all left out is kept untested (untested; a not_judged day kept too). A day kept
+       step 2 kept unjudged (over_kept); a day testable in the first pass that is not once the
+       days left out are gone (too few comparable samples left: the days it was compared with left
+       out, or those kept too thin on their own, e.g. two days of 2 frames a cell once a third is
+       left out, min_frames 3) is kept untested (untested; a not_judged day kept too). A day kept
        untested keeps its place whatever its first-pass offset: that offset was measured against
-       days since left out (the one-pass test would have rejected it when over the limit).
+       days since left out (the one-pass test would have rejected it when over the limit, and kept
+       it when within, as here).
 
     A not_judged entry records the step where the day was set aside; where it ended up (left
     out, taken back, kept over or within the limit, untested) is in rejected, taken_back,
@@ -1128,8 +1177,9 @@ def day_test_warning(dt, limit):
     if stay:
         why.append(f"Kept although over the limit of the kept days: {', '.join(_unit(k) for k in stay)}")
     if untested:
-        why.append(f"Kept without a check, as every day they were compared with was left out: "
-                   f"{', '.join(_unit(k) for k in untested)}")
+        why.append("Kept without a final check, as too few comparable samples are left once the days left "
+                   "out are gone; in the first pass each was compared with every other day, the ones since "
+                   "left out included: " + ", ".join(_unit(f"{k} ({_off(dt['first'][k][0])})") for k in untested))
     if stay or untested:
         why.append("Read the DEM with care where these days lie (the lines above give their offsets)")
     return head, [head] + _wrap(". ".join(why) + ".")
@@ -1161,8 +1211,18 @@ def day_trend_warning(t, limit, rejected):
     def chance(c):
         return f", which days in random order reach 1 time in {int(round(1 / c)):,}" if c else ""
     w = t.get("without")
-    rest = (f"; without {w['day']}, the one day left out, at an end, the other {w['days']} days give "
-            f"rho {w['spearman_rho']:+.2f}{chance(w.get('chance'))}") if w else ""
+    rest, carried = "", ""
+    if w and w.get("alone", True):
+        rest = (f"; without {w['day']}, the one day left out, at an end, the other {w['days']} days give "
+                f"rho {w['spearman_rho']:+.2f}{chance(w.get('chance'))}")
+    elif w:
+        short = (f"too few to pass the rule alone (it asks {DAY_TREND_MIN_DAYS})" if w["days"] < DAY_TREND_MIN_DAYS
+                 else f"not enough to pass the rule alone (range {w['range_m']:.2f} m)" if w["range_m"] <= limit
+                 else "not enough to pass the rule alone")
+        rest = (f"; it rests on {w['day']}, the one day left out, at an end: the other {w['days']} days "
+                f"give rho {w['spearman_rho']:+.2f}{chance(w.get('chance'))}, {short}")
+        carried = (f" {_unit(w['day'])} may be the end of the trend or one bad day that happens to lie "
+                   f"beyond it: the other days run the same way, but on their own they would not warn.")
     return [f"WARNING: {cam}'s camera-day offsets run one way with time over {t['days']} days "
             f"(Spearman rho {t['spearman_rho']:+.2f}{chance(t.get('chance'))}; {o0:+.3f} m on {d0} to "
             f"{o1:+.3f} m on {d1}, a range of {t['range_m']:.2f} m > the {limit:g} m limit{rest})."] + _wrap(
@@ -1170,7 +1230,8 @@ def day_trend_warning(t, limit, rejected):
             "pointing or lens, a detection bias that follows the tides or the waves), gives this pattern; "
             "the day test then trims the end(s) furthest out"
             + (f" -- left out here: {', '.join(_unit(k) for k in gone)}" if gone else " -- none left out here")
-            + f". Check {cam}'s pointing and the beach change before reading this DEM as one surface.")
+            + "." + carried + f" Check {cam}'s pointing and the beach change before reading this DEM as "
+            "one surface.")
 
 
 def day_test_record(dt, limit, trends):
@@ -1249,11 +1310,14 @@ def day_test_record(dt, limit, trends):
                                 "range_m": t["range_m"], "first_day": t["first"][0],
                                 "first_offset_m": r(t["first"][1]), "last_day": t["last"][0],
                                 "last_offset_m": r(t["last"][1]),
+                                # the one day left out, at an end, and the camera's other days:
+                                # alone, they pass the rule on their own; else the trend rests on it
                                 "without": None if not t.get("without") else {
                                     "day": t["without"]["day"], "days": t["without"]["days"],
                                     "spearman_rho": t["without"]["spearman_rho"],
                                     "chance": None if t["without"].get("chance") is None
-                                    else round(t["without"]["chance"], 6)}}
+                                    else round(t["without"]["chance"], 6),
+                                    "range_m": t["without"]["range_m"], "alone": t["without"]["alone"]}}
                                for t in trends],
             "trend_from": "final offsets",
             "trend_rule": day_trend_rule(),

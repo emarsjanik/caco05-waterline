@@ -33,8 +33,10 @@ one way with time. These checks plant the answer and ask for it back:
     limit in the end, is not named; one the kept days judge in the end
     is not either; one kept unjudged is tried again, and left out once
     the test can judge it; no other log line holds the word WARNING;
-  * a steady trend: the WARNING, and what the test trims; days without a
-    trend, or one bad day at an end: the WARNING stays rare;
+  * a steady trend: the WARNING, and what the test trims; a trend trimmed
+    at one end of a camera's 5 days: the WARNING, saying it rests on that
+    day; days without a trend, or one bad day at an end: the WARNING stays
+    rare; the chance of a rho exact for tied offsets;
   * the station's 7-day c1/c2 pattern of 5-11 Oct 2026, replayed;
   * fewer than 3 days: none left out;
   * the offsets equal the one-pass code's, whatever the order of the
@@ -315,6 +317,22 @@ def test_spearman():
     rx, ry = np.arange(1, 7.0), np.array([1, 2.5, 2.5, 4, 6, 5])
     check(abs(rho - np.corrcoef(rx, ry)[0, 1]) < 1e-12, f"with ties: Pearson's r of the averaged ranks ({rho:.4f})")
     check(np.isnan(dfc.spearman([1, 2, 3], [2, 2, 2])), "a constant side: NaN, never a trend")
+    # the chance of a rho by random order, exact for the values' own ties: their tie pattern is kept
+    # in every order (5 days with a tied pair cannot reach rho 1; their largest rho comes in 2 orders)
+    from itertools import permutations
+    y = [-0.2, -0.1, 0.0, 0.0, 0.2]
+    rho = dfc.spearman(np.arange(5), y)
+    brute = np.mean([dfc.spearman(np.arange(5), [y[i] for i in q]) >= rho - 1e-9 for q in permutations(range(5))])
+    check(abs(rho - 0.975) < 1e-3 and dfc.spearman_tail(rho, 5, y) == brute == 2 / 120.0
+          and dfc.spearman_tail(rho, 5) == 1 / 120.0,
+          f"one tie over 5 days: rho {rho:.3f}, reached by 2 of the 120 orders (the tied pair either way): "
+          f"{dfc.spearman_tail(rho, 5, y):.4f} (the no-tie table said 1/120)")
+    off = {f"c1 2026-10-0{i}": o for i, o in enumerate(y, 1)}
+    two = {f"c1 2026-10-0{i}": o for i, o in enumerate([-0.2, -0.2, -0.1, -0.1, 0.2], 1)}
+    t1, t2 = dfc.day_trends(off, LIMIT), dfc.day_trends(two, LIMIT)
+    check(len(t1) == 1 and abs(t1[0]["chance"] - 1 / 60.0) < 1e-12 and t2 == []
+          and dfc.spearman_tail(dfc.spearman(np.arange(5), list(two.values())), 5, list(two.values())) == 4 / 120.0,
+          "5 days with one tie: still a WARNING (1 in 60, within 2 %); with two ties: 4 orders in 120 (3.3 %), none")
 
 
 def test_one_bad():
@@ -485,19 +503,34 @@ def test_trend_rule():
           and dfc.day_trends(planted, LIMIT, alpha=0.01) == [],
           f"a 0.35 m trend trimmed at its low end (two days left out), rho +0.86 over 7 days: WARNING "
           f"(chance {tr[0]['chance'] if tr else 0:.4f}; at 1 % it was missed)")
-    # one bad day at an end ranks first or last and lifts rho: alone it makes no trend
-    lone = dict(zip([f"c1 2026-10-{d:02d}" for d in range(5, 12)], [0.0, -0.02, 0.02, 0.01, 0.04, 0.03, 0.40]))
+    # one bad day at an end ranks first or last and lifts rho: alone it makes no trend. The camera's
+    # other days must still run the same way, |rho| > 0.8 whatever their number; when they do but would
+    # not warn on their own, the WARNING says it rests on that day
+    days7 = [f"c1 2026-10-{d:02d}" for d in range(5, 12)]
+    lone = dict(zip(days7, [0.02, -0.02, 0.0, 0.03, 0.05, 0.04, 0.40]))
     t_all = dfc.day_trends(lone, LIMIT)
-    check(len(t_all) == 1 and dfc.day_trends(lone, LIMIT, left_out=["c1 2026-10-11"]) == [],
-          f"6 days within 0.04 m (rho 0.83 among them) and 11 Oct +0.40 m, left out: rho over all 7 is "
+    check(len(t_all) == 1 and t_all[0]["spearman_rho"] == 0.857
+          and dfc.day_trends(lone, LIMIT, left_out=["c1 2026-10-11"]) == [],
+          f"6 days within 0.07 m (rho +0.77 among them) and 11 Oct +0.40 m, left out: rho over all 7 is "
           f"{t_all[0]['spearman_rho'] if t_all else 0:+.2f}, but without the one day left out at the end the "
-          f"6 others do not reach 0.89: no warning")
+          f"6 others do not run that way (|rho| not > 0.8): no warning")
+    rests = dict(zip(days7, [0.0, -0.02, 0.02, 0.01, 0.04, 0.03, 0.40]))
+    tr = dfc.day_trends(rests, LIMIT, left_out=["c1 2026-10-11"])
+    w = dfc.day_trend_warning(tr[0], LIMIT, ["c1 2026-10-11"]) if tr else [""]
+    check(len(tr) == 1 and tr[0]["without"]["spearman_rho"] == 0.829 and not tr[0]["without"]["alone"]
+          and "it rests on c1 2026-10-11, the one day left out, at an end: the other 6 days give rho +0.83" in w[0]
+          and "not enough to pass the rule alone (range 0.06 m)" in w[0]
+          and "may be the end of the trend or one bad day" in " ".join(" ".join(w[1:]).split())
+          and sum("WARNING" in x for x in w) == 1,
+          "6 days within 0.06 m that run the same way (rho +0.83) and 11 Oct +0.40 m, left out: WARNING, "
+          "saying it rests on 11 Oct (the 6 alone would not warn: range 0.06 m, and 0.83 needs 0.89 over 6)")
     # no trend: independent day biases, two cameras, 7 days, as the NUC's c2 (sd ~0.08 m)
     rng = np.random.RandomState(12)
     n, fired, end_on, end_off = 4000, 0, 0, 0
     days = [f"2026-10-{d:02d}" for d in range(5, 12)]
     tail7 = dfc.spearman_tail(need[7], 7)
     bound = 1 - (1 - 2 * tail7) ** 2
+    end5 = 0
     for _ in range(n):
         off = {f"{c} {d}": float(rng.normal(0, 0.08)) for c in ("c1", "c2") for d in days}
         fired += bool(dfc.day_trends(off, LIMIT))
@@ -505,12 +538,58 @@ def test_trend_rule():
         one["c1 2026-10-11"] = 0.40                                     # a bad last day, left out
         end_on += bool(dfc.day_trends(one, LIMIT, left_out=["c1 2026-10-11"]))
         end_off += bool(dfc.day_trends(one, LIMIT))
+        five = {f"c1 {d}": float(rng.normal(0, 0.04)) for d in days[:4]}
+        five["c1 2026-10-09"] = 0.40                                    # 5 days, the last one bad
+        end5 += bool(dfc.day_trends(five, LIMIT, left_out=["c1 2026-10-09"]))
     check(fired / n <= bound,
           f"{n} 7-day windows of two cameras with no trend (day biases sd 0.08 m): WARNING in "
           f"{100.0 * fired / n:.1f} % (at most {100 * bound:.1f} %: each camera {100 * tail7:.1f} % a direction)")
-    check(end_on / n < 0.025 and end_off / n > 2.5 * end_on / n,
+
+    def near(k, p):                                     # k of n, within 4 binomial sd of p
+        return abs(k / n - p) <= 4 * np.sqrt(p * (1 - p) / n)
+    p6, p4 = (float((dfc.spearman_null(m) > 0.8 + 1e-9).mean()) for m in (6, 4))
+    check(near(end_on, p6) and end_off / n > 2 * end_on / n,
           f"one camera, 6 good days and a bad last day (+0.40 m) left out: WARNING in {100.0 * end_on / n:.1f} % "
-          f"(the 6 others by chance); counting that day in the rho, {100.0 * end_off / n:.1f} %")
+          f"(the 6 others run up with rho > 0.8 by chance: {100 * p6:.1f} %); counting that day in the rho, "
+          f"{100.0 * end_off / n:.1f} %")
+    check(near(end5, p4),
+          f"5 days, the last one bad (+0.40 m) and left out: WARNING in {100.0 * end5 / n:.1f} % (the 4 others "
+          f"rise strictly by chance, 1 in 24: {100 * p4:.1f} %) -- the price of warning on a 5-day trend "
+          f"trimmed at one end, which the 4 days left can never show alone")
+
+
+def test_trend_end():
+    print("a trend trimmed at one end of a camera's days: the other days must run the same way")
+    rise5 = [(f"c1 2026-10-0{d}", b, range(80), 3) for d, b in zip(range(1, 6), (-0.35, -0.02, 0.0, 0.03, 0.06))]
+    dt, _ = run(rise5)
+    tr = dfc.day_trends({k: v[0] for k, v in dt["final"].items()}, LIMIT, left_out=dt["rejected"])
+    w = dfc.day_trend_warning(tr[0], LIMIT, dt["rejected"]) if tr else [""]
+    check(dt["rejected"] == ["c1 2026-10-01"] and len(tr) == 1 and tr[0]["days"] == 5
+          and tr[0]["spearman_rho"] == 1.0 and tr[0]["without"]["days"] == 4 and not tr[0]["without"]["alone"]
+          and "it rests on c1 2026-10-01" in w[0] and "too few to pass the rule alone (it asks 5)" in w[0]
+          and sum("WARNING" in x for x in w) == 1,
+          f"5 days at -0.35, -0.02, 0, +0.03, +0.06 m, the low end left out: rho +1.00 over the 5, range "
+          f"{tr[0]['range_m'] if tr else 0:.2f} m: WARNING, resting on 1 Oct (before: none, the 4 others being "
+          f"too few to carry it)")
+    flat5 = [(f"c1 2026-10-0{d}", b, range(80), 3) for d, b in
+             zip(range(1, 7), (-0.30, -0.05, -0.06, -0.03, -0.04, 0.10))]
+    dt, _ = run(flat5, sigma=0.0)
+    fin = {k: v[0] for k, v in dt["final"].items()}
+    rest = [fin[k] for k in sorted(fin) if k not in dt["rejected"]]
+    check(dt["rejected"] == ["c1 2026-10-01"] and dfc.day_trends(fin, LIMIT) != []
+          and abs(dfc.spearman(np.arange(5), rest) - 0.8) < 1e-12
+          and dfc.day_trends(fin, LIMIT, left_out=dt["rejected"]) == [],
+          "6 days, the low end (-0.30 m) left out, the other 5 flat but the last (rho +0.80 among them): the 6 "
+          "pass the rule (rho +0.89), but the 5 others do not run that way (|rho| not > 0.8): no warning -- the "
+          "trend rests on the one left-out end day alone")
+    rise6 = [(f"c1 2026-10-0{d}", b, range(80), 3) for d, b in
+             zip(range(1, 7), (-0.32, -0.06, -0.02, -0.04, 0.01, 0.05))]
+    dt, _ = run(rise6, sigma=0.0)
+    tr = dfc.day_trends({k: v[0] for k, v in dt["final"].items()}, LIMIT, left_out=dt["rejected"])
+    check(dt["rejected"] == ["c1 2026-10-01"] and len(tr) == 1 and tr[0]["without"]["spearman_rho"] == 0.9
+          and not tr[0]["without"]["alone"],
+          f"6 days, the low end left out, the other 5 rising (rho +0.90, one pair swapped; range "
+          f"{tr[0]['without']['range_m'] if tr else 0:.2f} m): WARNING, resting on 1 Oct")
 
 
 def test_nuc_7day():
@@ -529,11 +608,25 @@ def test_nuc_7day():
           f"so the WARNING carries it: c1 rho {tr[0]['spearman_rho']:+.2f}, range {tr[0]['range_m']:.2f} m "
           f"(5 Oct left out, 11 Oct kept: the trend trimmed at its low end only); none for c2")
     w = tr[0]["without"]
-    check(w is not None and w["day"] == "c1 2026-10-05" and w["days"] == 5 and w["spearman_rho"] == 1.0,
+    check(w is not None and w["day"] == "c1 2026-10-05" and w["days"] == 5 and w["spearman_rho"] == 1.0
+          and w["alone"],
           "5 Oct is c1's one day left out, at an end: the trend must stand without it, and does (the other "
-          "5 days rise strictly, rho +1.00)")
+          "5 days rise strictly, rho +1.00, and pass the rule on their own)")
     check(all(abs(dt["final"][k][0]) <= LIMIT for k in dt["final"] if k not in dt["rejected"]),
           "every kept day within the limit of the kept days")
+    # the same window with c1 seen on one day fewer: 5 testable days, 5 Oct trimmed, 4 left -- too few
+    # for the rule on their own, so before Oct 14 no warning at all (the review's case)
+    for drop in ("c1 2026-10-07", "c1 2026-10-09"):
+        dt5, _ = run([d for d in days if d[0] != drop], sigma=NUC_SIGMA, seed=3)
+        tr5 = dfc.day_trends({k: v[0] for k, v in dt5["final"].items()}, LIMIT, left_out=dt5["rejected"])
+        w5 = dfc.day_trend_warning(tr5[0], LIMIT, dt5["rejected"]) if tr5 else [""]
+        c1 = [round(dt5["final"][k][0], 3) for k in sorted(dt5["final"]) if k[:2] == "c1"]
+        check(dt5["rejected"] == ["c1 2026-10-05", "c2 2026-10-08"] and [t["camera"] for t in tr5] == ["c1"]
+              and tr5[0]["days"] == 5 and tr5[0]["spearman_rho"] == 1.0 and tr5[0]["without"]["days"] == 4
+              and not tr5[0]["without"]["alone"] and "it rests on c1 2026-10-05" in w5[0]
+              and "too few to pass the rule alone (it asks 5)" in w5[0],
+              f"without {drop[3:]}: c1's 5 final offsets {' '.join('%+.3f' % o for o in c1)} rise strictly, 5 Oct "
+              f"left out: WARNING, resting on 5 Oct (the other 4 days rise strictly too, too few alone)")
 
 
 def test_too_few():
@@ -830,7 +923,7 @@ def test_cli(d):
     check([x["day"] for x in t["rejected"]] == rej
           and all(x["how"] in ("left out", "not judged", "refused take-back") and x["offset_at_step_m"] is not None
                   for x in t["rejected"])
-          and t["warning"] is None and "|rho| needed by days 5: 1.00" in t["trend_rule"],
+          and t["warning"] is None and "|rho| needed by days without ties 5: 1.00" in t["trend_rule"],
           "day_test.rejected: each day left out, how and its offsets; the trend rule in words")
     check("rejected every camera-day" not in sp.dem_failure_reason(Path(d) / "dem.log"),
           "survey_products.dem_failure_reason reads the block (no 'every camera-day rejected')")
@@ -842,9 +935,38 @@ def test_cli(d):
     h = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), "--help"], stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(d)).stdout
     h = " ".join(h.split())
-    check("|rho| needed by days 5: 1.00, 6: 0.89, 7: 0.82, 8: 0.81" in h
-          and "a lone day left out at either end" in h,
+    check("|rho| needed by days without ties 5: 1.00, 6: 0.89, 7: 0.82, 8: 0.81" in h
+          and "when the one day left out of a camera's days is its first or last, the other days must run the "
+              "same way, |rho| > 0.8 (any number of days)" in h,
           "--help states the trend rule as applied (the |rho| it asks by number of days, the lone end day)")
+    # a camera on 5 days, rising, its low end left out: the WARNING says the trend rests on that day,
+    # and <stem>_info.json records the other days (without: their rho, alone False)
+    rows5 = rows[:1]
+    for i, (day, bias) in enumerate(zip(["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-09", "2026-10-11"],
+                                        (-0.35, -0.02, 0.0, 0.03, 0.06))):
+        for h in (14, 15, 16):
+            t5 = datetime.fromisoformat(f"{day}T{h:02d}:00:00+00:00")
+            f5 = f"{int(t5.timestamp())}.c1.timex"
+            for j in range(200):
+                e, n = 420000.0 + 2.0 * (j % 20) + 1.0, 4638000.0 + 2.0 * (j // 20) + 1.0
+                z = 1.0 - 0.02 * (e - 420000.0) + bias + rng.normal(0, 0.02)
+                rows5.append(f"{f5},c1,{t5:%Y-%m-%dT%H:%M:%S}+00:00,{int(t5.timestamp())},{e:.2f},{n:.2f},"
+                             f"{z:.4f},{z:.4f}")
+    (Path(d) / "ground5.csv").write_text("\n".join(rows5) + "\n")
+    r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(Path(d) / "ground5.csv"),
+                        str(Path(d) / "five"), "--max-day-offset", str(LIMIT), "--no-plot"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(d))
+    (Path(d) / "five.log").write_text(r.stdout)
+    warn = [ln for ln in r.stdout.splitlines() if "WARNING" in ln]
+    t5 = json.loads((Path(d) / "five_info.json").read_text())["filters"]["day_test"]
+    tw = t5["trend_warnings"]
+    check(r.returncode == 0 and len(warn) == 1 and "c1's camera-day offsets run one way with time over 5 days" in warn[0]
+          and "it rests on c1 2026-10-05, the one day left out, at an end: the other 4 days give rho +1.00" in warn[0]
+          and len(tw) == 1 and tw[0]["without"]["day"] == "c1 2026-10-05" and tw[0]["without"]["days"] == 4
+          and tw[0]["without"]["alone"] is False and tw[0]["without"]["spearman_rho"] == 1.0
+          and t5["rejected"][0]["day"] == "c1 2026-10-05",
+          "5 days rising, 5 Oct (-0.35 m) left out: one WARNING line, resting on 5 Oct; info.json "
+          "trend_warnings[].without gives the other 4 days (rho +1.00, alone false)")
     # no test: the info file says so
     r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(Path(d) / "plain"),
                         "--no-plot"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
@@ -1173,7 +1295,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--keep", default=None, help="keep the outputs, in a new folder inside this one")
     ap.add_argument("--year", action="store_true",
-                    help="time a year of camera-days (730, ~170 left out; about a minute) instead of a quarter")
+                    help="time a year of camera-days (730, 668k samples, ~170 left out; about a minute on the "
+                         "station's Python 3.8 / numpy 1.17; at the station's density, 1.5M samples, 2.5 min of "
+                         "CPU) instead of a quarter")
     args = ap.parse_args()
     if args.keep:
         Path(args.keep).mkdir(parents=True, exist_ok=True)
@@ -1190,6 +1314,7 @@ def main():
         test_take_back()
         test_trend()
         test_trend_rule()
+        test_trend_end()
         test_nuc_7day()
         test_too_few()
         test_fringe()
