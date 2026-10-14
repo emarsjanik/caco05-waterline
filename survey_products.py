@@ -5734,6 +5734,12 @@ def gcpfree_disclosure(plan, args, pcs):
     if t["b_commit"] and t["a_dem"] and t["b_commit"] > t["a_dem"]:
         flags.append("B was committed after A's DEM was built: only B's sha256, written down (and sent) when its run "
                      "ended, shows it was not changed in between")
+    if t["a_dem_last"] and t["b_run"] and t["a_dem_last"] > t["b_run"]:
+        # B's DEM is built with A's options as A was LAST built: a rebuild of A after B's run could have set them
+        # with B's calibration known (a rebuild after a code change keeps them: A's provenance gives its commands)
+        flags.append(f"A's DEM was rebuilt ({utc_text(t['a_dem_last'])}) after B's run began: B's DEM is built with "
+                     f"A's options as last built, which could then have been chosen with B known; A's provenance gives "
+                     f"the command of that rebuild (a rebuild after a code change keeps A's options)")
     def ran(sw):                                   # {script: {sha256 it ran with}} of a product's steps
         out_ = {}
         for v in ((sw or {}).get("by_step") or {}).values() if isinstance(sw, dict) else []:

@@ -4992,6 +4992,12 @@ def test_gcpfree_b_build(d):
                           for x in g["order_flags"])
                   and any("B was committed after A's DEM was built" in x for x in g["order_flags"]),
                   f"B's ORDER after A's DEM step was rebuilt: '{a_line[:70]}...', and the NOTEs stay (A came first)")
+            check(any("A's DEM was rebuilt (" in x and "after B's run began" in x for x in g["order_flags"]),
+                  "A's DEM rebuilt after B's run began (B is built with A's options as last built): a NOTE says so")
+            g_early = sp.gcpfree_disclosure(pb, ab, {"c2": dict(info_, run_started_utc="2099-01-01 00:00:00",
+                                                                run_finished_utc="2099-01-01 00:10:00")})
+            check(not any("after B's run began" in x for x in g_early["order_flags"]),
+                  "... and no such NOTE when A's last build came before B's run")
             g0 = sp.gcpfree_disclosure(pb, args_(output_root=str(d / "out_gcpfree"), eo={"c2": str(r1["c2"])},
                                                  calibration_variant="gcpfree", a_root=str(d / "nowhere")),
                                        {"c2": info_})
