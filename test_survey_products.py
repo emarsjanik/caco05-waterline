@@ -517,7 +517,8 @@ def test_round2(d):
     check(any(m.startswith("jan_lidar: survey file") and "NOT FOUND" in m for m in miss)
           and not any(m.startswith("oct_gcps") for m in miss),
           "a named survey file not found: a missing part; a row with no file yet: not")
-    # the DEM settings reported are those the DEM on disk was built with
+    # the DEM settings reported are those the DEM on disk was built with (here a DEM built before Oct 2026,
+    # tagged EPSG:32619, the default then; the default since is 6348)
     sp.write_stamp(d, "dem", {"cmd": "python3 dem_from_contours.py x.csv out --cell 2.0 --min-points 3 --max-spread 0.5 "
                                      "--max-hs 1.5 --max-day-offset 0.15", "tif": "python3 asc_to_geotiff.py a --epsg 32619"})
     built = sp.dem_settings_built(d)
@@ -530,10 +531,17 @@ def test_round2(d):
           and "min_points" not in dd,
           "a later command line's other DEM options are named as NOT applied, asked vs on disk the right way round")
     later = SimpleNamespace(dem_cell=1.0, dem_min_points=3, dem_max_spread=0.5, dem_max_hs=3.0, dem_max_day_offset=0.15,
-                            geotiff_epsg=6348, setup_coef=sp.SETUP_COEF)
+                            geotiff_epsg=sp.GEOTIFF_EPSG, setup_coef=sp.SETUP_COEF)
     b = sp.built_args(later, {"out": d, "date": "2025-01-23", "cams": {"c1": {}}})
     check(b.dem_cell == 2.0 and b.dem_max_hs == 1.5 and b.geotiff_epsg == 32619 and later.dem_cell == 1.0,
           "the 'rebuild everything' line takes the DEM settings the DEM was built with, not this run's")
+    import survey_compare
+    defaults = {"survey_products.GEOTIFF_EPSG": sp.GEOTIFF_EPSG, "survey_compare.DEFAULT_EPSG": survey_compare.DEFAULT_EPSG}
+    for name in ("asc_to_geotiff.py", "process_chelsea.py"):          # their --epsg default, read, not imported
+        m_ = re.search(r'add_argument\("--epsg", type=int, default=(\d+)', (HERE / name).read_text())
+        defaults[f"{name} --epsg"] = int(m_.group(1)) if m_ else None
+    check(set(defaults.values()) == {6348},
+          f"GeoTIFFs are tagged EPSG:6348 (NAD83(2011) / UTM 19N, the surveys' frame) by default everywhere ({defaults})")
     # a re-export of the real RTK the station's C was fitted to, entered under another date: same shots
     # (station-independent: test_fit_recognised)
     rtk_src, rtk_why = real_rtk()
@@ -2955,7 +2963,7 @@ def test_fix3(d):
           "3 camera-days (no wave filter), or the test off by option: nothing to say")
     cmd = sp.dem_cmds(dict(plan, date="2025-03-06", cams={"c2": {"station": "CACO04", "eo_file": "x_20250219_EO.yaml"}}),
                       SimpleNamespace(dem_cell=2.0, dem_min_points=3, dem_max_spread=0.5, dem_max_hs=1.5,
-                                      dem_max_day_offset=0.15, geotiff_epsg=32619), day_test=False)[1]
+                                      dem_max_day_offset=0.15, geotiff_epsg=sp.GEOTIFF_EPSG), day_test=False)[1]
     check("--max-day-offset" not in [str(c) for c in cmd], "... and dem_from_contours.py is run without it")
     log = d / "dem.log"
     log.write_text("Day consistency (median offset from the DEM without that day, limit +/-0.15 m):\n"
