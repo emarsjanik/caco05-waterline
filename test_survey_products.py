@@ -1636,6 +1636,16 @@ def test_pointing_verdicts(d):
     check("LEFT OUT of the detection: 2026-09-26 (UNCONFIRMED), 2026-09-27 (DIFFERENT POINTING), 2026-09-28 "
           "(UNCONFIRMED)" in txt and "    2026-09-26 UNCONFIRMED: the horizon read +4.23/+0.06" in txt,
           "print: the left-out days with their verdicts, and each day's why")
+    # a pointing-only run (--steps pointing): the detection does not run with these results now
+    _, txt = quiet(sp.print_pointing, "c1", res1, SimpleNamespace(keep_moved_days=False), detect_now=False,
+                   detected={"skip_days": ["2026-09-27"]})
+    check("to be LEFT OUT of the detection: 2026-09-26 (UNCONFIRMED), 2026-09-27 (DIFFERENT POINTING)" in txt
+          and "when the detection runs again with these results (--steps detect and the steps after it; the "
+              "detection on disk left out 2026-09-27)" in txt and "c1: LEFT OUT of the detection" not in txt,
+          "print, --steps pointing alone: 'to be LEFT OUT' when the detection runs again, and what the detection on "
+          "disk left out (it said 'LEFT OUT of the detection' as if done)")
+    _, txt = quiet(sp.print_pointing, "c1", res1, SimpleNamespace(keep_moved_days=False), detect_now=False)
+    check("no detection has run yet)" in txt, "... and with no detection on disk, says so")
     res2 = dict(sp.pointing_leave_out(c2), rows=c2, info=dict(i2, calibration="CACO05_c2_20251113_EO-CV.yaml"))
     _, txt = quiet(sp.print_pointing, "c2", res2, SimpleNamespace(keep_moved_days=False))
     check("    2026-09-27 matches: the horizon read +3.25/+0.74" in txt and "LEFT OUT" not in txt,

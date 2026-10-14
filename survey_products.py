@@ -2754,7 +2754,8 @@ def step_pointing(plan, args, state):
         results[cam] = res
         any_built = True
     for cam, res in results.items():
-        print_pointing(cam, res, args)
+        print_pointing(cam, res, args, detect_now="detect" in (state.get("requested") or STEPS),
+                       detected=read_stamp(out, f"detect_{cam}"))
     state["pointing"] = results
     if results and all(not r.get("rows") for r in results.values()):
         return "not checked (no photos found)"
@@ -2910,7 +2911,7 @@ def station_pointing_log(plan, cam, args):
     return {"log": str(log), "days": days}
 
 
-def print_pointing(cam, res, args):
+def print_pointing(cam, res, args, detect_now=True, detected=None):
     info = res.get("info", {})
     sl = res.get("station_log")
     if sl:
@@ -2950,12 +2951,19 @@ def print_pointing(cam, res, args):
         skip = skip_days_of(res, args)
         kept = [d for d in res["different_days"] if d not in skip]
         verdict = {r["date"]: r.get("verdict", "?") for r in res["rows"]}
+        # what the detection does with these results: this run's when it runs the detection too; a pointing-only
+        # run (--steps pointing) says what the next detection will do and what the one on disk did
+        later = "" if detect_now else (
+            " when the detection runs again with these results (--steps detect and the steps after it; "
+            + (f"the detection on disk left out {', '.join(sorted((detected or {}).get('skip_days') or [])) or 'no day'})"
+               if detected else "no detection has run yet)"))
         if skip:
-            warn(f"{cam}: LEFT OUT of the detection: " + ", ".join(f"{d} ({verdict.get(d, '?')})" for d in skip)
-                 + " (why: above; --keep-moved-days keeps them)")
+            warn(f"{cam}: " + ("LEFT OUT of the detection: " if detect_now else "to be LEFT OUT of the detection: ")
+                 + ", ".join(f"{d} ({verdict.get(d, '?')})" for d in skip)
+                 + " (why: above; --keep-moved-days keeps them)" + later)
         if kept:
-            warn(f"{cam}: days with a different or unconfirmed pointing KEPT: "
-                 + ", ".join(f"{d} ({verdict.get(d, '?')})" for d in kept) + f" ({kept_reason(res, args)})")
+            warn(f"{cam}: days with a different or unconfirmed pointing " + ("KEPT: " if detect_now else "to be KEPT: ")
+                 + ", ".join(f"{d} ({verdict.get(d, '?')})" for d in kept) + f" ({kept_reason(res, args)})" + later)
 
 
 def kept_reason(res, args, detect=None):
@@ -9196,7 +9204,7 @@ def build_date(date, cfg, surveys, args, steps):
     plan = build_plan(date, cfg, surveys, args)
     if plan is None:
         return "disabled"
-    state = {"steps": {}, "failures": [], "not_applied": []}
+    state = {"steps": {}, "failures": [], "not_applied": [], "requested": list(steps)}
     keep_built_window(plan, args, steps, state)
     bad = option_refusal(plan, args)
     if not bad:
