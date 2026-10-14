@@ -414,14 +414,20 @@ pointing leave days out, decided per day from two measurements
 measured: docs/VALIDATION.md 4.6):
 
 * features matched against the reference frame on 40 or more points
-  (pointing_check.py) are good to ~0.1 deg: a turn over 0.5 deg is a
-  DIFFERENT POINTING; one of 0.1-0.5 deg a small change, DIFFERENT POINTING
-  only when a clear horizon sees the same change (within 0.3 deg); a turn of
-  0.1 deg or less keeps the day against a horizon reading that is not clear
-  (the why gives both numbers), but against a CLEAR horizon edge that jumps
-  the day is UNCONFIRMED: dirt on the housing window matches at zero turn
-  when fog hides the scene. While the scene still matches, a second match
-  consensus of 40+ points turned elsewhere shows the dirt ('ambiguous');
+  (pointing_check.py) are good to ~0.1 deg, and a turned match is the scene
+  (dirt matches at zero turn): a change of tilt or roll over 0.3 deg (the
+  step's tilt/roll tolerance; 0.1 deg of tilt is ~0.13-0.17 m of DEM) or of
+  pan over 0.5 deg is a DIFFERENT POINTING, whatever the horizon reads; a
+  smaller turn over 0.1 deg is a small change (kept); a turn of 0.1 deg or
+  less keeps the day against a horizon reading that is not clear (the why
+  gives both numbers), but against a CLEAR horizon edge that jumps the day
+  is UNCONFIRMED: dirt on the housing window matches at zero turn when fog
+  hides the scene. While the scene still matches, a second match consensus
+  of 40+ points turned elsewhere shows the dirt ('ambiguous'); when it does
+  not, a zero turn no further from none than the match's own noise
+  (`turn_sigma` under 4: dirt moves with the camera and matches at EXACTLY
+  zero, a scene matched between two days shows the camera's own small
+  turns) is no reading at all, except on the reference day;
 * a sea-horizon reading counts only on a CLEAR edge: one sharp edge (12x the
   median gradient of its +/-250 px search or more, no rival over 0.65 of it),
   bright sky over darker sea on 2/3 of the columns or more, and more than
@@ -431,18 +437,31 @@ measured: docs/VALIDATION.md 4.6):
   window's median, offset or clear-day count;
 * every day is judged against the REFERENCE's tilt/roll as the horizon reads
   it (the clear days' horizon less the turn their matched features
-  measured), as the features are, not against the window's median, which
-  falls between two pointings when a camera moved on half the days; a clear
-  reading that its own matched features contradict is no clear day;
+  measured; the reference day's own group when another day confirms it), as
+  the features are, not against the window's median, which falls between two
+  pointings when a camera moved on half the days; a clear reading that its
+  own matched features contradict is no clear day;
 * without matched features, a jump of tilt or roll over 0.3 deg from the
   reference is a DIFFERENT POINTING only on a clear edge two or more days
-  share; otherwise the day is UNCONFIRMED.
+  share; otherwise the day is UNCONFIRMED. A day nothing could read (no
+  horizon fitted, no matched features) next to a left-out day is
+  UNCONFIRMED too: nothing shows the camera back (never the reference day,
+  which the others are measured against).
 
 DIFFERENT POINTING and UNCONFIRMED days are both left out of the detection
 (`--keep-moved-days` keeps them); when the days left out are most of the
-window, the step and the README say so with the count. The printed table, the CSV
-(`pointing/pointing_<cam>.csv`: the edge numbers, the inliers, the
-runner-up) and the README give each day's verdict and why. The predicted horizon
+window, the step and the README say so with the count (there is no option
+that leaves out or keeps single days; `--window FIRST LAST` narrows the
+photo days). The README takes which days were left out or kept, and why,
+from the detection's own record (a later `--steps compare` run without the
+option does not change it); a build whose detection has not run, or ran
+with other pointing results (the pointing step run again on its own), says
+so. Window dirt is caught only by these two tests (a second consensus, a
+turn within the match's noise): a dirt consensus of thousands of points may
+read above the noise test, and dirt under a clear horizon that does not jump
+can hide a pan (docs/VALIDATION.md 4.6). The printed table, the CSV
+(`pointing/pointing_<cam>.csv`: the edge numbers, the inliers,
+`turn_sigma`, the runner-up) and the README give each day's verdict and why. The predicted horizon
 (`estimate_eo_rotation.horizon_rows`) holds the full Earth-curvature dip with
 standard refraction (k = 0.13): a perfectly calibrated camera reads 0.00 deg
 (+/-0.01 for k from 0 to 0.25). Until Oct 2026 it held half the dip, which

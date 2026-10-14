@@ -363,8 +363,10 @@ POINT_WARN_DEG, POINT_FAIL_DEG = 0.1, 0.5
 # inliers; the real 26-28 Sep storm frames of c2 (the camera at rest) against the real 7 Oct 16:00
 # frame and a copy of it 4.9-16 on 6 matches of 25-102 inliers (lowest: 28 Sep, -0.06/-0.07 deg of
 # roll, which the match constrains least); copies of one frame (no true turn: the sandbox's
-# stand-ins) 1.2-5.0. A zero-turn match below TURN_SIGMA_MIN is therefore no reading (blind_match,
-# features_trusted); the reference day's own frames are exempt.
+# stand-ins) 1.2-5.0. A second measurement with other drops: drops alone 0.4-3.3 (18 consensuses of
+# 16-117 inliers), the real c2 storm frames against 7 Oct 6.5-13.4 and against each other (26-28 Sep,
+# 64-292 inliers) 15.6-18.5. A zero-turn match below TURN_SIGMA_MIN is therefore no reading
+# (blind_match, features_trusted); the reference day's own frames are exempt.
 MATCH_INLIERS = 40
 AMBIGUOUS_INLIERS = 40
 TURN_SIGMA_MIN = 4.0

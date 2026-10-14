@@ -1359,9 +1359,9 @@ def test_pointing_verdicts(d):
     # -- the zero-turn guard (review 2: window dirt matches at exactly zero turn when fog hides the scene). The
     # NUC's rows predate turn_sigma (an older row counts as the scene, as above); with the values the real storm
     # frames project for them (the real c2 26-28 Sep frames against the real 7 Oct frame, their standard errors
-    # scaled to the NUC's inlier counts: ~10, ~9, ~9) nothing changes; at a dirt-like 2.0 every day that no
+    # scaled to the NUC's inlier counts: ~17, ~9, ~9) nothing changes; at a dirt-like 2.0 every day that no
     # clear horizon confirms is UNCONFIRMED, the reference day and the clear days are not
-    for sig, want in (({"2026-09-26": 10.0, "2026-09-27": 9.3, "2026-09-28": 8.7}, ["matches"] * 3),
+    for sig, want in (({"2026-09-26": 17.5, "2026-09-27": 8.7, "2026-09-28": 8.4}, ["matches"] * 3),
                       ({"2026-09-26": 2.0, "2026-09-27": 2.0, "2026-09-28": 2.0}, ["UNCONFIRMED"] * 3)):
         c2s = _nuc_rows("c2")
         for r in c2s:
