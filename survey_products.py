@@ -2752,7 +2752,7 @@ def pointing_offset(info, eo_file, rate=True):
                  + (": partly OFF the frame, where the lens model is extrapolated, so the offset there may be the "
                     "lens model's rather than the pointing's" if off_frame else
                     ": near the top edge, far from the GCPs, where the lens model is least constrained" if top else ""))
-    text = (f"the sea horizon sits " + (f"{px:.0f} px " if px is not None else "")
+    text = ("the sea horizon sits " + (f"{px:.0f} px " if px is not None else "")
             + f"from where {eo_file} puts it over the window ({info.get('clear_horizon_days')} day(s) with a clear "
             f"horizon; as a tilt/roll change: {dt:+.2f}/{dr:+.2f} deg). A constant offset like this is either "
             f"a calibration error or the lens model's error near the top of the frame (the horizon lies far "
@@ -2909,7 +2909,7 @@ def other_pointing_rebuild(op, ref_day, date=None):
     w = other_pointing_window(op, ref_day)
     if not w:
         return ""
-    return (f"to build on the other pointing instead, leave the reference day out: survey_products.py"
+    return ("to build on the other pointing instead, leave the reference day out: survey_products.py"
             + (f" --date {date}" if date else "") + f" --window {w[0]} {w[1]} --output-root <another root> (all "
             f"steps; the day nearest the survey in that window becomes the reference; in this root it would "
             f"replace this build)")
@@ -4159,7 +4159,7 @@ def step_maps(plan, args, state):
             warn(f"plan-view map failed: {exc}")
     missing = [cam for cam in plan["cams"] if not map_png(plan, cam).exists()]
     if missing:
-        warn(f"waterline map(s) on the photos NOT drawn: "
+        warn("waterline map(s) on the photos NOT drawn: "
              + "; ".join(f"{c} ({(status.get(c) or {}).get('kind', '?')})" for c in missing) + " (status partial)")
     return ("built" if built else "skipped") + (f" (photo maps missing: {', '.join(missing)})" if missing else "")
 
@@ -5921,7 +5921,7 @@ def gcpfree_disclosure(plan, args, pcs):
              f"outcome rule '{pc.get('outcome_rule')}' pre-registered (PREREGISTERED.txt, decided by "
              f"{pr.get('decided_by')} on {pr.get('decided_on')}): first committed with this rule "
              f"{str((since or {}).get('commit') or pr.get('commit'))[:10]}, {utc_text(t['rule'])}"
-             + (f"; the file's commits: " + ", ".join(f"{str(h['commit'])[:10]} {utc_text(utc_time(h['date']))} "
+             + ("; the file's commits: " + ", ".join(f"{str(h['commit'])[:10]} {utc_text(utc_time(h['date']))} "
                                                        f"'{h['rule']}'" for h in hist) if len(hist) > 1 else ""),
              (f"A (the table's calibration) DEM first built {utc_text(t['a_dem'])}"
               + (f" (last rebuilt {utc_text(t['a_dem_last'])})" if t["a_dem_last"] and t["a_dem_last"] != t["a_dem"]
@@ -7077,7 +7077,7 @@ def prior_check_caveat(plan, pc, fits, forcing, prov=None):
     low = [c for c in cams if per[c][0] < -0.05]
     high = [c for c in cams if per[c][0] > 0.05]
     wms = ", ".join(f"{c} {per[c][0]:+.2f} m (NMAD {per[c][1]:.2f})" for c in cams)
-    text = (f"EARLIER CHECK (real photos)" + (f", itself {pc['label']}: {pc['label_why']}." if pc.get("label") else ":")
+    text = ("EARLIER CHECK (real photos)" + (f", itself {pc['label']}: {pc['label_why']}." if pc.get("label") else ":")
             + f" Before this script, {pc.get('tool', 'an earlier check')} on the real "
             f"photos of {pc['window']} with these same calibrations ({', '.join(pc['eo'][c] for c in pc['cameras'])}), "
             f"{pc['how']}, ")
@@ -7103,7 +7103,7 @@ def prior_check_caveat(plan, pc, fits, forcing, prov=None):
         if all(c in eff for c in cams):
             own = ", ".join(f"{c} ~{per[c][0] + eff[c][0]:+.2f} m ({per[c][0]:+.2f} {eff[c][0]:+.3f}, on "
                             f"{eff[c][1]})" for c in cams)
-            how_ = (f"this build's own paired C = 0 sensitivity gives each camera's lines a rise of "
+            how_ = ("this build's own paired C = 0 sensitivity gives each camera's lines a rise of "
                     + ", ".join(f"{c} {eff[c][0]:+.3f} m ({eff[c][0] / setup:.2f} x the setup median)" for c in cams)
                     + f": expect waterline - {pc['survey_text']} of about {own}")
         else:
@@ -7206,8 +7206,8 @@ def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
                                f"median {med:.2f} m, sqrt(Hs L0) ~{phi:.1f} m) would sit ~{lo_d:.2f}-{hi_d:.2f} m "
                                f"higher than with C = {C} ("
                                + (f"{lo_k:.2f}" if abs(hi_k - lo_k) < 0.005 else f"{lo_k:.2f}-{hi_k:.2f}")
-                               + f" x the extra setup, the share a "
-                               f"re-projected line keeps"
+                               + " x the extra setup, the share a "
+                               "re-projected line keeps"
                                + (": this build's own paired C = 0 rise per camera)" if shares else
                                   ", as measured in the builds so far)"))
             # this build's own check of the same kind (survey_compare.py's WHERE THE SURVEY STOPS), next to
@@ -7483,7 +7483,7 @@ def calibration_caveats(plan, args, prov):
         if len(sols) > 1:
             zs, xy = [t[4] for t in sols], [(t[2], t[3]) for t in sols]
             dxy = max(float(np.hypot(a[0] - b[0], a[1] - b[1])) for a in xy for b in xy)
-            spread = (f". The mount did not move, yet its GCP solutions "
+            spread = (". The mount did not move, yet its GCP solutions "
                       + ", ".join(f"{t[1]} ({t[0]})" for t in sols)
                       + f" put this camera {max(zs) - min(zs):.2f} m apart in height and {dxy:.2f} m horizontally "
                         f"(calibration_history.csv"
@@ -7587,7 +7587,7 @@ def collect_caveats(plan, args, state, forcing, prov):
         if had:
             diffs = [((read_stamp(out, f"detect_{c}") or {}).get("setup") or {}).get("max_diff_existing") or 0.0
                      for c in had]
-            cav.append(f"Live era: the station's rows already carried a setup (the cron applies it since 6 Oct 2026); "
+            cav.append("Live era: the station's rows already carried a setup (the cron applies it since 6 Oct 2026); "
                        + (f"this product recomputed it with C = {C} from each row's offshore_hs_m / offshore_tp_s "
                           f"(extract_elevation_contours.py's formula); the largest difference from the cron's value was "
                           f"{max(diffs):.4f} m." if C else
@@ -8836,7 +8836,7 @@ def waterline_readme_lines(wl_):
                  f"{af['frames_all']} frames lie below their transect's lowest shot). Over only the points whose line "
                  f"lies at least {af.get('margin_m', 0.1):.2f} m above that shot: "
                  + (f"median {af['median']:+.3f} m on {af['frames']} frames"
-                    + (f" (too few frames: not an estimate)" if af["frames"] < FEW_N else "")
+                    + (" (too few frames: not an estimate)" if af["frames"] < FEW_N else "")
                     if af.get("frames") else "no frame"))
     be = [b for b in wl_.get("by_elevation") or [] if b.get("n")]
     if len(be) > 1:
@@ -9002,9 +9002,9 @@ def write_readme(plan, args, prov):
         w(f"  {bl['statement']}.")
         w(f"  The survey: {bl['survey']}, held by {bl['held_by']} since {bl.get('since')}. This build never looked "
           f"for a survey file of {d}" + (f" or of {bl['survey_date']}" if bl["survey_date"] != d else "")
-          + f", under any name or in any folder (survey_products.py "
-          f"BLIND_DATES), made no comparison and drew no survey on the maps: no survey of that date, whatever "
-          f"lies on this computer, went into this product.")
+          + ", under any name or in any folder (survey_products.py "
+          "BLIND_DATES), made no comparison and drew no survey on the maps: no survey of that date, whatever "
+          "lies on this computer, went into this product.")
         ck = bl.get("check") or {}
         w(f"  How independent his check of this DEM is: {ck.get('label')} (by the calibration it was built with and "
           f"the search envelope that placed its detection, each named below with its sha256; a GCP-free B is also "
@@ -9677,7 +9677,7 @@ def run_date(plan, args, steps, state):
             old_int = None
         try:
             write_provenance(plan, args, state, final=True)
-            warn(f"README.txt and provenance.json say 'status: failed' (interrupted); rerun the same command")
+            warn("README.txt and provenance.json say 'status: failed' (interrupted); rerun the same command")
         except BaseException as exc2:
             warn(f"could not write the final README/provenance ({exc2!r}): they still say BUILD IN PROGRESS / "
                  f"INTERRUPTED")

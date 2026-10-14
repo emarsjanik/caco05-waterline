@@ -272,11 +272,14 @@ def self_test(image=None):
     are made by view_reproject.reproject_image, which needs scipy (its edge fill): on the station's Python 3.8
     (no scipy) the self-test says so and stops cleanly, exit 0 and the word SKIPPED, with nothing checked. The
     survey products' pointing step never calls it."""
-    import importlib.util
-    if importlib.util.find_spec("scipy") is None:      # looked up, not imported: the station has none
+    import importlib
+    try:                                   # what reproject_image itself imports: a scipy that is installed but
+        getattr(importlib.import_module("scipy.ndimage"), "distance_transform_edt")    # broken counts as none
+    except Exception as exc:
         print("pointing_check.py --self-test SKIPPED (nothing checked): it rotates the frame with "
-              "view_reproject.reproject_image, which needs scipy, not installed here (the station's Python 3.8 has "
-              "none); run it on a computer with scipy. The pointing step of survey_products.py does not need it.")
+              "view_reproject.reproject_image, which needs scipy.ndimage, which does not import here "
+              f"({exc.__class__.__name__}; the station's Python 3.8 has none); run it on a computer with scipy. The "
+              "pointing step of survey_products.py does not need it.")
         return 0
     from view_reproject import reproject_image
     io = load_intrinsics(CAL / "CACO05_c2_20240801_IO.yaml")

@@ -1607,8 +1607,8 @@ def test_pointing_verdicts(d):
               f"NUC c2 with turn_sigma {sig['2026-09-26']}/{sig['2026-09-27']}/{sig['2026-09-28']} on 26-28 Sep: {got} "
               f"(28 Sep, its fit failed: " + ("its own 393-inlier match decides" if want[2] == "matches" else
                                              "a day nothing read, next to two days misread, a storm")
-              + f"); the reference day matches whatever its turn_sigma, the clear "
-              f"days at a dirt-like 2.0 are 'horizon only' (the match is no reading), kept")
+              + "); the reference day matches whatever its turn_sigma, the clear "
+              "days at a dirt-like 2.0 are 'horizon only' (the match is no reading), kept")
     # ... the reviewer's DIRT2 (the real c1 storm frames, c1 turned -1.2 deg, the same synthetic drops on every
     # frame: 113 and 165 inliers at 0.00 deg, turn_sigma 1.1 and 2.7, the horizon misread) and DIRT2_ST10 (c2
     # tilted +1.0 deg on 28 Sep, its fit failed: 244 inliers at 0.00 deg, turn_sigma 2.1): UNCONFIRMED, left out
@@ -2985,7 +2985,7 @@ def test_summary_built(d):
             (out / "dem" / f"2025-03-06_{variant}_info.json").write_text(json.dumps(
                 {"cell": 2.0, "min_points": 3, "max_spread": 0.5, "filters": {"max_hs": 1.5, "max_day_offset": 0.15}}))
             cur, why, _, _ = sp.summary_comparison(prov, out, prov["comparisons"][0])
-            check(not cur and f"2025-03-06_info.json: cell_m 2.0" in why,
+            check(not cur and "2025-03-06_info.json: cell_m 2.0" in why,
                   "... and the variant's OWN DEM record is the one checked: another grid there makes it not current")
         # the end of --all: the per-date results, then the summary; its exit code is the builds' worst
         a = cfg_args(output_root=str(root), dry_run=False)
@@ -4007,6 +4007,32 @@ def test_dry_run_needs_adcp():
     check(not warns, "ADCP era: no chatham-era warnings")
 
 
+def copy_tracked_calibration(dst, repo=HERE):
+    """The repository's calibration folder as COMMITTED (git ls-files), into dst: never the station's own untracked
+    files there (review r1: copytree opened all 49 of them on the simulated NUC), and never a file named like a held
+    survey (survey_products.held_file_name, by its name: such a file is not even opened), whatever git holds. Without
+    git (a copy made by git archive) the folder as it is, by the same rule. -> how the files were listed."""
+    src = Path(repo) / "calibration"
+    r = subprocess.run(["git", "-C", str(repo), "ls-files", "-z", "--", "calibration"], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE)
+    if r.returncode == 0 and r.stdout:
+        rels = [Path(x).relative_to("calibration") for x in r.stdout.decode("utf-8", "replace").split("\0") if x]
+        how = "the committed files (git ls-files)"
+    else:
+        rels = [q.relative_to(src) for q in sorted(src.rglob("*")) if not q.is_dir()]
+        how = "the folder as it is (no git here)"
+    for rel in rels:
+        if any(sp.held_name(part) for part in rel.parts):
+            continue
+        q = src / rel
+        if not q.is_file():                         # tracked but deleted in this checkout
+            continue
+        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(q), str(dst / rel))
+    dst.mkdir(parents=True, exist_ok=True)
+    return how
+
+
 def test_blind_and_calibration(d):
     print("a BLIND date (DEM only: its survey is held for an independent check), its two calibrations, one per root")
     import builtins
@@ -4022,7 +4048,24 @@ def test_blind_and_calibration(d):
     # folders, the calibration folder, the output roots, the current folder). Never looked for, never opened.
     sdirs = [d / "survey_a", d / "survey_b"]
     cal = d / "calibration"
-    shutil.copytree(str(HERE / "calibration"), str(cal))
+    how_cal = copy_tracked_calibration(cal)
+    check((cal / "calibration_history.csv").is_file() and (cal / "CACO03_c1_20241023_EO.yaml").is_file()
+          and not any(sp.held_name(q.name) for q in cal.rglob("*")),
+          f"the test's calibration folder: {how_cal} of the repository's, none named like the held survey (the "
+          f"station's own untracked files there are never opened)")
+    # ... on a repository of its own: a tracked file is copied, an untracked one (the station's own) is not
+    rp = d / "cal_repo"
+    (rp / "calibration" / "sub").mkdir(parents=True)
+    (rp / "calibration" / "CACO03_c9_20250123_EO.yaml").write_text("x: 1\n")
+    (rp / "calibration" / "sub" / "kept.txt").write_text("k\n")
+    git_in(rp, "init", "-q")
+    git_in(rp, "add", "-A")
+    git_in(rp, "commit", "-q", "-m", "tracked")
+    (rp / "calibration" / "station_own_EO.yaml.bak").write_text("untracked\n")
+    how2 = copy_tracked_calibration(d / "cal_copy", rp)
+    check(how2.startswith("the committed files") and (d / "cal_copy" / "CACO03_c9_20250123_EO.yaml").is_file()
+          and (d / "cal_copy" / "sub" / "kept.txt").is_file() and not (d / "cal_copy" / "station_own_EO.yaml.bak").exists(),
+          "copy_tracked_calibration: the committed files only (an untracked station file is never copied or opened)")
     # the calibration history of the test's copy: the rows of the solution from the held GCPs get a height
     # no camera has (999 m): it must never reach a README (those rows are not read on a blind date)
     hist = cal / "calibration_history.csv"
@@ -5272,7 +5315,6 @@ def test_gcpfree_b(d):
 def test_gcpfree_b_build(d):
     print("a GCP-free B of a blind date is the pre-registered B BUILD: the committed tables, A's options, envelope and "
           "forcing, one root; A's first DEM time kept; every run listed; an uncommitted trial stops it")
-    import gcpfree_eo as G
     d = Path(d) / "gcpfree_b_build"
     d.mkdir()
     repo = GcpfreeRepo(d / "repo")
@@ -5456,7 +5498,6 @@ def test_gcpfree_b_build(d):
 def test_review2_nits(d):
     print("a restored calibration rebuilds nothing; a photo-named link to the held survey is refused (exit 5) before "
           "any step; the tilt table of a thin DEM strip, and why none; the same B file edited; the lens")
-    import time as time_
     from georectify import load_intrinsics, load_extrinsics, pixel_to_ground
     d = Path(d) / "review2"
     d.mkdir()
@@ -5821,6 +5862,61 @@ def test_py38():
         check(True, f"{f} parses as Python 3.8")
 
 
+def end_on_signals():
+    """SIGTERM and SIGHUP end the run like Ctrl-C (SystemExit), so main()'s finally removes the test folder: a
+    killed run would otherwise leave its canary files, named like the held survey, in /tmp (review r1)."""
+    import signal
+
+    def _end(signum, frame):
+        raise SystemExit(f"test run ended by signal {signum}: its folder is removed")
+    for sig in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, sig):
+            try:
+                signal.signal(getattr(signal, sig), _end)
+            except (ValueError, OSError):
+                pass
+
+
+def test_pointing_selftest_skips(d):
+    print("pointing_check.py --self-test without a working scipy: SKIPPED, exit 0 (also with a scipy that is installed "
+          "but does not import)")
+    stub = Path(d) / "broken_scipy" / "scipy"
+    stub.mkdir(parents=True)
+    (stub / "__init__.py").write_text("raise ImportError('a broken scipy (test stub)')\n")
+    r = subprocess.run([sys.executable, str(HERE / "pointing_check.py"), "--self-test"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(d),
+                       env=dict(os.environ, PYTHONPATH=str(stub.parent)))
+    check(r.returncode == 0 and "SKIPPED (nothing checked)" in r.stdout and "Traceback" not in r.stdout,
+          f"a scipy found but broken: SKIPPED, exit {r.returncode} (find_spec alone would have found it and then "
+          f"failed in view_reproject)")
+
+
+def test_killed_run_cleans_up(d):
+    print("a test run ended by SIGTERM removes its own folder (its canaries named like the held survey with it)")
+    if os.environ.get("SP_TEST_CHILD"):
+        return
+    import signal
+    pr = subprocess.Popen([sys.executable, str(HERE / "test_survey_products.py")], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, universal_newlines=True, env=dict(os.environ, SP_TEST_CHILD="1"),
+                          cwd=str(d))
+    first, folder = "", None
+    try:
+        for _ in range(40):
+            first = pr.stdout.readline()
+            m = re.match(r"test folder: (\S+)", first)
+            if m:
+                folder = Path(m.group(1))
+                break
+        time.sleep(1.0)                          # it has started its checks (and written files there)
+        pr.send_signal(signal.SIGTERM)
+        rest = pr.communicate(timeout=120)[0]
+    finally:
+        if pr.poll() is None:
+            pr.kill()
+    check(folder is not None and pr.returncode != 0 and not folder.exists() and "signal" in rest,
+          f"SIGTERM to a run of this test: it stops (exit {pr.returncode}) and its folder {folder} is gone")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--keep", default=None, help="keep the outputs, in a new folder inside this one")
@@ -5831,6 +5927,8 @@ def main():
     if args.keep:                       # a new folder each run: never the files an earlier run left
         Path(args.keep).mkdir(parents=True, exist_ok=True)
     d = os.path.realpath(tempfile.mkdtemp(prefix="survey_products_test_", dir=args.keep))
+    end_on_signals()                    # a kill (SIGTERM/SIGHUP) ends the run through the finally below: the folder,
+    #                                     with its canaries named like the held survey, is removed (review r1)
     TEST_DIRS.update(out=Path(d) / "no_output_root", surveys=Path(d) / "no_surveys")
     TEST_DIRS["surveys"].mkdir()
     start = os.getcwd()
@@ -5880,6 +5978,8 @@ def main():
         test_merge_level_source(d)
         test_dry_run_needs_adcp()
         test_one_setup_coef()
+        test_pointing_selftest_skips(d)
+        test_killed_run_cleans_up(d)
         test_py38()
         # the tables last: the repository's as shipped, then the station's as they are now (with its live
         # cron), so a table or cron the owner has edited cannot stop the checks of the code before they have run

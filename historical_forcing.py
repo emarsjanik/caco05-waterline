@@ -1280,7 +1280,7 @@ def currency_note(fits, coef, swr=None):
     else:
         lines = [
             f"Setup coefficient C = {coef} was given by the caller: where and in which wave currency it",
-            f"was fitted is not known here. The statements below assume it was fitted like the live",
+            "was fitted is not known here. The statements below assume it was fitted like the live",
             f"C = {SETUP_COEF} (ADCP-currency Hs, NDBC 44008 peak periods, lines at the GNSS-R level).",
             "The WIS hindcast stands in for 44008:",
         ]
