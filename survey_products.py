@@ -211,11 +211,12 @@ run, outcome rule and whether its file is committed to git.
 SHARING. --share --date D [--output-root R] packs one product into
 <R>/share/<name>.tgz (+ .sha256): README, provenance, the GeoTIFFs and DEM
 page, the maps, the calibration files used and, for B, the procedure's
-reports and run record, with a MANIFEST of every file's sha256. On a blind
-date the name says which DEM it is: <D>_A_official_calibration.tgz (the
-table's calibration) and <D>_B_gcpfree.tgz (<D>_B2_gcpfree_aug.tgz for a
-second GCP-free product). A B that is no longer the pre-registered
-procedure's is refused; an archive is never written over (--replace).
+reports, run record and pre-registration, with a MANIFEST of every file's
+sha256. On a blind date the name says which DEM it is:
+<D>_A_official_calibration.tgz (the table's calibration) and
+<D>_B_gcpfree.tgz (<D>_B2_gcpfree_aug.tgz for a second GCP-free product).
+A B that is no longer the pre-registered procedure's is refused; an
+archive is never written over (--replace).
 
 DISABLED DATES. A date whose rows in survey_dates.csv all have enabled=0
 is refused with the reason, unless --force-disabled.
@@ -9401,12 +9402,13 @@ def share(args):
     """
     One archive of a built date to send (e.g. to the holder of a blind date's survey): README, provenance, the
     DEM GeoTIFFs and page, the maps, the calibration files used (with, for a GCP-free calibration, its
-    procedure's reports and run record, and the report of a camera it did not deliver), and MANIFEST.txt (what
-    the archive is, the calibration identity, the holder's-check label, every file's sha256). Named so the two
-    DEMs of a blind date cannot be mixed up once separated from their folders: 2024-10-23_A_official_calibration
-    .tgz and 2024-10-23_B_gcpfree.tgz. Never written over (--replace to rebuild it). Refused (exit 5) for a
-    product in progress or failed, and for a GCP-free variant whose calibration is no longer the pre-registered
-    procedure's. -> exit code.
+    procedure's reports, run record and pre-registration, and the report of a camera it did not deliver), and
+    MANIFEST.txt (what the archive is, the calibration identity, the holder's-check label, whether the
+    pre-registration is still the file the run recorded, every file's sha256). Named so the two DEMs of a blind
+    date cannot be mixed up once separated from their folders: 2024-10-23_A_official_calibration.tgz and
+    2024-10-23_B_gcpfree.tgz. Never written over (--replace to rebuild it). Refused (exit 5) for a product in
+    progress or failed, and for a GCP-free variant whose calibration is no longer the pre-registered procedure's.
+    -> exit code.
     """
     import tarfile
     out = Path(args.output_root) / args.date
@@ -9437,6 +9439,7 @@ def share(args):
         print(f"--share: {tgz} exists: an archive is never written over (--replace to make it again)")
         return EXIT_CODES["refused"]
     files = []                                     # (path on disk, path in the archive)
+    prereg = []                                    # what the archive says of the GCP-free pre-registration
     for f in ("README.txt", "provenance.json"):
         if (out / f).is_file():
             files.append((out / f, f))
@@ -9468,6 +9471,18 @@ def share(args):
                 if q.is_file() and q not in seen:
                     seen.add(q)
                     files.append((q, f"calibration/gcpfree_run_{rd.name}/{q.name}"))
+            # the pre-registration (the outcome rule, fixed before any run): calibration/gcpfree/PREREGISTERED.txt,
+            # two folders up from runs/<run id>/; said whether it is still the file the run recorded
+            q = rd.parent.parent / "PREREGISTERED.txt"
+            rec = str((pc.get("preregistration") or {}).get("sha256") or "")
+            if q.is_file() and q not in seen:
+                seen.add(q)
+                files.append((q, f"calibration/{q.name}"))
+                prereg.append(f"pre-registration: {q.name} sha256 {file_sha(q)[:16]}, "
+                              + ("the file the procedure's run recorded" if file_sha(q) == rec else
+                                 f"NOT the file the run recorded (sha256 {rec[:16]}): changed after the run"))
+            elif not q.is_file():
+                prereg.append(f"pre-registration: {q} not found (the run recorded sha256 {rec[:16]})")
     for cam, v in sorted((prov.get("cameras_not_delivered") or {}).items()):
         q = Path(str(v.get("report") or ""))
         if q.is_file() and q not in seen:
@@ -9493,6 +9508,7 @@ def share(args):
     for cam, v in sorted((prov.get("cameras_not_delivered") or {}).items()):
         lines.append(f"  {cam}: NOT DELIVERED by the pre-registered GCP-free procedure (report "
                      f"{Path(str(v.get('report'))).name}); no {cam} data in this DEM")
+    lines += sorted(set(prereg))
     lines += ["The DEM files carry the calibration variant in their names (table: <date>_dem.tif) and every GeoTIFF's "
               "description names the calibration (EO files, sha256) and, on a blind date, the holder's-check label.",
               "", "files (sha256, bytes, path):"]

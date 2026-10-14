@@ -4305,7 +4305,7 @@ def test_gcpfree_b(d):
                 "status": "running", "started_utc": "2026-10-14 01:00:00", "argv": ["gcpfree_eo.py"],
                 "argv_text": "gcpfree_eo.py", "roots": list(G.ROOTS), "camera": "both", "aug_dir": None,
                 "procedure_sha256": G.own_sha256(), "modules_sha256": G.module_sha256(),
-                "preregistration": {"path": "calibration/gcpfree/PREREGISTERED.txt", "sha256": "a" * 64,
+                "preregistration": {"path": "calibration/gcpfree/PREREGISTERED.txt", "sha256": prereg_sha,
                                     "outcome_if_one_camera": rule, "decided_by": "the owner (a test)",
                                     "commit": "c" * 40, "git_history": [{"commit": "c" * 40, "date": "2026-10-14"}]},
                 "solved": sorted(results), "kept": {}}
@@ -4315,6 +4315,9 @@ def test_gcpfree_b(d):
         return {c: folder / G.OUT_EO.format(cam=c) for c in results}
 
     runs = d / "calibration" / "gcpfree" / "runs"
+    runs.mkdir(parents=True)
+    (runs.parent / "PREREGISTERED.txt").write_text("outcome_if_one_camera: per-camera\n(a test)\n")
+    prereg_sha = sp.file_sha(runs.parent / "PREREGISTERED.txt")
     r1 = make_run(runs / "20261014T010000Z", {"c1": fake_res("c1", (0, 0, 0), "NOT DELIVERED"),
                                               "c2": fake_res("c2", (-13.4, -0.5, 0.3))})
     r2 = make_run(runs / "20261014T020000Z", {"c1": fake_res("c1", (-12.5, 0.6, -0.4)),
@@ -4444,6 +4447,10 @@ def test_gcpfree_b(d):
           and not any("2024-10-23_A" in n for n in nb) and not any("2024-10-23_B" in n for n in na),
           "two archives with distinct names: A (the table's calibration) and B (gcpfree, with the procedure's reports, "
           "c1's NOT DELIVERED report among them)")
+    check("2024-10-23_B_gcpfree/calibration/PREREGISTERED.txt" in nb and not any("PREREGISTERED" in n for n in na)
+          and f"pre-registration: PREREGISTERED.txt sha256 {prereg_sha[:16]}, the file the procedure's run recorded"
+          in man_b, "B's archive holds the pre-registration (the outcome rule fixed before the run), its MANIFEST "
+                    "saying it is the file the run recorded; A's holds none")
     check("his check of this DEM: PARTLY-CIRCULAR" in man_a and "his check of this DEM: INDEPENDENT" in man_b
           and "c1: NOT DELIVERED by the pre-registered GCP-free procedure" in man_b and "BLIND" in man_a,
           "their MANIFESTs: what each is, its calibration and the holder's-check label, every file's sha256")
@@ -4451,6 +4458,15 @@ def test_gcpfree_b(d):
                                               share_dir=str(d / "share"), replace=False,
                                               calibration=str(HERE / "calibration")))
     check(rc == sp.EXIT_CODES["refused"] and "never written over" in out, "--share again: never written over")
+    (runs.parent / "PREREGISTERED.txt").write_text("outcome_if_one_camera: both-or-none\n(changed after the run)\n")
+    sp._FILE_SHA.clear()
+    rc, out = quiet(sp.share, SimpleNamespace(date="2024-10-23", output_root=str(d / "out_gcpfree"),
+                                              share_dir=str(d / "share_p"), replace=False,
+                                              calibration=str(HERE / "calibration")))
+    with tarfile.open(str(d / "share_p" / "2024-10-23_B_gcpfree.tgz")) as t:
+        man_p = t.extractfile("2024-10-23_B_gcpfree/MANIFEST.txt").read().decode()
+    check(rc == 0 and f"NOT the file the run recorded (sha256 {prereg_sha[:16]}): changed after the run" in man_p,
+          "a pre-registration changed after the run: the archive's MANIFEST says so")
     r1["c2"].write_text(tilt_plus(r1["c2"].read_text()))
     sp._FILE_SHA.clear()
     rc, out = quiet(sp.share, SimpleNamespace(date="2024-10-23", output_root=str(d / "out_gcpfree"),

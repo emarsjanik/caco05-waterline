@@ -758,10 +758,11 @@ sha256 prefix, and his check's label. `--share` packs each into one archive
 named by its calibration, `2024-10-23_A_official_calibration.tgz` and
 `2024-10-23_B_gcpfree.tgz` (+ `.sha256`), with README, provenance, GeoTIFFs
 (EPSG:6348, NAD83(2011) / UTM 19N + NAVD88), the DEM page, the maps, the
-calibration files used, for B the procedure's reports and `run.json` (and the
-report of a camera it did not deliver), and a MANIFEST of every file's
-sha256; never written over (`--replace`), and a B that is no longer the
-procedure's is refused.
+calibration files used, for B the procedure's reports, `run.json` and
+`PREREGISTERED.txt` (and the report of a camera it did not deliver), and a
+MANIFEST of every file's sha256 (for B also whether the pre-registration is
+still the file the run recorded); never written over (`--replace`), and a B
+that is no longer the procedure's is refused.
 
 The October date also needs its forcing files, which are NOT downloaded:
 * WIS ST63064 hourly waves (`WIS_ST63064_2024-10_to_2025-03.csv`) and/or
