@@ -699,6 +699,14 @@ def minus(x, fmt="{:.1f}"):
     return s.replace("-", "−")
 
 
+def title_size(text, max_px, width_px, size=16.0, smallest=11.0):
+    """The heading's font size: 16 pt, smaller (down to 11 pt) when a long station or calibration label would run
+    off the page's right edge."""
+    while size > smallest and width_px(text, size, "bold") > max_px:
+        size -= 0.5
+    return size
+
+
 def title_lines(info, cells, station, cutoff, min_points, cell):
     """
     The heading. Line 1 says what and when; then two lists of short
@@ -894,7 +902,7 @@ def draw_message_page(stem, output, info, station, message, detail, cells=None, 
         y_msg = y[-1] + 0.75
         H = y_msg + 0.32 * len(msg_lines) + sum(0.22 * len(p) + 0.12 for p in det_paras) + 0.3
         fig = plt.figure(figsize=(W, H), dpi=dpi, facecolor="white")
-        fig.text(left / W, 1 - y[0] / H, l1, fontsize=16, fontweight="bold", color=INK)
+        fig.text(left / W, 1 - y[0] / H, l1, fontsize=title_size(l1, max_px, width_px), fontweight="bold", color=INK)
         for i, t in enumerate(fact_lines):
             fig.text(left / W, 1 - y[1 + i] / H, t, fontsize=11, color=INK2)
         for i, t in enumerate(out_lines):
@@ -1174,7 +1182,8 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
 
     fig = plt.figure(figsize=(W, H), dpi=dpi, facecolor="white")
 
-    fig.text(left / W, 1 - y_text[0] / H, l1, fontsize=16, fontweight="bold", color=INK)
+    fig.text(left / W, 1 - y_text[0] / H, l1, fontsize=title_size(l1, max_px, width_px), fontweight="bold",
+             color=INK)
     for i, t in enumerate(fact_lines):
         fig.text(left / W, 1 - y_text[1 + i] / H, t, fontsize=11, color=INK2)
     for i, t in enumerate(out_lines):
