@@ -1629,7 +1629,7 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
 
     An 'unchecked' day on which nothing could be read (no horizon fitted, no feature reading) next to a
     DIFFERENT POINTING or UNCONFIRMED day is UNCONFIRMED too (nothing shows the camera back; runs of such
-    days take it from their neighbour, either side).
+    days take it from their neighbour, either side), except the reference day itself.
 
     DIFFERENT POINTING and UNCONFIRMED days are left out (LEFT_OUT_VERDICTS; pointing_leave_out says
     which are, as the detection decides it, so no why here says so); every why gives the numbers
@@ -1874,9 +1874,11 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
     # its pointing: nothing shows the camera back, so it is not kept as if it matched (review 2, simR: c1
     # turned -1.2 deg on 26-28 Sep, 28 Sep's 3-frame horizon fit failed at 14.6 px and its features did not
     # match; it was 'unchecked', kept, and its frames gridded). Runs of such days take it from their
-    # neighbour, either side (the step cannot tell when the camera turned or came back).
+    # neighbour, either side (the step cannot tell when the camera turned or came back). Never the reference
+    # day: the others are measured against its frame, so a neighbour that differs from it says nothing of it.
     order = sorted(rows, key=lambda r: str(r.get("date") or ""))
-    blind = [r for r in order if r.get("verdict") == "unchecked" and id(r) not in is_fitted and not trusted(r)]
+    blind = [r for r in order if r.get("verdict") == "unchecked" and id(r) not in is_fitted and not trusted(r)
+             and r is not ref]
     grown = True
     while grown:
         grown = False
@@ -2033,8 +2035,8 @@ def step_pointing(plan, args, state):
         if not lo["leave_out"]:
             info["warning"] = (f"{len(lo['measured_different_days'])} of {lo['measured_days']} measured days differ "
                                f"from the reference {info['reference_day']}: the reference itself may be the odd one "
-                               f"out. Nothing is left out automatically: look at {pdir} and pass --skip-days if "
-                               f"needed")
+                               f"out. Nothing is left out automatically: look at {pdir}; this script has no option that leaves "
+                               f"single days out (--window FIRST LAST narrows the photo days)")
         fields = ["camera", "date", "photos", "verdict", "why", "horizon", "horizon_offset_px",
                   "horizon_dtilt_deg", "horizon_droll_deg", "horizon_fit_px", "horizon_frames", "horizon_edge",
                   "horizon_prominence", "horizon_rival", "horizon_sky_above", "horizon_to_limit_px", "features",
@@ -2114,8 +2116,8 @@ def pointing_majority_note(res, args, skip=None, ran=True):
             + (f". {len(alone)} of them ({', '.join(alone)}) are UNCONFIRMED on a horizon reading alone that is not "
                f"a clear horizon, with no feature reading: such a reading never shows a day moved, but in a storm "
                f"the camera can turn on those very days (c1, 26-28 Sep 2026: -1.2 deg of pan)" if alone else "")
-            + ". Look at the photos and the pointing CSV; --keep-moved-days keeps every such day, --skip-days "
-              "chooses by hand")
+            + ". Look at the photos and the pointing CSV; --keep-moved-days keeps every such day (there is no "
+              "option that keeps only some; --window FIRST LAST narrows the photo days)")
 
 
 def station_pointing_log(plan, cam, args):
@@ -4618,18 +4620,31 @@ def collect_caveats(plan, args, state, forcing, prov):
         # --keep-moved-days), never this run's options: a later --steps compare or pointing run without
         # the option rewrites this README too
         dst = read_stamp(out, f"detect_{cam}")
-        skip = (dst or {}).get("skip_days") or []
+        skip = sorted((dst or {}).get("skip_days") or [])
         byday = {r.get("date"): r for r in res.get("rows") or []}
 
         def with_why(ds):
             return "; ".join(f"{d_} ({byday[d_].get('verdict')}: {byday[d_]['why']})" if byday.get(d_, {}).get("why")
                              else d_ for d_ in ds)
         diff_ = list(res.get("different_days") or [])
-        if dst is None:
+        # a detection made with other pointing results (the pointing step was run again on its own since,
+        # e.g. after a change of its rule): the days it left out are not those these results leave out, so
+        # neither its list nor these results' 'kept' days describe the product (an older stamp did not
+        # record --keep-moved-days: it is stale only when it left out days these results do not)
+        kmd_ = (dst or {}).get("keep_moved_days")
+        stale = dst is not None and (
+            skip != skip_days_of(res, argparse.Namespace(keep_moved_days=bool(kmd_))) if kmd_ is not None
+            else bool(skip) and skip != skip_days_of(res, None))
+        if dst is None or stale:
+            if stale:
+                cav.append(f"{cam}: the detection ran with other pointing results than these (the pointing step "
+                           f"was run again since) and left out " + (", ".join(skip) if skip else "no day")
+                           + "; run the detection again (--steps detect and the steps after it) to apply these.")
             if diff_:
                 cav.append(f"{cam}: days with a different or unconfirmed pointing: {with_why(diff_)}. The detection "
-                           f"has not run with these pointing results (not requested, or it failed): it leaves such "
-                           f"days out by default"
+                           f"has not run with these pointing results"
+                           + (" (not requested, or it failed)" if dst is None else "")
+                           + ": it leaves such days out by default"
                            + ("" if res.get("leave_out", True) else
                               ", but here most days measured differ from the reference, so it would keep them (see "
                               "the warning)")
@@ -4641,8 +4656,9 @@ def collect_caveats(plan, args, state, forcing, prov):
             if kept_:
                 cav.append(f"{cam}: days with a different or unconfirmed pointing KEPT in the detection ("
                            f"{kept_reason(res, args, dst)}): {with_why(kept_)}.")
-        note_ = (pointing_majority_note(res, args, skip=skip if dst is not None else skip_days_of(res, None),
-                                        ran=dst is not None) if res.get("rows") else None)
+        ran_ = dst is not None and not stale
+        note_ = (pointing_majority_note(res, args, skip=skip if ran_ else skip_days_of(res, None), ran=ran_)
+                 if res.get("rows") else None)
         if note_:
             cav.append(f"{cam}: {note_}.")
         over = [d_ for d_, r_ in sorted(byday.items()) if r_.get("verdict") not in LEFT_OUT_VERDICTS

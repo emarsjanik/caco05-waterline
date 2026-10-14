@@ -1323,6 +1323,13 @@ def test_pointing_verdicts(d):
     check([vb[x]["verdict"] for x in ("2026-09-28", "2026-09-29", "2026-09-30")]
           == ["UNCONFIRMED", "UNCONFIRMED", "matches"] and "2026-09-28, has an unconfirmed" in vb["2026-09-29"]["why"],
           "... a run of such days after a left-out day: each UNCONFIRMED")
+    # ... but never the reference day: the other days are measured against its frame, so a neighbour that
+    # differs from it says nothing of it (its run stops there)
+    sp.pointing_verdicts(blindrows, ref_day="2026-09-29")
+    check([vb[x]["verdict"] for x in ("2026-09-28", "2026-09-29", "2026-09-30")]
+          == ["UNCONFIRMED", "unchecked", "matches"],
+          "... the reference day itself, nothing read on it and next to a left-out day: 'unchecked', not UNCONFIRMED "
+          f"({vb['2026-09-29']['verdict']})")
     check(i1["clear_horizon_days"] == 4 and abs(i1["window_horizon_dtilt_deg"] - 0.928) < 0.0011
           and abs(i1["window_horizon_droll_deg"] - 0.240) < 0.0011 and abs(i1["window_horizon_offset_px"] - 42.55) < 0.06
           and i1["horizon_not_clear_days"] == ["2026-09-26", "2026-09-27", "2026-09-28"] and abs(old_med - 0.956) < 1e-9,
@@ -1633,9 +1640,10 @@ def test_pointing_verdicts(d):
     note = sp.pointing_majority_note(res, no) or ""
     check(sp.skip_days_of(res, no) == [f"2025-01-{d}" for d in range(21, 25)]
           and note.startswith("4 of the window's 7 days are left out of the detection") and "--keep-moved-days" in note
+          and "--skip-days" not in note and "--window FIRST LAST" in note
           and sp.pointing_majority_note(res, SimpleNamespace(keep_moved_days=True)) is None,
           "4 of 7 days left out (each a clear jump that its zero-turn features contradict): left out, with the count "
-          "and the options")
+          "and the options this script has (no --skip-days: that is detect_original_view.py's)")
     note2 = sp.pointing_majority_note(res, no, skip=sp.skip_days_of(res, None), ran=False) or ""
     check(note2.startswith("4 of the window's 7 days would be left out of the detection (it has not run with these "
                            "pointing results yet)") and "would rest on the 3 other day(s)" in note2
@@ -1968,6 +1976,25 @@ def test_storm_and_wave_caveats(d):
           and not any("are left out of the detection" in c for c in c1_),
           "README with no detection stamp: the days and their whys, 'the detection has not run', never KEPT or left "
           "out")
+    # ... and a detection made with OTHER pointing results (the pointing step run again on its own since, as
+    # after a change of its rule): what it left out is said as such, and these results' days are the ones it
+    # would leave out, never 'KEPT' (it left out 30 Sep only; these results leave out 26-28 Sep)
+    sp.write_stamp(out, "detect_c1", {"x": 6}, extra={"skip_days": ["2026-09-30"], "keep_moved_days": False})
+    c1_ = [c for c in sp.collect_caveats(plan, cfg_args(), {}, forcing, frames(new)) if c.startswith("c1: ")]
+    check(any(c.startswith("c1: the detection ran with other pointing results than these") and "left out 2026-09-30;"
+              in c and "--steps detect" in c for c in c1_)
+          and any(c.startswith("c1: days with a different or unconfirmed pointing: 2026-09-26 (UNCONFIRMED: ")
+                  and "The detection has not run with these pointing results: it leaves such days out" in c for c in c1_)
+          and not any("KEPT in the detection" in c or c.startswith("c1: days left out of the detection") for c in c1_),
+          "README after a pointing-only rerun over an older detection: the detection's own left-out days said as "
+          "such, these results' days 'not run with these', never KEPT")
+    sp.write_stamp(out, "detect_c1", {"x": 7}, extra={"skip_days": ["2026-09-26", "2026-09-27", "2026-09-28"],
+                                                      "keep_moved_days": False})
+    c1_ = [c for c in sp.collect_caveats(plan, cfg_args(), {}, forcing, frames(new)) if c.startswith("c1: ")]
+    check(any(c.startswith("c1: days left out of the detection for their pointing: 2026-09-26 (UNCONFIRMED: ")
+              for c in c1_) and not any("other pointing results" in c or "has not run" in c for c in c1_),
+          "... a detection made with these results: its left-out days, nothing about other results")
+    sp.drop_stamp(out, "detect_c1")
 
 
 def _rotated(img, io, eo_src, eo_dst, step=4):
