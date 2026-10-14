@@ -703,18 +703,24 @@ VARIANT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 # 'Position (x, y, z) kept from' lines are true of its numbers and its references' (the references' content the one
 # the report recorded); its run folder is THIS repository's calibration/gcpfree/runs/<id> (GCPFREE_DIR), the run
 # was made under THIS repository's PREREGISTERED.txt, unchanged and not committed again since the run, from the
-# station's photo folders, and it is the first finished delivery run there (or the one allowed second run with Aug
-# photos); and the B file, its report and run.json are committed in this repository, unchanged, each touched by one
-# commit. Otherwise it is 'not the pre-registered procedure': never INDEPENDENT, never built or shared under the
-# procedure's variant names. What no check here can see: a B edited BEFORE its first commit with its report and
-# run.json rewritten to agree (an edit that keeps the 'rotated by' magnitude, e.g. a small tilt): only the sha256 of
-# each B file, written down and sent to the holder when the run ends, shows that.
+# station's photo folders and with the photos its pre-registration pins, and it is the first finished delivery run
+# there (or the one allowed second run with Aug photos); every run's record there (a trial, a run cut off) is
+# committed; no commit outside this branch's history (another branch, a stash, the reflog) wrote a pre-registration
+# or run record this branch does not hold; and the B file, its report, run.json and run_report.txt are committed in
+# this repository, unchanged, each touched by one commit. Otherwise it is 'not the pre-registered procedure': never
+# INDEPENDENT, never built or shared under the procedure's variant names. On a BLIND date the B DEM must also be the
+# pre-registered B BUILD (blind_b_build_problem: built as A was, one root). What no check here can see: a B edited
+# BEFORE its first commit with its report and run.json rewritten to agree (an edit that keeps the 'rotated by'
+# magnitude, e.g. a small tilt); a copy of the procedure run outside this repository (another clone or a copy of the
+# script) before the pre-registration, or a whole re-clone of the repository after a first run; a branch or stash
+# removed together with its reflog entries. Only the sha256s sent to the holder beforehand (the procedure's, the
+# pre-registration's, each B file's when its run ends) answer those.
 # test_survey_products.py checks that the LAST pin is the files as committed: change gcpfree_eo.py or one of its
 # modules and a new pin is appended in the same commit, BEFORE any B is made with it. Once the station has run a
 # pinned version (pre-registration or run), its pin is never removed or edited (a B made by it stays traceable);
 # until then (Oct 2026: no run outside tests) the single pin follows the committed files.
 GCPFREE_PINS = [
-    {"gcpfree_eo.py": "4314fe3a5f091c0304608636db207d56ab43734a0c867042b8744d981104fcd3",
+    {"gcpfree_eo.py": "2387f2d3857dbaf544406608e3393ff2a21dc7309355088871bd99dc6388adcc",
      "modules": {
          "estimate_eo_rotation.py": "2fbb27b69db3604498b5cfd63739e4ab5ebdbb061e58e2397bc1323956406e72",
          "georectify.py": "e9f1d2c1872697b1be5d805d2762c40b9e32752251f0e9e6d6cb75f5bc7eba1e",
@@ -722,9 +728,11 @@ GCPFREE_PINS = [
          "detect_original_view.py": "c807b2f907b4856cda08b21ddcf46c1c0470bd23b7559f990fc21e831a19036a",
          "view_reproject.py": "2d63650ec558c90f7aada6a223f6dfb6dd61dc55f5998d9a8f0cf737de3cd817"},
      "constants_sha256": "6259cec4a81e4e0d7da96fec2a6ec4430e589b5a5935401ab274f069feee9f96",
-     "pinned": "2026-10-14 (review round 1: texts, records and refusals; no gate, threshold, window or rule of the "
-               "computation changed). It replaces the first pin of 2026-10-14, under which nothing was run outside "
-               "tests"},
+     "pinned": "2026-10-14 (review round 2: every run, a trial too, under this repository's committed "
+               "pre-registration, which also pins the photos; records outside the branch's history refused; the "
+               "EXPOSURE statement on the position cases; no gate, threshold, window or rule of the computation "
+               "changed, the constants are the same). It replaces the pins of review rounds 0 and 1 of 2026-10-14 "
+               "(4314fe3a5f09... the last), under which nothing was run outside tests"},
 ]
 # gcpfree_eo.py's ROOTS: the station's photo folders a delivery run must use (a B made from other folders is a test of
 # the procedure, never the delivered B)
@@ -829,9 +837,27 @@ def normal(obj):
     return json.loads(json.dumps(obj, default=str))
 
 
+def eo_same_content(old, new):
+    """The calibration (EO) file of a pointing or detection signature whose stamp differs from it only in that file's
+    time, while its content is the one the stamp recorded (eo_sha256): a calibration restored byte for byte (git
+    checkout) or only touched needs no rebuild. -> its path, or None."""
+    osig = old.get("sig") if isinstance(old, dict) else None
+    if not isinstance(new, dict) or not isinstance(osig, dict):
+        return None
+    ne, oe = new.get("eo_file"), osig.get("eo_file")
+    if not (isinstance(ne, list) and isinstance(oe, list) and len(ne) == 3 and len(oe) == 3 and ne[:2] == oe[:2]):
+        return None
+    if not old.get("eo_sha256") or file_sha(ne[0]) != old["eo_sha256"]:
+        return None
+    if dict(osig, eo_file=None) != dict(new, eo_file=None):
+        return None
+    return str(ne[0])
+
+
 def is_fresh(out, key, sig, outputs, inputs=()):
     """(True, '') when step `key` last ran with this signature, its outputs all exist and
-    none of its inputs is newer than them; else (False, why)."""
+    none of its inputs is newer than them; else (False, why). The calibration file counts by its
+    content (the stamp's eo_sha256), not its time: restored byte for byte, it rebuilds nothing."""
     st = stamp_path(out, key)
     if not st.exists():
         return False, "not built yet"
@@ -839,15 +865,23 @@ def is_fresh(out, key, sig, outputs, inputs=()):
         old = json.loads(st.read_text())
     except (OSError, ValueError):
         return False, "its stamp is unreadable"
-    if old.get("sig") != normal(sig):
+    new = normal(sig)
+    same_eo = eo_same_content(old, new) if old.get("sig") != new else None
+    if old.get("sig") != new and not same_eo:
         return False, "its settings changed"
     missing = [o for o in outputs if not Path(o).exists()]
     if missing:
         return False, f"{Path(missing[0]).name} is missing"
     t_out = min(Path(o).stat().st_mtime for o in outputs) if outputs else 0
-    newer = [i for i in inputs if i and Path(i).exists() and Path(i).stat().st_mtime > t_out + 1]
+    eo_now = (new.get("eo_file") or [None])[0] if isinstance(new, dict) and isinstance(new.get("eo_file"), list) \
+        else None
+    unchanged_eo = str(eo_now) if eo_now and old.get("eo_sha256") and file_sha(eo_now) == old["eo_sha256"] else None
+    newer = [i for i in inputs if i and str(i) != unchanged_eo and Path(i).exists()
+             and Path(i).stat().st_mtime > t_out + 1]
     if newer:
         return False, f"{Path(newer[0]).name} is newer than its outputs"
+    if same_eo:
+        update_stamp(out, key, sig=new)         # the file's time now, the same token: nothing downstream rebuilds
     return True, ""
 
 
@@ -868,13 +902,45 @@ def eo_content_fresh(out, key, eo_path):
     return True, ""
 
 
+FIRST_BUILT = "first_built.json"
+
+
+def first_built(out, key=None):
+    """When each step of a product FIRST finished ({key: time}, or one key's time): logs/first_built.json, kept across
+    rebuilds (a stamp is dropped and rewritten when its step reruns, so its finished_utc is the LAST build). A blind
+    date's ORDER states when A's DEM first existed from this, not from its last rebuild."""
+    d = load_json(Path(out) / "logs" / FIRST_BUILT) or {}
+    return d if key is None else d.get(key)
+
+
+def note_first_built(out, key, when):
+    """Records `when` as step `key`'s first finish unless an earlier one is recorded."""
+    if not when:
+        return
+    f = Path(out) / "logs" / FIRST_BUILT
+    d = load_json(f) or {}
+    if key in d and str(d[key]) <= str(when):
+        return
+    d[key] = when
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = Path(str(f) + ".tmp")
+        tmp.write_text(json.dumps(d, indent=1, sort_keys=True) + "\n")
+        os.replace(str(tmp), str(f))
+    except OSError:
+        pass
+
+
 def write_stamp(out, key, sig, cmds=(), extra=None, scripts=None):
     """Records a finished step: its signature, commands, the software that ran it
-    (commit, sha256 of each script) and a token later steps put in their own signature."""
+    (commit, sha256 of each script) and a token later steps put in their own signature. The step's first
+    finish is kept apart (first_built), whatever rebuilds follow."""
     st = stamp_path(out, key)
     st.parent.mkdir(parents=True, exist_ok=True)
     d = {"sig": normal(sig), "commands": [cmd_text(c) if not isinstance(c, str) else c for c in cmds],
          "finished_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")}
+    note_first_built(out, key, d["finished_utc"])
+    d["first_finished_utc"] = first_built(out, key) or d["finished_utc"]
     sw = software()
     used = list(scripts or []) + ["survey_products.py"]
     d["software"] = {"commit": sw.get("commit"),
@@ -919,7 +985,11 @@ def token(out, key):
 
 def drop_stamp(out, key):
     """A step about to rebuild loses its stamp first: if it fails, nothing downstream can look
-    current against outputs it may have half rewritten."""
+    current against outputs it may have half rewritten. When the step first finished is kept
+    (first_built; a stamp written before that record existed gives its own time)."""
+    old = read_stamp(out, key)
+    if old:
+        note_first_built(out, key, old.get("first_finished_utc") or old.get("finished_utc"))
     try:
         stamp_path(out, key).unlink()
     except OSError:
@@ -3018,6 +3088,8 @@ def step_detect(plan, args, state):
                                "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
                                "photos": len(photos), "eo_sha256": calibration_record(c)["eo_sha256"],
                                "calibration": calibration_record(c)})
+            # the search envelope's content as this detection used it (a GCP-free B of a blind date must use A's)
+            update_stamp(out, f"detect_{cam}", envelope_sha256=file_sha(c["envelope_path"]))
             if not args.keep_detector_debug:
                 prune_detector_scratch(wdir / cam)
             parts.append((cam, ground))
@@ -3591,7 +3663,7 @@ def calibration_identity(plan, args, blind_note=True):
         lab = ""
         if plan.get("blind"):
             lab = " " + held_check(calibration_origin(c.get("eo_path") or c.get("eo_file"), eo_dirs(args)),
-                                   plan["blind"])[0]
+                                   plan["blind"], envelope_check(plan, cam, args))[0]
         parts.append(f"{cam} {c.get('eo_file')} sha256 {sha}{lab}")
     for cam in sorted(plan.get("not_delivered") or {}):
         parts.append(f"{cam} NOT DELIVERED by the GCP-free procedure (no data)")
@@ -5044,6 +5116,94 @@ def gcpfree_run_records(runs_dir):
     return {k: sorted(v) for k, v in out.items()}
 
 
+GCPFREE_RECORD = re.compile(r"(^|/)(PREREGISTERED\.txt|runs/[^/]+/run\.json)$")
+
+
+def gcpfree_foreign_records(gdir):
+    """Commits OUTSIDE this branch's history (another branch, a stash, the reflog: a branch made from before the
+    pre-registration, a reset) that wrote a PREREGISTERED.txt or a runs/<id>/run.json in the gcpfree folder whose
+    content this branch's history does not hold (a rebased copy holds the same content: not counted). The first run,
+    or an earlier pre-registration, kept there would be invisible from this branch (gcpfree_eo.foreign_records, the
+    same rule). -> [(commit, path)] ([] when git cannot tell)."""
+    anc = Path(str(gdir))
+    while not anc.exists() and anc != anc.parent:
+        anc = anc.parent
+    spec = os.path.relpath(str(Path(str(gdir))), str(anc))
+
+    def blobs(*refs):
+        r = subprocess.run(["git", "-C", str(anc), "log"] + list(refs) + ["--no-abbrev", "--format=@%H", "--raw",
+                                                                           "--", spec],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        out, commit = [], None
+        for ln in r.stdout.splitlines() if r.returncode == 0 else []:
+            if ln.startswith("@"):
+                commit = ln[1:].strip()
+            elif ln.startswith(":") and "\t" in ln:
+                meta, path = ln.split("\t", 1)
+                f = meta.split()
+                if len(f) >= 4 and GCPFREE_RECORD.search(path.strip()) and set(f[3]) != {"0"}:
+                    out.append((commit, path.strip(), f[3]))
+        return out, r.returncode
+    try:
+        head, _ = blobs("HEAD")
+        every, rc = blobs("--all", "--reflog")
+    except OSError:
+        return []
+    have = {b for _, _, b in head}
+    found = []
+    for c, path, b in every if rc == 0 else []:
+        if b not in have and (c, path) not in found:
+            found.append((c, path))
+    return found
+
+
+def gcpfree_uncommitted_runs(runs_dir):
+    """The run folders of a gcpfree runs folder whose record (run.json) is not committed as it is (untracked, or
+    changed), or that have none: every run, a trial or one cut off, is committed (its record is what B's README lists).
+    -> [run id]."""
+    rdir = Path(str(runs_dir))
+    if not rdir.is_dir():
+        return []
+    try:
+        st = subprocess.run(["git", "-C", str(rdir), "status", "--porcelain", "--untracked-files=all", "--", "."],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    except OSError:
+        return []
+    if st.returncode != 0:
+        return []
+    top = subprocess.run(["git", "-C", str(rdir), "rev-parse", "--show-toplevel"], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, universal_newlines=True).stdout.strip()
+    bad = set()
+    for ln in st.stdout.splitlines():
+        q = Path(top) / ln[3:].strip().strip('"')
+        if q.name == "run.json" and q.parent.parent == Path(os.path.realpath(str(rdir))):
+            bad.add(q.parent.name)
+    bad |= {d.name for d in rdir.iterdir() if d.is_dir() and not (d / "run.json").is_file()}
+    return sorted(bad)
+
+
+def prereg_photos(prereg):
+    """The photos a PREREGISTERED.txt pins ('photo: <cam> <window> <day> <name> <size> <sha256>' lines, as gcpfree_eo.py
+    reads them) and its 'photos_sha256:' line. -> (rows, sha256 line or None)."""
+    rows, sha = [], None
+    try:
+        for ln in Path(str(prereg)).read_text().splitlines():
+            s = ln.strip()
+            if s.startswith("photos_sha256:"):
+                sha = s.split(":", 1)[1].strip()
+            elif s.startswith("photo:"):
+                w = s.split(":", 1)[1].split()
+                rows.append(w[:4] + [int(w[4]) if w[4].isdigit() else w[4]] + w[5:] if len(w) == 6 else w)
+    except OSError:
+        pass
+    return rows, sha
+
+
+def photos_sha256(rows):
+    """gcpfree_eo.photos_sha256: the sha256 of a list of photo rows."""
+    return hashlib.sha256(json.dumps([list(r) for r in rows]).encode()).hexdigest()
+
+
 def prereg_rule_history(prereg):
     """The outcome rule of every commit of a PREREGISTERED.txt, oldest first: [{"commit", "date", "rule"}] ([] when
     it is not in git). Only that file is read (git show)."""
@@ -5087,11 +5247,12 @@ def procedure_check(eo_path, dirs=()):
     delivery, sha256); its 'rotated by', 'pan change' and 'Position ... kept from' lines are true of its numbers and
     of its references (whose content is the one the report recorded); its run folder is GCPFREE_DIR/runs/<id>, made
     under GCPFREE_DIR/PREREGISTERED.txt as it is now (same sha256, no commit since the run), from the station's photo
-    folders, as the first finished delivery run there (or the one allowed second run, with Aug photos); its file,
-    report and run.json are committed in this repository, unchanged, each touched by ONE commit (the same one).
-    What it cannot see: a B edited BEFORE that commit with its report and run.json rewritten to agree, by an edit
-    that keeps the 'rotated by' magnitude (e.g. a small tilt): only the B sha256 written down and sent to the holder
-    when the run ended shows it.
+    folders and the photos it pins, as the first finished delivery run there (or the one allowed second run, with Aug
+    photos); every run record there committed; nothing outside this branch's history (gcpfree_foreign_records); its
+    file, report, run.json and run_report.txt committed in this repository, unchanged, each touched by ONE commit
+    (the same one). What it cannot see: the GCPFREE_PINS comment's list (a B edited BEFORE that commit with its report
+    and run.json rewritten to agree; a copy of the procedure run elsewhere before the pre-registration; a re-clone; a
+    branch removed with its reflog): only the sha256s sent to the holder beforehand show those.
     -> {"format": it says it is gcpfree_eo.py's, "pinned": every check passed, "why": [what failed], and from its
     report: camera, run_id, run_no, variant, first_run, verdict, delivery, source, solved_in_run, outcome_rule,
     preregistration {sha256, commit, commits, decided_by, path, git}, roots, station_roots, aug_dir, uncertainty,
@@ -5304,6 +5465,29 @@ def procedure_check(eo_path, dirs=()):
                 why.append(f"its report calls it delivery run {run.get('run_no')} (variant {run.get('variant')}); "
                            f"it is run {k + 1} of this repository, whose B is variant {want}")
     out["delivery_runs_here"] = ids
+    if rd.parent == runs_here:
+        # every run's record committed (a trial and a run cut off too: B's README lists them all)
+        unc = gcpfree_uncommitted_runs(runs_here)
+        if unc:
+            why.append(f"the record of run(s) {', '.join(unc)} in this repository's runs folder is not committed (a "
+                       f"trial, a run cut off: every run is committed, and B's README lists them): commit it")
+        # nothing outside this branch's history: another branch, a stash or the reflog holding an earlier
+        # pre-registration or run (e.g. a branch made from before the pre-registration)
+        fr = gcpfree_foreign_records(GCPFREE_DIR)
+        if fr:
+            why.append(f"{len(fr)} commit(s) outside this branch's history wrote a pre-registration or a run record that "
+                       f"this branch does not hold (" + ", ".join(f"{c[:10]} {q}" for c, q in fr[:3])
+                       + (" ..." if len(fr) > 3 else "") + "): an earlier pre-registration or run may sit there, so "
+                       "which run came first cannot be told")
+        # the photos its run solved with are the ones the pre-registration pins (for the cameras it solved)
+        rows_, sha_ = prereg_photos(pr_here)
+        solved_ = set((rj or {}).get("solved") or [])
+        want_ph = photos_sha256([r for r in rows_ if r and r[0] in solved_])
+        if not rows_ or sha_ != photos_sha256(rows_) or not (rj or {}).get("photos_preregistered") \
+                or (rj or {}).get("photos_used_sha256") != want_ph:
+            why.append("its run did not use the photos its pre-registration pins (run.json photos_used_sha256 "
+                       f"{str((rj or {}).get('photos_used_sha256'))[:12]}..., the pre-registration's for "
+                       f"{', '.join(sorted(solved_)) or 'no camera'} {want_ph[:12]}...)")
     recs = gcpfree_run_records(runs_here) if rd.parent == runs_here else {}
     if recs.get("removed"):
         why.append(f"the record of run(s) {', '.join(recs['removed'])} was committed in this repository's runs folder "
@@ -5314,7 +5498,8 @@ def procedure_check(eo_path, dirs=()):
                    f"as written, so which delivery run came first cannot be told")
     # committed: the B file, its report and run.json, unchanged, each touched by one commit (the same)
     gs = {}
-    for f, what in ((p, "B file"), (rp, "report"), (rd / "run.json", "run.json")):
+    for f, what in ((p, "B file"), (rp, "report"), (rd / "run.json", "run.json"), (rd / "run_report.txt",
+                                                                                  "run_report.txt")):
         g = git_file_state(f)
         gs[what] = g
         name = f"its {what}" + ("" if f.name == what else f" {f.name}")
@@ -5326,8 +5511,8 @@ def procedure_check(eo_path, dirs=()):
         elif g.get("toplevel") != repo_toplevel():
             why.append(f"{name} is committed in another git repository than this script's")
     if all(g.get("committed") for g in gs.values()) and len({g.get("commit") for g in gs.values()}) > 1:
-        why.append("its B file, report and run.json were committed in different commits (the run folder is committed "
-                   "once)")
+        why.append("its B file, report, run.json and run_report.txt were committed in different commits (the run "
+                   "folder is committed once)")
     out["committed"] = {k: gs["B file"].get(k) for k in ("committed", "commit", "date", "commits", "why")}
     out["b_commit"] = gs["B file"].get("commit") if gs["B file"].get("committed") else None
     out["pinned"] = not why
@@ -5374,12 +5559,14 @@ def uncertainty_terms(pc):
 def tilt_effect_text(rt):
     """The README line on a GCP-free B's rotation term taken as a pure tilt (write_provenance: rotation_term_as_tilt)."""
     if not rt or not rt.get("bands"):
-        return ("its DEM effect as a tilt: not computed (no DEM yet); a rotation of that size as tilt moves waterlines "
-                "metres at 200-400 m from the camera")
+        return (f"its DEM effect as a tilt: not computed ({(rt or {}).get('why_none') or 'no DEM yet'}); a rotation of "
+                f"that size as tilt moves waterlines metres at 200-400 m from the camera")
     return (f"the rotation term as a pure TILT of {rt['tilt_deg']} deg, from this date's DEM and calibration (median per "
             f"range band from the camera): "
             + "; ".join(f"{b['range_m']} m: waterlines move {b['shift_m']} m, DEM |dz| "
                         f"{float(b.get('dem_abs_error_m', abs(float(b['dem_error_m'])))):.2f} m" for b in rt["bands"])
+            + (" (local slopes from one-sided differences: a thin strip of DEM)" if any(b.get("slope") for b in
+                                                                                     rt["bands"]) else "")
             + " (the DEM error is the local slope times the move; the rotation term is not a validated bound, nor "
               "is this)")
 
@@ -5414,15 +5601,52 @@ def pin_commit(procedure_sha):
     return (first[0], first[1] if len(first) > 1 else None) if first else (None, None)
 
 
-def a_product_times(args, date, variant):
-    """When the table-calibration (A) product of a blind date was built, from its root (--a-root, else the root this
-    variant's root is named after): its DEM stamp and provenance. Only times are read. -> dict."""
+def argv_options(words):
+    """{option: [values]} of a command line split into words (state_argv's form; the words before the first option,
+    e.g. the interpreter and the script, are left out)."""
+    out, k = {}, None
+    for w in words or []:
+        if str(w).startswith("--"):
+            k = str(w)
+            out[k] = []
+        elif k is not None:
+            out[k].append(str(w))
+    return out
+
+
+def a_product(args, date, variant):
+    """The table-calibration (A) product of a blind date, from its root (--a-root, else the root this variant's root
+    is named after): when its DEM FIRST existed and when it was last rebuilt, its build options (provenance: the
+    command that rebuilds it), and per camera the search envelope and forcing inputs its steps used (stamps). Only
+    these records are read: never A's calibration, grids or waterlines. -> dict."""
     root = Path(getattr(args, "a_root", None) or root_for_variant(args.output_root, None, variant))
     out = root / date
     st, prov = read_stamp(out, "dem") or {}, load_json(out / "provenance.json") or {}
     var = sorted({(v.get("calibration") or {}).get("variant") or "table" for v in (prov.get("cameras") or {}).values()})
+    times = [x for x in (first_built(out, "dem"), st.get("first_finished_utc"), st.get("finished_utc")) if x]
+    cmd = (prov.get("commands") or {}).get("survey_products")
+    try:
+        words = shlex.split(cmd) if cmd else None
+    except ValueError:
+        words = None
+    env, cams = {}, sorted((prov.get("cameras") or {}).keys())
+    for cam in cams:
+        ds = read_stamp(out, f"detect_{cam}") or {}
+        sig = (ds.get("sig") or {}).get("envelope")
+        if ds:
+            env[cam] = {"path": sig[0] if sig else None, "sig": sig, "sha256": ds.get("envelope_sha256")}
     return {"root": str(root), "found": bool(st or prov), "variant": "/".join(var) or None,
-            "dem_built_utc": st.get("finished_utc"), "provenance_built_utc": prov.get("built_utc")}
+            "dem_built_utc": min(times) if times else None, "dem_last_built_utc": st.get("finished_utc"),
+            "provenance_built_utc": prov.get("built_utc"), "options": argv_options(words) if words else None,
+            "command": cmd, "envelope": env, "cameras": cams,
+            "forcing_inputs": ((read_stamp(out, "forcing") or {}).get("sig") or {}).get("inputs"),
+            "forcing_sha256": {k: file_sha(out / "forcing" / k) for k in ("water_level.csv", "waves.csv")},
+            "software": prov.get("software")}
+
+
+def a_product_times(args, date, variant):
+    """a_product() (its times are what B's ORDER states)."""
+    return a_product(args, date, variant)
 
 
 def gcpfree_disclosure(plan, args, pcs):
@@ -5433,7 +5657,7 @@ def gcpfree_disclosure(plan, args, pcs):
     pc = next(iter(pcs.values()))
     pr = pc.get("preregistration") or {}
     pin_c, pin_d = pin_commit(pc.get("procedure_sha256"))
-    a = a_product_times(args, plan["date"], plan_variant(plan))
+    a = a_product(args, plan["date"], plan_variant(plan))
     # the rule's own history: when the rule in force was first committed (an earlier rule, or an edit of who decided,
     # is said); the run recorded the pre-registration's last commit
     hist = prereg_rule_history(pc.get("preregistration_here") or GCPFREE_DIR / "PREREGISTERED.txt")
@@ -5444,8 +5668,19 @@ def gcpfree_disclosure(plan, args, pcs):
         since = h
     t = {"pin": utc_time(pin_d), "rule": utc_time((since or {}).get("date") or pr.get("commit_date")),
          "prereg": utc_time(pr.get("commit_date")), "a_dem": utc_time(a.get("dem_built_utc")),
+         "a_dem_last": utc_time(a.get("dem_last_built_utc")),
          "b_run": utc_time(pc.get("run_started_utc")), "b_end": utc_time(pc.get("run_finished_utc")),
          "b_commit": utc_time((pc.get("committed") or {}).get("date"))}
+    # every run of the procedure in this repository's runs folder (a trial, a run cut off), with its start: a trial
+    # is a full result, so one made before B's run, or any run made before the rule was committed, is said
+    runs = []
+    rdir = Path(pc.get("run_dir") or GCPFREE_DIR / "runs" / "x").parent
+    for d_ in sorted(q for q in rdir.glob("*") if q.is_dir()) if rdir.is_dir() else []:
+        js = load_json(d_ / "run.json") or {}
+        runs.append({"run_id": d_.name, "kind": "delivery" if js.get("eligible") else "TRIAL" if js else "unreadable",
+                     "status": js.get("status") or "no run.json", "started": utc_time(js.get("started_utc")),
+                     "finished": utc_time(js.get("finished_utc")), "why": js.get("trial_why"),
+                     "this": d_.name == Path(str(pc.get("run_dir") or "")).name})
     order = [f"procedure pinned (gcpfree_eo.py sha256 {str(pc.get('procedure_sha256'))[:12]}... in survey_products.py "
              f"GCPFREE_PINS): " + (f"commit {pin_c[:10]}, {utc_text(t['pin'])}" if pin_c else
                                    "its commit not found in this repository's history"),
@@ -5454,7 +5689,9 @@ def gcpfree_disclosure(plan, args, pcs):
              f"{str((since or {}).get('commit') or pr.get('commit'))[:10]}, {utc_text(t['rule'])}"
              + (f"; the file's commits: " + ", ".join(f"{str(h['commit'])[:10]} {utc_text(utc_time(h['date']))} "
                                                        f"'{h['rule']}'" for h in hist) if len(hist) > 1 else ""),
-             (f"A (the table's calibration) DEM built {utc_text(t['a_dem'])} ({a['root']}/{plan['date']}"
+             (f"A (the table's calibration) DEM first built {utc_text(t['a_dem'])}"
+              + (f" (last rebuilt {utc_text(t['a_dem_last'])})" if t["a_dem_last"] and t["a_dem_last"] != t["a_dem"]
+                 else "") + f" ({a['root']}/{plan['date']}"
               + (f"; variant {a['variant']}" if a.get("variant") not in (None, "table") else "") + ")"
               if a["found"] and t["a_dem"] else
               f"A (the table's calibration): its product at {a['root']}/{plan['date']} has no finished DEM yet (being "
@@ -5464,8 +5701,28 @@ def gcpfree_disclosure(plan, args, pcs):
               f"stated here; give --a-root)"),
              f"B run {pc.get('run_id')}: {utc_text(t['b_run'])} to {utc_text(t['b_end'])}",
              f"B committed: {', '.join(sorted({str((p.get('committed') or {}).get('commit'))[:10] for p in pcs.values()}))}, "
-             f"{utc_text(t['b_commit'])}"]
+             f"{utc_text(t['b_commit'])}",
+             f"every run of the procedure in {rdir} ({len(runs)}): " + "; ".join(
+                 f"{r['run_id']} {r['kind']}" + (" (B's run)" if r["this"] else "")
+                 + f", started {utc_text(r['started'])}, "
+                 + (f"finished {utc_text(r['finished'])}" if r["status"] == "finished" else f"status {r['status']}")
+                 for r in runs)]
     flags = []
+    early = [r for r in runs if r["started"] and t["rule"] and r["started"] < t["rule"]]
+    if early:
+        flags.append(f"run(s) {', '.join(r['run_id'] for r in early)} started BEFORE the outcome rule in force was "
+                     f"committed: a result could have been seen when the rule was chosen")
+    trials = [r for r in runs if r["kind"] != "delivery" and r["started"] and t["b_run"] and r["started"] < t["b_run"]]
+    if trials:
+        flags.append(f"TRIAL run(s) {', '.join(r['run_id'] for r in trials)} (a full result: every verdict and angle) "
+                     f"were made before B's run {pc.get('run_id')}, under the same committed rule")
+    cut = [r for r in runs if r["status"] != "finished"]
+    if cut:
+        flags.append(f"run(s) {', '.join(r['run_id'] for r in cut)} never finished (cut off, or still running): what "
+                     f"they had computed was printed only")
+    if not a["found"]:
+        flags.append(f"the order of B relative to A is not known: no table-calibration (A) product was found at "
+                     f"{a['root']}/{plan['date']} (give --a-root)")
     if len({h.get("rule") for h in hist}) > 1:
         flags.append("the outcome rule of PREREGISTERED.txt was changed before the run ("
                      + " -> ".join(f"'{h['rule']}' {utc_text(utc_time(h['date']))}" for h in hist) + ")")
@@ -5477,9 +5734,22 @@ def gcpfree_disclosure(plan, args, pcs):
     if t["b_commit"] and t["a_dem"] and t["b_commit"] > t["a_dem"]:
         flags.append("B was committed after A's DEM was built: only B's sha256, written down (and sent) when its run "
                      "ended, shows it was not changed in between")
+    def ran(sw):                                   # {script: {sha256 it ran with}} of a product's steps
+        out_ = {}
+        for v in ((sw or {}).get("by_step") or {}).values() if isinstance(sw, dict) else []:
+            for s, h in ((v or {}).get("scripts") or {}).items():
+                out_.setdefault(s, set()).add(h)
+        return out_
+    sw_a, sw_b = ran(a.get("software")), ran(software_of_outputs(plan["out"]) if plan.get("out") else None)
+    other_code = sorted(k for k in set(sw_a) & set(sw_b) if sw_a[k] != sw_b[k])
+    if other_code:
+        flags.append(f"B was built with other code than A ({', '.join(other_code)}: see the software of both "
+                     f"provenance files)")
     return {"exposure": pc.get("exposure") or "the procedure's report states no exposure",
             "order": order, "order_flags": flags,
-            "times": {k: (v.strftime("%Y-%m-%dT%H:%M:%SZ") if v else None) for k, v in t.items()}, "a_product": a,
+            "times": {k: (v.strftime("%Y-%m-%dT%H:%M:%SZ") if v else None) for k, v in t.items()},
+            "a_product": {k: v for k, v in a.items() if k not in ("options", "software")},
+            "runs": [dict(r, started=utc_text(r["started"]), finished=utc_text(r["finished"])) for r in runs],
             "rule_history": hist}
 
 
@@ -5629,10 +5899,23 @@ def calibration_origin(eo_path, dirs=(), _depth=0, name_only=False):
     return out
 
 
-def held_check(origin, b):
-    """What the holder's check of a BLIND product can test, given one camera's calibration origin.
-    -> (label, text). The label is that of a comparison of this DEM with the held survey, by the
-    calibration alone: nothing else in the chain used the held survey (the build never read it)."""
+def held_check(origin, b, envelope=None):
+    """What the holder's check of a BLIND product can test, given one camera's calibration origin and (envelope:
+    envelope_check()) the search envelope that placed its detection. -> (label, text). The label is that of a
+    comparison of this DEM with the held survey: the build never read it, so what is left is the camera geometry
+    (the calibration) and the envelope (a DEM built with calibration A, or a file not known, carries A's geometry
+    into the search band: PARTLY-CIRCULAR)."""
+    lab, text = held_check_calibration(origin, b)
+    if envelope and not envelope.get("ok") and lab == "INDEPENDENT":
+        return "PARTLY-CIRCULAR", (f"{text}; BUT {envelope.get('text')}: the envelope may rest on the held survey's "
+                                   f"calibration, so his check of this DEM is not called independent")
+    if envelope and envelope.get("ok") and lab == "INDEPENDENT" and envelope.get("text"):
+        text += f"; {envelope['text']}"
+    return lab, text
+
+
+def held_check_calibration(origin, b):
+    """held_check by the calibration alone."""
     who = b["held_by"].split(" (")[0]
     head = (f"{origin['file']} {origin['text']}" if origin["kind"] == "gcp" else f"{origin['file']}: {origin['text']}")
     pc_ = origin.get("procedure") or {}
@@ -5767,6 +6050,19 @@ def calibration_replace_note(plan, args, steps):
         return None
     variant = next((c.get("variant") for c in plan["cams"].values() if c.get("variant")), None)
     held = next((b.get("variant") for b in built.values() if b.get("variant")), None)
+    same_file = all(str((built.get(cam) or {}).get("eo_path")) == str(c.get("eo_path"))
+                    for cam, c in plan["cams"].items() if built.get(cam))
+    if variant and variant == held and same_file and \
+            re.search(rf"_{re.escape(variant)}(_c\d+(\.\d+)?)?$", Path(args.output_root).name):
+        # the same variant and file in its own root: the calibration FILE changed since the build (another root
+        # would not help)
+        return (f"the product in {plan['out']} was built with another calibration ({'; '.join(diff)}): the same --eo "
+                f"file, changed since this product was built (its sha256). Restore the file as it was, or give "
+                f"--replace to rebuild this product with it on purpose"
+                + (" (a GCP-free B edited after its run is not the pre-registered procedure's: it is refused)"
+                   if variant in GCPFREE_VARIANTS else "")
+                + (f". For this date the photo detection runs again (~{SEC_PER_PHOTO_DETECT:.0f} s a photo)."
+                   if plan.get("era") != "live" else ""))
     alt = root_for_variant(args.output_root, variant, held)
     return (f"the product in {plan['out']} was built with another calibration ({'; '.join(diff)}): this run would "
             f"rebuild its pointing, waterlines, DEM and maps with "
@@ -5886,6 +6182,231 @@ def procedure_variant_problem(plan, args):
     return "; ".join(probs)
 
 
+# A GCP-free B of a BLIND date is built exactly as A was, only the calibration different: the committed default
+# tables, A's build options as built (provenance), the search envelope A's detection used (path and sha256) and A's
+# forcing. These options name only the product, its calibration or its label, and are not compared:
+B_BUILD_NOT_COMPARED = ("--date", "--output-root", "--eo", "--calibration-variant", "--synthetic", "--force-disabled")
+# The one root and command a B is built with, written into its run folder at its first build (commit it): a B of
+# that run is built and shared from that root only, with that command.
+B_BUILD_FILE = "B_BUILD.txt"
+
+
+def gcpfree_b_of(plan, args):
+    """{camera: procedure_check()} of a pinned B (a GCP-free variant's --eo files that the pre-registered procedure
+    delivered here) on a BLIND date, else {}."""
+    if not plan.get("blind") or getattr(args, "calibration_variant", None) not in GCPFREE_VARIANTS:
+        return {}
+    pcs = {cam: procedure_check(c["eo_path"], eo_dirs(args)) for cam, c in plan["cams"].items()
+           if c.get("eo_given") and c.get("eo_path")}
+    return pcs if pcs and all(pc.get("pinned") for pc in pcs.values()) else {}
+
+
+def tiff_description(path):
+    """The ImageDescription (tag 270) of a classic little-endian TIFF, as asc_to_geotiff.py writes them, read from
+    the file's first IFD only (no image data), else None (another layout, e.g. a BigTIFF, or not a TIFF)."""
+    import struct
+    try:
+        with open(str(path), "rb") as f:
+            head = f.read(8)
+            if head[:4] != b"II*\0":
+                return None
+            off = struct.unpack("<I", head[4:8])[0]
+            f.seek(off)
+            n = struct.unpack("<H", f.read(2))[0]
+            ents = f.read(12 * min(n, 512))
+            for k in range(len(ents) // 12):
+                tag, typ, cnt, val = struct.unpack("<HHI4s", ents[12 * k:12 * k + 12])
+                if tag == 270 and typ == 2:
+                    if cnt <= 4:
+                        return val[:cnt].rstrip(b"\0").decode("ascii", "replace")
+                    f.seek(struct.unpack("<I", val)[0])
+                    return f.read(min(cnt, 1 << 16)).rstrip(b"\0").decode("ascii", "replace")
+    except (OSError, struct.error, ValueError):
+        return None
+    return None
+
+
+def product_dem_note(path):
+    """The description of a GeoTIFF this script wrote (asc_to_geotiff.py --note: '... calibration ...'), else None:
+    a search envelope that is one of these is a DEM of this pipeline, not a survey."""
+    q = Path(str(path or ""))
+    if q.suffix.lower() not in (".tif", ".tiff") or not q.is_file():
+        return None
+    d = tiff_description(q) or ""
+    return d if ("calibration" in d and ("survey_products" in d or "EPSG:" in d or "BLIND" in d)) else None
+
+
+def envelope_check(plan, cam, args, a=None):
+    """On a BLIND date, what a camera's search envelope rests on (it places the detection's search band, so an
+    envelope built with calibration A carries A's geometry into the waterlines). The envelope of the detection on
+    disk (its stamp), else the one a build would use. For a calibration variant it counts as the date's envelope
+    survey only when it is the file A's detection used (same path and sha256) and is no DEM of this pipeline.
+    -> {"ok": bool, "text", "path", "sha256"}."""
+    c = plan["cams"].get(cam) or {}
+    st = read_stamp(plan["out"], f"detect_{cam}") or {}
+    sig = (st.get("sig") or {}).get("envelope")
+    path = (sig[0] if sig else None) or (str(c["envelope_path"]) if c.get("envelope_path") else None)
+    sha = st.get("envelope_sha256") if sig else None
+    sha = sha or file_sha(path)
+    out = {"ok": True, "path": path, "sha256": sha,
+           "text": f"search envelope {Path(str(path)).name if path else c.get('envelope_survey')}"
+                   + (f" (sha256 {sha[:12]}...)" if sha else "")}
+    if plan.get("era") == "live":
+        return dict(out, text="the live detector's own envelope (not a survey)")
+    note = product_dem_note(path)
+    if note:
+        held = any(n in note for n in ("20241023_EO", "PARTLY-CIRCULAR", "CIRCULAR"))
+        return dict(out, ok=False, text=f"its search envelope {path} is a DEM of this pipeline ({note[:120]})"
+                    + ("; built with the held survey's calibration (A)" if held else "")
+                    + ": the detection's search band then carries that DEM's camera geometry")
+    if not c.get("eo_given") or not plan.get("blind"):
+        return out
+    a = a or a_product(args, plan["date"], plan_variant(plan))
+    ae = (a.get("envelope") or {}).get(cam)
+    if not a.get("found") or not ae:
+        return dict(out, ok=False, text=f"its search envelope {path} cannot be checked against A's (no A product with "
+                                        f"a {cam} detection at {a.get('root')}/{plan['date']}; give --a-root): it "
+                                        f"may not be the date's envelope survey")
+    if str(path) != str(ae.get("path")):
+        return dict(out, ok=False, text=f"its search envelope {path} is not the one A's detection used "
+                                        f"({ae.get('path')})")
+    if ae.get("sha256") and sha != ae["sha256"]:
+        return dict(out, ok=False, text=f"its search envelope {path} (sha256 {str(sha)[:12]}...) is not the file A's "
+                                        f"detection used (sha256 {ae['sha256'][:12]}...)")
+    if not ae.get("sha256") and file_sig(path) != ae.get("sig"):
+        return dict(out, ok=False, text=f"its search envelope {path} is not the file A's detection used (size or "
+                                        f"time; A's stamp records no sha256)")
+    return dict(out, text=out["text"] + ", the file A's detection used")
+
+
+def b_build_record(pcs):
+    """The B_BUILD.txt of a pinned B's run folder: {path, exists, root, command, options_sha256, git} ({} for
+    no B)."""
+    if not pcs:
+        return {}
+    rd = Path(str(next(iter(pcs.values())).get("run_dir")))
+    f = rd / B_BUILD_FILE
+    out = {"path": str(f), "exists": f.is_file()}
+    if f.is_file():
+        for ln in f.read_text().splitlines():
+            if ":" in ln and not ln.startswith("#"):
+                k, v = ln.split(":", 1)
+                out.setdefault(k.strip(), v.strip())
+        out["git"] = git_file_state(f)
+    return out
+
+
+def b_build_options(args, date):
+    """The result-changing options of this build (state_argv), less those that name only the product
+    (B_BUILD_NOT_COMPARED). -> {option: [values]}."""
+    return {k: v for k, v in argv_options(state_argv(args, date)).items() if k not in B_BUILD_NOT_COMPARED}
+
+
+def blind_b_build_problem(plan, args):
+    """A GCP-free B of a BLIND date must be the pre-registered B BUILD, not only the pre-registered calibration: the
+    committed default tables (surveys/survey_dates.csv, surveys.csv); A's product found (--a-root) and every
+    result-changing option equal to A's as built (its provenance: the command that rebuilds it), the same search
+    envelope (path and sha256 of A's detection) and the same forcing inputs; and, once its first build wrote
+    B_BUILD.txt into the run folder, that root and command. Anything else is refused (exit 5): a B built with other
+    options, another envelope (e.g. A's DEM) or in a second root could be chosen after comparing it with A.
+    -> text ('' when fine, or not such a build)."""
+    pcs = gcpfree_b_of(plan, args)
+    if not pcs:
+        return ""
+    probs = []
+    for opt, given, default in (("--config", args.config, DEFAULT_CONFIG), ("--surveys", args.surveys,
+                                                                             DEFAULT_SURVEYS)):
+        if os.path.realpath(str(given)) != os.path.realpath(str(default)):
+            probs.append(f"{opt} {given}: a B is built with the committed {Path(default).name} of this repository")
+            continue
+        g = git_file_state(default)
+        if not g.get("committed"):
+            probs.append(f"{default} is {g.get('why')}: a B is built with the table as committed")
+    a = a_product(args, plan["date"], plan_variant(plan))
+    if not a.get("found") or a.get("options") is None:
+        probs.append(f"no table-calibration (A) product of {plan['date']} with its build record at {a.get('root')} "
+                     f"(give --a-root <A's output root>): a B is built as A was, and checked against A's record")
+    else:
+        mine, theirs = b_build_options(args, plan["date"]), {k: v for k, v in a["options"].items()
+                                                             if k not in B_BUILD_NOT_COMPARED}
+        def shown(o, k):
+            return "(default)" if k not in o else (" ".join(o[k]) or "on")
+        diff = [f"{k} {shown(mine, k)} (A: {shown(theirs, k)})"
+                for k in sorted(set(mine) | set(theirs)) if mine.get(k) != theirs.get(k)]
+        if diff:
+            probs.append("its build options are not A's as built (" + "; ".join(diff) + "): a B is built with "
+                         "every result-changing option as A was, only the calibration different")
+        for cam in plan["cams"]:
+            ec = envelope_check(plan, cam, args, a)
+            if not ec["ok"]:
+                probs.append(f"{cam}: {ec['text']}")
+        if a.get("forcing_inputs"):
+            try:
+                now = {k: file_sig(q) for k, q in forcing_inputs(args).items()}
+            except StepFailed:
+                now = None
+            if now is not None and normal(now) != normal(a["forcing_inputs"]):
+                bad = sorted(k for k in set(now) | set(a["forcing_inputs"])
+                             if normal(now.get(k)) != normal(a["forcing_inputs"].get(k)))
+                probs.append(f"its forcing inputs are not the files A's forcing was built from ({', '.join(bad)})")
+    rec = b_build_record(pcs)
+    if rec.get("exists"):
+        if os.path.realpath(str(args.output_root)) != rec.get("root"):
+            probs.append(f"this B (run {next(iter(pcs.values())).get('run_id')}) is built in {rec.get('root')} only "
+                         f"({rec['path']}: its first build): one B root, so no second B can be built and compared")
+        elif rec.get("options_sha256") != options_sha256(b_build_options(args, plan["date"])):
+            probs.append(f"this B's build command is fixed by its first build ({rec['path']}: "
+                         f"{rec.get('command')}): rebuild it with that command")
+    return "; ".join(probs)
+
+
+def options_sha256(opts):
+    return hashlib.sha256(json.dumps(opts, sort_keys=True).encode()).hexdigest()
+
+
+def write_b_build_record(plan, args, pcs):
+    """At a B's first build: its root and command, into its run folder (B_BUILD.txt; to be committed). -> path or
+    None (already there)."""
+    rec = b_build_record(pcs)
+    if not pcs or rec.get("exists"):
+        return None
+    a = a_product(args, plan["date"], plan_variant(plan))
+    f = Path(rec["path"])
+    opts = b_build_options(args, plan["date"])
+    f.write_text(
+        "# B BUILD: the one root and command this run's GCP-free B is built with (survey_products.py, at its first\n"
+        "# build). COMMIT THIS FILE now (git add + git commit): the B is built and shared from this root only, with\n"
+        "# this command; another root or command is refused.\n"
+        f"date: {plan['date']}\n"
+        f"variant: {args.calibration_variant}\n"
+        f"run: {next(iter(pcs.values())).get('run_id')}\n"
+        f"root: {os.path.realpath(str(args.output_root))}\n"
+        f"command: {cmd_text(['python3', 'survey_products.py'] + state_argv(args, plan['date']))}\n"
+        f"options_sha256: {options_sha256(opts)}\n"
+        f"a_root: {a.get('root')}\n"
+        f"a_dem_first_built_utc: {a.get('dem_built_utc')}\n"
+        + "".join(f"b_file_{cam}: {pc.get('b_sha256')}\n" for cam, pc in sorted(pcs.items()))
+        + "".join(f"envelope_{cam}: {envelope_check(plan, cam, args, a).get('sha256')}\n" for cam in sorted(plan['cams']))
+        + f"written_utc: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\n")
+    return f
+
+
+def b_forcing_problem(plan, args):
+    """After a pinned B's forcing step: its water level and waves must be A's, byte for byte (the forcing does not
+    depend on the calibration). -> text or ''."""
+    if not gcpfree_b_of(plan, args):
+        return ""
+    a = a_product(args, plan["date"], plan_variant(plan))
+    bad = []
+    for k, want in (a.get("forcing_sha256") or {}).items():
+        q = plan["out"] / "forcing" / k
+        got = sha256(q) if q.is_file() else None
+        if want and got != want:
+            bad.append(k)
+    return (f"its forcing ({', '.join(bad)}) is not A's ({a.get('root')}/{plan['date']}/forcing): a B is built with A's "
+            f"water level and waves" if bad else "")
+
+
 def option_refusal(plan, args):
     """What refuses this run before anything is written (exit 5): a wrong --eo, a variant in the wrong root,
     an --eo calibration whose acceptance failed, a GCP-free B under another name than the procedure gave it.
@@ -5902,7 +6423,8 @@ def blind_independence_warnings(plan, args):
     out = []
     for cam, c in plan["cams"].items():
         if c.get("eo_given") and c.get("eo_path"):
-            lab, why = held_check(calibration_origin(c["eo_path"], eo_dirs(args)), plan["blind"])
+            lab, why = held_check(calibration_origin(c["eo_path"], eo_dirs(args)), plan["blind"],
+                                  envelope_check(plan, cam, args))
             if lab != "INDEPENDENT":
                 out.append(f"{cam}: the --eo calibration (variant {c.get('variant')}) is NOT independent of the held "
                            f"survey: {why}")
@@ -6111,35 +6633,78 @@ def comparison_current(plan, s):
     return ok, why
 
 
-def tilt_sensitivity(plan, cam, dtilt, droll):
+def nan_gradient(g, cell):
+    """(d/drow, d/dcol) of a grid with empty (NaN) cells: a central difference where both neighbours are there, else
+    a one-sided one, else NaN (np.gradient leaves NaN wherever a neighbour is empty: a thin strip of cells then has
+    no slope at all)."""
+    p = np.pad(np.asarray(g, float), 1, mode="constant", constant_values=np.nan)
+    out = []
+    for prev, nxt in ((p[:-2, 1:-1], p[2:, 1:-1]), (p[1:-1, :-2], p[1:-1, 2:])):
+        d = np.where(np.isfinite(prev) & np.isfinite(nxt), (nxt - prev) / (2.0 * cell),
+                     np.where(np.isfinite(nxt), (nxt - g) / cell, np.where(np.isfinite(prev), (g - prev) / cell,
+                                                                           np.nan)))
+        out.append(np.where(np.isfinite(g), d, np.nan))
+    return out[0], out[1]
+
+
+TILT_MIN_CELLS, TILT_MIN_BAND = 20, 15
+
+
+def tilt_sensitivity(plan, cam, dtilt, droll, why=None):
     """
     The DEM error a pointing error of (dtilt, droll) deg would cause, per range band, from this
     date's own DEM and calibration. Each DEM cell is projected into the photo with the
     calibration, mapped back to the ground at its own elevation with the pointing changed, and
     the DEM's local slope times that horizontal shift is the elevation error. The view grazes the
     beach, so a small tilt moves a line metres along the ground (~1/sin of the depression angle).
-    -> list of dicts (range band, cells, median shift m, median error m, median |error| m), or None without a DEM.
+    The local slope is np.gradient's; where that leaves too few cells (a thin strip: every cell has an
+    empty neighbour), one-sided differences (nan_gradient).
+    -> list of dicts (range band, cells, median shift m, median error m, median |error| m), or None; why
+    (a dict, if given) gets "text": why there is no band.
     """
     from georectify import load_intrinsics, load_extrinsics, pixel_to_ground
     from view_reproject import ground_to_pixel
     from asc_to_geotiff import read_asc
+    why = why if why is not None else {}
     c = plan["cams"].get(cam) or {}
     demp = Path(f"{dem_stem(plan)}_dem.asc")
     if not demp.exists() or not c.get("eo_path") or not Path(c["io_path"]).exists():
+        why["text"] = ("no DEM yet" if not demp.exists() else f"no calibration or lens file for {cam}")
         return None
     g, h = read_asc(demp)
     cell = h["cellsize"]
     xll, ytop = h["xllcorner"], h["yllcorner"] + g.shape[0] * cell
-    d_row, d_col = np.gradient(g, cell)
-    dzde, dzdn = d_col, -d_row                   # rows run north to south
-    rr, cc = np.nonzero(np.isfinite(g) & np.isfinite(dzde) & np.isfinite(dzdn))
-    if len(rr) < 20:
-        return None
-    E, N, Z = xll + (cc + 0.5) * cell, ytop - (rr + 0.5) * cell, g[rr, cc]
     io, eo = load_intrinsics(c["io_path"]), load_extrinsics(c["eo_path"])
-    U, V, ok = ground_to_pixel(E, N, Z, io, eo)
-    if ok.sum() < 20:
-        return None
+    rows, n_view, n_slope = [], 0, 0
+    for how, grad in (("", lambda: np.gradient(g, cell)), (" (one-sided slopes)", lambda: nan_gradient(g, cell))):
+        d_row, d_col = grad()
+        dzde, dzdn = d_col, -d_row                   # rows run north to south
+        rr, cc = np.nonzero(np.isfinite(g) & np.isfinite(dzde) & np.isfinite(dzdn))
+        n_slope = max(n_slope, len(rr))
+        if len(rr) < TILT_MIN_CELLS:
+            continue
+        E, N, Z = xll + (cc + 0.5) * cell, ytop - (rr + 0.5) * cell, g[rr, cc]
+        U, V, ok = ground_to_pixel(E, N, Z, io, eo)
+        n_view = int(ok.sum())
+        if ok.sum() < TILT_MIN_CELLS:
+            continue
+        rows = tilt_bands(E, N, Z, U, V, ok, rr, cc, dzde, dzdn, io, eo, dtilt, droll, pixel_to_ground)
+        if rows:
+            for r in rows if how else []:
+                r["slope"] = "one-sided differences where a neighbour cell is empty"
+            return rows
+    n_cells = int(np.isfinite(g).sum())
+    why["text"] = (f"the DEM has {n_cells} cells, {n_slope} with a local slope (even from one-sided differences), "
+                   f"fewer than the {TILT_MIN_CELLS} needed" if n_slope < TILT_MIN_CELLS else
+                   f"the DEM has {n_cells} cells, but only {n_view} with a local slope in {cam}'s view (fewer than "
+                   f"{TILT_MIN_CELLS})" if n_view < TILT_MIN_CELLS else
+                   f"no range band holds {TILT_MIN_BAND} or more of the {n_view} DEM cells with a local slope in "
+                   f"{cam}'s view")
+    return None
+
+
+def tilt_bands(E, N, Z, U, V, ok, rr, cc, dzde, dzdn, io, eo, dtilt, droll, pixel_to_ground):
+    """tilt_sensitivity's per-band medians for the cells in view (ok). -> list of dicts (empty: no band)."""
     e2 = eo.copy()
     e2[4] += np.deg2rad(dtilt)
     e2[5] += np.deg2rad(droll)
@@ -6151,12 +6716,12 @@ def tilt_sensitivity(plan, cam, dtilt, droll):
     rows = []
     for a, b in ((0, 100), (100, 150), (150, 200), (200, 250), (250, 300), (300, 350), (350, 450), (450, 800)):
         m = (rng >= a) & (rng < b) & np.isfinite(err)
-        if m.sum() >= 15:
+        if m.sum() >= TILT_MIN_BAND:
             rows.append({"range_m": f"{a}-{b}", "cells": int(m.sum()),
                          "shift_m": round(float(np.median(shift[m])), 2),
                          "dem_error_m": round(float(np.median(err[m])), 3),
                          "dem_abs_error_m": round(float(np.median(np.abs(err[m]))), 3)})
-    return rows or None
+    return rows
 
 
 def survey_path_for(s, plan, args):
@@ -6782,10 +7347,14 @@ def collect_caveats(plan, args, state, forcing, prov):
         off = pointing_offset(info, eo_)
         if off:
             dt, dr = off[0], off[1]
-            sens = tilt_sensitivity(plan, cam, dt, dr)
+            sens_why = {}
+            sens = tilt_sensitivity(plan, cam, dt, dr, why=sens_why)
             if sens:
                 off = pointing_offset(info, eo_, rate=False) or off
             text = f"{cam}: {off[2]}"
+            if not sens:                     # the rough rate's promise of a per-band table is kept only when it is made
+                text = text.replace("the README gives it per range band from this date's own DEM, roll included",
+                                    f"not given per range band from this date's DEM: {sens_why.get('text') or 'no DEM'}")
             if sens:
                 text += (f". From this date's own DEM and calibration, a pointing error of {dt:+.2f}/{dr:+.2f} deg "
                          f"(tilt/roll) would shift the DEM by: "
@@ -7600,6 +8169,7 @@ def write_provenance(plan, args, state, final=True):
                             "table_eo_file": c.get("table_eo_file") or c["eo_file"],
                             "origin": calibration_origin(c["eo_path"] or c["eo_file"], eo_dirs(args))},
             "search_envelope": ({"survey": str(c["envelope_path"] or c["envelope_survey"]),
+                                 "sha256": envelope_check(plan, cam, args).get("sha256"),
                                  "how": "detect_original_view.py: the survey's -1.5..+2.5 m band projected "
                                         "into the photo with this calibration"}
                                 if plan["era"] != "live" else
@@ -7634,12 +8204,13 @@ def write_provenance(plan, args, state, final=True):
     for cam, pc_ in pinned.items():
         u_ = pc_.get("uncertainty") or {}
         if u_.get("rotation_deg"):
+            why_ = {}
             try:
-                bands = tilt_sensitivity(plan, cam, float(u_["rotation_deg"]), 0.0)
-            except Exception:                    # no readable DEM yet: said as not computed
-                bands = None
+                bands = tilt_sensitivity(plan, cam, float(u_["rotation_deg"]), 0.0, why=why_)
+            except Exception as exc:             # no readable DEM yet: said as not computed
+                bands, why_["text"] = None, f"the DEM cannot be read ({exc.__class__.__name__})"
             cams[cam]["calibration"]["rotation_term_as_tilt"] = {
-                "tilt_deg": u_["rotation_deg"], "bands": bands,
+                "tilt_deg": u_["rotation_deg"], "bands": bands, "why_none": None if bands else why_.get("text"),
                 "how": "each DEM cell projected into the photo with this calibration and back to the ground at its own "
                        "elevation with the tilt changed by the rotation term; DEM error = local slope x that move; "
                        "median per range band from the camera"}
@@ -7651,7 +8222,8 @@ def write_provenance(plan, args, state, final=True):
     blind = None
     if plan.get("blind"):
         b = plan["blind"]
-        per_cam = {cam: dict(zip(("label", "why"), held_check(v["calibration"]["origin"], b)))
+        per_cam = {cam: dict(zip(("label", "why"), held_check(v["calibration"]["origin"], b,
+                                                             envelope_check(plan, cam, args))))
                    for cam, v in cams.items()}
         other = [{"label": "PARTLY-CIRCULAR", "why": f"setup coefficient C = {f['coef']} of unknown origin (no "
                                                      f"--setup-fitted-to): it may have been fitted to the held survey"}
@@ -7666,8 +8238,9 @@ def write_provenance(plan, args, state, final=True):
                         "step did not run; the plan view draws no survey",
                  "check": {"label": worst, "per_camera": per_cam, "other": other,
                            "what": "how independent the holder's check of THIS DEM is, by the calibration it was "
-                                   "built with (nothing else in the chain used the held survey: the build never "
-                                   "read it)"}}
+                                   "built with and the search envelope that placed its detection (the build never "
+                                   "read the held survey; a GCP-free B is built as A was, only the calibration "
+                                   "different)"}}
         if pinned:                  # a GCP-free B: what its makers had seen of A, and the order of pin, rule, A and B
             blind["gcpfree"] = gcpfree_disclosure(plan, args, pinned)
     comps = []
@@ -8011,11 +8584,18 @@ def write_readme(plan, args, prov):
         w(f"  The survey: {bl['survey']}, held by {bl['held_by']} since {bl.get('since')}. This build never looked "
           f"for a survey file of {d}" + (f" or of {bl['survey_date']}" if bl["survey_date"] != d else "")
           + f", under any name or in any folder (survey_products.py "
-          f"BLIND_DATES), made no comparison and drew no survey on the maps: whatever lies on this computer, "
-          f"nothing of it went into this product.")
+          f"BLIND_DATES), made no comparison and drew no survey on the maps: no survey of that date, whatever "
+          f"lies on this computer, went into this product.")
         ck = bl.get("check") or {}
-        w(f"  How independent his check of this DEM is: {ck.get('label')} (by the calibration it was built with; "
-          f"nothing else in the chain used his survey)")
+        w(f"  How independent his check of this DEM is: {ck.get('label')} (by the calibration it was built with and "
+          f"the search envelope that placed its detection, each named below with its sha256; a GCP-free B is also "
+          f"built exactly as A was, only the calibration different: the committed tables, A's options, envelope "
+          f"and forcing)")
+        for cam, v in sorted((prov.get("cameras") or {}).items()):
+            se = v.get("search_envelope") or {}
+            if se.get("survey"):
+                w(f"    {cam} search envelope: {se.get('survey')}" + (f" sha256 {se['sha256']}" if se.get("sha256")
+                                                                       else ""))
         for cam, v in sorted((ck.get("per_camera") or {}).items()):
             w(f"    {cam}: {v['label']}: {v['why']}")
         for o in ck.get("other") or []:
@@ -8245,7 +8825,7 @@ def dry_run(plan, args, steps):
             say("  acceptance", org["acceptance"]["verdict"]
                 + (f" ({org['acceptance']['text']})" if org["acceptance"].get("text") else ""))
         if plan.get("blind"):
-            say("  held check", " -- ".join(held_check(org, plan["blind"])))
+            say("  held check", " -- ".join(held_check(org, plan["blind"], envelope_check(plan, cam, args))))
         if plan["era"] != "live":
             say("  envelope", f"{c['envelope_survey']} -> "
                 f"{c['envelope_path'] or 'NOT FOUND in ' + ', '.join(args.survey_dirs)}")
@@ -8334,6 +8914,16 @@ def dry_run(plan, args, steps):
     bad = option_refusal(plan, args)
     if bad:
         warn(f"a real run would be REFUSED (exit 5): {bad}")
+    else:
+        bb = blind_b_build_problem(plan, args)
+        if bb:
+            warn(f"a real run would be REFUSED (exit 5): NOT the pre-registered B build: {bb}")
+        elif gcpfree_b_of(plan, args):
+            rec = b_build_record(gcpfree_b_of(plan, args))
+            say("B build", ("the pre-registered B build (the committed tables, A's options, envelope and forcing "
+                            "inputs); " + (f"its root and command as recorded in {rec['path']}" if rec.get("exists") else
+                                           f"a real run records this root and command in {rec.get('path')} (commit "
+                                           f"it then)")))
     for w_ in blind_independence_warnings(plan, args):
         warn(w_)
     if plan.get("blind") and blind_leftovers(plan):
@@ -8488,6 +9078,21 @@ def release_lock(out):
             pass
 
 
+def photo_scan_refusal(plan, args, steps):
+    """The photo folders scanned before any step runs (scan_photos is cached: the steps reuse it): a photo-named file
+    there that is, or links to, a file named like a held survey is refused by this process's guard (BlindSurvey, before
+    it is opened) while the scan reads its size. Said as a refusal, before anything is written (no forcing step, no
+    folder). -> text or ''."""
+    if plan.get("era") == "live" or not (args.dry_run or {"pointing", "detect"} & set(steps)):
+        return ""
+    try:
+        for cam in plan["cams"]:
+            scan_photos(plan, cam, args)
+    except BlindSurvey as exc:
+        return f"a file in the photo folders is (or links to) a file named like the held survey: {exc}"
+    return ""
+
+
 def build_date(date, cfg, surveys, args, steps):
     args = argparse.Namespace(**vars(args))          # this date's own copy (built settings go in it)
     plan = build_plan(date, cfg, surveys, args)
@@ -8498,6 +9103,14 @@ def build_date(date, cfg, surveys, args, steps):
     bad = option_refusal(plan, args)
     if not bad:
         keep_built_calibration(plan, args, steps, state)
+        bad = blind_b_build_problem(plan, args)
+        if bad:
+            bad = f"NOT the pre-registered B build: {bad}"
+    ps = photo_scan_refusal(plan, args, steps)
+    if ps:                                           # before anything is written, a dry run too
+        rule(f"{date}  era {plan['era']}  cameras {', '.join(plan['cams'])}")
+        warn(f"{date}: REFUSED (exit 5): {ps}. NOTHING built")
+        return "refused"
     if args.dry_run:
         dry_run(plan, args, steps)
         return "dry-run"
@@ -8546,6 +9159,11 @@ def build_date(date, cfg, surveys, args, steps):
         if rep_w:
             warn(rep_w)
             state["replaced_window"] = rep_w
+        rec = write_b_build_record(plan, args, gcpfree_b_of(plan, args))
+        if rec:
+            warn(f"{date}: this B's root and command are recorded in {rec} (its first build): COMMIT IT NOW (git -C "
+                 f"{rec.parent} add {rec.name} && git -C {rec.parent} commit -m 'gcpfree: B build'); the B is built "
+                 f"and shared from {os.path.realpath(str(args.output_root))} only, with this command")
         return run_date(plan, args, steps, state)
     finally:
         release_lock(plan["out"])
@@ -8602,6 +9220,10 @@ def run_date(plan, args, steps, state):
             t0 = time.time()
             try:
                 state["steps"][st] = funcs[st](plan, args, state)
+                if st == "forcing":
+                    fb = b_forcing_problem(plan, args)
+                    if fb:
+                        raise StepFailed(f"NOT the pre-registered B build: {fb}")
             except StepFailed as exc:
                 state["steps"][st] = "FAILED"
                 state["failures"].append(f"{st}: {exc}")
@@ -9903,6 +10525,32 @@ def share_name(date, prov):
     return f"{date}_survey_product" + ("" if v == "table" else f"_{v}")
 
 
+def lens_note(io_, cam, station, files, seen):
+    """The detector reads every date's lens as CACO05_<cam>_20240801_IO.yaml (the lens of the camera since Aug 2024,
+    on every mount). A product of another station (CACO03, CACO04) also gets that station's file of the same lens
+    (e.g. CACO03_<cam>_20240801_IO.yaml, which gcpfree_eo.py solved with), and the MANIFEST says whether the two
+    have the same numbers. -> MANIFEST line or ''."""
+    if not station or station == "CACO05" or not str(io_.name).startswith("CACO05_"):
+        return ""
+    other = io_.parent / io_.name.replace("CACO05_", f"{station}_", 1)
+    if not other.is_file():
+        return (f"lens {cam}: {io_.name} (the detector's lens file; no {other.name} here to compare with)")
+    try:
+        from georectify import load_intrinsics
+        dmax = float(np.max(np.abs(np.asarray(load_intrinsics(io_), float) - np.asarray(load_intrinsics(other), float))))
+    except Exception:
+        dmax = None
+    if other not in seen:
+        seen.add(other)
+        files.append((other, f"calibration/{other.name}"))
+    return (f"lens {cam}: {io_.name} is the file the detector reads (every station's lens under its CACO05 name); "
+            f"{other.name}, this {station} product's own lens file, is in the archive too: "
+            + (f"the same lens (the CACO05 file holds its numbers rounded: the largest difference {dmax:.1e}, in px "
+               f"or a distortion coefficient)" if dmax is not None and dmax < 1e-5 else
+               f"THEY DIFFER (by up to {dmax:.3g}): this DEM was built with the CACO05 file" if dmax is not None else
+               "not compared (not readable)"))
+
+
 def share(args):
     """
     One archive of a built date to send (e.g. to the holder of a blind date's survey): README, provenance, the
@@ -9947,6 +10595,19 @@ def share(args):
             if not pc.get("pinned"):
                 problems.append(f"{cam} {cal.get('eo_file')}: NOT the pre-registered procedure's B "
                                 f"({'; '.join(pc.get('why') or ['its file is not here'])})")
+            elif prov.get("blind"):
+                # the one B root its first build recorded (B_BUILD.txt, committed once): no other root is shared
+                rec = b_build_record({cam: pc})
+                g = rec.get("git") or {}
+                if not rec.get("exists"):
+                    problems.append(f"{cam}: no {B_BUILD_FILE} in its run folder ({rec.get('path')}): a B is shared "
+                                    f"only from the root its first build recorded there")
+                elif rec.get("root") != os.path.realpath(str(args.output_root)):
+                    problems.append(f"{cam}: this B is built in {rec.get('root')} ({rec['path']}), not in "
+                                    f"{args.output_root}: only that root's B is shared")
+                elif not g.get("committed") or g.get("commits") != 1:
+                    problems.append(f"{rec['path']} is {g.get('why') or 'committed more than once'}: commit it (once) "
+                                    f"before the B is shared")
     if problems:
         print(f"--share: {name} REFUSED: " + "; ".join(problems))
         return EXIT_CODES["refused"]
@@ -9957,6 +10618,7 @@ def share(args):
         return EXIT_CODES["refused"]
     files = []                                     # (path on disk, path in the archive)
     prereg = []                                    # what the archive says of the GCP-free pre-registration
+    lens = []                                      # what the archive says of the lens files
     for f in ("README.txt", "provenance.json"):
         if (out / f).is_file():
             files.append((out / f, f))
@@ -9980,11 +10642,13 @@ def share(args):
         if io_.is_file() and io_ not in seen:
             seen.add(io_)
             files.append((io_, f"calibration/{io_.name}"))
+            lens.append(lens_note(io_, cam, (v.get("station") or ""), files, seen))
         pc = ((cal.get("origin") or {}).get("procedure") or {})
         if pc.get("pinned") and pc.get("run_dir"):
             rd = Path(pc["run_dir"])
             for q in sorted(rd.glob("*_report.json")) + sorted(rd.glob("*_report.txt")) + [rd / "run.json",
-                                                                                           rd / "run_report.txt"]:
+                                                                                           rd / "run_report.txt",
+                                                                                           rd / B_BUILD_FILE]:
                 if q.is_file() and q not in seen:
                     seen.add(q)
                     files.append((q, f"calibration/gcpfree_run_{rd.name}/{q.name}"))
@@ -10037,6 +10701,7 @@ def share(args):
         lines += [gf.get("exposure") or "", "ORDER (what decides B, and A): " + "; ".join(gf.get("order") or [])]
         lines += [f"NOTE: {x}" for x in gf.get("order_flags") or []]
     lines += sorted(set(prereg))
+    lines += [x for x in lens if x]
     lines += ["The DEM and map files carry the calibration variant in their names (the table's: <date>_dem.tif, "
               "maps/<date>_waterlines_plan.png; a variant: <date>_<variant>_dem.tif, maps/<date>_<variant>_waterlines_"
               "plan.png); every GeoTIFF's description (and, on a blind date or with a variant, the plan view's title) "

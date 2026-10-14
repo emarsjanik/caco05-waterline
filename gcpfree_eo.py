@@ -26,26 +26,36 @@ solutions of Aug 2024 and Jan 2025 place the camera 0.36 m apart for c1
 (0.34 m horizontally, 0.11 m in height) and 1.23 m for c2 (1.08 m, 0.59 m)
 on a mount that did not move.
 
-PRE-REGISTRATION FILE (required). calibration/gcpfree/PREREGISTERED.txt,
-written by `--preregister` with the OWNER's choice of the outcome rule
-(below) and COMMITTED to git before any run. Every run, a trial too, refuses
-(exit 2) while it is missing, not committed, changed since its last commit,
-names another sha256 of this script or of its modules (estimate_eo_rotation.py,
-georectify.py, horizon_check.py, detect_original_view.py, view_reproject.py),
-names photo folders other than the station's three (ROOTS), or states no valid
-rule; and once any run has been made under it, under any other version of it
-(so a rule can never be chosen after seeing a result). Each run records the
-file's sha256 and its git history (every commit that touched it). Nothing is
-pre-registered or run unless this file and its modules are the version
-survey_products.py pins last (its GCPFREE_PINS, read without importing it):
-a B of any other version would be 'NOT the pre-registered procedure' there,
-and the one delivery run would be spent on it. Only THIS repository's file
-(calibration/gcpfree/PREREGISTERED.txt next to this script, PREREG) makes
-delivery runs: a run under any other --preregistered file (another folder,
-another repository) is a TRIAL run, reports only, so a second
-pre-registration made after a result was seen can never deliver a B (and
-survey_products.py accepts a B only from runs/ next to this repository's
-file, as the first delivery run there).
+PRE-REGISTRATION FILE (required). calibration/gcpfree/PREREGISTERED.txt next
+to this script (PREREG; there is no other), written by `--preregister` with
+the OWNER's choice of the outcome rule (below) and the PHOTO MANIFEST (name,
+size and sha256 of every Oct, Jan and, for c2, Dec photo a run selects from
+the station's three folders), and COMMITTED to git before any run. EVERY run,
+a trial too, is made under this file and refuses (exit 2) while it is
+missing, not committed, changed since its last commit, names another sha256
+of this script or of its modules (estimate_eo_rotation.py, georectify.py,
+horizon_check.py, detect_original_view.py, view_reproject.py), names photo
+folders other than the station's three (ROOTS), pins no photos, or states no
+valid rule; and once any run has been made under it, under any other version
+of it. So the rule is fixed, committed, before this code solves any photo,
+and a run on the station's folders that selects other photos than the
+manifest (a photo removed, replaced or added after a look) is refused. Each
+run records the file's sha256 and its git history (every commit that touched
+it). Nothing is pre-registered or run unless this file and its modules are
+the version survey_products.py pins last (its GCPFREE_PINS, read without
+importing it): a B of any other version would be 'NOT the pre-registered
+procedure' there, and the one delivery run would be spent on it. A run is
+also refused while a commit OUTSIDE this branch's history (another branch, a
+stash, the reflog: a branch made from before the pre-registration, a reset)
+wrote a PREREGISTERED.txt or a run record (runs/*/run.json) whose content
+this branch's history does not hold: an earlier pre-registration or run there
+would otherwise be invisible. What no check here can see: a copy of this
+procedure run outside this repository (another clone, a copy of the script)
+before the pre-registration, and a branch or reflog entry removed with its
+history; only the sha256s the holder is sent beforehand (the deploy notes)
+answer those. survey_products.py accepts a B only from runs/ next to this
+repository's file, as the first delivery run there, and its README lists
+every run in runs/ (a trial, a killed run) with its start time.
 
 STEPS (per camera)
   1. Photos (CACO03 timex, full frame as the lens file, each name once):
@@ -132,10 +142,16 @@ running process is not the pre-registered procedure; and every repository
 module the run had loaded, with its sha256: the five MODULES are pinned,
 the others -- compare_dem_survey.py, asc_to_geotiff.py and
 dem_from_contours.py, imported by detect_original_view.py for its survey
-envelope -- compute nothing of B and are recorded only). A DELIVERY run
-uses this repository's pre-registration (PREREG), the station's three photo
-folders (ROOTS, the default --roots) and --camera both; any other run is a
-TRIAL (folder suffix _trial): reports only, no B file. A run (trial or
+envelope -- compute nothing of B and are recorded only), and the photos it
+selected (name, size, sha256; for Aug photos from --aug-dir too, which no
+pre-registration can list before they arrive). A DELIVERY run uses the
+station's three photo folders (ROOTS, the default --roots), exactly the
+pre-registered photos, and --camera both; any other run (one camera, other
+--roots) is a TRIAL (folder suffix _trial), made under the same committed
+pre-registration and recorded in the same runs/: reports only, no B file. A
+trial is a FULL result (every verdict, every angle): it is never run on the
+station (survey_products.py lists every run in B's README, and a trial or a
+killed run left uncommitted stops the B DEM build). A run (trial or
 delivery) is refused (exit 2) when a camera it solves has no Oct 2024 or no
 Jan 2025 photo, and a delivery run when a photo folder is missing (an
 unmounted disk would change the photos used): bad input never becomes a
@@ -180,7 +196,10 @@ bound on real photos):
              five synthetic position-inheritance cases (camera height
              +/-0.25 and +/-0.55 m, 0.5 m east and north, and the Aug 2024 -
              Jan 2025 solution difference): POSITION_TERM below. The largest
-             of five cases, not a bound.
+             of five cases, not a bound. These cases were chosen AFTER A's
+             rows had been seen, and three of them match c1's A minus Jan
+             2025 offset (EXPOSURE): c1's DEM term comes from the -0.55 m
+             case.
 
 EXPECTED OUTCOME (stated before the run, from the tests of 13 Oct 2026):
   c1: NOT DELIVERED from Jan photos (its Jan and Oct views share no fixed
@@ -205,6 +224,17 @@ A, and when; written into every report and B file, see EXPOSURE below).
   The synthetic test turns that validated the gates (pan -12.5 deg for c1,
     -13.4 deg for c2) are the sizes the brief gave: A minus the Jan 2025
     solution.
+  13 Oct 2026, 15:16 UTC, five minutes after A's rows were printed: the five
+    position-inheritance cases that size the stated POSITION term were
+    written. Three of them match c1's A minus Jan 2025 camera offset
+    (-0.39 m east, +0.41 m north, +0.55 m up): the +/-0.55 m height cases
+    and the 0.5 m east-and-north case; the design log gives no other source
+    for 0.55 m (c1's Aug 2024 - Jan 2025 height difference is 0.11 m; c2's
+    0.59 m has its own case). c1's stated DEM position term (POSITION_TERM:
+    |dz| median 0.011 m, p90 0.026 m) comes from the -0.55 m case: it was
+    sized after A had been seen, and is in effect the DEM effect of A's own
+    height offset from the Jan solution. It is a stated uncertainty only: no
+    gate, threshold or rule uses it.
   14 Oct 2026: the implementer read a synthetic test fixture's notes that
     give A's azimuths to 0.1 deg; the same day (the order is not recorded)
     the horizon pass rule was changed from |d| <= tolerance (the 13 Oct
@@ -213,8 +243,9 @@ A, and when; written into every report and B file, see EXPOSURE below).
     (HZ_EXPECTED_WINDOW_PX = 60, HZ_EDGE_MARGIN_PX = 25). Later changes of 14
     Oct 2026 (review) touched texts, records and refusals only: no gate,
     threshold, window or rule of the computation.
-  No constant, threshold or rule was set from A's numbers by intent (this
-  is a statement, it cannot be proven), and the computation never reads A.
+  Apart from those position cases, no constant, threshold or rule was set
+  from A's numbers by intent (this is a statement, it cannot be proven), and
+  the computation never reads A.
   The 23 Oct 2024 GCPs were never on this side at all. On the station, the
   deploy notes have this procedure's sha256 (survey_products.py
   GCPFREE_PINS) sent to the holder before A's DEM is built; A's DEM may be
@@ -222,14 +253,16 @@ A, and when; written into every report and B file, see EXPOSURE below).
   run: the B DEM's README states the actual order, with dates.
 
 Usage (on the station, from the repo folder):
+    python3 gcpfree_eo.py --dry-run       # the pre-registration, the photos (would a run be refused? are they
+                                          # the pinned ones?), the reference horizon; writes nothing
     python3 gcpfree_eo.py --preregister --outcome-if-one-camera <both-or-none|per-camera> --decided-by "NAME"
-        (then commit calibration/gcpfree/PREREGISTERED.txt, before anything else)
-    python3 gcpfree_eo.py --dry-run       # pre-registration, photos (would a run be refused?), the
-                                          # reference horizon; writes nothing
+        (the rule and the photos a run will use; then commit calibration/gcpfree/PREREGISTERED.txt, before
+        anything else, and send its sha256 to Chris)
     python3 gcpfree_eo.py                 # the delivery run, both cameras (~10-30 min each)
         (then commit calibration/gcpfree/runs/<run id>/ in ONE commit, and write down each B file's sha256
         and send it to Chris)
     python3 gcpfree_eo.py --aug-dir /path/to/aug_2024_photos      # the one allowed second run
+    (--camera c1|c2 or other --roots make a TRIAL run: a full result, never run on the station)
 Exit status: 0 B delivered for both cameras, each DELIVERED; 3 B delivered
 in part, or a camera DELIVERED-WIDER; 4 nothing delivered (also a TRIAL
 run); 2 bad input or refused.
@@ -332,7 +365,8 @@ ROT_FLOOR_PX = 4.0              # >= the true error of every delivered B of the 
                                 # nothing of this term as a tilt: no DEM figure is stated for it here)
 # the largest DEM effect over the five synthetic position-inheritance cases (height +/-0.25, +/-0.55 m; 0.5 m
 # east and north; the Aug 2024 - Jan 2025 solution difference), B re-solved in each (Oct view, m): the largest of
-# five cases, not a bound
+# five cases, not a bound. The cases were written after A's rows had been seen (EXPOSURE): the +/-0.55 m and 0.5 m
+# cases match c1's A minus Jan 2025 offset, and c1's DEM numbers here come from the -0.55 m case
 POSITION_TERM = {"c1": {"dem_abs_median_m": 0.011, "dem_p90_m": 0.026, "horizontal_median_m": 0.29},
                  "c2": {"dem_abs_median_m": 0.018, "dem_p90_m": 0.086, "horizontal_median_m": 0.83}}
 POSITION_SPREAD = {"c1": "0.36 m (0.34 m horizontally, 0.11 m in height)",
@@ -347,12 +381,19 @@ EXPOSURE = (
     "the procedure was designed, a grep printed the 2024-10-23 rows of calibration_history.csv (calibration A, solved "
     "from the 23 Oct 2024 GCPs), and the repository's table notes said the Aug 2024 calibration differs from A by "
     "~2.3-2.5 deg of azimuth; the synthetic test turns that validated the gates (pan -12.5 deg for c1, -13.4 deg for "
-    "c2) are the sizes the brief gave, i.e. A minus the Jan 2025 solution; on 14 Oct 2026 the implementer read a test "
+    "c2) are the sizes the brief gave, i.e. A minus the Jan 2025 solution; at 15:16 UTC the same day, five minutes after "
+    "A's rows were printed, the five position-inheritance cases that size the stated POSITION term were written, and "
+    "three of them match c1's A minus Jan 2025 camera offset (-0.39 m east, +0.41 m north, +0.55 m up): the +/-0.55 m "
+    "height cases and the 0.5 m east-and-north case (the design log gives no other source for 0.55 m; c1's Aug 2024 - "
+    "Jan 2025 height difference is 0.11 m), and c1's stated DEM position term (|dz| median 0.011 m, p90 0.026 m) comes "
+    "from the -0.55 m case: it was sized after A had been seen (a stated uncertainty only: no gate, threshold or rule "
+    "uses it); on 14 Oct 2026 the implementer read a test "
     "fixture's notes giving A's azimuths to 0.1 deg, and the same day (the order is not recorded) the horizon pass "
     "rule was changed from |d| <= tolerance (the 13 Oct design) to the band [min(0, e) - tol, max(0, e) + tol] (asked "
     "for by the design's adversarial check) and its two window parameters were set (60 px, 25 px); later changes of "
-    "14 Oct 2026 touched texts, records and refusals only. No constant, threshold or rule was set from A's numbers by "
-    "intent, and the computation never reads A; the 23 Oct 2024 GCPs were never on this side. On the station, the "
+    "14 Oct 2026 touched texts, records and refusals only. Apart from those position cases, no constant, threshold or "
+    "rule was set from A's numbers by intent, and the computation never reads A; the 23 Oct 2024 GCPs were never on "
+    "this side. On the station, the "
     "deploy notes have this procedure's sha256 sent to the holder before A's DEM is built; A's DEM may be built and seen "
     "before the outcome rule is pre-registered and before B is run: the B DEM's README states the actual order, with "
     "dates.")
@@ -510,14 +551,19 @@ def archived(path):
 
 def read_preregistration(path):
     """{key: value} of PREREGISTERED.txt ('key: value' lines; '#' lines are comments; roots and
-    modules_sha256 are JSON)."""
-    out = {}
+    modules_sha256 are JSON; every 'photo: <cam> <window> <day> <name> <size> <sha256>' line goes, in
+    order, into 'photos' as a list)."""
+    out = {"photos": []}
     for ln in Path(guard(path)).read_text().splitlines():
         s = ln.strip()
         if not s or s.startswith("#") or ":" not in s:
             continue
         k, v = s.split(":", 1)
         k, v = k.strip(), v.strip()
+        if k == "photo":
+            w = v.split()
+            out["photos"].append(w[:4] + [int(w[4]) if w[4].isdigit() else w[4]] + w[5:] if len(w) == 6 else w)
+            continue
         if k in ("roots", "modules_sha256"):
             try:
                 v = json.loads(v)
@@ -525,6 +571,105 @@ def read_preregistration(path):
                 v = None
         out[k] = v
     return out
+
+
+# ------------------------------------------------------------------ the pre-registered photos
+
+def photo_manifest(roots, cams=("c1", "c2")):
+    """The photos a run selects from these folders (select_photos: Oct and Jan for every camera, Dec for c2), each
+    with its size and sha256: [[cam, window, day, name, size, sha256]], in the order a run reads them. Only names,
+    sizes and bytes: nothing is computed from a photo here. The pre-registration lists them; a run on the station's
+    folders that selects other photos is refused (a photo removed, replaced or added after a look)."""
+    rows = []
+    for cam in cams:
+        io = load_intrinsics(archived(CAL / IO_FILE.format(cam=cam)))
+        for k in ("oct", "jan") + (("dec",) if cam == "c2" else ()):
+            days, _ = select_photos(roots, cam, WINDOWS[k], io)
+            for day, paths in sorted(days.items()):
+                for q in paths:
+                    rows.append([cam, k, day, Path(q).name, os.path.getsize(str(guard(q))), sha256(q)])
+    return rows
+
+
+def photos_sha256(rows):
+    return hashlib.sha256(json.dumps([list(r) for r in rows]).encode()).hexdigest()
+
+
+def manifest_difference(want, now):
+    """'' when the photos selected now are the pre-registered ones, else what differs (a few examples)."""
+    w = {(r[0], r[1], r[3]): tuple(r[4:6]) for r in want}
+    n = {(r[0], r[1], r[3]): tuple(r[4:6]) for r in now}
+    gone = sorted(set(w) - set(n))
+    new = sorted(set(n) - set(w))
+    changed = sorted(k for k in set(w) & set(n) if w[k] != n[k])
+    if not (gone or new or changed) and [list(r) for r in want] == [list(r) for r in now]:
+        return ""
+    parts = []
+    for what, ks in (("no longer selected (removed, or replaced by another)", gone),
+                     ("selected now but not pre-registered", new), ("of other content (size or sha256)", changed)):
+        if ks:
+            parts.append(f"{len(ks)} {what}: " + ", ".join(f"{c} {k} {nm}" for c, k, nm in ks[:3])
+                         + (" ..." if len(ks) > 3 else ""))
+    return "; ".join(parts) or "the same photos in another order"
+
+
+# ------------------------------------------------------------------ git: records outside this branch's history
+
+RECORD_NAME = re.compile(r"(^|/)(PREREGISTERED\.txt|runs/[^/]+/run\.json)$")
+
+
+def foreign_records(base):
+    """Commits OUTSIDE this branch's history (another branch, a stash, the reflog: a branch made from before the
+    pre-registration, a reset, a rebase) that wrote a PREREGISTERED.txt or a runs/<id>/run.json under `base` whose
+    content this branch's history does not hold (a rebased copy of a commit holds the same content and does not
+    count). An earlier pre-registration or run there would otherwise be invisible from this branch.
+    -> ([(commit, path)], why git could not tell, or '')."""
+    anc = Path(base)
+    while not anc.exists() and anc != anc.parent:
+        anc = anc.parent
+    spec = os.path.relpath(str(Path(base)), str(anc))
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+
+    def blobs(*refs):
+        r = subprocess.run(["git", "-C", str(anc), "log"] + list(refs) + ["--no-abbrev", "--format=@%H", "--raw",
+                                                                           "--", spec],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, env=env)
+        out, commit = [], None
+        for ln in r.stdout.splitlines() if r.returncode == 0 else []:
+            if ln.startswith("@"):
+                commit = ln[1:].strip()
+            elif ln.startswith(":") and "\t" in ln:
+                meta, path = ln.split("\t", 1)
+                f = meta.split()
+                if len(f) >= 4 and RECORD_NAME.search(path.strip()) and set(f[3]) != {"0"}:
+                    out.append((commit, path.strip(), f[3]))
+        return out, r.returncode
+    try:
+        head, rc_h = blobs("HEAD")
+        every, rc_a = blobs("--all", "--reflog")
+    except OSError as exc:
+        return [], f"git cannot be run ({exc})"
+    if rc_a != 0:
+        return [], "" if rc_h != 0 else "git log --all --reflog failed"
+    have = {b for _, _, b in head}
+    seen, found = set(), []
+    for c, path, b in every:
+        if b not in have and (c, path) not in seen:
+            seen.add((c, path))
+            found.append((c, path))
+    return found, ""
+
+
+def foreign_problem(base):
+    """A run is refused while foreign_records() finds one. -> text or ''."""
+    found, _ = foreign_records(base)
+    if not found:
+        return ""
+    return (f"{len(found)} commit(s) outside this branch's history wrote a pre-registration or a run record that this "
+            f"branch does not hold (" + ", ".join(f"{c[:10]} {p}" for c, p in found[:4])
+            + (" ..." if len(found) > 4 else "") + "): another branch, a stash, or the reflog (a branch made from "
+            "before the pre-registration, a reset) holds an earlier pre-registration or run, which would be invisible "
+            "from here. Bring that history into this branch (git merge), never around it")
 
 
 def git_state(path):
@@ -583,10 +728,23 @@ def preregistration(path, roots=None):
     if not isinstance(pr.get("roots"), list) or [str(r) for r in pr["roots"]] != [str(r) for r in ROOTS]:
         probs.append(f"roots must be the station's three photo folders ({', '.join(ROOTS)}), as a delivery run "
                      f"uses them; it says {pr.get('roots')}")
+    rows = pr.get("photos") or []
+    info.update(photos=rows, photos_sha256=pr.get("photos_sha256"))
+    if not rows:
+        probs.append(f"{p} pins no photos (no 'photo:' lines): write it with --preregister of this version")
+    elif any(len(r) != 6 for r in rows) or photos_sha256(rows) != pr.get("photos_sha256"):
+        probs.append(f"{p}: its 'photo:' lines are not those its photos_sha256 line was written for (edited)")
+    elif {r[0] for r in rows} != {"c1", "c2"}:
+        probs.append(f"{p} pins photos of {', '.join(sorted({r[0] for r in rows}))} only: a delivery run solves c1 "
+                     f"and c2")
     return info, probs
 
 
-def write_preregistration(path, outcome, decided_by, roots):
+def write_preregistration(path, outcome, decided_by, roots, photos=None):
+    """Writes the pre-registration once: the owner's rule, who decided, the procedure's and its modules' sha256, the
+    station's photo folders and the photos a run selects from them (photo_manifest; `photos` given only by tests
+    that have no such folders). Refused (nothing written) unless every folder is there and every camera has Oct and
+    Jan photos (check_photos), as a delivery run needs them."""
     p = Path(path)
     if p.exists():
         raise Refused(f"{p} exists: a pre-registration is written once (before any run it may still be edited and "
@@ -601,6 +759,12 @@ def write_preregistration(path, outcome, decided_by, roots):
     pp = pin_problem()
     if pp:
         raise Refused(f"nothing pre-registered: {pp}")
+    fp = foreign_problem(p.parent)
+    if fp:
+        raise Refused(f"nothing pre-registered: {fp}")
+    if photos is None:
+        check_photos([str(r) for r in roots], ["c1", "c2"], None, True)
+        photos = photo_manifest([str(r) for r in roots])
     p.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     p.write_text(
@@ -626,7 +790,11 @@ def write_preregistration(path, outcome, decided_by, roots):
         "# when the first used none and left a camera NOT DELIVERED, and it solves only those cameras. Its B is\n"
         "# the delivered B only when the first run delivered no camera; otherwise it is a second product\n"
         "# (--calibration-variant gcpfree-aug) and the first run's B stays the delivered one.\n"
-        "# Once any run is made under this file, it can never change (gcpfree_eo.py refuses).\n")
+        "# Once any run is made under this file, it can never change (gcpfree_eo.py refuses).\n"
+        "# THE PHOTOS: every photo a run selects from the folders above (Oct and Jan for each camera, Dec for c2),\n"
+        "# with its size and sha256. A run on these folders that selects other photos is refused.\n"
+        f"photos_sha256: {photos_sha256(photos)}\n"
+        + "".join(f"photo: {' '.join(str(x) for x in r)}\n" for r in photos))
     return p
 
 
@@ -1549,8 +1717,6 @@ def main(argv=None):
     ap.add_argument("--roots", nargs="+", default=None,
                     help="photo folders (default: the station's three, ROOTS; any other folders make a TRIAL run)")
     ap.add_argument("--aug-dir", default=None, help="CACO03 photos of 25-29 Aug 2024 from Chris: " + AUG_NAMING)
-    ap.add_argument("--preregistered", default=str(PREREG),
-                    help="the committed pre-registration file (runs are written next to it, in runs/<run id>/)")
     ap.add_argument("--dry-run", action="store_true",
                     help="the pre-registration, the photos, the reference horizon; writes nothing")
     ap.add_argument("--preregister", action="store_true", help="write the pre-registration file (then commit it)")
@@ -1594,16 +1760,27 @@ def check_photos(roots, cams, aug_dir, eligible):
 
 
 def trial_reasons(args, roots):
-    """Why a run is a TRIAL run (reports only), [] for a DELIVERY run: one camera, photo folders other than the
-    station's, or a pre-registration other than this repository's own (PREREG)."""
+    """Why a run is a TRIAL run (reports only), [] for a DELIVERY run: one camera, or photo folders other than the
+    station's. (Every run, a trial too, is made under this repository's committed pre-registration, PREREG.)"""
     why = []
     if args.camera != "both":
         why.append("one camera only")
     if roots != [str(r) for r in ROOTS]:
         why.append(f"photo folders other than the station's ({', '.join(ROOTS)})")
-    if os.path.realpath(str(args.preregistered)) != os.path.realpath(str(PREREG)):
-        why.append(f"a pre-registration other than this repository's ({PREREG}): only runs under it can deliver a B")
     return why
+
+
+def photos_problem(prereg_info, roots, cams):
+    """On the station's folders, the photos a run of these cameras selects must be the pre-registered ones.
+    -> (text or '', the manifest selected now)."""
+    now = photo_manifest(roots, cams)
+    if roots != [str(r) for r in ROOTS]:
+        return "", now
+    want = [r for r in (prereg_info.get("photos") or []) if r[0] in cams]
+    diff = manifest_difference(want, now)
+    return ((f"the photos a run selects now from the station's folders are not the pre-registered ones ({diff}): a run "
+             f"uses exactly the photos its pre-registration lists (a photo removed, replaced or added after the "
+             f"pre-registration would change the result)") if diff else ""), now
 
 
 def run(args, argv):
@@ -1611,12 +1788,10 @@ def run(args, argv):
     for p in roots + ([args.aug_dir] if args.aug_dir else []):
         guard(p)
     if args.preregister:
-        p = write_preregistration(args.preregistered, args.outcome_if_one_camera, args.decided_by, roots)
-        print(f"wrote {p}\nNow commit it before any run: git -C {p.parent} add {p.name} && "
-              f"git -C {p.parent} commit -m 'gcpfree: pre-registration ({args.outcome_if_one_camera})'")
-        if os.path.realpath(str(p)) != os.path.realpath(str(PREREG)):
-            print(f"NOTE: not this repository's pre-registration ({PREREG}): every run under it is a TRIAL run "
-                  f"(reports only, never a B)")
+        p = write_preregistration(PREREG, args.outcome_if_one_camera, args.decided_by, roots)
+        print(f"wrote {p} (the outcome rule '{args.outcome_if_one_camera}' and "
+              f"{len(read_preregistration(p)['photos'])} photos)\nNow commit it before any run: git -C {p.parent} add "
+              f"{p.name} && git -C {p.parent} commit -m 'gcpfree: pre-registration ({args.outcome_if_one_camera})'")
         return 0
     import cv2
     if not hasattr(cv2, "SIFT_create"):
@@ -1630,15 +1805,16 @@ def run(args, argv):
         print(s, flush=True)
         lines.append(s)
 
-    prereg_info, probs = preregistration(args.preregistered)
-    out_dir = Path(args.preregistered).parent            # runs/<run id>/ next to the pre-registration
+    prereg_info, probs = preregistration(PREREG)        # every run, a trial too: this repository's, committed
+    out_dir = Path(PREREG).parent                        # runs/<run id>/ next to it: every run is recorded there
     trial_why = trial_reasons(args, roots)
     eligible = not trial_why
     if args.dry_run:
         return dry_run(args, cams, roots, prereg_info, probs, eligible, out_dir, log)
     if probs:
-        raise Refused("the pre-registration does not allow a run: " + "; ".join(probs))
-    bad = earlier_preregistration_problem(out_dir, prereg_info)
+        raise Refused("the pre-registration does not allow a run (a trial neither: the rule is fixed and committed "
+                      "before this code solves any photo): " + "; ".join(probs))
+    bad = earlier_preregistration_problem(out_dir, prereg_info) or foreign_problem(out_dir)
     if bad:
         raise Refused(bad)
     for cam in cams:                                     # every file read is checked before anything is solved
@@ -1648,6 +1824,16 @@ def run(args, argv):
             archived(CAL / REF_EO_FILE["aug"].format(cam=cam))
     plan = plan_run(out_dir, eligible, cams, args.aug_dir, prereg_info)
     photos = check_photos(roots, plan["solve"], args.aug_dir, eligible)
+    bad, manifest = photos_problem(prereg_info, roots, plan["solve"])
+    if bad:
+        raise Refused(bad)
+    aug_manifest = []
+    if args.aug_dir:
+        for cam in plan["solve"]:
+            io = load_intrinsics(archived(CAL / IO_FILE.format(cam=cam)))
+            days, _ = select_photos([args.aug_dir], cam, WINDOWS["aug"], io)
+            aug_manifest += [[cam, "aug", dd, Path(q).name, os.path.getsize(str(guard(q))), sha256(q)]
+                             for dd, qs in sorted(days.items()) for q in qs]
     rid, run_dir = new_run_dir(out_dir, eligible)
     started = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     run_info = {"run_id": rid, "run_no": plan["run_no"], "eligible": eligible, "trial_why": trial_why or None,
@@ -1657,7 +1843,12 @@ def run(args, argv):
                 "procedure_sha256": own_sha256(), "modules_sha256": module_sha256(), "preregistration": prereg_info,
                 "constants": constants(), "constants_sha256": constants_sha256(),
                 "constants_problem": constants_problem() or None, "exposure": EXPOSURE,
-                "solved": plan["solve"], "kept": {c: v[2] for c, v in plan["keep"].items()}}
+                "solved": plan["solve"], "kept": {c: v[2] for c, v in plan["keep"].items()},
+                # the photos this run selected (name, size, sha256): on the station's folders the pre-registered ones
+                "photos_used": manifest, "photos_used_sha256": photos_sha256(manifest),
+                "photos_preregistered": roots == [str(r) for r in ROOTS],
+                "aug_photos_used": aug_manifest or None,
+                "aug_photos_sha256": photos_sha256(aug_manifest) if aug_manifest else None}
     (run_dir / RUN_FILE).write_text(json.dumps(run_info, indent=1, default=str) + "\n")
     log(f"gcpfree_eo.py run {rid} ({'DELIVERY run ' + str(plan['run_no']) if eligible else 'TRIAL run: reports only'}"
         f"; pre-registration {prereg_info.get('path')} ({len(prereg_info.get('git_history') or [])} commit(s)), "
@@ -1698,7 +1889,8 @@ def run(args, argv):
             f"compared with the A DEM: survey_products.py builds no B whose file, report or run.json is uncommitted, "
             f"changed or touched by more than one commit")
     else:
-        log(f"\nTRIAL run folder {run_dir}: reports only, nothing delivered (commit it too: the record of every run)")
+        log(f"\nTRIAL run folder {run_dir}: reports only, nothing delivered. Commit it too, at once (the record of every "
+            f"run: survey_products.py lists it in B's README, and builds no B DEM while a run folder is uncommitted)")
     (run_dir / "run_report.txt").write_text("\n".join(lines) + "\n")
     return rc
 
@@ -1711,15 +1903,22 @@ def dry_run(args, cams, roots, prereg_info, probs, eligible, out_dir, log):
                                                                if not pp else "REFUSED: " + pp))
     cp = constants_problem()
     log(f"pre-registered constants: sha256 {constants_sha256()}: " + ("the pinned ones" if not cp else "NOT: " + cp))
-    log(f"pre-registration {prereg_info.get('path')}: " + ("OK" if not probs else "a run is REFUSED: " + "; ".join(probs)))
+    log(f"pre-registration {prereg_info.get('path')}: " + ("OK" if not probs else "a run (a trial too) is REFUSED: "
+                                                              + "; ".join(probs)))
     if not probs:
         log(f"  outcome_if_one_camera {prereg_info.get('outcome_if_one_camera')} (decided by "
-            f"{prereg_info.get('decided_by')} on {prereg_info.get('decided_on')}); commit {prereg_info.get('commit')}")
+            f"{prereg_info.get('decided_by')} on {prereg_info.get('decided_on')}); commit {prereg_info.get('commit')}; "
+            f"{len(prereg_info.get('photos') or [])} photos pinned")
     log(f"this run would be a {'DELIVERY' if eligible else 'TRIAL'} run"
-        + ("" if eligible else f" (reports only: {'; '.join(trial_reasons(args, roots))})"))
-    bad = earlier_preregistration_problem(out_dir, prereg_info) if not probs else ""
+        + ("" if eligible else f" (reports only: {'; '.join(trial_reasons(args, roots))}; a trial is a FULL result: "
+                               f"never run one on the station)"))
+    bad = (earlier_preregistration_problem(out_dir, prereg_info) if not probs else "") or foreign_problem(out_dir)
     if bad:
         log(f"  REFUSED: {bad}")
+    runs_ = prior_runs(out_dir, finished=False)
+    if runs_:
+        log(f"  runs already in {out_dir / 'runs'}: " + ", ".join(
+            f"{d.name} ({'delivery' if js.get('eligible') else 'trial'}, {js.get('status')})" for js, d in runs_))
     if eligible:
         try:
             pl = plan_run(out_dir, eligible, cams, args.aug_dir, prereg_info)
@@ -1732,6 +1931,15 @@ def dry_run(args, cams, roots, prereg_info, probs, eligible, out_dir, log):
         check_photos(roots, cams, args.aug_dir, eligible)
         log(f"photos: every folder there and Oct and Jan photos for {', '.join(cams)}"
             + (" and Aug photos" if args.aug_dir else "") + ": a run would not be refused for its photos")
+        if not probs:
+            pb, now = photos_problem(prereg_info, roots, cams)
+            log("  " + (f"a run would be REFUSED (exit 2): {pb}" if pb else
+                        f"the {len(now)} photos selected now are the pre-registered ones (names, sizes, sha256)"
+                        if roots == [str(r) for r in ROOTS] else
+                        f"{len(now)} photos selected (other folders: not compared with the pre-registered ones)"))
+        else:
+            log(f"  {len(photo_manifest(roots, cams))} photos would be pinned by --preregister now (names, sizes, "
+                f"sha256; nothing is computed from them)")
     except Refused as exc:
         log(f"photos: a {'delivery' if eligible else 'trial'} run would be REFUSED (exit 2): {exc}")
     for cam in cams:

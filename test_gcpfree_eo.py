@@ -601,23 +601,23 @@ def test_pinned_version(d):
     repo.mkdir()
     git(repo, "init", "-q")
     pr = repo / "PREREGISTERED.txt"
-    real, real_roots = G.PINS_FILE, list(G.ROOTS)
+    real, real_roots, real_prereg = G.PINS_FILE, list(G.ROOTS), G.PREREG
     G.ROOTS = roots_of(d / "roots")                     # the 'station's' folders of this test (never the station's)
+    G.PREREG = pr                                       # this test's repository stands for the station's
     try:
-        rc, out = main_q(["--preregistered", str(pr), "--preregister", "--outcome-if-one-camera", "per-camera",
-                          "--decided-by", "the owner"])
+        rc, out = main_q(["--preregister", "--outcome-if-one-camera", "per-camera", "--decided-by", "the owner"])
         G.PINS_FILE = other
-        rc2, out2 = main_q(["--preregistered", str(pr), "--dry-run"])
+        rc2, out2 = main_q(["--dry-run"])
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "prereg")
-        rc3, out3 = main_q(["--preregistered", str(pr), "--camera", "c2"])
+        rc3, out3 = main_q(["--camera", "c2"])
         pr2 = d / "prereg_pin2" / "PREREGISTERED.txt"
-        rc4, out4 = main_q(["--preregistered", str(pr2), "--preregister", "--outcome-if-one-camera", "per-camera",
-                            "--decided-by", "the owner"])
-        G.PINS_FILE = d / "pins_none" / "survey_products.py"
-        rc5, out5 = main_q(["--preregistered", str(pr), "--camera", "c2"])
+        G.PREREG = pr2
+        rc4, out4 = main_q(["--preregister", "--outcome-if-one-camera", "per-camera", "--decided-by", "the owner"])
+        G.PINS_FILE, G.PREREG = d / "pins_none" / "survey_products.py", pr
+        rc5, out5 = main_q(["--camera", "c2"])
     finally:
-        G.PINS_FILE, G.ROOTS = real, real_roots
+        G.PINS_FILE, G.ROOTS, G.PREREG = real, real_roots, real_prereg
     check(rc == 0 and pr.exists(), "the pinned version: --preregister writes the file")
     check(rc2 == 0 and "REFUSED: this gcpfree_eo.py" in out2 and "not the version survey_products.py pins" in out2,
           "--dry-run under another pin: says the procedure is not the pinned version")
@@ -630,11 +630,13 @@ def test_pinned_version(d):
 
 
 def test_runs(d, canned):
-    print("runs: the committed pre-registration, run folders never overwritten, one more run only with Aug photos")
+    print("runs: the committed pre-registration (a trial too), its pinned photos, run folders never overwritten, one "
+          "more run only with Aug photos")
     real_run_camera, real_roots = G.run_camera, list(G.ROOTS)
-    scen = {}
+    scen, solved = {}, []
 
     def fake_run_camera(cam, roots, aug_dir, log):
+        solved.append(cam)
         r = copy.deepcopy(scen[(cam, bool(aug_dir))])
         log(f"{cam}: replayed ({r['verdict']})")
         return r, (G.eo_rad(r["B"]) if r.get("B") else None)
@@ -646,25 +648,56 @@ def test_runs(d, canned):
     git(repo, "init", "-q")
     pr = repo / "calibration" / "gcpfree" / "PREREGISTERED.txt"
     real_prereg, G.PREREG = G.PREREG, pr                # this test's repository stands for the station's
-    base = ["--preregistered", str(pr)]
+    base = []
     try:
+        scen[("c1", False)] = nd_of(canned["c1_aug_only"])
+        scen[("c2", False)] = canned["c2"]
         rc, out = main_q(base)
         check(rc == 2 and "does not exist" in out, "no pre-registration: every run REFUSED (exit 2)")
+        # the review's peek: a full run before the rule exists, as a trial (one camera, or other folders): refused,
+        # nothing solved, nothing written (the rule is fixed and committed before this code solves any photo)
+        for argv, what in ((["--camera", "c2"], "one camera"), (["--roots", str(d / "roots" / "pics")], "other --roots")):
+            rc, out = main_q(argv)
+            check(rc == 2 and "does not exist" in out and "a trial neither" in out and not solved
+                  and not (pr.parent / "runs").exists(),
+                  f"no pre-registration: a TRIAL run ({what}) REFUSED too, nothing solved, no run folder")
+        import io as io_
+        import contextlib
+        try:
+            with contextlib.redirect_stderr(io_.StringIO()):
+                G.main(["--preregistered", str(d / "shadow" / "PREREGISTERED.txt"), "--dry-run"])
+            gone = False
+        except SystemExit as exc:
+            gone = exc.code == 2
+        check(gone, "no --preregistered option any more: every run is made under this repository's file (PREREG)")
         rc, out = main_q(base + ["--preregister", "--decided-by", "the owner"])
         check(rc == 2 and "must be one of" in out and not pr.exists(), "--preregister without the owner's rule: refused")
         rc, out = main_q(base + ["--preregister", "--outcome-if-one-camera", "per-camera", "--decided-by", "the owner",
                                  "--roots", str(d / "elsewhere")])
         check(rc == 2 and "station's three photo folders" in out and not pr.exists(),
               "--preregister naming other photo folders: refused")
+        G.ROOTS = roots_of(d / "roots") + [str(d / "not_mounted")]
+        rc, out = main_q(base + ["--preregister", "--outcome-if-one-camera", "per-camera", "--decided-by", "the owner"])
+        G.ROOTS = roots_of(d / "roots")
+        check(rc == 2 and "photo folder(s) missing" in out and not pr.exists(),
+              "--preregister with a station folder missing: refused (the photos it pins would not be a run's)")
         rc, out = main_q(base + ["--preregister", "--outcome-if-one-camera", "per-camera", "--decided-by", "the owner"])
         txt = pr.read_text()
-        check(rc == 0 and "outcome_if_one_camera: per-camera" in txt and f"procedure_sha256: {G.own_sha256()}" in txt,
-              "--preregister: the owner's rule, the procedure's and its modules' sha256, the photo folders")
+        pinned = G.read_preregistration(pr)["photos"]
+        n_c1 = sum(1 for r in pinned if r[0] == "c1")
+        check(rc == 0 and "outcome_if_one_camera: per-camera" in txt and f"procedure_sha256: {G.own_sha256()}" in txt
+              and pinned == G.photo_manifest(G.ROOTS) and n_c1 == 15 and len(pinned) == 39
+              and f"photos_sha256: {G.photos_sha256(pinned)}" in txt
+              and all(len(r[5]) == 64 and isinstance(r[4], int) for r in pinned),
+              "--preregister: the owner's rule, the procedure's and its modules' sha256, the photo folders and the 39 "
+              "photos a run selects (c1 15: Oct and Jan; c2 24: and Dec), each with its size and sha256")
         rc, out = main_q(base + ["--preregister", "--outcome-if-one-camera", "both-or-none", "--decided-by", "x"])
         check(rc == 2 and "exists" in out, "... written once (a second --preregister is refused)")
         rc, out = main_q(base)
         check(rc == 2 and "not committed" in out and not (pr.parent / "runs").exists(),
               "not committed yet: REFUSED, nothing written")
+        rc, out = main_q(base + ["--camera", "c2"])
+        check(rc == 2 and "not committed" in out and not solved, "... a trial too")
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "prereg")
         pr.write_text(txt.replace("decided_by: the owner", "decided_by: the owner (13 Oct)"))
@@ -673,49 +706,52 @@ def test_runs(d, canned):
         git(repo, "commit", "-q", "-am", "prereg: who decided")
         rc, out = main_q(base + ["--dry-run"])
         check(rc == 0 and "OK" in out and "DELIVERY" in out and not (pr.parent / "runs").exists()
-              and "a run would not be refused for its photos" in out,
-              "--dry-run: the pre-registration OK (2 commits, no run yet), a DELIVERY run, its photos there, nothing "
-              "written")
+              and "a run would not be refused for its photos" in out
+              and "the 39 photos selected now are the pre-registered ones" in out,
+              "--dry-run: the pre-registration OK (2 commits, no run yet), a DELIVERY run, its photos there and the "
+              "pinned ones, nothing written")
         G.ROOTS = roots_of(d / "roots") + [str(d / "not_mounted")]
         rc, out = main_q(base + ["--dry-run"])
         G.ROOTS = roots_of(d / "roots")
         check(rc == 0 and "a delivery run would be REFUSED (exit 2): photo folder(s) missing" in out
               and not (pr.parent / "runs").exists(),
               "--dry-run with a station folder missing: says a delivery run would be REFUSED (exit 2)")
-        # a pre-registration other than this repository's (another folder, the other rule): TRIAL runs only
-        sh = repo / "shadow" / "PREREGISTERED.txt"
-        rc, out = main_q(["--preregistered", str(sh), "--preregister", "--outcome-if-one-camera", "both-or-none",
-                          "--decided-by", "someone else"])
-        check(rc == 0 and "every run under it is a TRIAL run" in out, "--preregister elsewhere: said to make TRIAL "
-                                                                     "runs only")
-        git(repo, "add", "-A")
-        git(repo, "commit", "-q", "-m", "a second pre-registration")
-        rc, out = main_q(["--preregistered", str(sh), "--dry-run"])
-        check("this run would be a TRIAL run" in out and "a pre-registration other than this repository's" in out,
-              "--dry-run under it: a TRIAL run (a pre-registration other than this repository's)")
-        scen[("c1", False)] = nd_of(canned["c1_aug_only"])
-        scen[("c2", False)] = canned["c2"]
-        rc, out = main_q(["--preregistered", str(sh)])
-        srun = sorted((sh.parent / "runs").iterdir())
-        sj = json.loads((srun[0] / "run.json").read_text())
-        check(rc == 4 and len(srun) == 1 and srun[0].name.endswith("_trial") and not list(srun[0].glob("*_EO.yaml"))
-              and sj["eligible"] is False and "this repository's" in " ".join(sj["trial_why"]),
-              "a run under it (both cameras, the station's folders): a TRIAL run, reports only, never a B")
-        git(repo, "add", "-A")
-        git(repo, "commit", "-q", "-m", "the trial under the second pre-registration")
-        # a TRIAL run (one camera): reports only
-        scen[("c2", False)] = canned["c2"]
+        # the pinned photos: one removed, or one of other content, after the pre-registration: refused
+        oct_one = Path(G.ROOTS[0]) / pinned[0][3]
+        keep = oct_one.read_bytes()
+        try:
+            oct_one.rename(oct_one.with_name(oct_one.name + ".away"))
+            rc, out = main_q(base)
+            rc2, out2 = main_q(base + ["--dry-run"])
+            oct_one.with_name(oct_one.name + ".away").rename(oct_one)
+            oct_one.write_bytes(keep + b"\0")
+            rc3, out3 = main_q(base)
+        finally:
+            oct_one.write_bytes(keep)
+        check(rc == 2 and "not the pre-registered ones" in out and "no longer selected" in out and not solved
+              and not (pr.parent / "runs").exists() and "a run would be REFUSED (exit 2): the photos" in out2,
+              "a pinned photo removed after the pre-registration: a run REFUSED before anything is solved (the dry run "
+              "says so)")
+        check(rc3 == 2 and "of other content (size or sha256)" in out3 and not solved,
+              "a pinned photo of other content (one byte added): REFUSED")
+        # a TRIAL run (one camera), under this repository's pre-registration: reports only, recorded in its runs/
         rc, out = main_q(base + ["--camera", "c2"])
         runs = sorted((pr.parent / "runs").iterdir())
+        tj = json.loads((runs[0] / "run.json").read_text())
         check(rc == 4 and len(runs) == 1 and runs[0].name.endswith("_trial") and not list(runs[0].glob("*_EO.yaml"))
-              and json.loads((runs[0] / "run.json").read_text())["status"] == "finished",
-              "--camera c2: a TRIAL run (exit 4): its report, no B file")
-        # the rule cannot change once a run was made under it
+              and tj["status"] == "finished" and tj["preregistration"]["path"] == str(pr.resolve())
+              and tj["photos_used"] == [r for r in pinned if r[0] == "c2"]
+              and "Commit it too, at once" in out,
+              "--camera c2: a TRIAL run (exit 4) under this repository's pre-registration, recorded in its runs/ "
+              "(its report, its photos, no B file); commit it too")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "the trial")
+        # the rule cannot change once a run (a trial too) was made under it
         pr.write_text(pr.read_text().replace("outcome_if_one_camera: per-camera", "outcome_if_one_camera: both-or-none"))
         git(repo, "commit", "-q", "-am", "prereg: other rule")
         rc, out = main_q(base)
         check(rc == 2 and "another version of the pre-registration" in out,
-              "the rule changed after a run was made: REFUSED (a rule is never chosen after seeing a result)")
+              "the rule changed after a trial was made: REFUSED (a rule is never chosen after seeing a result)")
         git(repo, "checkout", "-q", "HEAD~1", "--", str(pr.relative_to(repo)))
         git(repo, "commit", "-q", "-am", "prereg: as it was")
         # delivery run 1: c1 NOT DELIVERED, c2 DELIVERED (per-camera): a c2-only B
@@ -744,17 +780,22 @@ def test_runs(d, canned):
                       "inherited camera position", "per-camera", "photo folders",
                       f"pre-registered constants sha256 {G.constants_sha256()}",
                       "EXPOSURE (stated by the people who made this procedure", "A minus the Jan 2025 solution",
-                      "the horizon pass rule was changed from |d| <= tolerance"):
+                      "the horizon pass rule was changed from |d| <= tolerance",
+                      "five position-inheritance cases that size the stated POSITION term were written",
+                      "c1's stated DEM position term (|dz| median 0.011 m, p90 0.026 m) comes from the -0.55 m case"):
             check(words in txt, f"B file: '{words}'")
         rj = json.loads((r1 / "run.json").read_text())
         check(rj["argv"][1:] == base and rj["roots"] == G.ROOTS and len(rj["preregistration"]["git_history"]) == 4
               and rj["constants_sha256"] == G.constants_sha256() and rj["constants"]["ROOTS"] == G.ROOTS
               and "not the pinned ones" in rj["constants_problem"] and rj["exposure"] == G.EXPOSURE
-              and rep["exposure"] == G.EXPOSURE
+              and rep["exposure"] == G.EXPOSURE and rj["photos_used"] == pinned
+              and rj["photos_used_sha256"] == rj["preregistration"]["photos_sha256"] == G.photos_sha256(pinned)
               and all(m in rj["loaded_modules"] for m in G.MODULES + ("gcpfree_eo.py",)),
               "run.json: argv, the photo folders, the pre-registration and its git history (4 commits), the "
               "constants in effect (this test's photo folders: not the pinned ones, said), the exposure statement, "
-              "every repository module loaded with its sha256")
+              "the photos it used (the pinned ones), every repository module loaded with its sha256")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "delivery run 1")
         # no second run without new evidence; never over an earlier run
         rc, out = main_q(base)
         check(rc == 2 and "B is fixed by it" in out, "a second delivery run without Aug photos: REFUSED")
@@ -784,9 +825,12 @@ def test_runs(d, canned):
               and (r2[0] / G.OUT_EO.format(cam="c2")).exists(), f"delivery run 2 (Aug photos, exit {rc}): c1 and c2")
         t2 = (r2[0] / G.OUT_EO.format(cam="c2")).read_text()
         t1 = (r2[0] / G.OUT_EO.format(cam="c1")).read_text()
+        rj2 = json.loads((r2[0] / "run.json").read_text())
         check(f"solved in run {r1.name}" in t2 and "--calibration-variant gcpfree-aug (a SECOND product" in t1
-              and "Reference EO: CACO03_c1_20240827_EO.yaml" in t1,
-              "c2 kept from run 1 ('solved in run ...'); c1 from the Aug solve; a SECOND product: gcpfree-aug")
+              and "Reference EO: CACO03_c1_20240827_EO.yaml" in t1 and len(rj2["aug_photos_used"]) == 9
+              and rj2["aug_photos_sha256"] == G.photos_sha256(rj2["aug_photos_used"]),
+              "c2 kept from run 1 ('solved in run ...'); c1 from the Aug solve; a SECOND product: gcpfree-aug; the 9 "
+              "Aug photos it used recorded (names, sizes, sha256)")
         rc, out = main_q(base + ["--aug-dir", str(d / "aug_c1")])
         check(rc == 2 and "no third delivery run" in out, "a third delivery run: REFUSED")
         # both-or-none: c2 passes, c1 does not -> nothing delivered, c2 WITHHELD in its report
@@ -795,31 +839,34 @@ def test_runs(d, canned):
         git(repo2, "init", "-q")
         pr2 = repo2 / "PREREGISTERED.txt"
         G.PREREG = pr2
-        main_q(["--preregistered", str(pr2), "--preregister", "--outcome-if-one-camera", "both-or-none",
-                "--decided-by", "the owner"])
+        main_q(["--preregister", "--outcome-if-one-camera", "both-or-none", "--decided-by", "the owner"])
         git(repo2, "add", "-A")
         git(repo2, "commit", "-q", "-m", "prereg")
-        rc, out = main_q(["--preregistered", str(pr2)])
+        rc, out = main_q([])
         rr = sorted((repo2 / "runs").iterdir())[0]
         rep2 = json.loads((rr / (G.OUT_REPORT.format(cam="c2") + ".json")).read_text())
         check(rc == 4 and not list(rr.glob("*_EO.yaml")) and rep2["delivery"].startswith("WITHHELD")
               and rep2["verdict"] == "DELIVERED",
               "both-or-none, only c2 passed: no B file at all, c2 WITHHELD (its result kept in its report)")
         # bad input is never a verdict
-        G.ROOTS = roots_of(d / "roots") + [str(d / "not_mounted")]
         repo3 = d / "prereg3"
         repo3.mkdir()
         git(repo3, "init", "-q")
         pr3 = repo3 / "PREREGISTERED.txt"
         G.PREREG = pr3
-        main_q(["--preregistered", str(pr3), "--preregister", "--outcome-if-one-camera", "per-camera",
-                "--decided-by", "the owner"])
+        main_q(["--preregister", "--outcome-if-one-camera", "per-camera", "--decided-by", "the owner"])
         git(repo3, "add", "-A")
         git(repo3, "commit", "-q", "-m", "prereg")
-        rc, out = main_q(["--preregistered", str(pr3)])
-        check(rc == 2 and "photo folder(s) missing" in out and not (repo3 / "runs").exists(),
+        owg = Path(G.ROOTS[1])
+        owg.rename(owg.with_name("owg_unmounted"))
+        try:
+            n0 = len(solved)
+            rc, out = main_q([])
+        finally:
+            owg.with_name("owg_unmounted").rename(owg)
+        check(rc == 2 and "photo folder(s) missing" in out and not (repo3 / "runs").exists() and len(solved) == n0,
               "a delivery run with a photo folder missing (unmounted): REFUSED, no run")
-        rc, out = main_q(["--preregistered", str(pr3), "--camera", "c1", "--roots", str(d / "roots_other" / "pics")])
+        rc, out = main_q(["--camera", "c1", "--roots", str(d / "roots_other" / "pics")])
         check(rc == 2 and "no usable CACO03 c1 photo of 20-26 Oct 2024" in out,
               "no Oct photo for a camera: REFUSED (exit 2), never NOT DELIVERED")
         # a link to calibration A under the Jan EO's name: refused before anything is solved
@@ -829,15 +876,55 @@ def test_runs(d, canned):
         os.symlink(str(G.CAL / "CACO03_c2_20241023_EO.yaml"), str(jan))
         try:
             G.ROOTS, G.PREREG = roots_of(d / "roots"), pr2
-            rc, out = main_q(["--preregistered", str(pr2)])
+            rc, out = main_q([])
             check(rc == 2 and "a link to CACO03_c2_20241023_EO.yaml" in out,
                   "the Jan EO replaced by a link to calibration A: REFUSED before anything is solved")
         finally:
             jan.unlink()
             jan.write_bytes(keep)
+        test_foreign_history(d, scen)
     finally:
         WATCH["on"] = False
         G.run_camera, G.ROOTS, G.PREREG = real_run_camera, real_roots, real_prereg
+
+
+def test_foreign_history(d, scen):
+    print("records outside this branch's history (a branch made from before the pre-registration, a stash, the "
+          "reflog): refused; a rebased copy of the same records is not")
+    repo = d / "branch_away"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    (repo / "README").write_text("the station's repository (a test)\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "before the pre-registration")
+    first = git(repo, "rev-parse", "HEAD").stdout.strip()
+    pr = repo / "calibration" / "gcpfree" / "PREREGISTERED.txt"
+    G.PREREG = pr
+    rc, _ = main_q(["--preregister", "--outcome-if-one-camera", "both-or-none", "--decided-by", "the owner"])
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "gcpfree: pre-registration")
+    rc, out = main_q([])
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "gcpfree: delivery run 1")
+    main_branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    check(rc == 4 and G.foreign_records(pr.parent) == ([], ""),
+          "the first delivery run, committed on its branch: nothing outside the branch's history")
+    git(repo, "checkout", "-q", "-b", "alt", first)
+    check(not pr.exists(), "a branch made from before the pre-registration: no pre-registration in its tree")
+    rc, out = main_q(["--preregister", "--outcome-if-one-camera", "per-camera", "--decided-by", "the owner, again"])
+    found, _ = G.foreign_records(pr.parent)
+    check(rc == 2 and not pr.exists() and "outside this branch's history" in out and len(found) == 2,
+          f"--preregister there: REFUSED (the other branch's pre-registration and run records: {len(found)} found)")
+    git(repo, "branch", "-q", "-D", main_branch)
+    found, _ = G.foreign_records(pr.parent)
+    check(len(found) == 2, "... still seen with that branch deleted (the reflog keeps its commits)")
+    # a rebase-like copy of the same records onto this branch: the same content, not foreign
+    for c in git(repo, "log", "--reflog", "--topo-order", "--reverse", "--format=%H", "--", "calibration").stdout.split():
+        git(repo, "cherry-pick", c)
+    found, why = G.foreign_records(pr.parent)
+    rc, out = main_q(["--dry-run"])
+    check(not found and pr.exists() and "outside this branch's history" not in out,
+          "the same records cherry-picked onto the branch (as a rebase copies them): nothing foreign")
 
 
 def test_py38():
