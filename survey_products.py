@@ -3641,8 +3641,21 @@ def day_test_off(plan, args, src=None):
 
 
 def plan_variant(plan):
-    """The calibration variant this plan builds with (--calibration-variant), None for the table's."""
-    return next((c.get("variant") for c in plan["cams"].values() if c.get("variant")), None)
+    """The calibration variant this plan builds with (--calibration-variant), None for the table's (also for a plan
+    that names no cameras)."""
+    return next((c.get("variant") for c in (plan.get("cams") or {}).values()
+                 if c.get("variant") and c.get("variant") != "table"), None)
+
+
+def product_plan(prov, pdir):
+    """The plan a BUILT product's files are read back with (--summary): its date, its folder and each camera's
+    calibration variant from its provenance.json ('table' = none), so a variant's DEM is read as
+    dem/<date>_<variant>_* (dem_stem), never as the table calibration's."""
+    cams = {}
+    for cam, v in (prov.get("cameras") or {}).items():
+        var = ((v or {}).get("calibration") or {}).get("variant")
+        cams[cam] = {"variant": None if var in (None, "", "table") else var}
+    return {"date": prov.get("date") or Path(pdir).name, "out": Path(pdir), "cams": cams}
 
 
 def dem_stem(plan):
@@ -9843,8 +9856,7 @@ def summary_comparison(prov, pdir, c):
     st = str(prov.get("status") or "")
     if st.startswith(("in progress", "failed")):
         return False, f"the product's build is {st} (README.txt says why)", {}, {}
-    plan_min = {"date": date, "out": Path(pdir)}
-    cur, why = comparison_current(plan_min, {"name": c["name"]})
+    cur, why = comparison_current(product_plan(prov, pdir), {"name": c["name"]})
     if not cur:
         return False, why, {}, {}
     head = load_json(Path(pdir) / "compare" / f"{date}_{c['name']}_comparison.json")
@@ -10605,12 +10617,24 @@ def main():
     results = {}
     for d in sorted({r["date"] for r in cfg}):
         results[d] = build_date(d, cfg, srv, args, steps)
+    return finish_all(results, args)
+
+
+def finish_all(results, args):
+    """The end of an --all run: each date's result, then the summary table across the root. The exit code is the
+    builds' worst (worst_exit): a summary that cannot be made is said (with its traceback), never the run's code."""
     rule("all dates")
     for d, r in results.items():
         say(d, r + {"partial": " (PARTIAL: see its README)", "failed": " (FAILED: see its log)",
                     "refused": " (NOT built: see the WARNING above)"}.get(r, ""))
     if not args.dry_run:
-        summary(args)
+        try:
+            summary(args)
+        except Exception:                          # the builds are done and on disk: their result stands
+            import traceback
+            traceback.print_exc()
+            warn("the summary table across the root could not be made (traceback above); every date's product is "
+                 "as its own README says. Run --summary again after a fix")
     return worst_exit(results.values())
 
 

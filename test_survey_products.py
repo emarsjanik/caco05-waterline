@@ -2776,6 +2776,86 @@ def test_fix1(d):
     check("TOO FEW" not in t, "16 frames on RTK transects: an estimate")
 
 
+def summary_product(root, date, variant=None, name="lidar"):
+    """A BUILT product as --summary reads it back: the stamps' chain (forcing -> merge -> dem -> compare), the DEM's
+    record dem/<stem>_info.json (the variant's own stem, dem_stem) with the settings the dem stamp holds, the
+    comparison's json and provenance.json naming each camera's calibration variant ('table' = none)."""
+    out = Path(root) / date
+    (out / "waterlines").mkdir(parents=True)
+    (out / "dem").mkdir()
+    (out / "compare").mkdir()
+    (out / "waterlines" / "contour_points_ground.csv").write_text("camera,x\n")
+    sp.write_stamp(out, "forcing", {"forcing": "test"})
+    sp.write_stamp(out, "merge", {"after": {"forcing": sp.token(out, "forcing")}})
+    settings = {"cell_m": 1.0, "min_points": 3, "max_spread_m": 0.5, "max_hs_m": 1.5, "max_day_offset_m": 0.15}
+    sp.write_stamp(out, "dem", {"after": {"merge": sp.token(out, "merge")}}, extra={"settings": settings})
+    info = {"cell": 1.0, "min_points": 3, "max_spread": 0.5, "filters": {"max_hs": 1.5, "max_day_offset": 0.15}}
+    (out / "dem" / f"{date}{'_' + variant if variant else ''}_info.json").write_text(json.dumps(info))
+    if variant:          # the table calibration's DEM record left in a variant's folder (other settings): not B's
+        (out / "dem" / f"{date}_info.json").write_text(json.dumps(dict(info, cell=2.0)))
+    sp.write_stamp(out, f"compare_{name}", {"after": {"dem": sp.token(out, "dem"), "waterlines": sp.token(out, "merge")}},
+                   extra={"label": {"label": "INDEPENDENT", "reasons": []}})
+    (out / "compare" / f"{date}_{name}_comparison.json").write_text(json.dumps(
+        {"n": 120, "median": -0.034, "nmad": 0.057, "rmse": 0.08, "p5": -0.12, "p95": 0.07, "dem_cells": 900,
+         "dem_cells_compared": 120, "photo_dates": [date, date], "days_outside_photo_window": 0}))
+    prov = {"date": date, "era": "adcp", "status": "complete", "built_utc": "2026-10-14T21:00:00Z",
+            "window": {"first_day": date, "last_day": date}, "setup": {"coef": sp.SETUP_COEF},
+            "frames_per_day": {"c2": {date: 12}},
+            "cameras": {"c2": {"calibration": {"variant": variant or "table"}, "photos": {"count": 12}}},
+            "comparisons": [{"name": name, "survey_type": "dsm", "survey_date": date, "label": "INDEPENDENT",
+                             "table_label": "INDEPENDENT", "status": "built", "current": True}]}
+    (out / "provenance.json").write_text(json.dumps(prov))
+    return out, prov
+
+
+def test_summary_built(d):
+    print("--summary and the end of --all over BUILT products with a comparison: a table root and a variant root")
+    for variant in (None, "test-var"):
+        root = Path(d) / f"summary_{variant or 'table'}"
+        out, prov = summary_product(root, "2025-03-06", variant)
+        pl = sp.product_plan(prov, out)
+        check(sp.plan_variant(pl) == variant and sp.dem_stem(pl) == out / "dem" / ("2025-03-06" + (f"_{variant}" if
+                                                                                                     variant else "")),
+              f"a built product read back ({variant or 'table'}): its plan names the variant from provenance.json, so "
+              f"its DEM record is dem/{sp.dem_stem(pl).name}_info.json")
+        cur, why, h, lab = sp.summary_comparison(prov, out, prov["comparisons"][0])
+        check(cur and not why and h.get("n") == 120 and lab.get("label") == "INDEPENDENT",
+              f"summary_comparison on a complete product with a DEM and a comparison ({variant or 'table'} root): "
+              f"current, no exception (was KeyError 'cams')")
+        a = cfg_args(output_root=str(root))
+        rc, txt = quiet(sp.summary, a)
+        with open(root / "summary.csv", newline="") as f:
+            rows = [r for r in csv.DictReader(f) if r.get("survey") == "lidar"]
+        check(rc == 0 and len(rows) == 1 and rows[0]["current"] == "True" and "-0.034" in txt,
+              f"--summary over that root: exit 0, the comparison current with its numbers ({variant or 'table'})")
+        if variant:
+            (out / "dem" / f"2025-03-06_{variant}_info.json").write_text(json.dumps(
+                {"cell": 2.0, "min_points": 3, "max_spread": 0.5, "filters": {"max_hs": 1.5, "max_day_offset": 0.15}}))
+            cur, why, _, _ = sp.summary_comparison(prov, out, prov["comparisons"][0])
+            check(not cur and f"2025-03-06_info.json: cell_m 2.0" in why,
+                  "... and the variant's OWN DEM record is the one checked: another grid there makes it not current")
+        # the end of --all: the per-date results, then the summary; its exit code is the builds' worst
+        a = cfg_args(output_root=str(root), dry_run=False)
+        rc, txt = quiet(sp.finish_all, {"2025-03-06": "built", "2024-10-23": "disabled"}, a)
+        check(rc == 0 and "Traceback" not in txt and "2025-03-06" in txt,
+              f"the end of --all ({variant or 'table'} root): the summary is made, exit 0 (the builds')")
+    real = sp.summary
+
+    def broken(args):
+        raise KeyError("cams")
+    sp.summary = broken
+    try:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, txt = quiet(sp.finish_all, {"2025-03-06": "partial"}, cfg_args(output_root=str(root), dry_run=False))
+    finally:
+        sp.summary = real
+    check(rc == sp.EXIT_CODES["partial"] and "KeyError" in err.getvalue() and "could not be made" in
+          (txt + err.getvalue()),
+          "a summary that fails at the end of --all is said, with its traceback; the exit code stays the builds' "
+          "(3, partial), not 1")
+
+
 def test_fix2(d):
     print("one build at a time, the window and inputs of the build, map reasons, still water, waves, summary")
     d = Path(d) / "fix2"
@@ -5524,6 +5604,7 @@ def main():
         test_fit_recognised(d)
         test_cwd_never_searched(d)
         test_fix1(d)
+        test_summary_built(d)
         test_fix2(d)
         test_fix3(d)
         test_dem_two_days(d)
