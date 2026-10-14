@@ -452,8 +452,18 @@ def test_trend():
     rest = " ".join(x.strip() for x in w[1:])
     check(w[0].startswith("WARNING: c1's camera-day offsets run one way with time over 7 days")
           and all(k in rest for k in dt["rejected"]) and "drifts with time" in rest
-          and sum("WARNING" in x for x in w) == 1 and all(x.startswith("   ") for x in w[1:]),
-          "one WARNING line (the station status counts them), naming the days left out")
+          and sum("WARNING" in x for x in w) == 1 and all(x.startswith("   ") for x in w[1:])
+          and "The method alone drifts so: on a static synthetic beach" in rest and "rho -0.96" in rest,
+          "one WARNING line (the station status counts them), naming the days left out, and what the method alone "
+          "gives on a static synthetic beach (the same warning: no proof of a camera fault or of beach change)")
+    # the range over ALL the camera's days, from the unrounded offsets, with the days that make it (review r1: the
+    # Mar fixture's printed 0.17 m was round(0.1647, 3) rounded again, next to first/last offsets 0.159 apart)
+    mar = {f"c2 2025-03-0{i}": o for i, o in zip(range(3, 10), [0.066, 0.072, 0.03, -0.01, -0.03, -0.06, -0.0927])}
+    tm = dfc.day_trends(mar, LIMIT)
+    wm = dfc.day_trend_warning(tm[0], LIMIT, [])[0] if tm else ""
+    check(tm and "+0.066 m on 2025-03-03 to -0.093 m on 2025-03-09; over all its days -0.093 m (2025-03-09) to "
+                 "+0.072 m (2025-03-04), a range of 0.165 m > the 0.15 m limit" in wm,
+          "the trend's range is over all its days, with its lowest and highest day, from unrounded offsets: " + wm[:60])
     flat = dfc.day_trends({"c1 2026-10-0%d" % i: o for i, o in enumerate([0.0, 0.03, 0.05, 0.08, 0.1], 1)}, LIMIT)
     check(flat == [], "a monotonic run within the limit (range 0.10 m) is no warning")
     four = dfc.day_trends({"c1 2026-10-0%d" % i: o for i, o in enumerate([-0.2, -0.1, 0.1, 0.2], 1)}, LIMIT)
@@ -489,8 +499,8 @@ def test_trend_rule():
           and len(dfc.day_trends(five_swap, LIMIT, alpha=1.0)) == 1
           and len(dfc.day_trends(six_cycle, LIMIT, alpha=1.0)) == 1
           and abs(dfc.day_trends(rising, LIMIT)[0]["chance"] - 1 / 720.0) < 1e-12
-          and "which days in random order reach 1 time in 720;" in dfc.day_trend_warning(
-              dfc.day_trends(rising, LIMIT)[0], LIMIT, [])[0],
+          and "which days in random order reach in that direction 1 time in 720 (either way 1 in 360);"
+          in dfc.day_trend_warning(dfc.day_trends(rising, LIMIT)[0], LIMIT, [])[0],
           "5 days rising with one pair swapped (rho 0.90, reached by 4.2 % of random orders) and 6 days with "
           "three rotated (rho 0.83, 2.9 %): no warning (|rho| > 0.8 alone warned); strictly rising: WARNING, "
           "chance 1/720")

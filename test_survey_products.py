@@ -2656,7 +2656,8 @@ def test_day_test_record(d):
           and "day test WARNING: the day test could not judge every camera-day -- left out without being judged: "
               "c1 2025-01-22." in rl
           and "day test WARNING: c2's camera-day offsets run one way with time over 5 days (Spearman rho -1.00, "
-              "which days in random order reach 1 time in 120" in rl
+              "which days in random order reach in that direction 1 time in 120 (either way 1 in 60)" in rl
+          and "The method alone drifts so: on a static synthetic beach" in rl
           and "it rests on c2 2025-01-23, the one day left out, at an end: the other 4 days give rho -1.00" in rl
           and all(ord(ch) < 128 for ch in rl),
           "README: every camera-day left out with how, its offsets and why; the WARNING; the trend 'rests on' its "

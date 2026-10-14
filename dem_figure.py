@@ -833,9 +833,8 @@ def day_test_warnings(f):
     dt = f.get("day_test") or {}
     lim = dt.get("limit_m", f.get("max_day_offset"))
     out = [dt["warning"]] if dt.get("warning") else []
+    from dem_from_contours import trend_chance_text as chance, trend_span_text, TREND_METHOD_DRIFT
     for t in dt.get("trend_warnings") or []:
-        def chance(c):
-            return f", which days in random order reach 1 time in {int(round(1 / c)):,}" if c else ""
         w = t.get("without") or None
         rest = ""
         if w and w.get("alone", True):
@@ -846,14 +845,16 @@ def day_test_warnings(f):
                     f"rho {w['spearman_rho']:+.2f}{chance(w.get('chance'))}, not enough to pass the rule alone, "
                     f"so {w['day']} may be the end of the trend or one bad day beyond it")
         fo, lo = t.get("first_offset_m"), t.get("last_offset_m")
+        mm = ({"min": (t["min_day"], t["min_offset_m"]), "max": (t["max_day"], t["max_offset_m"])}
+              if t.get("min_day") and t.get("min_offset_m") is not None and t.get("max_offset_m") is not None else {})
         out.append(f"WARNING: {t['camera']}'s camera-day offsets run one way with time over {t['days']} days "
                    f"(Spearman rho {t['spearman_rho']:+.2f}{chance(t.get('chance'))}; "
                    + (f"{fo:+.3f}" if fo is not None else "--") + f" m on {t.get('first_day')} to "
-                   + (f"{lo:+.3f}" if lo is not None else "--") + f" m on {t.get('last_day')}, a range of "
-                   f"{t['range_m']:.2f} m > the " + (f"{float(lim):g}" if lim is not None else "?")
-                   + f" m limit{rest}): real beach change or an error that "
+                   + (f"{lo:+.3f}" if lo is not None else "--") + f" m on {t.get('last_day')}"
+                   + trend_span_text(dict(t, **mm), lim) + f"{rest}): real beach change or an error that "
                    f"drifts with time (pointing, lens, a detection bias with the tides or waves); check "
-                   f"{t['camera']}'s pointing and the beach change before reading this DEM as one surface.")
+                   f"{t['camera']}'s pointing and the beach change before reading this DEM as one surface. "
+                   + TREND_METHOD_DRIFT)
     return out
 
 

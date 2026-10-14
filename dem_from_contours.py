@@ -57,7 +57,9 @@ THE DAY TEST (--max-day-offset) is iterative: the camera-day furthest
 over the limit from the DEM of the other days is left out, the others
 are measured again without it, and so on until none is over; a day left
 out on the way is taken back if it lies within the limit of the DEM of
-the kept days. One pass let the days it rejected shape the DEM it judged
+the kept days and its return puts no kept day over the limit (else it
+stays out: a refused take-back). One pass let the days it rejected shape
+the DEM it judged
 the others by (day_consistency() has the details). A day is left out
 only where the test can tell which day is off; days over the limit it
 cannot judge (two days that only see each other, the last two days)
@@ -744,7 +746,7 @@ def spearman_tail(rho, n, y=None):
     with one tied pair cannot reach rho 1; their largest rho, 0.97, comes in 2 orders of 120, the
     tied pair either way, where the table for distinct values said 1 in 120); without y, n distinct
     values. The null is symmetric (reversing an order turns rho into -rho), so the same chance holds
-    for rho <= -`rho`."""
+    for rho <= -`rho`: the chance is ONE-SIDED (in that direction); either way it is twice this."""
     if n > 8:
         return None
     return float((spearman_null(n, y) >= rho - 1e-9).mean())
@@ -833,8 +835,8 @@ def day_trends(offsets, limit, min_days=DAY_TREND_MIN_DAYS, min_rho=DAY_TREND_MI
                        "chance": spearman_tail(abs(rho2), len(rest), rest),
                        "range_m": round(float(rest.max() - rest.min()), 3), "alone": bool(alone)}
         out.append({"camera": cam, "days": len(days), "spearman_rho": round(rho, 3),
-                    "chance": chance, "range_m": round(span, 3), "first": days[0], "last": days[-1],
-                    "without": without})
+                    "chance": chance, "range_m": round(span, 4), "first": days[0], "last": days[-1],
+                    "min": days[int(np.argmin(y))], "max": days[int(np.argmax(y))], "without": without})
     return out
 
 
@@ -1202,14 +1204,43 @@ def ordinal(n):
     return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
 
 
+# What the method alone gives (review r1): on a STATIC synthetic beach with a fixed pointing the detection's own
+# drift makes the same WARNING, so the warning alone shows neither a camera fault nor a change of the beach
+TREND_METHOD_DRIFT = ("The method alone drifts so: on a static synthetic beach with a fixed pointing (the Mar 2025 "
+                      "replica) c2's offsets give rho -0.96 and a range of 0.165 m over 7 days, the same warning; "
+                      "only a drift clearly larger than that, or one the pointing check or a survey confirms, "
+                      "points at the camera or the beach.")
+
+
+def trend_chance_text(c):
+    """The chance part of a trend WARNING: how often days in random order reach that rho IN THAT DIRECTION (the
+    one-sided chance the rule uses), and either way (twice that: the null is symmetric). '' without one."""
+    if not c:
+        return ""
+    return (f", which days in random order reach in that direction 1 time in {int(round(1 / c)):,} (either way "
+            f"1 in {int(round(1 / (2 * c))):,})")
+
+
+def trend_span_text(t, limit):
+    """', the lowest ... the highest ..., a range of X m > the limit': the range over ALL the camera's days, with
+    the days that make it (the first and last day need not), from the unrounded offsets where the record has them."""
+    lo, hi = t.get("min"), t.get("max")
+    if lo and hi:
+        span = float(hi[1]) - float(lo[1])
+        where = f"; over all its days {lo[1]:+.3f} m ({lo[0]}) to {hi[1]:+.3f} m ({hi[0]})"
+    else:
+        span, where = float(t["range_m"]), ""
+    return f"{where}, a range of {span:.3f} m > the {float(limit):g} m limit" if limit is not None else \
+        f"{where}, a range of {span:.3f} m"
+
+
 def day_trend_warning(t, limit, rejected):
     """The WARNING lines for one camera's trend (day_trends), naming the days the test left out."""
     cam = t["camera"]
     gone = [k for k in rejected if k.split(" ", 1)[0] == cam]
     (d0, o0), (d1, o1) = t["first"], t["last"]
 
-    def chance(c):
-        return f", which days in random order reach 1 time in {int(round(1 / c)):,}" if c else ""
+    chance = trend_chance_text
     w = t.get("without")
     rest, carried = "", ""
     if w and w.get("alone", True):
@@ -1225,13 +1256,13 @@ def day_trend_warning(t, limit, rejected):
                    f"beyond it: the other days run the same way, but on their own they would not warn.")
     return [f"WARNING: {cam}'s camera-day offsets run one way with time over {t['days']} days "
             f"(Spearman rho {t['spearman_rho']:+.2f}{chance(t.get('chance'))}; {o0:+.3f} m on {d0} to "
-            f"{o1:+.3f} m on {d1}, a range of {t['range_m']:.2f} m > the {limit:g} m limit{rest})."] + _wrap(
+            f"{o1:+.3f} m on {d1}{trend_span_text(t, limit)}{rest})."] + _wrap(
             "Real beach change through the window, or an error that drifts with time (the camera's "
             "pointing or lens, a detection bias that follows the tides or the waves), gives this pattern; "
             "the day test then trims the end(s) furthest out"
             + (f" -- left out here: {', '.join(_unit(k) for k in gone)}" if gone else " -- none left out here")
             + "." + carried + f" Check {cam}'s pointing and the beach change before reading this DEM as "
-            "one surface.")
+            "one surface. " + TREND_METHOD_DRIFT)
 
 
 def day_test_record(dt, limit, trends):
@@ -1310,6 +1341,10 @@ def day_test_record(dt, limit, trends):
                                 "range_m": t["range_m"], "first_day": t["first"][0],
                                 "first_offset_m": r(t["first"][1]), "last_day": t["last"][0],
                                 "last_offset_m": r(t["last"][1]),
+                                "min_day": (t.get("min") or (None, None))[0],
+                                "min_offset_m": r((t.get("min") or (None, None))[1]),
+                                "max_day": (t.get("max") or (None, None))[0],
+                                "max_offset_m": r((t.get("max") or (None, None))[1]),
                                 # the one day left out, at an end, and the camera's other days:
                                 # alone, they pass the rule on their own; else the trend rests on it
                                 "without": None if not t.get("without") else {
@@ -1553,7 +1588,9 @@ def main():
                          "different failure from the tide-direction check, which only sees "
                          "direction. Iterative: the day furthest over the limit is left out "
                          "and the others measured again without it, until none is over; a "
-                         "left-out day within the limit of the kept days is then taken back. "
+                         "left-out day within the limit of the kept days is then taken back, if "
+                         "its return puts no kept day over the limit (else it stays out: a refused "
+                         "take-back). "
                          "Days with fewer than 30 comparable samples are kept, and with fewer "
                          "than 3 testable camera-days every day is kept (the DEM without one "
                          "day is then the other day alone, so the test cannot tell which is "
