@@ -175,6 +175,18 @@ def command_line_shown(proc, timeout=30.0):
     return False
 
 
+@contextlib.contextmanager
+def unblinded(date="2024-10-23"):
+    """The behaviour of a BLIND date once it is unblinded (its BLIND_DATES entry removed, after the holder
+    has reported): the survey looked for, merged, compared. Restored afterwards, whatever happens."""
+    held = sp.BLIND_DATES.pop(date, None)
+    try:
+        yield
+    finally:
+        if held is not None:
+            sp.BLIND_DATES[date] = held
+
+
 def photo_name(t, station, cam):
     e = calendar.timegm(t.timetuple())
     return f"{e}.{t:%a.%b.%d_%H_%M_%S}.GMT.{t.year}.{station}.{cam}.timex.jpg"
@@ -779,21 +791,29 @@ def test_config(d):
     lab, why = sp.honest_label(rtk_row, pl, SimpleNamespace(setup_coef=0.0), rtk_file)
     check(lab == "INDEPENDENT" and not why, "... a C = 0 build (fitted to nothing): INDEPENDENT")
     # The GCP files arrive later, one per camera, under the survey date's name: picked up by
-    # themselves and merged, a target both cameras saw counted once.
+    # themselves and merged, a target both cameras saw counted once. 2024-10-23 is BLIND (its GCPs are
+    # held for an independent check: test_blind_and_calibration), so this is the behaviour once it is
+    # unblinded (its BLIND_DATES entry removed).
     oct_ = [s for s in srv if s["name"] == "oct_gcps"][0]
     sdir = Path(d) / "gcp_arrive"
     sdir.mkdir()
     a = cfg_args(survey_dirs=[str(sdir)], **tabs)
-    paths, note = sp.resolve_survey(oct_, None, a)
-    check(not paths and "no survey file" in note, "Oct GCPs not there yet: skipped, with the reason")
-    (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv").write_text(
-        "1,420100.0,4638400.0,1.20\n2,420110.0,4638410.0,0.80\n")
-    (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c2_xyz.csv").write_text(
-        "2,420110.0,4638410.0,0.80\n3,420120.0,4638500.0,0.50\n")
-    paths, note = sp.resolve_survey(oct_, None, a)
-    check(len(paths) == 2 and "found" in note, "Oct GCPs arrive: both camera files found by their date")
-    rows = [ln for ln in Path(sp.merged_points(paths, sdir / "merged.csv")).read_text().splitlines() if ln]
-    check(len(rows) == 3, f"Oct GCPs merged: 3 targets, the one both cameras saw once (got {len(rows)})")
+    held = sp.BLIND_DATES.pop("2024-10-23", None)
+    try:
+        paths, note = sp.resolve_survey(oct_, None, a)
+        check(not paths and "no survey file" in note, "Oct GCPs not there yet: skipped, with the reason")
+        (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv").write_text(
+            "1,420100.0,4638400.0,1.20\n2,420110.0,4638410.0,0.80\n")
+        (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c2_xyz.csv").write_text(
+            "2,420110.0,4638410.0,0.80\n3,420120.0,4638500.0,0.50\n")
+        paths, note = sp.resolve_survey(oct_, None, a)
+        check(len(paths) == 2 and "found" in note, "Oct GCPs arrive (once unblinded): both camera files found by "
+                                                   "their date")
+        rows = [ln for ln in Path(sp.merged_points(paths, sdir / "merged.csv")).read_text().splitlines() if ln]
+        check(len(rows) == 3, f"Oct GCPs merged: 3 targets, the one both cameras saw once (got {len(rows)})")
+    finally:
+        if held:
+            sp.BLIND_DATES["2024-10-23"] = held
 
 
 def test_table_commas(d):
@@ -968,11 +988,17 @@ def test_shipped_tables(d):
     cfg = sp.read_table(d / "survey_dates.csv", sp.CONFIG_FIELDS)
     srv = sp.read_table(d / "surveys.csv", sp.SURVEY_FIELDS)
     tabs = {"config": str(d / "survey_dates.csv"), "surveys": str(d / "surveys.csv")}
-    for date in ("2024-10-23", "2025-03-19"):
+    for date in ("2025-03-19",):
         plan, out = quiet(sp.build_plan, date, cfg, srv, cfg_args(**tabs))
         forced, _ = quiet(sp.build_plan, date, cfg, srv, cfg_args(force_disabled=True, **tabs))
         check(plan is None and "DISABLED" in out and forced is not None,
-              f"{date}: switched off (the user asked to skip it): refused, and builds with --force-disabled")
+              f"{date}: switched off (no photos, no ADCP): refused, and builds with --force-disabled")
+    plan, out = quiet(sp.build_plan, "2024-10-23", cfg, srv, cfg_args(**tabs))
+    check(plan is not None and plan.get("blind") and plan["surveys"] == [] and not plan["forced_disabled"]
+          and [h["name"] for h in plan["held"]] == ["oct_gcps"]
+          and all(c["eo_file"] == f"CACO03_{k}_20241023_EO.yaml" for k, c in plan["cams"].items()),
+          "2024-10-23: switched on (the user asked for it, 13 Oct 2026), BLIND: DEM only, its survey withheld, "
+          "calibration A (the table's) unless --eo")
     plan, _ = quiet(sp.build_plan, "2025-01-23", cfg, srv, cfg_args(**tabs))
     check(plan["last"] == "2025-01-23" and all(c["station"] == "CACO03" for c in plan["cams"].values()),
           "2025-01-23: CACO03 only, 24 Jan (the re-set) outside the window")
@@ -1006,8 +1032,10 @@ def test_shipped_tables(d):
           f"GCP rows (points of their calibration's day: {', '.join(s['name'] for s in gcps) or 'none'}): "
           f"PARTLY-CIRCULAR in the table, whether or not their file has arrived")
     oct_ = [s for s in srv if s["name"] == "oct_gcps"][0]
-    check(oct_["label"] == "PARTLY-CIRCULAR" and not oct_["path"], "Oct GCPs: PARTLY-CIRCULAR, path empty until the "
-                                                                   "file arrives")
+    check(oct_["label"] == "PARTLY-CIRCULAR" and not oct_["path"] and "BLIND" in oct_["why"]
+          and "Sherwood" in oct_["why"],
+          "Oct GCPs: PARTLY-CIRCULAR (the label of a check of the DEM built with calibration A), no path: held by "
+          "Chris Sherwood (BLIND), never on the NUC")
 
 
 def test_station_tables(d):
@@ -1158,7 +1186,8 @@ def test_caveats(d):
         check("none on 2026-09-26" in text, f"{era}: the window days without waterlines are listed")
         check(("GNSS-R" in text and "surf zone" in text) == (era == "adcp"),
               f"{era}: C's still-water reference (GNSS-R, surf zone) stated for the ADCP era only")
-        check("NOMINAL" in text and "6348" in text, f"{era}: the GeoTIFF CRS tag is said to be nominal")
+        check("6348" in text and ("NOMINAL" in text) == (sp.GEOTIFF_EPSG == 32619),
+              f"{era}: the GeoTIFF CRS tag (EPSG:{sp.GEOTIFF_EPSG}) is said, nominal only if 32619")
     cav = sp.collect_caveats(plan, SimpleNamespace(setup_coef=0.05), {}, forcing, {})
     check(not any("not pinned by the 2026 RTK" in c for c in cav) and any("WITHOUT saying where" in c for c in cav),
           "a C of unknown origin: no RTK caveat, and said to be of unknown origin")
@@ -3211,14 +3240,16 @@ def test_oct_path(d):
     paths, note = sp.resolve_survey(oct_, plan, a)
     msg = sp.missing_survey_message(oct_, plan, a, note)
     want = f"{sdir}/2024-10-23_Marconi_Extrinsic_Targets_<cam>_xyz.csv"
-    check(want in msg and str(sp.CHELSEA) not in msg and "--force-disabled" in msg,
-          "Oct GCPs missing, --survey-dirs given: the advice names that folder, not the station's Chelsea folder")
+    check(want in msg and str(sp.CHELSEA) not in msg and ("--force-disabled" in msg) == bool(plan["forced_disabled"]),
+          "Oct GCPs missing, --survey-dirs given: the advice names that folder, not the station's Chelsea folder "
+          "(--force-disabled in the rerun line only while the date is switched off)")
     check("--steps maps,compare" in msg,
           "... and reruns the maps too (a compare-only rerun left the plan view drawn without the GCPs)")
     (sdir / "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv").write_text("1,420100.0,4638400.0,1.20\r\n")
     paths, note = sp.resolve_survey(oct_, plan, a)
     check(len(paths) == 1, "... and a file put where the advice says is found")
-    a2 = cfg_args(force_disabled=True)            # the station's defaults: Chelsea first
+    # the station's folders, Chelsea first (named only: missing_survey_message looks nothing up)
+    a2 = cfg_args(force_disabled=True, survey_dirs=[str(x) for x in sp.DEFAULT_SURVEY_DIRS])
     msg = sp.missing_survey_message(oct_, plan, a2, "no survey file given")
     check(f"{sp.CHELSEA}/2024-10-23_Marconi_Extrinsic_Targets_<cam>_xyz.csv" in msg,
           "... and with the station's own folders, the Chelsea folder (searched first)")
@@ -3523,6 +3554,596 @@ def test_dry_run_needs_adcp():
     check(not warns, "ADCP era: no chatham-era warnings")
 
 
+def test_blind_and_calibration(d):
+    print("a BLIND date (DEM only: its survey is held for an independent check), its two calibrations, one per root")
+    import builtins
+    import pathlib
+    import estimate_eo_rotation as er
+    from georectify import load_extrinsics
+    d = Path(d) / "blind"
+    d.mkdir()
+    cfg, srv, tabs = fixture_tables(d)
+    oct_row = [s for s in srv if s["name"] == "oct_gcps"][0]
+    held = sp.BLIND_DATES["2024-10-23"]
+    # canaries: files named like the held October GCPs, in every folder a build could search (the survey
+    # folders, the calibration folder, the output roots, the current folder). Never looked for, never opened.
+    sdirs = [d / "survey_a", d / "survey_b"]
+    cal = d / "calibration"
+    shutil.copytree(str(HERE / "calibration"), str(cal))
+    # the calibration history of the test's copy: the rows of the solution from the held GCPs get a height
+    # no camera has (999 m): it must never reach a README (those rows are not read on a blind date)
+    hist = cal / "calibration_history.csv"
+    rows_h = list(csv.DictReader(open(hist, newline="")))
+    for r in rows_h:
+        if "20241023" in r["file"]:
+            r["z"] = "999.000"
+    with open(hist, "w", newline="") as f:
+        w_ = csv.DictWriter(f, fieldnames=list(rows_h[0].keys()))
+        w_.writeheader()
+        w_.writerows(rows_h)
+    roots = {k: d / k for k in ("out", "out_gcpfree", "outb_gcpfree", "fresh", "fresh_gcpfree", "proc_gcpfree")}
+    for f in sdirs + list(roots.values()):
+        f.mkdir()
+    canary_names = ["2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv", "2024-10-23_Marconi_Extrinsic_Targets_c2_xyz.csv",
+                    "2024-10-23_GCP_points.csv", "targets_20241023_xyz.csv"]
+    canaries = set()
+    for f in sdirs + [cal, roots["out"], Path.cwd()]:
+        for n in canary_names:
+            (f / n).write_text("1,420100.0,4638400.0,1.20\n")          # writing is allowed: only reading is refused
+            canaries.add(os.path.realpath(str(f / n)))
+    (sdirs[0] / "2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm.tif").write_text("not a real lidar")
+    forcing = {}
+    for k in ("adcp", "adcp_navd88", "chatham", "wis", "ndbc"):
+        forcing[k] = str(d / f"{k}.csv")
+        Path(forcing[k]).write_text("")
+    a = cfg_args(output_root=str(roots["out"]), survey_dirs=[str(x) for x in sdirs], calibration=str(cal),
+                 force_disabled=True, photo_roots=[str(d / "no_photos")], live_contours="/x/contour_points_timex.csv",
+                 setup_fitted_to=None, geotiff_epsg=sp.GEOTIFF_EPSG, gnssr_spline=str(d / "no_spline.txt"),
+                 gauge_csv=str(d / "no_gauge.csv"), live_cron=str(sp.LIVE_CRON), pointing_log_dir=str(d / "no_log"),
+                 pointing_frames=3, pointing_fail=sp.POINT_FAIL_DEG, dem_cell=sp.DEM_CELL,
+                 dem_min_points=sp.DEM_MIN_POINTS, dem_max_spread=sp.DEM_MAX_SPREAD, dem_max_hs=sp.DEM_MAX_HS,
+                 dem_max_day_offset=sp.DEM_MAX_DAY_OFFSET, keep_moved_days=False, no_download=True, synthetic=None,
+                 replace=False, dry_run=False, force=False, eo=None, calibration_variant=None, **forcing, **tabs)
+
+    # -- the tracer: every look-up (a glob of the held date, a stat or open of a file named like it) through
+    # pathlib, os and open(), and every open() of a canary seen by an audit hook (also C-level opens: pandas,
+    # numpy), and every command run (survey_compare.py, or a canary named on a command line)
+    seen = []
+    trace = {"on": False}
+
+    def held_name(x):          # a survey-like file (never a calibration .yaml) named with the held date
+        n = os.path.basename(str(x)).lower()
+        return (("2024-10-23" in n or "20241023" in n) and any(k in n for k in ("xyz", "gcp", "extrinsic", "target"))
+                and not n.endswith((".yaml", ".yml")))
+
+    def held_pattern(pat):
+        return any(k in str(pat) for k in ("2024-10-23", "20241023"))
+    orig = {"glob": pathlib.Path.glob, "rglob": pathlib.Path.rglob, "stat": pathlib.Path.stat,
+            "open": pathlib.Path.open, "io_open": io.open, "b_open": builtins.open, "os_stat": os.stat}
+
+    def wrap(name, fn, kind):
+        def inner(*args, **kw):
+            if kind == "pattern" and len(args) > 1 and held_pattern(args[1]):
+                seen.append(f"{name}({args[0]}, {args[1]!r})")
+            elif kind == "path" and args and held_name(args[0]):
+                seen.append(f"{name}({args[0]})")
+            return fn(*args, **kw)
+        return inner
+
+    watch_a = {"on": False, "paths": {os.path.realpath(str(cal / f"CACO03_{c}_20241023_EO.yaml")) for c in ("c1", "c2")},
+               "seen": []}
+
+    def audit(event, args_):
+        if event == "open" and watch_a["on"] and args_ and isinstance(args_[0], (str, bytes, os.PathLike)):
+            if os.path.realpath(os.fsdecode(args_[0])) in watch_a["paths"]:
+                watch_a["seen"].append(os.fsdecode(args_[0]))
+        if not trace["on"]:
+            return
+        if event == "open" and args_ and isinstance(args_[0], (str, bytes, os.PathLike)):
+            if os.path.realpath(os.fsdecode(args_[0])) in canaries:
+                seen.append(f"audit open({os.fsdecode(args_[0])})")
+        elif event == "subprocess.Popen":
+            argv_ = [str(x) for x in (args_[1] or [])]
+            words = " ".join(argv_)
+            if (len(argv_) > 1 and argv_[1].endswith("survey_compare.py")) or any(n in words for n in canary_names):
+                seen.append(f"audit subprocess({words[:120]})")       # a comparison run, or a canary named
+    if hasattr(sys, "addaudithook"):
+        sys.addaudithook(audit)
+
+    @contextlib.contextmanager
+    def traced():
+        pathlib.Path.glob = wrap("Path.glob", orig["glob"], "pattern")
+        pathlib.Path.rglob = wrap("Path.rglob", orig["rglob"], "pattern")
+        pathlib.Path.stat = wrap("Path.stat", orig["stat"], "path")
+        pathlib.Path.open = wrap("Path.open", orig["open"], "path")
+        io.open = builtins.open = wrap("open", orig["io_open"], "path")
+        os.stat = wrap("os.stat", orig["os_stat"], "path")
+        trace["on"] = True
+        try:
+            yield
+        finally:
+            trace["on"] = False
+            pathlib.Path.glob, pathlib.Path.rglob = orig["glob"], orig["rglob"]
+            pathlib.Path.stat, pathlib.Path.open = orig["stat"], orig["open"]
+            io.open, builtins.open, os.stat = orig["io_open"], orig["b_open"], orig["os_stat"]
+
+    # the tracer catches what it should: an UNBLINDED look-up of the same date is seen (glob, stat, open)
+    sp.BLIND_DATES.pop("2024-10-23")
+    try:
+        with traced():
+            hits = sp.resolve_survey(oct_row, None, a)[0]
+            sp.merged_points(hits, d / "merged_unblinded.csv")
+    finally:
+        sp.BLIND_DATES["2024-10-23"] = held
+    check(len(hits) >= 2 and any(x.startswith("Path.glob") for x in seen)
+          and (any(x.startswith("audit open") for x in seen) or not hasattr(sys, "addaudithook")),
+          f"the tracer sees an (unblinded) look-up and read of the October GCPs ({len(seen)} calls)")
+    seen.clear()
+    (d / "merged_unblinded.csv").unlink()
+
+    def fake_product(plan_, args_):
+        """Stamps of every step, waterlines and maps of a two-camera build (no detection is run)."""
+        outd = plan_["out"]
+        wdir = outd / "waterlines"
+        wdir.mkdir(parents=True)
+        rows = ["source_file,camera,capture_time_utc,easting_utm19,northing_utm19,tide_elevation_navd88,"
+                "beach_elevation_navd88,setup_correction_m"]
+        for k in range(40):
+            for cam in ("c1", "c2"):
+                rows.append(f"f{k}_{cam},{cam},2024-10-2{k % 7} 15:00:00,{420150 + k},{4638350 + 3 * k},"
+                            f"{0.1 * (k % 9) - 0.3:.2f},{0.1 * (k % 9) - 0.1:.2f},0.2")
+        (wdir / "contour_points_ground.csv").write_text("\n".join(rows) + "\n")
+        sp.write_stamp(outd, "forcing", {"x": 1})
+        fit = sp.setup_fit_info(sp.SETUP_COEF)
+        for cam, c in plan_["cams"].items():
+            rec = sp.calibration_record(c)
+            sp.write_stamp(outd, f"pointing_{cam}", {"eo_file": sp.file_sig(c["eo_path"])},
+                           extra={"eo_sha256": rec["eo_sha256"], "calibration": rec})
+            sp.write_stamp(outd, f"detect_{cam}", {"eo_file": sp.file_sig(c["eo_path"])},
+                           extra={"setup_coef": sp.SETUP_COEF, "setup_fit": fit, "calibration": rec,
+                                  "eo_sha256": rec["eo_sha256"]})
+            (outd / "pointing").mkdir(exist_ok=True)
+            (outd / "pointing" / f"pointing_{cam}.json").write_text(json.dumps(
+                {"rows": [{"date": "2024-10-23", "verdict": "matches", "why": "", "horizon_offset_px": 2.0,
+                           "d_azimuth_deg": 0.01, "d_tilt_deg": 0.0, "d_roll_deg": 0.0}], "info": {}}))
+        sp.write_stamp(outd, "merge", {"after": {"detect_c1": sp.token(outd, "detect_c1"),
+                                                 "detect_c2": sp.token(outd, "detect_c2"),
+                                                 "forcing": sp.token(outd, "forcing")}},
+                       extra={"setup": {c: {"coef": sp.SETUP_COEF, "fit": fit} for c in ("c1", "c2")},
+                              "cameras": ["c1", "c2"]})
+        sp.write_stamp(outd, "dem", {"after": {"merge": sp.token(outd, "merge")}},
+                       extra={"settings": sp.dem_settings_requested(args_)})
+        st_ = {"steps": {}, "failures": [], "not_applied": []}
+        res_, out_ = quiet(sp.step_maps, plan_, args_, st_)
+        for cam in ("c1", "c2"):
+            (outd / "maps" / f"2024-10-23_waterlines_{cam}.png").write_bytes(b"png")
+            sp.write_stamp(outd, f"map_{cam}", {"after": {"waterlines": sp.waterline_token(plan_)}})
+        st_["steps"] = {s: "built" for s in sp.STEPS}
+        res_c, out_c = quiet(sp.step_compare, plan_, args_, st_)
+        st_["steps"]["compare"] = res_c
+        prov_, _ = quiet(sp.write_provenance, plan_, args_, st_, True)
+        return prov_, (outd / "README.txt").read_text(), res_c, out_c
+
+    # -- calibration B, made WITHOUT the held GCPs: synthetic files here, turned from the 23 Jan 2025 solution
+    # (c2 through a Dec 2024 step), as the GCP-free procedure writes them: the reference(s) in a comment line
+    # ('X.yaml rotated by N deg'), the pre-registered acceptance in another. Their angles are made up.
+    gf = d / "gcpfree"
+    gf.mkdir()
+
+    from georectify import cirn_angles_to_R
+
+    def turn_deg(e1, e2):
+        q = cirn_angles_to_R(*e1[3:6]) @ cirn_angles_to_R(*e2[3:6]).T
+        return float(np.degrees(np.arccos(np.clip((np.trace(q) - 1.0) / 2.0, -1.0, 1.0))))
+
+    def turned(path, ref_names, acceptance=None, ref_dir=cal, d_angles=(-11.0, 0.2, 0.1), shift=(0.0, 0.0, 0.0),
+               note_turn=None):
+        """A synthetic turned calibration: the first reference's position (+ shift), its angles + d_angles,
+        and the notes estimate_eo_rotation.py writes, with the true turn from each reference (or note_turn)."""
+        refs_e = [load_extrinsics(ref_dir / n) if (ref_dir / n).is_file() else load_extrinsics(gf / n)
+                  for n in ref_names]
+        ang = np.degrees(refs_e[0][3:6]) + np.array(d_angles)
+        e_new = np.r_[refs_e[0][:3] + np.array(shift), np.radians(ang)]
+        er.write_eo(path, e_new, ang,
+                    "Solved by gcpfree_eo: " + "; ".join(
+                        f"{n} rotated by {note_turn if note_turn is not None else turn_deg(e_new, r):.2f} deg from "
+                        f"140 feature matches (6 new / 6 reference photos)" for n, r in zip(ref_names, refs_e))
+                    + "; position unchanged.")
+        if acceptance:
+            with open(path, "a") as f:
+                f.write(f"# acceptance: {acceptance}\n")
+        return path
+    b_eo = {"c1": turned(gf / "CACO03_c1_20241023_gcpfree_EO.yaml", ["CACO03_c1_20250123_EO.yaml"],
+                         "PASS (inliers 140 >= 40, residual 0.8 px, horizon on the Oct photos 3 px)")}
+    turned(gf / "CACO03_c2_20241205_gcpfree_EO.yaml", ["CACO03_c2_20250123_EO.yaml"])
+    b_eo["c2"] = turned(gf / "CACO03_c2_20241023_gcpfree_EO.yaml", ["CACO03_c2_20241205_gcpfree_EO.yaml"],
+                        "PASS-WIDER: the chain through Dec and the direct turn differ by 0.12 deg of tilt: +/-0.12 deg, "
+                        "~0.2 m of DEM at 300 m")
+    b_eo = {k: str(v) for k, v in b_eo.items()}
+    ab = argparse.Namespace(**dict(vars(a), eo=b_eo, calibration_variant="gcpfree",
+                                   output_root=str(roots["out_gcpfree"])))
+
+    with traced():
+        # 1. the plan: the date's survey rows withheld
+        plan, out = quiet(sp.build_plan, "2024-10-23", cfg, srv, a)
+        check(plan["blind"]["held_by"].startswith("Dr Chris Sherwood") and plan["surveys"] == []
+              and [h["name"] for h in plan["held"]] == ["oct_gcps"] and "path" not in plan["held"][0]
+              and "BLIND" in out,
+              "2024-10-23 is BLIND: its survey rows are withheld from the plan (names, types, dates only), said")
+        # 2. every look-up of a held survey is refused before any folder is searched
+        for what, call in (("resolve_survey, no plan", lambda: sp.resolve_survey(oct_row, None, a)),
+                           ("resolve_survey, the blind plan", lambda: sp.resolve_survey(oct_row, plan, a)),
+                           ("survey_path_for", lambda: sp.survey_path_for(oct_row, plan, a)),
+                           ("another date's row of the held survey's date",
+                            lambda: sp.resolve_survey(dict(oct_row, date="2024-10-25", path=""), None, a)),
+                           ("a row of the date with a path",
+                            lambda: sp.resolve_survey(dict(oct_row, path=canary_names[0]), None, a)),
+                           ("any survey row in a blind plan",
+                            lambda: sp.resolve_survey([s for s in srv if s["name"] == "jan_lidar"][0], plan, a))):
+            try:
+                call()
+                check(False, f"{what}: NOT refused")
+            except sp.BlindSurvey as exc:
+                check("held by Dr Chris Sherwood" in str(exc), f"{what}: refused (BlindSurvey, never swallowed by "
+                                                               f"'except Exception')")
+        check(not issubclass(sp.BlindSurvey, Exception), "BlindSurvey is not an Exception: no broad except swallows it")
+        # 3. the compare step does not run; nothing is a missing part; no label is looked up
+        state = {"steps": {}, "failures": [], "not_applied": []}
+        res, out = quiet(sp.step_compare, plan, a, state)
+        check(res == "not run (blind: DEM only)" and "NOT RUN" in out and state["comparisons"] == {},
+              "compare: not run on a blind date")
+        lw, why = sp.label_when_built("2024-10-23", oct_row, cfg, srv, a)
+        check(lw == "blind (DEM only)", "--summary's label of a not-yet-built blind date: 'blind (DEM only)', never "
+                                        "looked up")
+        # 4. calibration A (the table's), a whole (fake) product: status complete, README and provenance blind
+        prov, rd, res_c, _ = fake_product(plan, a)
+        mp = sp.read_stamp(plan["out"], "map_plan") or {}
+        check((plan["out"] / "maps" / "2024-10-23_waterlines_plan.png").exists() and mp["sig"]["surveys"] == []
+              and mp["sig"].get("blind") == "2024-10-23",
+              "maps: the plan view is drawn over no survey, its stamp says blind")
+        check(prov["status"] == "complete" and prov["comparisons"] == [] and not prov["status_why"]
+              and res_c == "not run (blind: DEM only)" and not (plan["out"] / "compare").exists(),
+              "A: a blind product with everything else built: status complete (not partial), no comparison made")
+        stmt = ("blind: the survey is held by Dr Chris Sherwood (USGS) for an independent check; nothing in this "
+                "build read it")
+        check(prov["blind"]["statement"] == stmt and stmt in rd and "BLIND: NO COMPARISON" in rd
+              and "compare/      none: a blind product" in rd and "DEM - survey grids" not in rd,
+              "README and provenance: 'blind: the survey is held by Dr Chris Sherwood ...; nothing in this build read it'")
+        ck = prov["blind"]["check"]
+        check(ck["label"] == "PARTLY-CIRCULAR"
+              and all("not the geometry (PARTLY-CIRCULAR for the geometry)" in v["why"] for v in ck["per_camera"].values())
+              and "CALIBRATION: the table's (surveys/survey_dates.csv eo_file): c1 CACO03_c1_20241023_EO.yaml" in rd
+              and "c1: PARTLY-CIRCULAR: CACO03_c1_20241023_EO.yaml solved from the GCPs surveyed 23 Oct 2024" in rd
+              and "tests the water level, the detection and the wave setup, not the geometry" in rd,
+              "A: solved from the held GCPs: his check is PARTLY-CIRCULAR for the geometry (water level, detection, "
+              "setup only), said in the README")
+        check("calibration CACO03_c1_20241023_EO.yaml: solved from the GCPs surveyed 23 Oct 2024" in rd
+              and "999" not in rd, "A: WHAT WAS USED says what the calibration was solved from")
+        # 5. --summary lists it as 'blind (DEM only)', also before it is built
+        rc, out = quiet(sp.summary, a)
+        sm = (roots["out"] / "summary.txt").read_text()
+        row = [r for r in csv.DictReader(open(roots["out"] / "summary.csv")) if r["date"] == "2024-10-23"]
+        check(rc == 0 and "Blind (DEM only)" in sm and "2024-10-23 oct_gcps: blind (DEM only)" in sm
+              and row and row[0]["label"] == "blind (DEM only)" and row[0]["held_check_label"] == "PARTLY-CIRCULAR"
+              and row[0]["calibration_variant"] == "table",
+              "--summary: 'blind (DEM only)', with the calibration and what the holder's check can test")
+        on = Path(tabs["config"]).with_name("survey_dates_on.csv")
+        on.write_text(FIXTURE_DATES.replace("2024-10-23,c1,0,", "2024-10-23,c1,1,").replace("2024-10-23,c2,0,",
+                                                                                            "2024-10-23,c2,1,"))
+        rc, out = quiet(sp.summary, argparse.Namespace(**dict(vars(a), output_root=str(roots["fresh"]), config=str(on))))
+        sm = (roots["fresh"] / "summary.txt").read_text()
+        check("2024-10-23 oct_gcps: blind (DEM only): not built yet" in sm,
+              "--summary before it is built: the enabled blind date is listed 'blind (DEM only): not built yet'")
+        # 6. a dry run of the blind date says so and looks for nothing
+        _, out = quiet(sp.dry_run, plan, a, list(sp.STEPS))
+        check("BLIND" in out and "survey oct_gcps" not in out and "held check" in out,
+              "--dry-run: BLIND, the survey not listed, what the check can test per camera")
+        # 7. calibration B in its own root: what it was solved from, INDEPENDENT, its acceptance, its position
+        pb, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, ab)
+        check(all(c["eo_file"] == f"CACO03_{k}_20241023_gcpfree_EO.yaml" and c["variant"] == "gcpfree"
+                  and c["table_eo_file"] == f"CACO03_{k}_20241023_EO.yaml" for k, c in pb["cams"].items())
+              and sp.option_refusal(pb, ab) == "",
+              "--eo: the plan builds with the given calibrations, named variant, the table's kept for the record")
+        watch_a["on"] = True
+        try:
+            provb, rdb, _, _ = fake_product(pb, ab)
+        finally:
+            watch_a["on"] = False
+        if hasattr(sys, "addaudithook"):
+            check(not watch_a["seen"], "B's build never opens calibration A (the table's, solved from the held GCPs): "
+                                       + (", ".join(watch_a["seen"]) or "none opened"))
+        ckb = provb["blind"]["check"]
+        c1o = provb["cameras"]["c1"]["calibration"]["origin"]
+        c2o = provb["cameras"]["c2"]["calibration"]["origin"]
+        check(provb["status"] == "complete" and ckb["label"] == "INDEPENDENT"
+              and c1o["kind"] == "rotated" and c1o["gcp_dates"] == ["2025-01-23"]
+              and c1o["position_from"] == "CACO03_c1_20250123_EO.yaml"
+              and c2o["chain"] == ["CACO03_c2_20241023_gcpfree_EO.yaml", "CACO03_c2_20241205_gcpfree_EO.yaml",
+                                   "CACO03_c2_20250123_EO.yaml"] and c2o["gcp_dates"] == ["2025-01-23"],
+              "B: traced to the 23 Jan 2025 GCPs (c2 through its Dec 2024 step), position of the Jan solution: "
+              "INDEPENDENT of the held GCPs")
+        check("CALIBRATION: variant gcpfree (--eo), NOT the table's" in rdb
+              and "made WITHOUT ground control of its own: CACO03_c1_20250123_EO.yaml (solved from the GCPs surveyed "
+                  "23 Jan 2025" in rdb
+              and "nothing in it comes from the GCPs surveyed 23 Oct 2024" in rdb and "(INDEPENDENT)" in rdb
+              and "pre-registered acceptance: PASS (inliers 140" in rdb
+              and "pre-registered acceptance: PASS-WIDER (the chain through Dec" in rdb,
+              "B's README: the variant, what it was solved from, INDEPENDENT, and its pre-registered acceptance")
+        cav_b = [c for c in provb["caveats"] if c.startswith("c2 calibration CACO03_c2_20241023_gcpfree_EO.yaml")]
+        check(cav_b and "camera position (x, y, z) is that of CACO03_c2_20250123_EO.yaml" in cav_b[0]
+              and "2024-08-27 (CACO03_c2_20240827_EO.yaml), 2025-01-23 (CACO03_c2_20250123_EO.yaml) put this camera "
+                  "0.59 m apart in height" in cav_b[0]
+              and "nothing of it is used by this build" in cav_b[0] and "LARGER UNCERTAINTY" in cav_b[0]
+              and "999" not in rdb and "999" not in json.dumps(provb),
+              "B: its camera position is the Jan solution's, with the mount's GCP solutions' spread (Aug and Jan: "
+              "0.59 m in height for c2; the held survey's solution never read)")
+        _, out = quiet(sp.dry_run, pb, ab, list(sp.STEPS))
+        check("held check" in out and "INDEPENDENT" in out and "acceptance" in out and "REFUSED" not in out,
+              "B --dry-run: what it was solved from, INDEPENDENT, its acceptance, not refused")
+        pf, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, argparse.Namespace(**dict(vars(a),
+                                                                                      output_root=str(roots["fresh"]))))
+        pf["out"].mkdir(parents=True)
+        sp.mark_in_progress(pf, argparse.Namespace(**dict(vars(a), output_root=str(roots["fresh"]))))
+        rc, out = quiet(sp.summary, argparse.Namespace(**dict(vars(a), output_root=str(roots["fresh"]))))
+        sm = (roots["fresh"] / "summary.txt").read_text()
+        check(sp.load_json(pf["out"] / "provenance.json")["blind"]["statement"].startswith("blind: the survey is held")
+              and "2024-10-23 oct_gcps: blind (DEM only)" in sm and "status in progress" in sm,
+              "a blind build in progress (or interrupted): provenance says blind, --summary lists it so, in progress")
+        shutil.rmtree(str(pf["out"]))
+        rc, out = quiet(sp.summary, ab)
+        rowb = [r for r in csv.DictReader(open(roots["out_gcpfree"] / "summary.csv")) if r["date"] == "2024-10-23"]
+        check(rowb and rowb[0]["calibration_variant"] == "gcpfree" and rowb[0]["held_check_label"] == "INDEPENDENT",
+              "--summary of B's root: blind (DEM only), calibration gcpfree, INDEPENDENT")
+    check(not seen, "the held survey was never looked for or opened (no glob of its date, no stat or open of a file "
+                    "named like it, no comparison run): " + ("; ".join(seen[:5]) or "none"))
+
+    # -- the runtime guard: whatever tries to read a file named like the held survey is refused
+    if sp.arm_blind_guard():
+        try:
+            with open(sorted(canaries)[0]) as f_:
+                f_.read()
+            check(False, "a canary read: NOT refused")
+        except sp.BlindSurvey as exc:
+            check("named like a survey of 2024-10-23" in str(exc), "the runtime guard refuses to open a file named "
+                                                                   "like the held survey (any reader, any folder)")
+        for ok_name in ("CACO03_c1_20241023_gcpfree_EO.yaml", "2024-10-23_info.json", "2024-10-23_dem.asc"):
+            check(sp.held_file_name(d / ok_name) is None, f"... never a calibration or a product ({ok_name})")
+        sp.BLIND_DATES.pop("2024-10-23")
+        try:
+            check(open(sorted(canaries)[0]).read().startswith("1,"), "... and only while the date is blind")
+        finally:
+            sp.BLIND_DATES["2024-10-23"] = held
+    else:
+        skip("runtime guard", "no sys.addaudithook (Python < 3.8)")
+
+    # -- refusals, before anything is written
+    outd_a = plan["out"]
+    (outd_a / "compare").mkdir()
+    (outd_a / "compare" / "2024-10-23_oct_gcps_comparison.json").write_text("{}")
+    check(any("compare" in x for x in sp.blind_leftovers(plan)), "earlier comparisons in the folder: listed")
+    res, out = quiet(sp.build_date, "2024-10-23", cfg, srv, a, list(sp.STEPS))
+    check(res == "refused" and "fresh --output-root" in out, "... and a blind build over them is REFUSED (exit 5)")
+    shutil.rmtree(str(outd_a / "compare"))
+
+    def refused(args_, words, what):
+        root_ = Path(args_.output_root)
+        before = sorted(p_.name for p_ in root_.iterdir()) if root_.exists() else []
+        res_, out_ = quiet(sp.build_date, "2024-10-23", cfg, srv, args_, list(sp.STEPS))
+        after = sorted(p_.name for p_ in root_.iterdir()) if root_.exists() else []
+        check(res_ == "refused" and all(w in out_ for w in words) and before == after,
+              f"{what}: REFUSED (exit 5), nothing written")
+    refused(argparse.Namespace(**dict(vars(ab), output_root=str(roots["out"]))), ["own root", "out_gcpfree"],
+            "B into A's root (the default root's name)")
+    refused(argparse.Namespace(**dict(vars(a), output_root=str(roots["out_gcpfree"]))),
+            ["another calibration variant", "gcpfree (2024-10-23)"], "A (the table's) into B's root")
+    refused(argparse.Namespace(**dict(vars(ab), output_root=str(roots["fresh_gcpfree"]),
+                                      eo=dict(b_eo, c2=str(gf / "missing.yaml")))),
+            ["no such file", "never used in its place"], "an --eo file that is missing (never the table's instead)")
+    p_m, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv,
+                   argparse.Namespace(**dict(vars(ab), eo=dict(b_eo, c2=str(gf / "missing.yaml")))))
+    check(p_m["cams"]["c2"]["eo_path"] is None and p_m["cams"]["c2"]["table_eo_path"] is not None,
+          "... the plan has no calibration for it, not the table's")
+    turned(gf / "failed.yaml", ["CACO03_c1_20250123_EO.yaml"], "FAIL: c1 and c2 disagree by 0.4 deg of roll")
+    refused(argparse.Namespace(**dict(vars(ab), output_root=str(roots["fresh_gcpfree"]),
+                                      eo=dict(b_eo, c1=str(gf / "failed.yaml")))),
+            ["acceptance of the --eo calibration FAILED", "0.4 deg of roll", "never built in its place"],
+            "an --eo calibration whose pre-registered acceptance FAILED (B not delivered)")
+    turned(gf / "unstated.yaml", ["CACO03_c1_20250123_EO.yaml"])
+    refused(argparse.Namespace(**dict(vars(ab), output_root=str(roots["fresh_gcpfree"]),
+                                      eo=dict(b_eo, c1=str(gf / "unstated.yaml")))),
+            ["must state its pre-registered acceptance", "unstated.yaml"],
+            "on a blind date, an --eo calibration that states no acceptance (its checks not run)")
+    check(sp.root_for_variant("/x/survey_products", "gcpfree") == Path("/x/survey_products_gcpfree")
+          and sp.root_for_variant("/x/survey_products_gcpfree", None, "gcpfree") == Path("/x/survey_products")
+          and sp.root_for_variant("/x/survey_products_c0", "gcpfree") == Path("/x/survey_products_gcpfree_c0"),
+          "a variant's root: <root>_<variant> (before any _c<C>); the table's: the base root")
+    # the same B root, B's file edited since: another calibration by content, refused without --replace
+    b2 = dict(b_eo, c1=str(turned(gf / "CACO03_c1_20241023_gcpfree-v2_EO.yaml", ["CACO03_c1_20250123_EO.yaml"],
+                                   "PASS")))
+    ab2 = argparse.Namespace(**dict(vars(ab), eo=b2))
+    pb2, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, ab2)
+    note = sp.calibration_replace_note(pb2, ab2, list(sp.STEPS))
+    check(note and "built with another calibration" in note and "--replace" in note,
+          "B's root, another B (by content): a rebuild with it is refused without --replace")
+    res, out = quiet(sp.build_date, "2024-10-23", cfg, srv, ab2, list(sp.STEPS))
+    check(res == "refused" and "built with another calibration" in out, "... build_date refuses it (exit 5)")
+    st0 = {"steps": {}, "failures": [], "not_applied": []}
+    pa2, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, ab2)
+    _, out = quiet(sp.keep_built_calibration, pa2, ab2, ["dem", "maps"], st0)
+    check("NOT applied" in out and pa2["cams"]["c1"]["eo_file"] == "CACO03_c1_20241023_gcpfree_EO.yaml",
+          "--steps dem,maps with another --eo: NOT APPLIED; the product keeps (and reports) the calibration that "
+          "built it")
+    words = sp.state_argv(ab, "2024-10-23")
+    check("--eo" in words and f"c1={b_eo['c1']}" in words and words[words.index("--calibration-variant") + 1] == "gcpfree",
+          "the 'rebuild everything' line carries --eo and --calibration-variant")
+
+    # -- origins: other references, unknown ones, one turned from the held survey's solution
+    both = turned(gf / "both.yaml", ["CACO03_c1_20250123_EO.yaml", "CACO03_c1_20240827_EO.yaml"], "PASS")
+    o = sp.calibration_origin(both, [str(cal)])
+    check(o["kind"] == "rotated" and o["gcp_dates"] == ["2024-08-27", "2025-01-23"]
+          and o["position_from"] == "CACO03_c1_20250123_EO.yaml"
+          and sp.held_check(o, sp.blind_of("2024-10-23"))[0] == "INDEPENDENT",
+          "photos of Aug 2024 as a second reference: both traced, position from the first named, INDEPENDENT")
+    moved = turned(gf / "moved.yaml", ["CACO03_c1_20250123_EO.yaml"], "PASS", shift=(0.0, 0.0, 0.112))
+    o = sp.calibration_origin(moved, [str(cal)])
+    check(o["kind"] == "unknown" and "comes from elsewhere" in o["text"]
+          and sp.held_check(o, sp.blind_of("2024-10-23"))[0] == "PARTLY-CIRCULAR",
+          "a 'turned' file whose camera position is not its reference's (e.g. taken from another solution): NOT KNOWN, "
+          "never called independent")
+    lie = turned(gf / "lie.yaml", ["CACO03_c1_20250123_EO.yaml"], "PASS", note_turn=3.0)
+    o = sp.calibration_origin(lie, [str(cal)])
+    check(o["kind"] == "unknown" and "but it is turned" in o["text"],
+          "a file whose notes give another turn than its numbers: NOT KNOWN")
+    from_a = turned(gf / "turned_from_oct.yaml", ["CACO03_c1_20241023_EO.yaml"])
+    check(sp.held_check(sp.calibration_origin(from_a, [str(cal)]), sp.blind_of("2024-10-23"))[0] == "PARTLY-CIRCULAR",
+          "one turned from the held survey's solution: PARTLY-CIRCULAR")
+    (gf / "noted_nothing.yaml").write_text((cal / "CACO03_c1_20250123_EO.yaml").read_text())
+    (gf / "CACO03_c1_20240827_EO.yaml").write_text((cal / "CACO03_c1_20240827_EO.yaml").read_text() + "# edited\n")
+    lost = d / "lost"
+    lost.mkdir()
+    shutil.copy2(str(b_eo["c2"]), str(lost / "CACO03_c2_20241023_gcpfree_EO.yaml"))   # its Dec step not beside it
+    for p_, what in ((gf / "noted_nothing.yaml", "no reference in its notes"),
+                     (gf / "CACO03_c1_20240827_EO.yaml", "an archived name with other content"),
+                     (lost / "CACO03_c2_20241023_gcpfree_EO.yaml", "a chain whose Dec step is not found")):
+        o = sp.calibration_origin(p_, [])
+        check(o["kind"] == "unknown" and sp.held_check(o, sp.blind_of("2024-10-23"))[0] == "PARTLY-CIRCULAR",
+              f"a calibration of unknown origin ({what}): never called independent")
+    (gf / "CACO03_c1_20240827_EO.yaml").unlink()
+
+    # -- calibration B as the pre-registered procedure writes it (gcpfree_eo.py write_outputs, into the
+    # calibration folder): its verdict in the first comment line, its reference with that file's sha256, the
+    # position it keeps, the pan change and the rotation source. The lines are the procedure's; the angles
+    # are made up (from the Jan 2025 solution: calibration A is never read for them).
+    def procedure_file(path, cam, verdict="DELIVERED", reasons="all checks passed", d_angles=(-12.5, 0.15, -0.1),
+                       numbers_from=None, notes_ref=None, sha=None, pan=None, source="direct Jan->Oct"):
+        numbers_from = numbers_from or f"CACO03_{cam}_20250123_EO.yaml"    # the solution its numbers come from
+        notes_ref = notes_ref or numbers_from                              # the one its notes name
+        e_num, e_note = load_extrinsics(cal / numbers_from), load_extrinsics(cal / notes_ref)
+        ang = np.degrees(e_num[3:6]) + np.array(d_angles)
+        pan_ = ((ang[0] - np.degrees(e_note[3]) + 180.0) % 360.0) - 180.0 if pan is None else pan
+        notes = [f"CALIBRATION B (GCP-FREE) for the 23 Oct 2024 DEM, camera {cam}: {verdict} ({reasons})",
+                 f"No Oct 2024 GCP used: CACO03_{cam}_20241023_EO.yaml (calibration A, solved from them) was not read.",
+                 f"Reference EO: {notes_ref} (Jan 2025 GCPs) sha256 {sha or sp.file_sha(cal / notes_ref)}; "
+                 f"lens CACO03_{cam}_20240801_IO.yaml.",
+                 f"Position (x, y, z) kept from {notes_ref}: B inherits the Jan 2025 solution's camera position.",
+                 f"Rotation source: {source}; pan change {pan_:+.3f} deg from {notes_ref}.",
+                 "Solve (Jan->Oct): 212 inliers of 1830 matches, residual median 0.61 px, inlier days [20, 21, 22, 24, "
+                 "25], leave-one-day-out 1.9 px.",
+                 "Per-day: 5 days measured, off days [].",
+                 "Horizon (differential, vs the reference EO on the reference photos): tilt +0.031, roll -0.012 deg.",
+                 "Oct photos: 1729782000.Thu.Oct.24_15_00_00.GMT.2024.CACO03.c1.timex.jpg",
+                 "Reference photos: 1737471600.Tue.Jan.21_15_00_00.GMT.2025.CACO03.c1.timex.jpg",
+                 f"Made by gcpfree_eo.py (sha256 {'0' * 64}) on 2026-10-14 01:00 UTC; report "
+                 f"CACO03_{cam}_20241023_gcpfree_report.json"]
+        path.write_text(f"x: {e_num[0]:.4f}\ny: {e_num[1]:.4f}\nz: {e_num[2]:.4f}\n"
+                        f"azimuth: {ang[0]:.4f}\ntilt: {ang[1]:.4f}\nroll: {ang[2]:.4f}\n"
+                        + "".join(f"# {n}\n" for n in notes)
+                        + "#x, y - camera Easting / Northing (m, UTM zone 19); z - camera elevation (m, NAVD88)\n"
+                          "#azimuth, tilt, roll - degrees, CIRN convention\n")
+        return path
+    pe = {"c1": str(procedure_file(cal / "CACO03_c1_20241023_gcpfree_EO.yaml", "c1")),
+          "c2": str(procedure_file(cal / "CACO03_c2_20241023_gcpfree_EO.yaml", "c2", "DELIVERED-WIDER",
+                                   "chain differs from direct by 12.3 px (0.150 deg; > 10.0 px): uncertainty at least "
+                                   "that", d_angles=(-13.4, 0.1, 0.05), source="direct Jan->Oct"))}
+    ap_ = argparse.Namespace(**dict(vars(a), eo=pe, calibration_variant="gcpfree",
+                                    output_root=str(roots["proc_gcpfree"])))
+    with traced():
+        pp, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, ap_)
+        check(sp.option_refusal(pp, ap_) == "" and not sp.blind_independence_warnings(pp, ap_),
+              "gcpfree_eo.py's files (DELIVERED, DELIVERED-WIDER): accepted for the blind date, no warning")
+        watch_a["on"] = True
+        try:
+            provp, rdp, _, _ = fake_product(pp, ap_)
+        finally:
+            watch_a["on"] = False
+    check(not seen, "... and the held survey was never looked for: " + ("; ".join(seen[:5]) or "none"))
+    if hasattr(sys, "addaudithook"):
+        check(not watch_a["seen"], "... nor calibration A opened: " + (", ".join(watch_a["seen"]) or "none opened"))
+    o1, o2 = (provp["cameras"][k]["calibration"]["origin"] for k in ("c1", "c2"))
+    check(provp["status"] == "complete" and provp["blind"]["check"]["label"] == "INDEPENDENT"
+          and all(o["kind"] == "rotated" and o["gcp_dates"] == ["2025-01-23"] and o["rotation_source"] == "direct Jan->Oct"
+                  for o in (o1, o2))
+          and o1["position_from"] == "CACO03_c1_20250123_EO.yaml" and o2["position_from"] == "CACO03_c2_20250123_EO.yaml"
+          and o1["acceptance"]["verdict"] == "PASS" and o2["acceptance"]["verdict"] == "PASS-WIDER",
+          "gcpfree_eo.py's B: traced to the 23 Jan 2025 GCPs (reference sha256, pan change and position checked), "
+          "DELIVERED = PASS, DELIVERED-WIDER = PASS-WIDER, the holder's check INDEPENDENT")
+    check("CACO03_c1_20250123_EO.yaml (solved from the GCPs surveyed 23 Jan 2025 (not the Jan 2025 lidar)) turned "
+          "-12.500 deg in pan to this pointing by matching photos (rotation source: direct Jan->Oct), its camera "
+          "position (x, y, z) that of CACO03_c1_20250123_EO.yaml" in rdp
+          and "pre-registered acceptance: PASS (gcpfree_eo.py: DELIVERED; all checks passed)" in rdp
+          and "pre-registered acceptance: PASS-WIDER (gcpfree_eo.py: DELIVERED-WIDER; chain differs from direct by "
+              "12.3 px" in rdp and "(INDEPENDENT)" in rdp and "999" not in rdp,
+          "... its README: what B was solved from, its turn, its position, the procedure's verdict word for word")
+    cav_p = [c for c in provp["caveats"] if c.startswith("c2 calibration CACO03_c2_20241023_gcpfree_EO.yaml")]
+    check(cav_p and "LARGER UNCERTAINTY" in cav_p[0] and "chain differs from direct by 12.3 px" in cav_p[0]
+          and "0.59 m apart in height" in cav_p[0],
+          "... DELIVERED-WIDER: the larger uncertainty, as stated, and the mount's position spread under KNOWN CAVEATS")
+    for n, kw, words, what in (
+            ("nd", dict(verdict="NOT DELIVERED", reasons="c1 and c2 pan changes differ by 4.10 deg (> 3.0)"), None,
+             "NOT DELIVERED"),
+            ("sha", dict(sha="0" * 64), "not the one it was turned from", "a reference whose sha256 is not the stated one"),
+            ("pan", dict(pan=2.0), "pan change of +2.000 deg", "a pan change its numbers do not have"),
+            ("aug", dict(numbers_from="CACO03_c1_20240827_EO.yaml", notes_ref="CACO03_c1_20250123_EO.yaml",
+                         source="Aug->Oct"), "comes from elsewhere",
+             "numbers from the Aug 2024 solution, notes naming the Jan one")):
+        f_ = procedure_file(cal / f"CACO03_c1_20241023_gcpfree-{n}_EO.yaml", "c1", **kw)
+        o = sp.calibration_origin(f_, [str(cal)])
+        if words is None:
+            check(o["acceptance"]["verdict"] == "FAIL", f"gcpfree_eo.py's {what}: read as FAIL")
+            refused(argparse.Namespace(**dict(vars(ap_), output_root=str(roots["fresh_gcpfree"]), eo=dict(pe, c1=str(f_)))),
+                    ["acceptance of the --eo calibration FAILED", "NOT DELIVERED", "pan changes differ"],
+                    f"gcpfree_eo.py's {what}")
+            continue
+        check(o["kind"] == "unknown" and words in o["text"]
+              and sp.held_check(o, sp.blind_of("2024-10-23"))[0] == "PARTLY-CIRCULAR",
+              f"gcpfree_eo.py-style file, {what}: NOT KNOWN, never called independent")
+    pa_ = argparse.Namespace(**dict(vars(ap_), eo=dict(pe, c1=str(cal / "CACO03_c1_20241023_gcpfree-aug_EO.yaml"))))
+    pq, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, pa_)
+    check(any("NOT independent" in x for x in sp.blind_independence_warnings(pq, pa_)),
+          "... a WARNING before such a build (its README would call the holder's check PARTLY-CIRCULAR)")
+    for n in ("CACO03_c1_20241023_gcpfree_report.txt", "CACO03_c1_20241023_gcpfree_report.json"):
+        check(sp.held_file_name(cal / n) is None, f"the runtime guard never refuses the procedure's report ({n})")
+    check(sp.held_file_name(cal / "2024-10-23_gcpfree_GCP_xyz.csv") is not None,
+          "... but a survey-like name with 'gcpfree' in it is still refused")
+
+    # -- freshness: the calibration's content is in every pointing/detection stamp
+    e = d / "eo_edit.yaml"
+    e.write_text((cal / "CACO03_c1_20250123_EO.yaml").read_text())
+    sp.write_stamp(d, "pointing_c1", {"x": 1}, extra={"eo_sha256": sp.file_sha(e)})
+    check(sp.eo_content_fresh(d, "pointing_c1", e) == (True, ""), "the same calibration content: fresh")
+    e.write_text(e.read_text().replace("azimuth", "azimuth ", 1))
+    sp._FILE_SHA.clear()
+    ok, why = sp.eo_content_fresh(d, "pointing_c1", e)
+    check(not ok and "content" in why, "an edited calibration (same name, same size or not): stale, rebuilt")
+    sp.write_stamp(d, "detect_c1", {"x": 1})
+    tk = sp.token(d, "detect_c1")
+    check(sp.eo_content_fresh(d, "detect_c1", e) == (True, "") and sp.read_stamp(d, "detect_c1")["eo_sha256"]
+          == sp.file_sha(e) and sp.token(d, "detect_c1") == tk,
+          "a stamp from before Oct 2026 (no content): its content recorded now, its token kept (nothing rebuilds)")
+    # -- the GeoTIFFs carry the surveys' CRS
+    check(sp.GEOTIFF_EPSG == 6348 and "--epsg 6348" in sp.cmd_text(sp.dem_cmds(plan, a)[2]),
+          "GeoTIFFs tagged EPSG:6348 by default (NAD83(2011) / UTM 19N, the surveys' frame)")
+    # -- the command line: --eo needs --date and a variant name
+    for argv, what in ((["--all", "--eo", "c1=x.yaml", "--calibration-variant", "gcpfree"], "--eo with --all"),
+                       (["--date", "2024-10-23", "--eo", "c1=x.yaml"], "--eo without --calibration-variant"),
+                       (["--date", "2024-10-23", "--eo", "c3=x.yaml", "--calibration-variant", "gcpfree"], "camera c3"),
+                       (["--date", "2024-10-23", "--eo", "c1=x.yaml", "--calibration-variant", "GCP free"],
+                        "a variant name with capitals and a space")):
+        r = subprocess.run([sys.executable, str(HERE / "survey_products.py")] + argv + ["--dry-run", "--output-root",
+                                                                                       str(d / "usage")],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, cwd=str(d))
+        check(r.returncode == sp.EXIT_CODES["usage"] and not (d / "usage").exists(),
+              f"{what}: a usage error (exit {r.returncode}), nothing written")
+    # -- the station's own tables: 2024-10-23 is blind, built when asked
+    scfg, ssrv = sp.read_table(sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS), sp.read_table(sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
+    p_, _ = quiet(sp.build_plan, "2024-10-23", scfg, ssrv, cfg_args())
+    check(p_ is not None and p_.get("blind") and p_["surveys"] == [] and not p_["forced_disabled"],
+          "the station's tables: 2024-10-23 enabled and BLIND (DEM only), no --force-disabled needed")
+    check(all(not s["path"] for s in ssrv if s["date"] == "2024-10-23") and
+          all("BLIND" in s["why"] and "Sherwood" in s["why"] for s in ssrv if s["date"] == "2024-10-23"),
+          "surveys.csv: the held survey has no path, and its row says BLIND, held by Chris Sherwood")
+
+
 def test_one_setup_coef():
     print("one setup coefficient for the station and the products")
     import historical_forcing as hf
@@ -3617,10 +4238,13 @@ def main():
         test_filter_leaves_nothing_old(d)
         test_setup_share(d)
         test_c_change(d)
+        test_blind_and_calibration(d)
         test_fit_setup_flat(d)
-        test_oct_path(d)
+        with unblinded():            # the GCP path as it runs once Chris has reported
+            test_oct_path(d)
         test_oct_transfer_caveat(d)
-        test_gcp_files_any_format(d)
+        with unblinded():
+            test_gcp_files_any_format(d)
         test_merge_level_source(d)
         test_dry_run_needs_adcp()
         test_one_setup_coef()

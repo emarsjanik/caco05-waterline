@@ -83,15 +83,17 @@ stale, and nothing stale is ever reported as current):
   dem       dem_from_contours.py over the window (the cron's DEM settings;
             its day test is not run on fewer than 3 camera-days, where it
             cannot tell which day is off: every day is kept, and the README
-            says so), asc_to_geotiff.py (EPSG:32619; NAVD88 EPSG:5703
-            vertical keys on the DEM), and the DEM page by dem_figure.py
-            with the date's own camera positions.
+            says so), asc_to_geotiff.py (EPSG:6348, NAD83(2011) / UTM 19N,
+            the surveys' frame; NAVD88 EPSG:5703 vertical keys on the DEM),
+            and the DEM page by dem_figure.py with the date's own camera
+            positions.
   maps      daily_elevation_map.py per camera on the window's photos, and a
             plan view of the filtered waterlines coloured by elevation over
             the survey (or the DEM).
   compare   survey_compare.py for every survey of the date in
             surveys/surveys.csv. A survey whose file is missing is skipped
-            with a message saying which file to provide and where.
+            with a message saying which file to provide and where. Never on
+            a BLIND date (below).
 Then provenance.json (calibration, water level and wave sources, setup
 coefficient and where it was fitted, filter and DEM settings, search
 envelope, photo list, pointing results, and the commit and script
@@ -137,6 +139,51 @@ so: build a recheck with another window in its own --output-root).
 --synthetic NOTE (or a SYNTHETIC_FIXTURE file in a photo root) marks a build
 from synthetic test inputs on every output.
 
+BLIND DATES (BLIND_DATES below). A date whose survey is HELD by someone
+else for an independent check of the DEM (2024-10-23: the GCPs of 23 Oct
+2024, held by Dr Chris Sherwood, USGS) is built as a DEM only: forcing,
+pointing, detection, filter, DEM, GeoTIFFs, maps and README. Its survey
+rows never reach a file look-up: build_plan withholds them (names, types
+and dates only), resolve_survey refuses any row of the date or of the held
+survey's date (BlindSurvey, before any folder is searched), the compare
+step does not run and the plan view draws no survey, whatever the tables
+say and whatever lies in the survey folders. A second, runtime guard (an
+audit hook) refuses to open for reading any file named like a survey of
+the held date (its date and xyz/GCP/target/... in a .csv/.txt/... name).
+The README and provenance say 'blind: the survey is held by ... for an
+independent check; nothing in this build read it', and what that check can
+test given the calibration used (PARTLY-CIRCULAR for the camera geometry
+when the calibration rests on the held survey; INDEPENDENT when it traces
+to other GCPs only). Status complete when everything else was built;
+--summary lists the date as 'blind (DEM only)'. A folder holding outputs an
+earlier build made with a survey of the date is refused (exit 5): build it
+in a fresh --output-root. A date is unblinded by removing its BLIND_DATES
+entry (a commit), after the holder has reported.
+
+ONE CALIBRATION PER ROOT. --eo c1=PATH c2=PATH --calibration-variant NAME
+builds a date with another calibration than the table's eo_file (e.g. one
+made without the date's held GCPs), into a root named for it,
+<root>_<NAME> (any other root is refused, exit 5); a table build is refused
+in a root that holds a variant. The README, the DEM page, provenance and
+--summary say what each calibration was solved from (CALIBRATION_ORIGINS,
+by name and sha256; a calibration turned from another by matching photos
+is traced through the reference(s) its notes name: estimate_eo_rotation.py's
+'X.yaml rotated by N deg', the first named giving the camera position, or
+gcpfree_eo.py's 'Reference EO: X.yaml ... sha256 H', 'Position (x, y, z)
+kept from X.yaml' and 'pan change N deg from X.yaml', each claim checked
+against the files: a claim that is not true makes the origin NOT KNOWN,
+never independent) and carry its pre-registered acceptance (gcpfree_eo.py's
+'CALIBRATION B ...: DELIVERED | DELIVERED-WIDER (<why>)', or a line
+'# acceptance: PASS | PASS-WIDER <uncertainty> | FAIL <why>'): FAIL is
+refused (exit 5), and so, on a BLIND date, is a file that states none; a
+--eo file that is missing is refused, never replaced by the table's. As
+with C, a run that would rebuild a date's pointing or waterlines with
+another calibration (by content, sha256) than they carry is refused, exit
+5; --replace overwrites on purpose. A run that does not rebuild them says
+NOT APPLIED and reports the calibration that built the outputs. Every
+freshness stamp of the pointing and detection records the calibration's
+content (sha256): an edited calibration rebuilds.
+
 DISABLED DATES. A date whose rows in survey_dates.csv all have enabled=0
 is refused with the reason, unless --force-disabled.
 
@@ -161,6 +208,12 @@ Usage:
         (another C in its own --output-root: in the default root it would replace the C = 0.037
          product of that date, so it is refused there without --replace; a 2025 date's detection
          runs again, ~50 min a two-camera week)
+    python3 survey_products.py --date 2024-10-23           # BLIND: DEM only (calibration A, the table's)
+    python3 survey_products.py --date 2024-10-23 \\
+        --eo c1=calibration/CACO03_c1_20241023_gcpfree_EO.yaml \\
+             c2=calibration/CACO03_c2_20241023_gcpfree_EO.yaml \\
+        --calibration-variant gcpfree --output-root /mnt/I2Rgus_Data/survey_products_gcpfree
+        (calibration B, made without the held GCPs by gcpfree_eo.py, in its own root)
     python3 survey_products.py --all
     python3 survey_products.py --summary
     (station defaults; override the inputs with --photo-roots, --survey-dirs,
@@ -517,11 +570,85 @@ STEP_SCRIPTS = {
 }
 
 # Horizontal CRS written into the GeoTIFFs (--geotiff-epsg). The grids are in
-# the frame of the calibration's GCPs, assumed to be that of the surveys
-# (NAD83(2011) / UTM 19N, EPSG:6348: the GCP files state no CRS); 32619 (WGS 84 /
-# UTM 19N) was asked for, so it is the default, and every README says the tag is
+# the frame of the calibration's GCPs, assumed to be that of the surveys: the 2025
+# lidar DSMs are tagged EPSG:6348 and the 2026 RTK file says NAD83(2011) / UTM 19N
+# (the GCP files state no CRS). Until Oct 2026 the default was 32619 (WGS 84 / UTM
+# 19N), a NOMINAL tag taken from an old .prj, which a GIS places ~1-1.5 m off the
+# surveys; --geotiff-epsg 32619 still writes it, and the README then says it is
 # nominal.
-GEOTIFF_EPSG = 32619
+GEOTIFF_EPSG = 6348
+
+# BLIND DATES: a date whose survey is HELD by someone else for an independent check of our DEM.
+# The build makes the DEM, its GeoTIFFs, maps and README only. Its survey rows never reach a file
+# look-up (build_plan withholds them; resolve_survey raises BlindSurvey for any row of the date or of
+# the held survey's date before any folder is searched), whatever surveys.csv (or --surveys) says and
+# whatever lies in the survey folders; and a runtime guard (arm_blind_guard: an audit hook) refuses to
+# open for reading a file named like a survey of the held date. A date is unblinded by removing its
+# entry here -- a commit, so when and why stays in the history -- after the holder has reported.
+BLIND_DATES = {
+    "2024-10-23": {
+        "held_by": "Dr Chris Sherwood (USGS)",
+        "survey": "the GCPs surveyed 23 Oct 2024 (surveys.csv oct_gcps)",
+        "survey_date": "2024-10-23",
+        "since": "2026-10-13",
+        "why": "the owner's request (13 Oct 2026): the 23 Oct 2024 DEM only, so that Chris can verify its accuracy "
+               "independently; the GCP file is kept secret, so no survey of that date can have been used to make "
+               "or to compare it"},
+}
+# The runtime guard refuses to open for reading a file whose name holds a held survey's date (2024-10-23
+# or 20241023), one of these words and one of these extensions: the names resolve_survey would look for
+# (<date>*xyz*.csv, <date>*GCP*.csv, *<compact date>*xyz*.csv) and the like. Never a calibration (.yaml),
+# a product of this script (dem/<date>_info.json, .asc, .tif, .png) or a photo.
+BLIND_GUARD_WORDS = ("xyz", "gcp", "target", "extrinsic", "control", "checkshot", "rtk", "survey", "points")
+BLIND_GUARD_EXT = (".csv", ".txt", ".xyz", ".dat", ".xls", ".xlsx", ".las", ".laz", ".shp", ".gpkg", ".geojson",
+                   ".kml", ".zip")
+
+# What each GCP-solved calibration was solved from, for the README and provenance (and, on a BLIND date,
+# for what the holder's check can test). Keyed by file name, with its sha256 (a file of that name with
+# other content is 'not known'). CACO03 stood on one mount from Aug 2024 to 24 Jan 2025 and was solved
+# from ground control three times (calibration_history.csv). A calibration turned from another by matching
+# photos (estimate_eo_rotation.py, or a procedure built on it) is traced through the reference(s) its
+# notes name (ROTATED_REF), down to these.
+CALIBRATION_ORIGINS = {
+    "CACO03_c1_20240827_EO.yaml": ("b942f527d17281f57087975ae7e44aa2de8af079d4b0f912cd87c5c38e435eb2", "2024-08-27",
+                                   "the CACO03 GCPs of Aug 2024 (the solution of 27 Aug 2024)"),
+    "CACO03_c2_20240827_EO.yaml": ("aab35e9d42c88b89adc2268a837e1b68baa3d7c993c1690a55524aae5c1fb0b2", "2024-08-27",
+                                   "the CACO03 GCPs of Aug 2024 (the solution of 27 Aug 2024)"),
+    "CACO03_c1_20241023_EO.yaml": ("f0f8a262a6f4dfd956158b74262e9a24440f15054a8c6c30b8f66fd746ed5c98", "2024-10-23",
+                                   "the GCPs surveyed 23 Oct 2024 (surveys.csv oct_gcps)"),
+    "CACO03_c2_20241023_EO.yaml": ("3a128aee6743e5625e48a0c82b1975b36c021a56a9e6bf41fe6bbb3827dffc2a", "2024-10-23",
+                                   "the GCPs surveyed 23 Oct 2024 (surveys.csv oct_gcps)"),
+    "CACO03_c1_20250123_EO.yaml": ("c31e0f461e845a394ae62c45a1f524b691b25be64e4348a15599a478e37d5c77", "2025-01-23",
+                                   "the GCPs surveyed 23 Jan 2025 (not the Jan 2025 lidar)"),
+    "CACO03_c2_20250123_EO.yaml": ("53a021843f9d11f5fe7e9fae5f303e5354b55849f28f8e3603715927e46a035e", "2025-01-23",
+                                   "the GCPs surveyed 23 Jan 2025 (not the Jan 2025 lidar)"),
+}
+# A calibration turned from another by matching photos names its reference(s) in a comment line, as
+# estimate_eo_rotation.py writes it: '<reference>.yaml rotated by <angle> deg ...'. Several references
+# (e.g. Jan 2025 and, once photos of it arrive, Aug 2024) may be named; the FIRST one named is the one
+# whose camera position (x, y, z) the file keeps. A chain (Jan -> Dec -> Oct) is followed file by file:
+# each intermediate file must lie next to the one naming it (or in the calibration folder).
+ROTATED_REF = re.compile(r"(\S+?\.ya?ml) (?:rotated|turned) by (-?[0-9.]+) deg")
+# gcpfree_eo.py (the pre-registered GCP-free procedure for 23 Oct 2024) names its reference as
+# 'Reference EO: <file>.yaml (...) sha256 <hex>', the position it keeps as 'Position (x, y, z) kept from
+# <file>.yaml', its turn as 'pan change <+deg> deg from <file>.yaml' and how it got it as 'Rotation source:
+# <how>'. Each claim is checked against the files here: the reference's content (the stated sha256), the
+# file's azimuth against the reference's (the stated pan change), its position against the reference's.
+REFERENCE_EO = re.compile(r"Reference EO:\s*(\S+?\.ya?ml)\b[^;]*?\bsha256\s+([0-9a-fA-F]{64})")
+PAN_FROM = re.compile(r"pan change ([+-]?[0-9.]+) deg from (\S+?\.ya?ml)")
+POSITION_FROM = re.compile(r"Position \(x, y, z\) kept from (\S+?\.ya?ml)")
+ROTATION_SOURCE = re.compile(r"Rotation source:\s*([^;]+?)\s*(?:;|$)")
+# The pre-registered acceptance of such a calibration, one comment line: '# acceptance: PASS',
+# '# acceptance: PASS-WIDER <the larger uncertainty, stated>' or '# acceptance: FAIL <why>'. FAIL is never
+# built (exit 5); PASS-WIDER is built and its stated uncertainty goes on every output.
+ACCEPTANCE_LINE = re.compile(r"^acceptance\b[^:]*:\s*(PASS-WIDER|PASS|FAIL)\b[\s;:,.-]*(.*)$", re.IGNORECASE)
+# gcpfree_eo.py states its pre-registered verdict in its first comment line instead: 'CALIBRATION B (GCP-FREE)
+# for the 23 Oct 2024 DEM, camera c1: DELIVERED (all checks passed)' | 'DELIVERED-WIDER (<why: the larger
+# uncertainty>)' | 'NOT DELIVERED' (it writes no file then): read as PASS, PASS-WIDER and FAIL.
+DELIVERY_LINE = re.compile(r"^CALIBRATION\b[^:]*:\s*(NOT DELIVERED|DELIVERED-WIDER|DELIVERED)\b[\s;:,.-]*(.*)$")
+DELIVERY_VERDICT = {"DELIVERED": "PASS", "DELIVERED-WIDER": "PASS-WIDER", "NOT DELIVERED": "FAIL"}
+# --calibration-variant: a short name, used in the root's name (<root>_<NAME>) and on every output
+VARIANT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 # Colours (as dem_figure.py / survey_compare.py): neutral ink, data in colour.
 INK, INK2, MUTED, GRID = "#1f1e1c", "#52514e", "#898781", "#e6e5df"
@@ -608,6 +735,23 @@ def is_fresh(out, key, sig, outputs, inputs=()):
     newer = [i for i in inputs if i and Path(i).exists() and Path(i).stat().st_mtime > t_out + 1]
     if newer:
         return False, f"{Path(newer[0]).name} is newer than its outputs"
+    return True, ""
+
+
+def eo_content_fresh(out, key, eo_path):
+    """Is step `key` (a pointing or detection) built with the calibration content this run uses? Its
+    stamp records the EO file's sha256 (eo_sha256). (True, '') when the same; (False, why) when the
+    content differs. A stamp written before the content was recorded has the file's path, size and
+    mtime in its signature, unchanged if it got here: the content is recorded now, keeping its token."""
+    st = read_stamp(out, key)
+    if not st:
+        return False, "not built yet"
+    now = file_sha(eo_path) if eo_path else None
+    if "eo_sha256" not in st:
+        update_stamp(out, key, eo_sha256=now)
+        return True, ""
+    if st["eo_sha256"] != now:
+        return False, "its calibration's content (sha256) changed"
     return True, ""
 
 
@@ -769,8 +913,89 @@ def resolve_file(text, dirs, typed=False):
     return []
 
 
+class BlindSurvey(BaseException):
+    """Raised BEFORE any folder is searched when a survey of a BLIND date (BLIND_DATES) is about to be
+    looked for. A BaseException on purpose: no 'except Exception' on the way may swallow it and carry
+    on; a build that reaches it stops, its README saying failed and why."""
+
+
+def blind_of(day):
+    """The BLIND_DATES entry (with its 'date') for a product date or a held survey's date, else None."""
+    if not day:
+        return None
+    for d, b in BLIND_DATES.items():
+        if day in (d, b.get("survey_date")):
+            return dict(b, date=d)
+    return None
+
+
+def held_survey(s):
+    """The BLIND_DATES entry when survey row s belongs to a blind date or is a survey of a held
+    survey's date (another row naming the same survey), else None."""
+    return blind_of(s.get("date")) or blind_of(s.get("survey_date"))
+
+
+def blind_statement(b):
+    """The sentence every output of a blind product carries."""
+    return (f"blind: the survey is held by {b['held_by']} for an independent check; nothing in this build "
+            f"read it")
+
+
+def held_file_name(path):
+    """The BLIND_DATES entry when `path` is named like a survey of a held date (its date, either form, with
+    one of BLIND_GUARD_WORDS, and one of BLIND_GUARD_EXT), else None."""
+    try:
+        n = os.path.basename(os.fsdecode(path)).lower()
+    except TypeError:
+        return None
+    if not n.endswith(BLIND_GUARD_EXT):
+        return None
+    words = n.replace("gcpfree", "")          # the GCP-free procedure's own reports name no survey
+    if not any(w in words for w in BLIND_GUARD_WORDS):
+        return None
+    for d, b in BLIND_DATES.items():
+        sd = b.get("survey_date") or d
+        if sd in n or sd.replace("-", "") in n:
+            return dict(b, date=d)
+    return None
+
+
+def _blind_audit(event, args):
+    """Audit hook (sys.addaudithook): an open for READING of a file named like a held survey raises
+    BlindSurvey, whoever opens it (this script, pandas, numpy, a library). Writing is not refused."""
+    if event != "open" or not BLIND_DATES or not args:
+        return
+    path = args[0]
+    if path is None or isinstance(path, int):
+        return
+    mode = args[1] if len(args) > 1 else None
+    flags = args[2] if len(args) > 2 else None
+    if mode is not None:
+        reading = "r" in str(mode) or "+" in str(mode)
+    else:
+        reading = not isinstance(flags, int) or (flags & 3) != os.O_WRONLY
+    b = held_file_name(path) if reading else None
+    if b:
+        raise BlindSurvey(f"refused to open {os.fsdecode(path)}: it is named like a survey of {b['survey_date']}, "
+                          f"and {blind_statement(b)} (survey_products.py BLIND_DATES {b['date']})")
+
+
+_BLIND_GUARD = {"armed": False}
+
+
+def arm_blind_guard():
+    """Installs _blind_audit once per process (Python 3.8+; the NUC runs 3.8). The hook reads BLIND_DATES
+    at each open, so it guards exactly the dates blind at that moment. -> True when armed."""
+    if not _BLIND_GUARD["armed"] and hasattr(sys, "addaudithook"):
+        sys.addaudithook(_blind_audit)
+        _BLIND_GUARD["armed"] = True
+    return _BLIND_GUARD["armed"]
+
+
 def build_plan(date, cfg_rows, survey_rows, args):
-    """Everything the steps need for one date, from the tables and the options."""
+    """Everything the steps need for one date, from the tables and the options. On a BLIND date
+    (BLIND_DATES) the date's survey rows are withheld from the plan (plan['held']: their names, types,
+    dates and table labels only) and plan['surveys'] is empty: no step can look for them."""
     rows = [r for r in cfg_rows if r["date"] == date]
     if not rows:
         known = sorted({r["date"] for r in cfg_rows})
@@ -796,7 +1021,13 @@ def build_plan(date, cfg_rows, survey_rows, args):
             sys.exit(f"{date}: camera {cam!r} (expected c1 or c2)")
         first, last = (args.window or (r["first_day"], r["last_day"]))
         hours_text = args.utc_hours if args.utc_hours is not None else r["utc_hours"]
-        eo = resolve_file(r["eo_file"], [args.calibration])
+        # --eo CAM=PATH: this build's calibration instead of the table's
+        eo_given = (getattr(args, "eo", None) or {}).get(cam)
+        eo_name = Path(eo_given).name if eo_given else r["eo_file"]
+        table_eo = resolve_file(r["eo_file"], [args.calibration])
+        # an --eo file is taken as given, never looked up by its name elsewhere: a wrong path is refused
+        # (eo_option_problems), never replaced by a file of the same name or by the table's calibration
+        eo = ([Path(eo_given)] if Path(eo_given).is_file() else []) if eo_given else table_eo
         env = resolve_file(r["envelope_survey"], args.survey_dirs) if r["envelope_survey"] else []
         hours = parse_hours(hours_text)
         th = parse_hours(r["utc_hours"])
@@ -805,17 +1036,30 @@ def build_plan(date, cfg_rows, survey_rows, args):
                      # the table's own window and hours (what no --window / --utc-hours means)
                      "table_first": r["first_day"], "table_last": r["last_day"],
                      "table_hours_text": f"{th[0]:g}-{th[1]:g}",
-                     "eo_file": r["eo_file"], "eo_path": eo[0] if eo else None,
+                     "eo_file": eo_name, "eo_path": eo[0] if eo else None,
+                     "table_eo_file": r["eo_file"], "table_eo_path": table_eo[0] if table_eo else None,
+                     "eo_given": eo_given or None,
+                     "variant": getattr(args, "calibration_variant", None) if eo_given else None,
                      "io_path": Path(args.calibration) / f"CACO05_{cam}_20240801_IO.yaml",
                      "envelope_survey": r["envelope_survey"], "envelope_path": env[0] if env else None,
                      "notes": r["notes"], "enabled": r in enabled}
     surveys = [s for s in survey_rows if s["date"] == date]
+    blind = blind_of(date) or next((held_survey(s) for s in surveys if held_survey(s)), None)
+    held = surveys if blind else []
+    surveys = [] if blind else surveys
     plan = {"date": date, "era": era, "cams": cams,
             "first": min(c["first"] for c in cams.values()),
             "last": max(c["last"] for c in cams.values()),
             "surveys": surveys, "out": Path(args.output_root) / date,
             "disabled_cams": {r["camera"]: r["notes"] for r in rows if r not in use},
             "forced_disabled": bool(args.force_disabled and len(enabled) < len(rows))}
+    if blind:
+        plan["blind"] = blind
+        plan["held"] = [{k: s.get(k) for k in ("name", "survey_type", "survey_date", "label")} for s in held]
+        guard = arm_blind_guard()
+        say("BLIND", f"{date}: DEM only. {blind_statement(blind)} ({blind['survey']}); no survey of this date is "
+                     f"looked for, opened or compared (survey_products.py BLIND_DATES"
+                     + ("; a file named like it is refused if anything tries to open it)" if guard else ")"))
     return plan
 
 
@@ -2240,6 +2484,8 @@ def step_pointing(plan, args, state):
         sig = pointing_sig(plan, cam, args, photos)
         csv_out, js = pdir / f"pointing_{cam}.csv", pdir / f"pointing_{cam}.json"
         fresh, why = is_fresh(out, f"pointing_{cam}", sig, [csv_out, js], [c["eo_path"]])
+        if fresh:
+            fresh, why = eo_content_fresh(out, f"pointing_{cam}", c["eo_path"])
         if fresh and not args.force:
             say(f"pointing {cam}", f"SKIPPED: {csv_out} is up to date (--force to rebuild)")
             results[cam] = json.loads(js.read_text())
@@ -2259,7 +2505,9 @@ def step_pointing(plan, args, state):
             js.write_text(json.dumps(results[cam], indent=1) + "\n")   # read back by the README's caveats
             csv_out.write_text("camera,date,verdict\n")
             write_stamp(out, f"pointing_{cam}", sig, [f"check_pointing() for {cam}: no photos"],
-                        scripts=STEP_SCRIPTS["pointing"], extra={"photo_roots": list(args.photo_roots)})
+                        scripts=STEP_SCRIPTS["pointing"], extra={"photo_roots": list(args.photo_roots),
+                                                                  "eo_sha256": calibration_record(c)["eo_sha256"],
+                                                                  "calibration": calibration_record(c)})
             continue
         if not c["eo_path"]:
             raise StepFailed(f"{cam}: calibration {c['eo_file']} not found in {args.calibration}")
@@ -2288,7 +2536,9 @@ def step_pointing(plan, args, state):
         js.write_text(json.dumps(res, indent=1) + "\n")
         write_stamp(out, f"pointing_{cam}", sig, [f"survey_products.py, in-process: check_pointing() for {cam} "
                                                   f"(horizon_check.fit_tilt_roll + pointing_check.measure)"],
-                    scripts=STEP_SCRIPTS["pointing"], extra={"photo_roots": list(args.photo_roots)})
+                    scripts=STEP_SCRIPTS["pointing"], extra={"photo_roots": list(args.photo_roots),
+                                                              "eo_sha256": calibration_record(c)["eo_sha256"],
+                                                              "calibration": calibration_record(c)})
         results[cam] = res
         any_built = True
     for cam, res in results.items():
@@ -2591,6 +2841,8 @@ def step_detect(plan, args, state):
                    "envelope": file_sig(c["envelope_path"]), "setup_fit": fit_sig(fit), "scripts": scripts_sig("detect")}
             fresh, why = is_fresh(out, f"detect_{cam}", sig, [ground],
                                   [f / "water_level.csv", f / "waves.csv", c["eo_path"]])
+            if fresh:
+                fresh, why = eo_content_fresh(out, f"detect_{cam}", c["eo_path"])
             if fresh and not args.force:
                 say(f"detect {cam}", f"SKIPPED: {ground} is up to date (--force to rebuild)")
                 parts.append((cam, ground))
@@ -2622,7 +2874,8 @@ def step_detect(plan, args, state):
             write_stamp(out, f"detect_{cam}", sig, [cmd], scripts=STEP_SCRIPTS["detect"],
                         extra={"setup_coef": args.setup_coef, "setup_fit": fit, "skip_days": skip,
                                "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
-                               "photos": len(photos)})
+                               "photos": len(photos), "eo_sha256": calibration_record(c)["eo_sha256"],
+                               "calibration": calibration_record(c)})
             if not args.keep_detector_debug:
                 prune_detector_scratch(wdir / cam)
             parts.append((cam, ground))
@@ -2724,6 +2977,8 @@ def live_detect(plan, args, state, fit):
                "setup_coef": args.setup_coef, "setup_fit": fit_sig(fit), "skip": sorted(skip), "cmd": cmd_text(geo),
                "eo_file": file_sig(c["eo_path"]), "v": LIVE_DETECT_VERSION, "scripts": scripts_sig("detect_live")}
         fresh, why = is_fresh(out, f"detect_{cam}", sig, [ground], [rows_file, c["eo_path"]])
+        if fresh:
+            fresh, why = eo_content_fresh(out, f"detect_{cam}", c["eo_path"])
         if fresh and not args.force:
             say(f"detect {cam}", f"SKIPPED: {ground} is up to date (--force to rebuild)")
             parts.append((cam, ground))
@@ -2755,7 +3010,8 @@ def live_detect(plan, args, state, fit):
         write_stamp(out, f"detect_{cam}", sig, [geo], scripts=STEP_SCRIPTS["detect_live"],
                     extra={"setup": {k: v for k, v in stats.items() if k != "frame_names"},
                            "setup_coef": args.setup_coef, "setup_fit": fit, "skip_days": skip,
-                           "keep_moved_days": bool(getattr(args, "keep_moved_days", False))})
+                           "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
+                           "eo_sha256": calibration_record(c)["eo_sha256"], "calibration": calibration_record(c)})
         parts.append((cam, ground))
     return parts
 
@@ -3177,8 +3433,9 @@ def dem_cmds(plan, args, day_test=True):
           ["--epsg", args.geotiff_epsg]
     station = "/".join(sorted({c["station"] for c in plan["cams"].values()}))
     cal = ", ".join(sorted({eo_date(c["eo_file"]) or "?" for c in plan["cams"].values()}))
+    var = sorted({c["variant"] for c in plan["cams"].values() if c.get("variant")})   # an --eo build says which
     page = [sys.executable, HERE / "dem_figure.py", stem, "--calibration", out / "dem" / "view_calibration",
-            "--station", f"{station} Marconi Beach (calibration {cal})"]
+            "--station", f"{station} Marconi Beach (calibration {cal}{', ' + '/'.join(var) if var else ''})"]
     return stem, cmd, tif, page
 
 
@@ -3435,6 +3692,8 @@ def step_maps(plan, args, state):
     sig = {"src": str(src), "after": {"waterlines": waterline_token(plan)}, "v": 11,
            "surveys": [[s["name"]] + [file_sig(p) for p in resolve_survey(s, plan, args)[0]] for s in surveys],
            "scripts": scripts_sig("map_plan")}
+    if plan.get("blind"):
+        sig["blind"] = plan["blind"]["date"]          # drawn over no survey, and titled so
     fresh, why = is_fresh(out, "map_plan", sig, [png], [src])
     if fresh and not args.force:
         say("plan map", f"SKIPPED: {png.name} is up to date (--force to rebuild)")
@@ -3663,6 +3922,8 @@ def plan_view_map(plan, src, surveys, args, png):
     # the legend below the map, so it never covers the ends of the contours and waterlines
     ax.legend(handles=legend, loc="upper left", bbox_to_anchor=(0.0, -0.09), fontsize=8, frameon=False,
               ncol=1)
+    if plan.get("blind"):
+        notes = [f"BLIND: no survey drawn (the survey is held by {plan['blind']['held_by']} for an independent check)"]
     ax.set_title(f"{plan['date']}: filtered waterlines in plan view\n" + ("\n".join(notes) or "no survey drawn"),
                  loc="left", fontsize=10, color=INK)
     fig.tight_layout()
@@ -3675,7 +3936,13 @@ def plan_view_map(plan, src, surveys, args, png):
 # ---------------------------------------------------------------------
 
 def resolve_survey(s, plan, args):
-    """-> (list of Paths, note). An empty path is looked for by the survey date (GCP files arrive later)."""
+    """-> (list of Paths, note). An empty path is looked for by the survey date (GCP files arrive later).
+    A survey of a BLIND date (BLIND_DATES: the row's date or survey date, or a blind plan) is never looked
+    for: BlindSurvey, before any folder is searched."""
+    b = held_survey(s) or (plan or {}).get("blind")
+    if b:
+        raise BlindSurvey(f"{s.get('name')}: {blind_statement(b)} ({b['survey']}): survey_products.py never looks "
+                          f"for it (BLIND_DATES {b['date']})")
     if s.get("path"):
         hits = resolve_file(s["path"], args.survey_dirs)
         return hits, ("" if hits else f"{s['path']} not found in {', '.join(args.survey_dirs)}")
@@ -4161,6 +4428,12 @@ def step_compare(plan, args, state):
     cdir = out / "compare"
     stem = out / "dem" / plan["date"]
     dem = Path(f"{stem}_dem.asc")
+    if plan.get("blind"):
+        b = plan["blind"]
+        say("compare", f"NOT RUN: {blind_statement(b)} ({b['survey']}); this is a DEM-only product and no survey "
+                       f"of {plan['date']} is looked for (BLIND_DATES)")
+        state["comparisons"] = {}
+        return "not run (blind: DEM only)"
     if not plan["surveys"]:
         say("compare", f"no survey listed for {plan['date']} in {args.surveys}: nothing to compare")
         return "skipped"
@@ -4405,6 +4678,417 @@ def software_of_outputs(out):
                     "scripts_not_as_committed": now.get("scripts_not_as_committed"), "python": now.get("python")}}
 
 
+def calibration_record(c):
+    """What identifies a camera's calibration in a stamp: file name, path, content, variant."""
+    return {"eo_file": c.get("eo_file"), "eo_path": str(c["eo_path"]) if c.get("eo_path") else None,
+            "eo_sha256": file_sha(c["eo_path"]) if c.get("eo_path") else None, "variant": c.get("variant")}
+
+
+def eo_comment_lines(path):
+    """The comment lines of an EO file, '#' and spaces stripped, in order ([] when it cannot be read)."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return []
+    return [ln.strip().lstrip("#").strip() for ln in text.splitlines() if ln.strip().startswith("#")]
+
+
+def calibration_acceptance(lines):
+    """The pre-registered acceptance a calibration file states, from its comment lines: an ACCEPTANCE_LINE
+    ('acceptance: PASS ...'), or gcpfree_eo.py's DELIVERY_LINE ('CALIBRATION B ...: DELIVERED ...', its words
+    kept in the text). -> {"verdict": 'PASS' | 'PASS-WIDER' | 'FAIL', "text": what follows} or None when it
+    states none."""
+    for ln in lines:
+        m = ACCEPTANCE_LINE.match(ln)
+        said = None
+        if not m:
+            m = DELIVERY_LINE.match(ln)
+            said = m.group(1).upper() if m else None
+        if m:
+            t = m.group(2).strip()
+            if t.startswith("(") and t.endswith(")"):
+                t = t[1:-1].strip()
+            if said:
+                return {"verdict": DELIVERY_VERDICT[said], "text": f"gcpfree_eo.py: {said}" + (f"; {t}" if t else "")}
+            return {"verdict": m.group(1).upper(), "text": t}
+    return None
+
+
+def rotation_claims(notes, own_name):
+    """What a turned calibration's notes claim, reference by reference in the order they are named: the turn
+    ('X.yaml rotated by N deg', estimate_eo_rotation.py), the pan change ('pan change N deg from X.yaml') and
+    the reference's sha256 ('Reference EO: X.yaml ... sha256 H', gcpfree_eo.py); the reference whose camera
+    position the file keeps ('Position (x, y, z) kept from X.yaml', else the first named); how the turn was
+    measured ('Rotation source: ...'). -> {"refs": [{"name", "angle", "pan", "sha256"}], "position_ref",
+    "source"}."""
+    found = [(m.start(), Path(m.group(1)).name, "angle", m.group(2)) for m in ROTATED_REF.finditer(notes)]
+    found += [(m.start(), Path(m.group(2)).name, "pan", m.group(1)) for m in PAN_FROM.finditer(notes)]
+    found += [(m.start(), Path(m.group(1)).name, "sha256", m.group(2).lower()) for m in REFERENCE_EO.finditer(notes)]
+    pm = POSITION_FROM.search(notes)
+    if pm:
+        found.append((pm.start(), Path(pm.group(1)).name, None, None))
+    refs = {}
+    for _, n, k, v in sorted(found, key=lambda t: t[0]):
+        if n == own_name:
+            continue
+        r = refs.setdefault(n, {"name": n, "angle": None, "pan": None, "sha256": None})
+        if k and r[k] is None:
+            r[k] = v
+    order = list(refs.values())
+    pos = Path(pm.group(1)).name if pm else (order[0]["name"] if order else None)
+    sm = ROTATION_SOURCE.search(notes)
+    return {"refs": order, "position_ref": pos if pos != own_name else None,
+            "source": sm.group(1).strip() if sm else None}
+
+
+def calibration_origin(eo_path, dirs=(), _depth=0, name_only=False):
+    """
+    What a calibration (EO file) was solved from: CACO03's GCP solutions are known by name and content
+    (CALIBRATION_ORIGINS); a calibration turned from others by matching photos is traced through the
+    reference(s) its comment lines name (ROTATED_REF: looked for next to it, then in `dirs`), down to
+    those. Only comment lines are read for the trace, never a calibration's numbers.
+    -> {"file", "kind": 'gcp' | 'rotated' | 'unknown', "gcp_dates": [dates of the GCP surveys its
+    geometry rests on], "text", "chain": [file names], "position_from": the solution whose camera
+    position it keeps, "acceptance": calibration_acceptance() of this file, "notes"}.
+    'rotated' only when every reference traces to a known GCP solution; else 'unknown'.
+    """
+    p = Path(str(eo_path)) if eo_path else None
+    name = p.name if p else "?"
+    out = {"file": name, "kind": "unknown", "gcp_dates": [], "chain": [name], "position_from": None,
+           "acceptance": None, "notes": ""}
+    reg = CALIBRATION_ORIGINS.get(name)
+    if name_only:                          # a reference named in notes and not found: known by its name only
+        p = None
+    sha = file_sha(p) if p is not None and p.is_file() else None
+    if reg and (sha is None or sha == reg[0]):
+        out.update(kind="gcp", gcp_dates=[reg[1]], position_from=name,
+                   text=f"solved from {reg[2]}" + ("" if sha else " (known by its name: the file is not here)"))
+        return out
+    if reg:
+        out["text"] = (f"NOT KNOWN: its content differs from the archived {name} (sha256), so what it was solved "
+                       f"from is not known")
+        return out
+    if p is None or not p.is_file():
+        out["text"] = f"NOT KNOWN: {name} is not here and its name is not in CALIBRATION_ORIGINS"
+        return out
+    lines = eo_comment_lines(p)
+    out["notes"] = " ".join(lines)
+    out["acceptance"] = calibration_acceptance(lines)
+    claims = rotation_claims(out["notes"], name)
+    refs, pos_ref = claims["refs"], claims["position_ref"]
+    if not refs or _depth >= 4:
+        out["text"] = ("NOT KNOWN: not in survey_products.py CALIBRATION_ORIGINS, and its notes name no reference "
+                       "it was turned from ('<file>.yaml rotated by <angle> deg', or gcpfree_eo.py's 'Reference EO: "
+                       "<file>.yaml ... sha256 ...')" if not refs else
+                       "NOT KNOWN: a chain of turned calibrations longer than 4")
+        return out
+    subs, parts, wrong = [], [], []
+    try:
+        from georectify import load_extrinsics, cirn_angles_to_R
+        e_self = load_extrinsics(p)
+    except Exception:                      # not a readable EO: nothing it says can be checked
+        e_self = None
+        wrong.append("its numbers cannot be read")
+    for r in refs:
+        ref = r["name"]
+        q = next((Path(d) / ref for d in [p.parent] + [str(x) for x in dirs] if (Path(d) / ref).is_file()), None)
+        sub = calibration_origin(q or ref, dirs, _depth + 1, name_only=q is None)
+        subs.append(sub)
+        how = (f"turned {r['angle']} deg" if r["angle"] is not None else
+               f"turned {float(r['pan']):+.3f} deg in pan" if r["pan"] is not None else "turned")
+        parts.append(f"{ref} ({sub['text']}) {how}")
+        # what the notes say must be true of the files: the reference's content, the turn (or pan change) from
+        # each reference, and the camera position of the one it keeps; a position from elsewhere (e.g. the held
+        # survey's solution) is caught here
+        if e_self is None:
+            continue
+        if q is None:
+            wrong.append(f"{ref} is not here, so the turn and position it claims cannot be checked")
+            continue
+        if r["sha256"] and file_sha(q) != r["sha256"]:
+            wrong.append(f"the {ref} here is not the one it was turned from (its sha256 is not the one its notes "
+                         f"state)")
+        try:
+            e_ref = load_extrinsics(q)
+            Rs, Rr = cirn_angles_to_R(*e_self[3:6]), cirn_angles_to_R(*e_ref[3:6])
+            turn = float(np.degrees(np.arccos(np.clip((np.trace(Rs @ Rr.T) - 1.0) / 2.0, -1.0, 1.0))))
+            dpan = float((np.degrees(e_self[3] - e_ref[3]) + 180.0) % 360.0 - 180.0)
+        except Exception:
+            wrong.append(f"{ref} cannot be read")
+            continue
+        if r["angle"] is not None and abs(turn - abs(float(r["angle"]))) > 0.05:
+            wrong.append(f"its notes say {r['angle']} deg from {ref}, but it is turned {turn:.2f} deg from it")
+        if r["pan"] is not None and abs(dpan - float(r["pan"])) > 0.05:
+            wrong.append(f"its notes say a pan change of {float(r['pan']):+.3f} deg from {ref}, but its azimuth "
+                         f"differs from that of {ref} by {dpan:+.3f} deg")
+        dpos = float(np.linalg.norm(np.asarray(e_self[:3]) - np.asarray(e_ref[:3])))
+        if ref == pos_ref and dpos > 0.001:
+            wrong.append(f"its camera position is {dpos:.3f} m from that of {ref}, whose position it claims to "
+                         f"keep: it comes from elsewhere")
+    known = all(x["kind"] in ("gcp", "rotated") for x in subs) and not wrong
+    pos_sub = next((x for x, r in zip(subs, refs) if r["name"] == pos_ref), subs[0])
+    pos_from = pos_sub.get("position_from") or pos_ref
+    out.update(kind="rotated" if known else "unknown", refs=[r["name"] for r in refs], checked=wrong or None,
+               gcp_dates=sorted({dd for x in subs for dd in x["gcp_dates"]}),
+               chain=[name] + [c for x in subs for c in x["chain"]],
+               position_from=pos_from, rotation_source=claims["source"],
+               text=("made WITHOUT ground control of its own: " + "; and ".join(parts)
+                     + " to this pointing by matching photos"
+                     + (f" (rotation source: {claims['source']})" if claims["source"] else "")
+                     + ", its camera position (x, y, z) that of " + str(pos_from)
+                     + ("" if known else
+                        "; NOT KNOWN: " + "; ".join(wrong) if wrong else "; a reference's origin is NOT KNOWN")))
+    return out
+
+
+def held_check(origin, b):
+    """What the holder's check of a BLIND product can test, given one camera's calibration origin.
+    -> (label, text). The label is that of a comparison of this DEM with the held survey, by the
+    calibration alone: nothing else in the chain used the held survey (the build never read it)."""
+    who = b["held_by"].split(" (")[0]
+    head = (f"{origin['file']} {origin['text']}" if origin["kind"] == "gcp" else f"{origin['file']}: {origin['text']}")
+    if origin["kind"] == "unknown":
+        return "PARTLY-CIRCULAR", (f"{head}: what its geometry rests on is not known, so it may rest on "
+                                   f"{b['survey']}: a check of this DEM cannot be called independent of the camera "
+                                   f"geometry")
+    if b["survey_date"] in origin["gcp_dates"]:
+        return "PARTLY-CIRCULAR", (f"{head}: that is the survey {who} holds, so the camera geometry is fitted to his "
+                                   f"points and his check of this DEM tests the water level, the detection and the "
+                                   f"wave setup, not the geometry (PARTLY-CIRCULAR for the geometry)")
+    acc = origin.get("acceptance") or {}
+    return "INDEPENDENT", (f"{head}: nothing in it comes from {b['survey']}, so his check tests the camera geometry "
+                           f"too (INDEPENDENT)"
+                           + (f"; its pre-registered acceptance: {acc['verdict']}"
+                              + (f" ({acc['text']})" if acc.get("text") else "") if acc else
+                              "; it states no pre-registered acceptance (no '# acceptance: ...' line, no "
+                              "gcpfree_eo.py 'CALIBRATION B ...: DELIVERED' line)"
+                              if origin["kind"] == "rotated" else ""))
+
+
+def built_calibration(plan):
+    """{camera: {"eo_file", "eo_path", "eo_sha256", "variant"}} of the pointing and waterlines ON DISK
+    (each camera's detection stamp, else its pointing stamp; one written before Oct 2026 gives the path
+    in its signature only). {} where nothing is built."""
+    res = {}
+    for cam in plan["cams"]:
+        for key in (f"detect_{cam}", f"pointing_{cam}"):
+            st = read_stamp(plan["out"], key) if plan.get("out") else None
+            if not st:
+                continue
+            cal = dict(st.get("calibration") or {})
+            sig_eo = (st.get("sig") or {}).get("eo_file") or [None]
+            cal.setdefault("eo_path", sig_eo[0])
+            if not cal.get("eo_file") and cal.get("eo_path"):
+                cal["eo_file"] = Path(cal["eo_path"]).name
+            cal["eo_sha256"] = cal.get("eo_sha256") or st.get("eo_sha256")
+            cal["step"] = key
+            res[cam] = cal
+            break
+    return res
+
+
+def calibration_differences(plan, built=None):
+    """This run's calibration against the one the outputs on disk were built with, per camera (by
+    content; by path for a stamp that has no content). -> list of text (empty when they agree)."""
+    built = built_calibration(plan) if built is None else built
+    diff = []
+    for cam, c in plan["cams"].items():
+        b = built.get(cam)
+        if not b:
+            continue
+        now = file_sha(c["eo_path"]) if c.get("eo_path") else None
+        same = (b["eo_sha256"] == now) if b.get("eo_sha256") and now else \
+            (str(b.get("eo_path")) == str(c.get("eo_path")))
+        if not same:
+            diff.append(f"{cam} {c['eo_file']}" + (f" (variant {c['variant']})" if c.get("variant") else "")
+                        + f", built with {b.get('eo_file')}" + (f" (variant {b['variant']})" if b.get("variant") else ""))
+    return diff
+
+
+def root_for_variant(root, variant, held_variant=None):
+    """The output root a build with this calibration variant belongs in: the table's calibration in the
+    base root, a variant in <base>_<variant> (before any _c<C> suffix, so root_for_c still finds its base).
+    held_variant: the variant this root holds (its suffix is taken off first). Never this very root."""
+    root = Path(root)
+    m = re.match(r"^(.*?)(_c\d+(?:\.\d+)?)?$", root.name)
+    stem, csuf = m.group(1), m.group(2) or ""
+    if held_variant and stem.endswith("_" + held_variant):
+        stem = stem[:-len(held_variant) - 1]
+    alt = root.parent / (stem + (f"_{variant}" if variant else "") + csuf)
+    if alt == root:
+        alt = root.parent / f"{root.name}_{variant or 'table'}"
+    return alt
+
+
+def root_variants(root):
+    """{variant ('table' for the table's calibration): [dates]} of the products under `root`, from their
+    pointing and detection stamps (a stamp written before Oct 2026 records none: 'table')."""
+    found = {}
+    for d in sorted(Path(root).iterdir()) if Path(root).is_dir() else []:
+        sdir = d / "logs" / "stamps"
+        if not sdir.is_dir():
+            continue
+        for st in sorted(sdir.glob("pointing_c*.json")) + sorted(sdir.glob("detect_c*.json")):
+            v = ((load_json(st) or {}).get("calibration") or {}).get("variant") or "table"
+            if d.name not in found.setdefault(v, []):
+                found[v].append(d.name)
+    return found
+
+
+def variant_root_problem(plan, args):
+    """One calibration variant per output root, told by its name: a --calibration-variant NAME build goes in
+    a root named <...>_NAME (optionally + _c<C>), and no root mixes variants across its dates (a table
+    build is refused in a root holding a variant, and the reverse). -> text ('' when fine). Refused, exit
+    5, whatever --replace says: the remedy is the right --output-root, not overwriting."""
+    variant = next((c.get("variant") for c in plan["cams"].values() if c.get("variant")), None)
+    root = Path(args.output_root)
+    if variant and not re.search(rf"_{re.escape(variant)}(_c\d+(\.\d+)?)?$", root.name):
+        return (f"a --calibration-variant {variant} build goes in its own root, named for it: --output-root "
+                f"{root_for_variant(root, variant)} (not {root}: one calibration variant per root, so a "
+                f"product's root says which calibration built it)")
+    other = {v: ds for v, ds in root_variants(root).items() if v != (variant or "table")}
+    if other:
+        held = ", ".join(f"{v} ({', '.join(ds)})" for v, ds in sorted(other.items()))
+        return (f"{root} holds products built with another calibration variant: {held}. One calibration variant "
+                f"per root: build this one "
+                + (f"(--calibration-variant {variant}) in --output-root {root_for_variant(root, variant)}" if variant
+                   else f"(the table's calibration) in --output-root "
+                        f"{root_for_variant(root, None, next(iter(sorted(other))))}"))
+    return ""
+
+
+def calibration_replace_note(plan, args, steps):
+    """A run that would rebuild the pointing or the waterlines of a built date with another calibration
+    in the SAME folder: what it would replace and the root this calibration belongs in. -> text or None.
+    Refused unless --replace (build_date), as another C is."""
+    if not ({"pointing", "detect"} & set(steps)):
+        return None
+    built = built_calibration(plan)
+    diff = calibration_differences(plan, built)
+    if not diff:
+        return None
+    variant = next((c.get("variant") for c in plan["cams"].values() if c.get("variant")), None)
+    held = next((b.get("variant") for b in built.values() if b.get("variant")), None)
+    alt = root_for_variant(args.output_root, variant, held)
+    return (f"the product in {plan['out']} was built with another calibration ({'; '.join(diff)}): this run would "
+            f"rebuild its pointing, waterlines, DEM and maps with "
+            + (f"the --eo calibration (variant {variant})" if variant else "the table's calibration")
+            + f" into the same folder, replacing it. One calibration per root: --output-root {alt} for this one "
+              f"(then --summary --output-root on each root); give --replace only to replace this product on "
+              f"purpose."
+            + (f" For this date the photo detection runs again (~{SEC_PER_PHOTO_DETECT:.0f} s a photo)."
+               if plan.get("era") != "live" else ""))
+
+
+def keep_built_calibration(plan, args, steps, state):
+    """A run that rebuilds neither the pointing nor the waterlines cannot change the calibration they were
+    built with: another --eo (or none, on a variant product) is NOT APPLIED, said, and the plan carries
+    the calibration on disk, so the README, provenance, DEM page and maps name the one that built them."""
+    if {"pointing", "detect"} & set(steps):
+        return
+    built = built_calibration(plan)
+    diff = calibration_differences(plan, built)
+    if not diff:
+        return
+    text = (f"this run's calibration NOT applied ({'; '.join(diff)}): the outputs on disk were built with the "
+            f"calibration shown; to apply it, rebuild from the pointing (all steps), in its own --output-root")
+    warn(text)
+    state["not_applied"].append(text)
+    for cam, b in built.items():
+        c = plan["cams"][cam]
+        c["eo_file"], c["variant"] = b.get("eo_file"), b.get("variant")
+        c["eo_path"] = Path(b["eo_path"]) if b.get("eo_path") and Path(b["eo_path"]).is_file() else None
+        c["eo_given"] = None if str(b.get("eo_path")) == str(c.get("table_eo_path")) else b.get("eo_path")
+    args.eo = {cam: c["eo_given"] for cam, c in plan["cams"].items() if c.get("eo_given")} or None
+    args.calibration_variant = next((c.get("variant") for c in plan["cams"].values() if c.get("variant")), None)
+
+
+def eo_option_problems(plan, args):
+    """--eo must give every camera the date builds, and each file must be found. -> text ('' if fine)."""
+    given = getattr(args, "eo", None) or {}
+    if not given:
+        return ""
+    probs = []
+    extra = sorted(set(given) - set(plan["cams"]))
+    if extra:
+        probs.append(f"--eo names {', '.join(extra)}, which {plan['date']} does not build")
+    missing = [cam for cam in plan["cams"] if cam not in given]
+    if missing:
+        probs.append(f"--eo gives no calibration for {', '.join(missing)}: one variant is one calibration for "
+                     f"every camera of the date")
+    for cam, c in plan["cams"].items():
+        if cam in given and not c.get("eo_path"):
+            probs.append(f"--eo {cam}={given[cam]}: no such file (an --eo path is taken as given; the table's "
+                         f"calibration is never used in its place)")
+    return "; ".join(probs)
+
+
+def eo_acceptance_problem(plan, args):
+    """An --eo calibration whose pre-registered acceptance FAILED is not built (exit 5): the procedure's
+    outcome for a failed check is 'not delivered', and the table's calibration is never used in its
+    place. On a BLIND date an --eo calibration must state its acceptance ('# acceptance: ...'): a
+    delivery for the holder's check is never built from a calibration whose checks were not run.
+    -> text ('' when fine)."""
+    bad, unstated = [], []
+    for cam, c in plan["cams"].items():
+        if c.get("eo_given") and c.get("eo_path"):
+            acc = calibration_origin(c["eo_path"], eo_dirs(args)).get("acceptance") or {}
+            if acc.get("verdict") == "FAIL":
+                bad.append(f"{cam} {c['eo_file']}: '{acc['verdict']}'" + (f" ({acc['text']})" if acc.get("text") else ""))
+            elif not acc and plan.get("blind"):
+                unstated.append(f"{cam} {c['eo_file']}")
+    if bad:
+        return ("the pre-registered acceptance of the --eo calibration FAILED: " + "; ".join(bad)
+                + ". Not built: a failed calibration is not delivered, and the table's calibration is never built in "
+                  "its place under this variant's name")
+    if unstated:
+        return ("on a BLIND date an --eo calibration must state its pre-registered acceptance, and "
+                + ", ".join(unstated) + " states none: run the procedure's acceptance checks first (gcpfree_eo.py "
+                "writes its file only when they pass, with a first comment line 'CALIBRATION B ...: DELIVERED' or "
+                "'DELIVERED-WIDER (<why>)'; another procedure, a comment line '# acceptance: PASS', '# acceptance: "
+                "PASS-WIDER <the larger uncertainty>' or '# acceptance: FAIL <why>'; FAIL is never built)")
+    return ""
+
+
+def option_refusal(plan, args):
+    """What refuses this run before anything is written (exit 5): a wrong --eo, a variant in the wrong root,
+    an --eo calibration whose acceptance failed. -> text ('' when none)."""
+    return eo_option_problems(plan, args) or variant_root_problem(plan, args) or eo_acceptance_problem(plan, args)
+
+
+def blind_independence_warnings(plan, args):
+    """On a BLIND date, an --eo calibration whose geometry rests (or may rest) on the held survey: said
+    loudly before the build (its README labels the holder's check PARTLY-CIRCULAR). -> list of text."""
+    if not plan.get("blind"):
+        return []
+    out = []
+    for cam, c in plan["cams"].items():
+        if c.get("eo_given") and c.get("eo_path"):
+            lab, why = held_check(calibration_origin(c["eo_path"], eo_dirs(args)), plan["blind"])
+            if lab != "INDEPENDENT":
+                out.append(f"{cam}: the --eo calibration (variant {c.get('variant')}) is NOT independent of the held "
+                           f"survey: {why}")
+    return out
+
+
+def blind_leftovers(plan):
+    """Outputs in this date's folder that an earlier, not blind, build made with a survey of the date: its
+    comparisons and their stamps, a plan view drawn over a survey. A blind product is never built over
+    them (build_date refuses). Only this product's own folder is listed. -> list of text."""
+    out = plan["out"]
+    found = []
+    cdir = out / "compare"
+    if cdir.is_dir() and any(cdir.iterdir()):
+        found.append(f"{cdir}/ (comparisons)")
+    sdir = out / "logs" / "stamps"
+    if sdir.is_dir():
+        found += [f"{p} (a comparison's stamp)" for p in sorted(sdir.glob("compare_*.json"))]
+        mp = load_json(sdir / "map_plan.json") or {}
+        if (mp.get("sig") or {}).get("surveys"):
+            found.append(f"{out / 'maps' / (plan['date'] + '_waterlines_plan.png')} (drawn over a survey)")
+    return found
+
+
 def calibration_history(eo_file, cal_dir):
     try:
         with open(Path(cal_dir) / "calibration_history.csv", newline="") as f:
@@ -4489,6 +5173,8 @@ def missing_parts(plan, state, args=None):
     failed = failed_cameras(plan, state)
     miss = []
     for s in plan.get("surveys") or []:
+        if held_survey(s) or plan.get("blind"):
+            continue                              # held for an independent check: never looked for here
         found = None
         if args is not None and getattr(args, "survey_dirs", None) is not None:
             found = bool(resolve_survey(s, plan, args)[0])
@@ -4641,7 +5327,7 @@ def survey_path_for(s, plan, args):
     dirs = getattr(args, "survey_dirs", None)
     try:
         hits = resolve_survey(s, plan, args)[0] if dirs is not None else []
-    except Exception:
+    except Exception:                # BlindSurvey is not one: a held survey is never given a path here
         hits = []
     if hits:
         return hits[0]
@@ -5018,6 +5704,71 @@ def transfer_caveat(wl, period, n_tr, n_all):
     return ". ".join(parts) + ". Every elevation of the DEM moves with it."
 
 
+def mount_solutions(cam, station, cal_dir, leave_out_dates=()):
+    """The GCP solutions of camera `cam` on mount `station` in calibration_history.csv whose files are in
+    CALIBRATION_ORIGINS, without those solved on leave_out_dates (a held survey's: their numbers are not
+    parsed). -> [(file, date, x, y, z)], by date."""
+    sols = []
+    try:
+        with open(Path(cal_dir) / "calibration_history.csv", newline="") as f:
+            for r in csv.DictReader(f):
+                reg = CALIBRATION_ORIGINS.get(r.get("file") or "")
+                if not reg or reg[1] in leave_out_dates or r.get("camera") != cam or r.get("setup") != station:
+                    continue
+                try:
+                    sols.append((r["file"], reg[1], float(r["x"]), float(r["y"]), float(r["z"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+    except OSError:
+        return []
+    return sorted(sols, key=lambda t: t[1])
+
+
+def calibration_caveats(plan, args, prov):
+    """A calibration turned from another by matching photos keeps that one's camera position: said, with
+    how far the mount's GCP solutions put the camera (calibration_history.csv; on a blind date the
+    solution from the held survey is left out, unread), and its pre-registered acceptance."""
+    cav = []
+    held_dates = {plan["blind"]["survey_date"]} if plan.get("blind") else set()
+    cal_dir = getattr(args, "calibration", None) or HERE / "calibration"
+    for cam, v in (prov.get("cameras") or {}).items():
+        o = (v.get("calibration") or {}).get("origin") or {}
+        if len(o.get("chain") or []) < 2:            # not turned from another calibration
+            continue
+        pos = o.get("position_from")
+        sols = mount_solutions(cam, v.get("station"), cal_dir, held_dates)
+        spread = ""
+        if len(sols) > 1:
+            zs, xy = [t[4] for t in sols], [(t[2], t[3]) for t in sols]
+            dxy = max(float(np.hypot(a[0] - b[0], a[1] - b[1])) for a in xy for b in xy)
+            spread = (f". The mount did not move, yet its GCP solutions "
+                      + ", ".join(f"{t[1]} ({t[0]})" for t in sols)
+                      + f" put this camera {max(zs) - min(zs):.2f} m apart in height and {dxy:.2f} m horizontally "
+                        f"(calibration_history.csv"
+                      + ("; the solution from the held survey is left out: nothing of it is used by this build"
+                         if held_dates else "")
+                      + "): each solution trades its position against its angles over its own GCPs, so this DEM "
+                        f"carries the position error of {pos} away from where its GCPs lay")
+        acc = o.get("acceptance") or {}
+        acc_t = ({"PASS": "its pre-registered acceptance checks passed (PASS"
+                          + (f": {acc['text']}" if acc.get("text") else "") + ")",
+                  "PASS-WIDER": f"its pre-registered acceptance checks passed only with a LARGER UNCERTAINTY, stated "
+                                f"with it: {acc.get('text') or '(no uncertainty stated)'}",
+                  "FAIL": f"its pre-registered acceptance FAILED ({acc.get('text') or 'no reason stated'}): it should "
+                          f"not have been built"}.get(acc.get("verdict"), "")
+                 if acc else "it states no pre-registered acceptance (no '# acceptance: ...' line, no "
+                             "gcpfree_eo.py 'CALIBRATION B ...: DELIVERED' line): its checks are not shown here")
+        cav.append(f"{cam} calibration {o.get('file')}: made without ground control of its own; its angles were "
+                   f"turned from {' and '.join(o.get('refs') or [])} by matching photos"
+                   + (f" (the whole chain: {' <- '.join(o.get('chain') or [])})"
+                      if len(o.get("chain") or []) > len(o.get("refs") or []) + 1 else "")
+                   + f", and its camera position "
+                   f"(x, y, z) is that of {pos}{spread}. The turn adds its own error (the matching residual); the "
+                   f"pointing step's sea-horizon check of this product's photos against this calibration (WHAT WAS "
+                   f"USED: 'sea horizon vs the calibration') is independent of the matches; {acc_t}.")
+    return cav
+
+
 def collect_caveats(plan, args, state, forcing, prov):
     cav = []
     era = plan["era"]
@@ -5240,15 +5991,17 @@ def collect_caveats(plan, args, state, forcing, prov):
     elif read_stamp(out, "merge") and not waterline_file(plan, quiet_=True).name.endswith("_filtered.csv"):
         cav.append("No current consistency-filtered waterlines (the filter step failed or has not run on the "
                    "current merged file): the DEM, maps and comparison use the UNFILTERED waterlines.")
+    cav += calibration_caveats(plan, args, prov)
     epsg = ((dem_settings_built(out) or {}).get("geotiff_epsg")      # what the GeoTIFFs on disk carry
             or getattr(args, "geotiff_epsg", GEOTIFF_EPSG))
     cav.append(f"Coordinates: the grids are in the frame of the calibration's GCPs, ASSUMED to be that of the "
                f"surveys, NAD83(2011) / UTM zone 19N (EPSG:6348): the GCP files state no CRS. Were the GCPs in "
                f"WGS 84 / ITRF instead, the grid would sit ~1-1.5 m off the surveys, up to ~0.1-0.15 m of "
                f"elevation where that shift runs across a 1:10 foreshore. The GeoTIFFs are tagged EPSG:{epsg}"
-               + (" (WGS 84 / UTM 19N) as asked, a NOMINAL tag: read them as NAD83(2011) (WGS 84 differs by "
-                  "~1-1.5 m here; nothing was transformed; --geotiff-epsg 6348 writes the true code)"
-                  if epsg == 32619 else "")
+               + (" (WGS 84 / UTM 19N), a NOMINAL tag: read them as NAD83(2011) (WGS 84 differs by "
+                  "~1-1.5 m here; nothing was transformed; --geotiff-epsg 6348, the default since Oct 2026, writes "
+                  "the true code)" if epsg == 32619 else
+                  ", the frame assumed above: a GIS places them with the surveys" if epsg == 6348 else "")
                + ". The surveys are sampled at the DEM's coordinates with no shift.")
     first_used, last_used, _ = frames_used_dates(plan)
     for s in plan["surveys"]:
@@ -5967,7 +6720,12 @@ def write_provenance(plan, args, state, final=True):
             "station": c["station"], "window": [c["first"], c["last"]], "utc_hours": c["hours_text"],
             "calibration": {"eo_file": c["eo_file"], "eo_path": str(c["eo_path"]),
                             "eo_sha256": sha256(c["eo_path"])[:16] if c["eo_path"] else None,
-                            "io_file": Path(c["io_path"]).name, "history": hist},
+                            "io_file": Path(c["io_path"]).name, "history": hist,
+                            "variant": c.get("variant") or "table",
+                            "given_with": (f"--eo {cam}={c['eo_given']} --calibration-variant {c.get('variant')}"
+                                           if c.get("eo_given") else "survey_dates.csv eo_file"),
+                            "table_eo_file": c.get("table_eo_file") or c["eo_file"],
+                            "origin": calibration_origin(c["eo_path"] or c["eo_file"], eo_dirs(args))},
             "search_envelope": ({"survey": str(c["envelope_path"] or c["envelope_survey"]),
                                  "how": "detect_original_view.py: the survey's -1.5..+2.5 m band projected "
                                         "into the photo with this calibration"}
@@ -6001,6 +6759,26 @@ def write_provenance(plan, args, state, final=True):
     mrg = read_stamp(out, "merge") or {}
     dstamp = read_stamp(out, "dem") or {}
     chain_ok, chain_why = chain_current(plan)
+    blind = None
+    if plan.get("blind"):
+        b = plan["blind"]
+        per_cam = {cam: dict(zip(("label", "why"), held_check(v["calibration"]["origin"], b)))
+                   for cam, v in cams.items()}
+        other = [{"label": "PARTLY-CIRCULAR", "why": f"setup coefficient C = {f['coef']} of unknown origin (no "
+                                                     f"--setup-fitted-to): it may have been fitted to the held survey"}
+                 for f in fits if f.get("kind") == "unknown"]
+        worst = max([v["label"] for v in per_cam.values()] + [o["label"] for o in other], key=LABELS.index,
+                    default="PARTLY-CIRCULAR")
+        blind = {"statement": blind_statement(b), "held_by": b["held_by"], "survey": b["survey"],
+                 "survey_date": b["survey_date"], "since": b.get("since"), "why": b.get("why"),
+                 "held_rows": plan.get("held") or [],
+                 "how": "survey_products.py BLIND_DATES: no survey of this date, nor of the held survey's date, was "
+                        "looked for or opened (resolve_survey refuses before any folder is searched); the compare "
+                        "step did not run; the plan view draws no survey",
+                 "check": {"label": worst, "per_camera": per_cam, "other": other,
+                           "what": "how independent the holder's check of THIS DEM is, by the calibration it was "
+                                   "built with (nothing else in the chain used the held survey: the build never "
+                                   "read it)"}}
     comps = []
     for s in plan["surveys"]:
         name = f"{plan['date']}_{s['name']}"
@@ -6136,6 +6914,7 @@ def write_provenance(plan, args, state, final=True):
                                "(EPSG:6348), untransformed; only the _dem GeoTIFF carries vertical keys (NAVD88, "
                                "EPSG:5703); spread, count and difference grids are not heights")),
         "chain": {"current": chain_ok, "why": chain_why or None},
+        "blind": blind,
         "comparisons": comps,
         "commands": commands,
         "software": software_of_outputs(out),
@@ -6290,6 +7069,16 @@ def write_readme(plan, args, prov):
             w(f"  NOT COMPLETE: {x}")
     for x in prov.get("not_applied") or []:
         w(f"  NOT APPLIED: {x}")
+    bl = prov.get("blind")
+    if bl:
+        w(f"BLIND PRODUCT, DEM ONLY: {bl['statement']}.")
+    cals = {cam: (v.get("calibration") or {}) for cam, v in (prov.get("cameras") or {}).items()}
+    var = sorted({c.get("variant") or "table" for c in cals.values()})
+    if bl or var != ["table"]:
+        w("CALIBRATION: " + (f"variant {'/'.join(v for v in var if v != 'table')} (--eo), NOT the table's"
+                             if var != ["table"] else "the table's (surveys/survey_dates.csv eo_file)")
+          + ": " + "; ".join(f"{cam} {c.get('eo_file')}" for cam, c in sorted(cals.items()))
+          + " (what each was solved from: WHAT WAS USED)")
     w("")
     w("WHAT THIS IS")
     fpd = prov.get("frames_per_day") or {}
@@ -6298,8 +7087,10 @@ def write_readme(plan, args, prov):
     w(f"An intertidal beach DEM of Marconi Beach made only from the station's camera photos "
       f"({', '.join(used) or 'no camera'}"
       + (f"; {', '.join(c for c in plan['cams'] if c not in used)} contributed nothing" if
-         [c for c in plan["cams"] if c not in used] else "") + f"), to check against the survey(s) of {d} "
-      f"listed below. Photo window {plan['first']} .. {plan['last']}; waterline frames on "
+         [c for c in plan["cams"] if c not in used] else "")
+      + (f"), for an independent check by {bl['held_by']}, who holds the survey of {d} ({bl['survey']}). "
+         if bl else f"), to check against the survey(s) of {d} listed below. ")
+      + f"Photo window {plan['first']} .. {plan['last']}; waterline frames on "
       + (f"{days[0]} .. {days[-1]} ({len(days)} days)" if days else "no day") + dem_days_text(plan, fpd) + ".")
     fits_ = (prov.get("setup") or {}).get("fits") or []
     no_setup = bool(fits_) and all(f.get("kind") == "none" or not f.get("coef") for f in fits_)
@@ -6310,7 +7101,26 @@ def write_readme(plan, args, prov):
          f"plus the wave setup (C = {(prov.get('setup') or {}).get('coef')}). ")
       + "Many waterlines at different tides make the DEM.")
     w("")
-    w("COMPARISON AND ITS LABEL (how independent the check is)")
+    if bl:
+        w("BLIND: NO COMPARISON (the survey is held for an independent check)")
+        w(f"  {bl['statement']}.")
+        w(f"  The survey: {bl['survey']}, held by {bl['held_by']} since {bl.get('since')}. This build never looked "
+          f"for a survey file of {d}" + (f" or of {bl['survey_date']}" if bl["survey_date"] != d else "")
+          + f", under any name or in any folder (survey_products.py "
+          f"BLIND_DATES), made no comparison and drew no survey on the maps: whatever lies on this computer, "
+          f"nothing of it went into this product.")
+        ck = bl.get("check") or {}
+        w(f"  How independent his check of this DEM is: {ck.get('label')} (by the calibration it was built with; "
+          f"nothing else in the chain used his survey)")
+        for cam, v in sorted((ck.get("per_camera") or {}).items()):
+            w(f"    {cam}: {v['label']}: {v['why']}")
+        for o in ck.get("other") or []:
+            w(f"    {o['label']}: {o['why']}")
+        if ck.get("label") != "INDEPENDENT":
+            w("  A DEM of this date built with a calibration that used none of his points (--eo ... "
+              "--calibration-variant, in its own --output-root) lets his check test the camera geometry too.")
+    else:
+        w("COMPARISON AND ITS LABEL (how independent the check is)")
     for c in prov["comparisons"]:
         h = c.get("headline") or {}
         if c["status"].startswith("skipped") and not h:
@@ -6360,7 +7170,17 @@ def write_readme(plan, args, prov):
         fc = fpd.get(cam) or {}
         w("      waterline frames used, per day: "
           + (", ".join(f"{dd[5:]} {n}" for dd, n in fc.items()) + f" (total {sum(fc.values())})" if fc else "none"))
-        w(f"      calibration {cal['eo_file']}" + (f" ({hist})" if hist else ""))
+        org = cal.get("origin") or {}
+        w(f"      calibration {cal['eo_file']}"
+          + (f" (--eo, variant {cal.get('variant')}; the table names {cal.get('table_eo_file')})"
+             if str(cal.get("given_with", "")).startswith("--eo") else "")
+          + (f": {org['text']}" if org.get("kind") in ("gcp", "rotated") or cal.get("variant") not in (None, "table")
+             or bl else f" ({hist})" if hist else ""))
+        if org.get("kind") == "gcp" and hist:
+            w(f"        ({hist})")
+        if org.get("acceptance"):
+            w(f"        pre-registered acceptance: {org['acceptance']['verdict']}"
+              + (f" ({org['acceptance']['text']})" if org["acceptance"].get("text") else ""))
         w(f"      search envelope: {c['search_envelope']['survey'] or c['search_envelope']['how']}")
         pc_ = c.get("pointing_check") or {}
         if pc_.get("per_day"):
@@ -6441,9 +7261,11 @@ def write_readme(plan, args, prov):
       "no_setup_frames.csv (frames left out: no wave record)")
     w(f"  dem/          {d}_dem/_spread/_count .asc and .tif, {d}_dem.png (the DEM page)")
     w("  maps/         waterlines drawn on the photos, per camera (daily_elevation_map.py, as the station's own "
-      "maps: its colour bar says which elevation colours the lines); plan view over the survey (coloured by "
-      "still water + setup, the elevation the DEM uses)")
-    w("  compare/      DEM - survey grids/points, report, figure, json")
+      "maps: its colour bar says which elevation colours the lines); plan view "
+      + ("(BLIND: no survey drawn" if bl else "over the survey (")
+      + "coloured by still water + setup, the elevation the DEM uses)")
+    w("  compare/      " + (f"none: a blind product ({bl['statement']})" if bl else
+                           "DEM - survey grids/points, report, figure, json"))
     w("  provenance.json  every source above, machine-readable")
     w("")
     w("EXACT COMMANDS (rebuild everything: the first line; each step's own command below it)")
@@ -6496,7 +7318,15 @@ def dry_run(plan, args, steps):
     total = 0
     for cam, c in plan["cams"].items():
         say(f"{cam}", f"station {c['station']}, {c['first']} .. {c['last']} {c['hours_text']} UTC")
-        say("  calibration", f"{c['eo_file']} -> {c['eo_path'] or 'NOT FOUND in ' + str(args.calibration)}")
+        say("  calibration", f"{c['eo_file']} -> {c['eo_path'] or 'NOT FOUND in ' + str(args.calibration)}"
+            + (f" (--eo, variant {c.get('variant')}; the table names {c.get('table_eo_file')})" if c.get("eo_given") else ""))
+        org = calibration_origin(c["eo_path"] or c["eo_file"], eo_dirs(args))
+        say("  solved from", org["text"])
+        if org.get("acceptance"):
+            say("  acceptance", org["acceptance"]["verdict"]
+                + (f" ({org['acceptance']['text']})" if org["acceptance"].get("text") else ""))
+        if plan.get("blind"):
+            say("  held check", " -- ".join(held_check(org, plan["blind"])))
         if plan["era"] != "live":
             say("  envelope", f"{c['envelope_survey']} -> "
                 f"{c['envelope_path'] or 'NOT FOUND in ' + ', '.join(args.survey_dirs)}")
@@ -6531,6 +7361,10 @@ def dry_run(plan, args, steps):
         sh = setup_share_inputs(getattr(args, "gnssr_spline", None), getattr(args, "gauge_csv", None))
         say("  setup share", "2026 record for the share of setup GNSS-R sees: "
             + ", ".join(f"{Path(p).name} {'here' if p and Path(p).exists() else 'NOT here'}" for p in sh))
+    if plan.get("blind"):
+        b = plan["blind"]
+        say("BLIND", f"{blind_statement(b)} ({b['survey']}): DEM only; the compare step will not run and no survey "
+                     f"of {plan['date']} is looked for")
     for s in plan["surveys"]:
         paths, note = resolve_survey(s, plan, args)
         v = Verdict(s)
@@ -6574,6 +7408,18 @@ def dry_run(plan, args, steps):
     rep_w = window_replace_note(plan, args, steps)
     if rep_w:
         warn(rep_w)
+    rep_c = calibration_replace_note(plan, args, steps)
+    if rep_c:
+        warn(rep_c + (" --replace given: a real run replaces it." if args.replace else
+                      " A real run would be REFUSED (exit 5) without --replace."))
+    bad = option_refusal(plan, args)
+    if bad:
+        warn(f"a real run would be REFUSED (exit 5): {bad}")
+    for w_ in blind_independence_warnings(plan, args):
+        warn(w_)
+    if plan.get("blind") and blind_leftovers(plan):
+        warn(f"a real run would be REFUSED (exit 5): {plan['out']} holds outputs made with a survey of this date "
+             f"({'; '.join(blind_leftovers(plan))}): build the blind product in a fresh --output-root")
     if args.setup_coef and not args.setup_fitted_to and not setup_fit_known(args.setup_coef):
         warn(f"a real run would be REFUSED (exit 5): --setup-coef {args.setup_coef} is not a known fit; give "
              f"--setup-fitted-to <survey file> or --setup-fitted-to 'none:<how>'")
@@ -6606,6 +7452,11 @@ def mark_in_progress(plan, args):
     else:
         prov = {"date": plan["date"], "era": plan["era"], "comparisons": [], "synthetic": RUN.get("synthetic"),
                 "window": {"first_day": plan["first"], "last_day": plan["last"]}}
+    if plan.get("blind"):                # --summary lists it as blind (DEM only) while it builds
+        b = plan["blind"]
+        prov["blind"] = dict(prov.get("blind") or {}, statement=blind_statement(b), held_by=b["held_by"],
+                             survey=b["survey"], survey_date=b["survey_date"], held_rows=plan.get("held") or [])
+        prov["comparisons"] = []
     # every survey of the date has a row (not current), so --summary lists the date while it builds
     have = {c.get("name") for c in prov.get("comparisons") or []}
     for sv in plan.get("surveys") or []:
@@ -6725,11 +7576,19 @@ def build_date(date, cfg, surveys, args, steps):
         return "disabled"
     state = {"steps": {}, "failures": [], "not_applied": []}
     keep_built_window(plan, args, steps, state)
+    bad = option_refusal(plan, args)
+    if not bad:
+        keep_built_calibration(plan, args, steps, state)
     if args.dry_run:
         dry_run(plan, args, steps)
         return "dry-run"
     rule(f"{date}  era {plan['era']}  cameras {', '.join(plan['cams'])}  photos {plan['first']} .. {plan['last']}")
     say("output", str(plan["out"]))
+    if bad:                                          # before anything is written: no folder, no lock
+        warn(f"{date}: NOT built: {bad}")
+        return "refused"
+    for w_ in blind_independence_warnings(plan, args):
+        warn(w_)
     state["argv"] = state_argv(args, date)
     try:
         plan["out"].mkdir(parents=True, exist_ok=True)
@@ -6743,6 +7602,20 @@ def build_date(date, cfg, surveys, args, steps):
     if note:
         warn(f"{date}: {note}")
     try:
+        if plan.get("blind"):
+            left = blind_leftovers(plan)
+            if left:
+                warn(f"{date}: NOT built: {plan['out']} holds outputs an earlier build made with a survey of this "
+                     f"date ({'; '.join(left)}). A blind product ({blind_statement(plan['blind'])}) is never built "
+                     f"over them: build it in a fresh --output-root, or move them away yourself")
+                return "refused"
+        rep_c = calibration_replace_note(plan, args, steps)
+        if rep_c and not args.replace:
+            warn(f"{date}: NOT built: {rep_c}")
+            return "refused"
+        if rep_c:
+            warn(rep_c + " (--replace given)")
+            state["replaced_calibration"] = rep_c
         rep = setup_replace_note(plan, args, steps)
         if rep and not args.replace:
             warn(f"{date}: NOT built: {rep}")
@@ -6850,6 +7723,9 @@ def run_date(plan, args, steps, state):
     rule(f"{date}: summary of this run ({time.time() - t_all:.0f} s)")
     for st in STEPS:
         say(st, state["steps"].get(st, "not reached"))
+    if prov.get("blind"):
+        bl = prov["blind"]
+        say("BLIND", f"DEM only: {bl['statement']}; his check of this DEM: {(bl.get('check') or {}).get('label')}")
     for c in prov["comparisons"]:
         h = c.get("headline") or {}
         if c.get("current") and h.get("n") is not None:
@@ -6906,6 +7782,9 @@ def run_date(plan, args, steps, state):
     if state.get("replaced_window"):
         warn(f"this run REPLACED the product built for another window/hours in {plan['out']} (a recheck with "
              f"another window goes in its own --output-root)")
+    if state.get("replaced_calibration"):
+        warn(f"this run REPLACED the product built with another calibration in {plan['out']} (--replace; another "
+             f"calibration goes in its own --output-root)")
     for cam, why in failed_cameras(plan, state).items():
         warn(f"{cam} contributed NOTHING to this product: {why} (status partial)")
     ns = (prov.get("setup") or {}).get("frames_left_out_without_setup") or {}
@@ -7132,6 +8011,13 @@ def built_args(args, plan):
             setattr(b, k, v)
     if "no_download" in bs["inputs"]:
         b.no_download = bool(bs["inputs"]["no_download"])
+    # the calibration the pointing and waterlines on disk were built with (their stamps)
+    bc = built_calibration(plan)
+    if bc and len(bc) == len(plan["cams"]):
+        given = {cam: v.get("eo_path") for cam, v in bc.items()
+                 if v.get("eo_path") and str(v["eo_path"]) != str(plan["cams"][cam].get("table_eo_path"))}
+        b.eo = given or None
+        b.calibration_variant = next((v.get("variant") for v in bc.values() if v.get("variant")), None) if given else None
     return b
 
 
@@ -7165,6 +8051,10 @@ def state_argv(args, date):
         a += ["--geotiff-epsg", str(args.geotiff_epsg)]
     if Path(args.calibration).resolve() != (HERE / "calibration").resolve():
         a += ["--calibration", str(args.calibration)]
+    if getattr(args, "eo", None):
+        a += ["--eo"] + [f"{c}={p}" for c, p in sorted(args.eo.items())]
+    if getattr(args, "calibration_variant", None):
+        a += ["--calibration-variant", str(args.calibration_variant)]
     try:
         from marconi_water_level import GNSSR_SPLINE, GAUGE_CSV
     except Exception:
@@ -7319,8 +8209,25 @@ def summary(args):
     """One table and one figure across every date built so far under --output-root."""
     root = Path(args.output_root)
     rows = []
+    blind_rows = []
     for pj in sorted(root.glob("*/provenance.json")):
         prov = load_json(pj) or {}
+        if prov.get("blind"):
+            bl = prov["blind"]
+            ck = bl.get("check") or {}
+            cal = sorted({(v.get("calibration") or {}).get("variant") or "table"
+                          for v in (prov.get("cameras") or {}).values()})
+            blind_rows.append({"date": prov.get("date"), "era": prov.get("era"), "status": prov.get("status"),
+                               "survey": ", ".join(h.get("name") or "" for h in bl.get("held_rows") or []) or "-",
+                               "survey_type": ", ".join(sorted({h.get("survey_type") or "" for h in bl.get("held_rows") or []})),
+                               "survey_date": bl.get("survey_date"), "label": "blind (DEM only)",
+                               "comparison": f"blind (DEM only): {bl.get('statement')}",
+                               "calibration_variant": "/".join(cal),
+                               "held_check_label": ck.get("label"),
+                               "held_check_why": "; ".join(f"{k}: {v.get('why')}"
+                                                           for k, v in sorted((ck.get("per_camera") or {}).items())),
+                               "synthetic": prov.get("synthetic") or None, "built_utc": prov.get("built_utc")})
+            continue
         for c in prov.get("comparisons", []):
             cur, why_not, h, lab = summary_comparison(prov, pj.parent, c)
             wl = h.get("waterlines") or {}
@@ -7435,10 +8342,21 @@ def summary(args):
     try:
         cfg = read_table(args.config, CONFIG_FIELDS)
         srv = read_table(args.surveys, SURVEY_FIELDS)
-        built_dates = {r["date"] for r in rows}
+        built_dates = {r["date"] for r in rows} | {r["date"] for r in blind_rows}
         for d in sorted({r["date"] for r in cfg}):
             rr = [r for r in cfg if r["date"] == d]
             if d in built_dates:
+                continue
+            if blind_of(d):
+                # held for an independent check: listed, never looked for (no label_when_built)
+                on = any(r["enabled"] in ("1", "yes", "true", "True") for r in rr)
+                st_ = (load_json(root / d / "provenance.json") or {}).get("status")
+                blind_rows.append({"date": d, "survey": ", ".join(x["name"] for x in srv if x["date"] == d) or "-",
+                                   "label": "blind (DEM only)", "status": st_,
+                                   "comparison": "blind (DEM only): " + (
+                                       f"product status {st_}" if st_ else
+                                       f"not built yet (no {d}/ under this root)" if on else
+                                       f"disabled in {Path(args.config).name}")})
                 continue
             if any(r["enabled"] in ("1", "yes", "true", "True") for r in rr):
                 # enabled, but no product (or no comparison row) under this root yet
@@ -7460,18 +8378,21 @@ def summary(args):
                                  "comparison": f"not built: disabled in {Path(args.config).name} ({why})"})
     except SystemExit:
         pass
-    if not rows and not disabled and not not_yet:
+    if not rows and not disabled and not not_yet and not blind_rows:
         print(f"no product with a comparison under {root} yet")
         return 1
-    fields = [k for k in (rows[0].keys() if rows else ["date", "survey", "survey_type", "survey_date", "comparison"])
+    fields = [k for k in (rows[0].keys() if rows else ["date", "era", "status", "survey", "survey_type", "survey_date",
+                                                       "label", "comparison"])
               if k not in ("dem_by_camera", "waterlines_by_camera")]
-    for k in ("table_label", "label_when_built", "label_when_built_reason"):
+    for k in ("table_label", "label_when_built", "label_when_built_reason", "calibration_variant",
+              "held_check_label", "held_check_why", "synthetic", "built_utc"):
         if k not in fields:
             fields.append(k)
     with open(root / "summary.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, restval="", extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
+        w.writerows(blind_rows)
         w.writerows(not_yet)
         w.writerows(disabled)
 
@@ -7569,6 +8490,17 @@ def summary(args):
         if r["survey_compare_suggests"] and r["survey_compare_suggests"] != r["label"]:
             lines.append(f"{'':<11} survey_compare.py's checks suggest {r['survey_compare_suggests']}"
                          + (f" (overruled: {r['overruled']})" if r["overruled"] else ""))
+    if blind_rows:
+        lines += ["", "Blind (DEM only): the survey is held by someone else for an independent check of the DEM; "
+                      "nothing here looked for it or compared it:"]
+        for r in blind_rows:
+            lines.append(f"  {r['date']} {r['survey']}: {r['comparison']}"
+                         + (f"; status {r['status']}" if r.get("status") else "")
+                         + (f"; calibration {r['calibration_variant']}" if r.get("calibration_variant") else "")
+                         + (f"; the holder's check of this DEM is {r['held_check_label']} ({r['held_check_why']})"
+                            if r.get("held_check_label") else ""))
+            if r.get("synthetic"):
+                lines.append(f"      SYNTHETIC FIXTURE: tests the pipeline, not the beach ({r['synthetic']})")
     if not_yet:
         lines += ["", "Enabled in the configuration, no comparison under this root yet (its label if built with "
                       f"this run's options, C = {args.setup_coef:g}):"]
@@ -7598,15 +8530,15 @@ def summary(args):
     (root / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
     if not any(r["median_m"] is not None for r in rows):
-        # e.g. only the Oct 2024 date built, before its GCP file arrived: nothing to plot, and an
-        # older figure would show numbers that are no longer the table's
+        # nothing to plot (a root of blind products, DEMs only; a date whose survey file has not arrived):
+        # an older figure would show numbers that are no longer the table's
         if (root / "summary.png").exists():
             (root / "summary.png").unlink()
         print(f"\nwrote {root / 'summary.csv'}, {root / 'summary.txt'} (no summary figure: no comparison has "
-              f"numbers yet)")
+              f"numbers yet under this root" + ("; a blind product is a DEM only" if blind_rows else "") + ")")
         return 0
     try:
-        summary_figure(rows, root / "summary.png", disabled, not_yet)
+        summary_figure(rows, root / "summary.png", disabled, not_yet, blind_rows)
         print(f"\nwrote {root / 'summary.csv'}, {root / 'summary.txt'}, {root / 'summary.png'}")
     except Exception as exc:
         warn(f"summary figure failed: {exc!r}")
@@ -7619,6 +8551,8 @@ def label_when_built(date, sv, cfg, srv, args):
     label when the chain would make it worse. -> (label, short reason) ('', '' for no survey row)."""
     if not sv.get("label") or sv.get("name") in (None, "", "-"):
         return "", ""
+    if blind_of(date) or held_survey(sv):
+        return "blind (DEM only)", "the survey is held for an independent check: never looked for here"
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             plan = build_plan(date, cfg, srv, args)
@@ -7646,7 +8580,7 @@ def label_without_setup(table_label, reasons):
     return lab
 
 
-def summary_figure(rows, path, disabled=(), not_yet=()):
+def summary_figure(rows, path, disabled=(), not_yet=(), blind=()):
     """Dot plot: median DEM - survey per comparison, NMAD as the bar (n >= 3 only), the label and the
     reason for it written beside it; on a two-camera date each camera's median as a small labelled
     marker (a pooled median near zero can hide two cameras off in opposite directions); the dates
@@ -7796,13 +8730,17 @@ def summary_figure(rows, path, disabled=(), not_yet=()):
                  fontsize=10.5, color=INK)
     fig.tight_layout()
     fig.subplots_adjust(right=0.64)
-    if disabled or not_yet:
+    if disabled or not_yet or blind:
         dd = sorted({(r["date"], r["comparison"].split("(", 1)[-1].rstrip(")")) for r in disabled})
         txt = ("Not built, at the user's request: " + "; ".join(
             f"{d} ({textwrap.shorten(w, 60, placeholder='...')})" for d, w in dd)) if dd else ""
         ny = sorted({r["date"] for r in not_yet})
         if ny:
             txt = (txt + ". " if txt else "") + "Enabled, no comparison under this root yet: " + ", ".join(ny)
+        bd = sorted({r["date"] for r in blind})
+        if bd:
+            txt = ((txt + ". " if txt else "") + "Blind, DEM only (the survey is held for an independent check, "
+                   "never compared here): " + ", ".join(bd))
         # under the legend, never over it: placed from the legend's drawn extent (the saved figure
         # grows to hold it, bbox_inches='tight')
         fig.canvas.draw()
@@ -7843,6 +8781,16 @@ def main():
     ap.add_argument("--survey-dirs", nargs="+", default=DEFAULT_SURVEY_DIRS,
                     help="folders where survey and envelope files named in the tables are looked for")
     ap.add_argument("--calibration", default=str(HERE / "calibration"), help="calibration folder")
+    ap.add_argument("--eo", nargs="+", default=None, metavar="CAM=PATH",
+                    help="build with these calibrations (EO files, each path taken as given) instead of the table's "
+                         "eo_file, one per camera the date builds (e.g. c1=calibration/CACO03_c1_20241023_gcpfree_EO.yaml "
+                         "c2=...); --date only, with --calibration-variant NAME, into a root named <root>_NAME, e.g. "
+                         f"{DEFAULT_OUTPUT_ROOT}_gcpfree (any other root is refused, exit 5). A file whose "
+                         "stated acceptance is FAIL ('# acceptance: FAIL', 'NOT DELIVERED') is refused; a missing one too (never "
+                         "the table's instead)")
+    ap.add_argument("--calibration-variant", default=None, metavar="NAME",
+                    help="short name of the --eo calibration (e.g. gcpfree: lower case, digits, '-'): said in the "
+                         "README, provenance, the DEM page and --summary, and names its root (<root>_<NAME>)")
     ap.add_argument("--adcp", help="sig1000_waves_ALL.csv (historical_forcing.py default: the repo's)")
     ap.add_argument("--adcp-navd88", help="adcp_water_level_navd88.csv")
     ap.add_argument("--chatham", help="Chatham 8447435 6-min NAVD88 CSV (time, level)")
@@ -7873,9 +8821,9 @@ def main():
                          "to no survey (e.g. 'none:repeat crossings, dem_from_contours.py --fit-setup on "
                          "2025-01-18..23'). Required for such a C: a C of unknown origin is refused")
     ap.add_argument("--geotiff-epsg", type=int, default=GEOTIFF_EPSG,
-                    help=f"horizontal EPSG code written into the GeoTIFFs (default {GEOTIFF_EPSG}, as asked; the "
-                         f"grids are in the frame of the GCPs, assumed NAD83(2011) / UTM 19N, EPSG:6348, as the "
-                         f"surveys)")
+                    help=f"horizontal EPSG code written into the GeoTIFFs (default {GEOTIFF_EPSG}: the grids are in "
+                         f"the frame of the GCPs, assumed NAD83(2011) / UTM 19N as the surveys; 32619, WGS 84 / UTM "
+                         f"19N, was the default until Oct 2026 and is a NOMINAL tag, ~1-1.5 m off in a GIS)")
     ap.add_argument("--keep-detector-debug", action="store_true",
                     help="keep the detector's debug images (~8 MB a photo; default: removed once the "
                          "waterlines are written)")
@@ -7902,6 +8850,22 @@ def main():
     ap.add_argument("--dem-max-day-offset", type=float, default=DEM_MAX_DAY_OFFSET, help="0 = off")
     args = ap.parse_args()
 
+    arm_blind_guard()          # no file named like a held survey (BLIND_DATES) is opened by this run, whatever asks
+    if args.eo or args.calibration_variant:
+        if not args.date:
+            ap.error("--eo / --calibration-variant: with --date only (one date, one calibration)")
+        if not (args.eo and args.calibration_variant):
+            ap.error("--eo and --calibration-variant go together: the calibrations, and the name of that variant")
+        if not VARIANT_NAME.match(args.calibration_variant) or args.calibration_variant in ("table", "station"):
+            ap.error(f"--calibration-variant {args.calibration_variant!r}: a short name of lower-case letters, digits "
+                     f"and '-' (not 'table' or 'station'), e.g. gcpfree")
+        eo = {}
+        for item in args.eo:
+            cam, sep, path = item.partition("=")
+            if not sep or cam not in ("c1", "c2") or not path or cam in eo:
+                ap.error(f"--eo {item!r}: expected c1=PATH and/or c2=PATH, each camera once")
+            eo[cam] = os.path.abspath(path)     # recorded as an absolute path: the stamps and the rebuild line
+        args.eo = eo
     if args.summary:
         return summary(args)
     # a shutdown or kill (SIGTERM) ends the run like Ctrl-C: the build writes 'status: failed' and why

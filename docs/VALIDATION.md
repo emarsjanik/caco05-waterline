@@ -84,9 +84,10 @@ products' C, or the live waterlines and the products carry different setups (the
 comments say `SETUP_COEF=""` for a refit: the test then FAILs, naming the cron's value, as
 `survey_products.py` warns).
 
-What was asked for in the tables (23 Oct 2024 and 19 Mar 2025 switched off, the windows, the
-29 Sep 2026 RTK row and its text, envelopes from the other lidar, every calibration in the
-repository, the Oct GCPs PARTLY-CIRCULAR, every row with all its columns) is checked on the
+What was asked for in the tables (19 Mar 2025 switched off; 23 Oct 2024 switched on and BLIND,
+its survey withheld, calibration A from the table; the windows, the 29 Sep 2026 RTK row and its
+text, envelopes from the other lidar, every calibration in the repository, the Oct GCPs
+PARTLY-CIRCULAR with no path, held by Chris Sherwood, every row with all its columns) is checked on the
 tables as the repository shipped them with the test: read with git as of the last commit of
 `test_survey_products.py`, not of HEAD, so the owner's edits never reach it, even when they
 are committed on the station to pull past them. A commit that changes the shipped tables
@@ -410,13 +411,39 @@ would give one (section 6).
 
 | what | data | number | reproduce |
 |---|---|---|---|
-| 2024-10-23 (GCP file not on the NUC yet) and 2025-03-19 (no photos, no ADCP) refused | config | exit 2: "Not built. To build it anyway: --force-disabled" | `python3 survey_products.py --date 2024-10-23` |
+| 2025-03-19 (no photos, no ADCP) refused | config | exit 2: "Not built. To build it anyway: --force-disabled" | `python3 survey_products.py --date 2025-03-19` |
+| 2024-10-23 is BLIND (DEM only): its survey is held by Dr Chris Sherwood for an independent check | [SYNTH] tests, files named like the Oct GCPs planted in every survey folder, the calibration folder, the output root and the current folder | never globbed, stat-ed or opened (a tracer on pathlib, os and open(), and an audit hook on every open and every command run); any look-up of a row of the date raises BlindSurvey (not an Exception: no `except Exception` swallows it); the compare step does not run; status `complete`; README and provenance say "blind: the survey is held by Dr Chris Sherwood (USGS) for an independent check; nothing in this build read it"; `--summary` lists it as `blind (DEM only)`; a runtime guard refuses to open for reading any `.csv`/`.txt`/... named like a survey of that date, whoever asks | `test_survey_products.py` (test_blind_and_calibration) |
+| One calibration variant per root (`--eo ... --calibration-variant NAME`) | tests | a variant build outside a root named `<root>_NAME`, a table build in a root holding a variant, a missing `--eo` file (never the table's instead), an `--eo` file whose stated acceptance is FAIL (`NOT DELIVERED`, `# acceptance: FAIL`), or (on a blind date) states none: each refused, exit 5, nothing written; another calibration (by sha256) in the same root: refused without `--replace`; `--eo` without `--calibration-variant` or with `--all`: exit 6 | same |
 | Another C in a root that holds a build | [SYNTH] tests + refreshes over copies of the real C = 0 and C = 0.037 2026 builds | refused, exit 5, nothing changed, no lock left; the message names the root that C belongs in (`<root>_c<C>`, the base root for the station's C); a root whose name gives it to the refused C although it holds another (a root without suffix holding a C = 0 build; a `..._c0` root holding C = 0.037) is said to hold that other C, and the run is given a root beside it (`<root>_c<C>`), never the same root; the same in the dry run, the compare-step warning, the CIRCULAR caveat and the end-of-run REPLACED line; `--replace` overwrites on purpose | `test_survey_products.py` |
 | A `--setup-coef` of unknown origin | tests | exit 5, nothing written, unless `--setup-fitted-to` says where it was fitted | same |
 | A usage error (unknown option; a bad `--steps`, `--window` or `--utc-hours`; a negative `--setup-coef`) | tests | exit 6, nothing written: never 2, which means a disabled date | same |
 | Two builds of one date at once | tests | the second exits 4 and names the build holding the lock | same |
 | `--all` exit code | tests | the worst by severity: failed (1) > refused (5) > busy (4) > partial (3) > 0 | same |
 | Rerun on unchanged inputs | [SYNTH] + [REAL] | every step skipped, numbers identical (every date rerun several times on the final code) | rerun the same command |
+
+### 3.5 2024-10-23: BLIND (DEM only), calibrations A and B
+
+The 23 Oct 2024 GCPs are held by Dr Chris Sherwood (USGS) to check our DEM of that date blind.
+Two DEMs, each in its own root: **A** with the table's calibration `CACO03_<cam>_20241023_EO`,
+solved from those GCPs (his check of A tests the water level, the detection and the setup, not
+the camera geometry: PARTLY-CIRCULAR for the geometry); **B** with a calibration made without
+them, the 23 Jan 2025 GCP solution of the same mount turned back to the October pointing by
+matching photos (c2 directly or through Dec 2024), its camera position the Jan solution's (the
+README traces it: INDEPENDENT of his GCPs). B is computed on the NUC by the pre-registered
+GCP-free procedure (`gcpfree_eo.py`: its own document and acceptance checks), which writes
+`calibration/CACO03_<cam>_20241023_gcpfree_EO.yaml` only for a camera whose checks pass; the
+file's first comment line carries its verdict, which `survey_products.py` reports (DELIVERED =
+PASS; DELIVERED-WIDER = PASS-WIDER: the stated uncertainty on every output) or refuses (NOT
+DELIVERED = FAIL: B not delivered; never A in its place), and its reference (with that file's
+sha256), the position it keeps and its pan change, each checked against the files.
+
+| what | data | number | reproduce |
+|---|---|---|---|
+| What each calibration rests on | [SYNTH] tests on synthetic B files (`estimate_eo_rotation.py`'s notes, and `gcpfree_eo.py`'s lines word for word) | A: the 23 Oct 2024 GCPs, PARTLY-CIRCULAR for the geometry; B turned from Jan 2025 (c2 directly or through a Dec step): INDEPENDENT; `gcpfree_eo.py`'s DELIVERED / DELIVERED-WIDER read as PASS / PASS-WIDER, NOT DELIVERED refused; a stated reference sha256, pan change or kept position that the files do not bear out (e.g. numbers from the Aug 2024 solution under notes naming Jan's): NOT KNOWN, a warning before the build, never INDEPENDENT; a B naming Aug 2024 as a second reference (photos from Chris): both traced, position from the first named; a file turned from A, a file with no reference, an archived name with other content, a chain missing its Dec step: never called INDEPENDENT | `test_survey_products.py` |
+| B's camera position | `calibration/calibration_history.csv` [REAL] | the Aug 2024 and Jan 2025 GCP solutions of the same mount differ by 0.11 m (c1) and 0.59 m (c2) in height, 0.34 m (c1) and 1.08 m (c2) horizontally; B keeps the Jan position; B's build uses nothing of the Oct solution | B's README, KNOWN CAVEATS |
+| B's build never opens A's calibration file | [SYNTH] tests (audit hook) | none opened | `test_survey_products.py` |
+| A and B built end to end on a synthetic October fixture (photos rendered from the Jan 2025 lidar, 22-23 Oct; files named like the Oct GCPs in the survey folder, the calibration folder and the current folder, their access times watched) | [SYNTH] | A: exit 0, complete, compare not run, held check PARTLY-CIRCULAR; B from `gcpfree_eo.py`-format files (made-up turns from the Jan 2025 solution, plumbing only): exit 0, complete, held check INDEPENDENT, its verdict lines in the README, a rerun skips every step, `--summary` "blind (DEM only)"; B into A's root and A into B's root refused (exit 5); the planted files never read (access times unchanged) | a scratch fixture, not in the repository |
+| The real A and B DEMs | [NUC] | built tonight; to be filled in from their READMEs | the commands in `surveys/README.md` |
 
 ---
 
@@ -606,7 +633,7 @@ only if it holds over several weeks of different waves; then change it in all th
 
 ### 4.4 Chatham to Marconi water-level transfer (only for dates outside the ADCP)
 
-* **Used for.** 2024-10-23 (disabled now) and hours the ADCP lacks. The 2025-01-23 and
+* **Used for.** 2024-10-23 (BLIND, DEM only: no comparison here) and hours the ADCP lacks. The 2025-01-23 and
   2025-03-06 windows are inside the ADCP record: water level measured.
 * **Value** [REAL], fitted on the ADCP overlap: harmonic transfer, 13 constituents, M2 ratio
   1.481, Marconi leads by 70 min, residual x 0.85; leave-one-week-out RMS 0.076 m,
@@ -1131,8 +1158,9 @@ only if it holds over several weeks of different waves; then change it in all th
   few cm here).
 * Camera GCP frame: no CRS in the GCP files; assumed NAD83(2011) / UTM 19N (EPSG:6348). Were
   they WGS 84 / ITRF, the grids would sit ~1-1.5 m off the surveys, up to ~0.1-0.15 m of
-  elevation across a 1:10 foreshore. GeoTIFFs are tagged EPSG:32619 as asked (a nominal tag;
-  `--geotiff-epsg 6348` writes the true code).
+  elevation across a 1:10 foreshore. GeoTIFFs are tagged EPSG:6348 by default since Oct 2026
+  (the 2025 lidar files and the 2026 RTK are in that frame); before, EPSG:32619 (WGS 84 / UTM 19N),
+  a nominal tag a GIS places ~1-1.5 m off; a product keeps its tag until its DEM step reruns.
 
 ### 4.9 Thresholds that move the numbers (not offsets, but each changes a result)
 
@@ -1186,6 +1214,11 @@ copy of today's pictures made before the pull (section 1).
 ---
 
 ## 6. What is not verified yet, and what would verify it
+
+* **The 23 Oct 2024 DEMs.** Checked blind by Dr Chris Sherwood against the GCPs he holds: A
+  tests the water level, detection and setup (its geometry is fitted to his points), B the
+  whole chain, geometry included. Nothing on our side may read his file; A and B are compared
+  with each other (DEM difference, `dem_change.py`) only after both are built.
 
 * **The real 2025 numbers.** Only the NUC has the real January and March 2025 photos. The
   sandbox numbers for those dates are synthetic and test the pipeline only.

@@ -8,6 +8,7 @@ python3 survey_products.py --date 2025-01-23            # one date
 python3 survey_products.py --date 2025-01-23 --dry-run  # what it would do: photos per day, files, labels, run time
 python3 survey_products.py --all                        # every enabled date, then the summary
 python3 survey_products.py --summary                    # one table + one figure across the dates built
+python3 survey_products.py --date 2024-10-23            # BLIND: a DEM only (below, "23 Oct 2024: BLIND")
 ```
 
 Products go to `/mnt/I2Rgus_Data/survey_products/<date>/` (`--output-root`),
@@ -51,10 +52,16 @@ are not one build; a disabled date exits 2; exit 4: not started, because
 another build of the same date is running; exit 5: not started, refused by
 the run's own settings (a `--setup-coef` other than the one the date's
 waterlines carry, without `--replace`; a C of unknown origin, without
-`--setup-fitted-to`; `--dry-run` says when a real run would be refused); exit
+`--setup-fitted-to`; a calibration variant (`--eo`) in a root not named for
+it, a missing `--eo` file, or one whose pre-registered acceptance FAILED; a
+blind date over a folder holding an earlier comparison; `--dry-run` says when
+a real run would be refused); exit
 6: not started, a usage error (an unknown option or a bad value, e.g.
-`--steps`, `--window`, `--utc-hours`, a negative `--setup-coef`), never 2. A
-row with no survey file yet (the October GCPs) is not a missing part. With
+`--steps`, `--window`, `--utc-hours`, a negative `--setup-coef`, `--eo` without
+`--calibration-variant` or with `--all`), never 2. A
+row with no survey file yet is not a missing part, and the held survey of a
+BLIND date is never looked for (a blind product with everything else built is
+`complete`). With
 `--all` the code of the worst date is returned, worst by severity, not by
 number: 1 if any date failed, else 5 if any was refused, else 4 if any was
 busy, else 3 if any was partial, else 0 (disabled dates do not count); the
@@ -125,7 +132,7 @@ taken as given when it exists, else by its name in those folders.
 
 | date | status | photos | calibration | water level / waves | survey | label |
 |---|---|---|---|---|---|---|
-| 2024-10-23 | **skipped for now** (user's request) | c1+c2 CACO03, 20-26 Oct | CACO03_<cam>_20241023_EO (solved from that day's GCPs) | Chatham transfer / WIS | GCPs only, file not on the NUC yet | PARTLY-CIRCULAR |
+| 2024-10-23 | enabled, **BLIND: DEM only** (user's request, 13 Oct 2026) | c1+c2 CACO03, 20-26 Oct | A: CACO03_<cam>_20241023_EO (solved from that day's GCPs, the ones held); B: GCP-free (`--eo ... --calibration-variant gcpfree`, its own root) | Chatham transfer / WIS | GCPs held by Dr Chris Sherwood (USGS): never on the NUC, never compared here | none here (`blind (DEM only)`); his check of A is PARTLY-CIRCULAR for the geometry, of B INDEPENDENT |
 | 2025-01-23 | enabled | c1+c2 CACO03, 18-23 Jan (24 Jan left out: re-set that day) | CACO03_<cam>_20250123_EO (GCPs, not the lidar) | ADCP | Jan 2025 lidar | INDEPENDENT (envelope from the Mar lidar) |
 | 2025-03-06 | enabled | c2 only, CACO04, 3-9 Mar | CACO04_c2_20250219_EO | ADCP (ends 10 Mar 15:00) | Mar 2025 lidar | INDEPENDENT (envelope from the Jan lidar) |
 | 2025-03-19 | **skipped** (user's request) | none on the NUC within 7 days | - | no ADCP | - | - |
@@ -344,10 +351,12 @@ Coordinates: the grids are in the frame of the calibration's GCPs, ASSUMED
 to be that of the surveys, NAD83(2011) / UTM 19N (EPSG:6348): the GCP files
 state no CRS. Were the GCPs in WGS 84 / ITRF instead, the grid would sit
 ~1-1.5 m off the surveys, up to ~0.1-0.15 m of elevation where that shift runs
-across a 1:10 foreshore. The GeoTIFFs are tagged EPSG:32619 (WGS 84 / UTM 19N)
-as asked: a nominal tag (WGS 84 differs by ~1-1.5 m here; nothing is
-transformed). `--geotiff-epsg 6348` writes the true
-code. The 2025 lidar files state no vertical datum: NAVD88 is assumed (the
+across a 1:10 foreshore. The GeoTIFFs are tagged EPSG:6348 (NAD83(2011) /
+UTM 19N, the frame of the 2025 lidar files and the 2026 RTK), the default
+since Oct 2026; until then they were tagged EPSG:32619 (WGS 84 / UTM 19N), a
+nominal tag a GIS places ~1-1.5 m off the surveys (nothing is transformed
+either way; a product built before then keeps its tag until its DEM step
+reruns, and `--geotiff-epsg 32619` still writes the old one, said nominal). The 2025 lidar files state no vertical datum: NAVD88 is assumed (the
 geoid model is unknown; GEOID12B and GEOID18 differ by a few cm here).
 
 `survey_compare.py`'s own checks (calibration notes, the envelope, the
@@ -560,6 +569,15 @@ merge, on the NUC:
 cd /mnt/I2Rgus_Data/waterline && git pull
 python3 survey_products.py --date 2025-01-23 --dry-run   # inputs found, labels, run time
 python3 survey_products.py --date 2025-01-23             # then 2025-03-06, 2026-09-29, --summary
+python3 survey_products.py --date 2024-10-23 --dry-run   # BLIND, calibration A: forcing files, held check
+python3 survey_products.py --date 2024-10-23             # A, default root
+# B: once gcpfree_eo.py (the pre-registered GCP-free procedure) has written the two B files
+#    (it writes a camera's file only when its checks pass: DELIVERED or DELIVERED-WIDER):
+python3 survey_products.py --date 2024-10-23 \
+    --eo c1=calibration/CACO03_c1_20241023_gcpfree_EO.yaml c2=calibration/CACO03_c2_20241023_gcpfree_EO.yaml \
+    --calibration-variant gcpfree \
+    --output-root /mnt/I2Rgus_Data/survey_products_gcpfree --dry-run   # then without --dry-run
+python3 survey_products.py --summary --output-root /mnt/I2Rgus_Data/survey_products_gcpfree
 ```
 
 One setup coefficient per output root: a run that would rebuild a date with
@@ -572,32 +590,100 @@ root holds and names a root beside it, `<root>_c<C>`, never the same root.
 Give a C = 0 or a refitted C its own `--output-root` (above, "a build with
 C = 0"). A full rebuild with another `--window` or `--utc-hours` replaces the
 date's product (the run says so): build such a recheck in its own
-`--output-root` too.
+`--output-root` too. One calibration variant per root, too, and stricter: a
+`--calibration-variant NAME` build goes only in a root named `<root>_NAME`
+(e.g. `/mnt/I2Rgus_Data/survey_products_gcpfree`), a table build never in a
+root holding a variant (exit 5 either way, `--replace` does not override it:
+the remedy is the right root, so a root's name always says which calibration
+built what is in it).
 
 The code is tested here under the station's oldest libraries too (Python
 3.8, numpy 1.17.4, matplotlib 3.3.4, pandas 1.1.5). The waterline maps on the
 photos need the `daily_elevation_map.py` that falls back to `plt.get_cmap`
 on matplotlib 3.3/3.4 (the version merged with the waterline work).
 
-## When the October GCP file arrives
+## 23 Oct 2024: BLIND (DEM only), two calibrations
 
-Save it as `/mnt/I2Rgus_Data/Chelsea_calibration/2024-10-23_Marconi_Extrinsic_Targets_<cam>_xyz.csv`
-(no header: `num,E,N,Z`, UTM 19N / NAVD88, like
-`calibration/2025-11-13_Marconi_Extrinsic_Targets_c1_xyz.csv`), or write its
-path in the `oct_gcps` row of `surveys.csv` (one file per camera is fine: they
-are merged, a target in both once, for the comparison and the plan view).
-When the October date is switched on (`enabled` = 1 in `survey_dates.csv`, or
-`--force-disabled`), the comparison runs; on a date already built,
-`--date 2024-10-23 --force-disabled --steps maps,compare` (about a minute)
-makes it and redraws the plan view with the points. Only the GCPs inside
-the DEM's cells are compared (targets on the berm and the upper beach lie
-above the waterlines), so expect few points, each off by up to ~0.1-0.2 m
-from the slope inside a 2 m cell. It is PARTLY-CIRCULAR: the 2024-10-23 calibration was solved
-from those points (the pointing is fitted to them; the elevations still come
-from the water levels). Days before 23 Oct may have had another pointing
-(the 2024-08-27 calibration differs by ~2.3-2.5 deg in azimuth): the pointing
-step checks every day against a photo of 23 Oct and leaves out the days that
-differ.
+The GCPs surveyed on 23 Oct 2024 are held by Dr Chris Sherwood (USGS) for an
+independent check of our DEM of that date. **Never put them on the NUC or in
+this repository.** `survey_products.py` treats the date as BLIND
+(`BLIND_DATES`): it builds the forcing, pointing, waterlines, DEM, GeoTIFFs,
+maps and README only. The date's survey rows never reach a file look-up
+(nothing named like `2024-10-23*xyz*.csv` is globbed, stat-ed or opened, in
+any folder, whatever `surveys.csv` says), the compare step does not run, the
+plan view draws no survey, and a runtime guard refuses to open for reading
+any `.csv`/`.txt`/... named like a survey of that date, whoever asks. The
+README and provenance say `blind: the survey is held by Dr Chris Sherwood
+(USGS) for an independent check; nothing in this build read it`, and what his
+check can test with the calibration used. `--summary` lists the date as
+`blind (DEM only)`. A folder holding an earlier comparison of the date is
+refused (exit 5): build in a fresh root. The date is unblinded only by removing
+its `BLIND_DATES` entry (a commit), after he has reported.
+
+Two DEMs are delivered, each in its own root (one calibration per root):
+
+* **A, the table's calibration** (`CACO03_<cam>_20241023_EO.yaml`), solved
+  from those very GCPs: the camera geometry is fitted to his points, so his
+  check of A tests the water level, the detection and the setup, not the
+  geometry (PARTLY-CIRCULAR for the geometry).
+  `python3 survey_products.py --date 2024-10-23`
+  (default root `/mnt/I2Rgus_Data/survey_products`).
+* **B, a calibration made without them**: the 23 Jan 2025 GCP solution of the
+  same mount (`CACO03_<cam>_20250123_EO.yaml`) turned back to the October
+  pointing by matching Jan and Oct photos (c2 directly, or through the Dec
+  2024 photos), its camera position that of the Jan solution. Computed on the
+  NUC by the pre-registered GCP-free procedure (`gcpfree_eo.py`, its own
+  document), never against A's numbers; it writes
+  `calibration/CACO03_<cam>_20241023_gcpfree_EO.yaml`. Then
+  `python3 survey_products.py --date 2024-10-23 --eo c1=calibration/CACO03_c1_20241023_gcpfree_EO.yaml c2=calibration/CACO03_c2_20241023_gcpfree_EO.yaml --calibration-variant gcpfree --output-root /mnt/I2Rgus_Data/survey_products_gcpfree`
+  (an `--eo` path is recorded as an absolute path).
+  The README traces each file to the GCPs it rests on: INDEPENDENT of his GCPs.
+
+What a B file must carry (`gcpfree_eo.py` writes it so; `--dry-run` shows
+what `survey_products.py` reads from it). Only comment lines are read for
+this, and every claim is checked against the files:
+* the reference it was turned from: `gcpfree_eo.py`'s `# Reference EO:
+  <reference>.yaml (...) sha256 <hex>` (the reference found here must have
+  that sha256), `# Position (x, y, z) kept from <reference>.yaml` (its x, y, z
+  must be the reference's) and `pan change <deg> deg from <reference>.yaml`
+  (its azimuth must differ from the reference's by that); or, as
+  `estimate_eo_rotation.py` writes it, `# ... <reference>.yaml rotated by
+  <angle> deg ...` (the first named is the one whose position it keeps; an
+  intermediate file, e.g. a Dec 2024 step of c2, lies next to the file
+  naming it). A claim that is not true, or a reference that cannot be traced
+  to a GCP solution, makes the origin NOT KNOWN, and the check is then never
+  called INDEPENDENT (the run warns before it builds);
+* its pre-registered acceptance: `gcpfree_eo.py`'s first comment line
+  `# CALIBRATION B (GCP-FREE) ..., camera <cam>: DELIVERED (...)` (= PASS) or
+  `DELIVERED-WIDER (<why: the larger uncertainty>)` (= PASS-WIDER: built, the
+  uncertainty on every output); `NOT DELIVERED` (= FAIL: `gcpfree_eo.py`
+  writes no file then, and a file saying so is refused, exit 5). Another
+  procedure may write `# acceptance: PASS | PASS-WIDER <uncertainty> | FAIL
+  <why>`. B is then not delivered; the table's calibration is never built in
+  its place under B's name. On a blind date a file stating no acceptance is
+  refused too: B is never built from a calibration whose checks were not run.
+
+B needs a delivered file for every camera the date builds (`--eo` must name
+both; one variant is one calibration for every camera). If `gcpfree_eo.py`
+does not deliver a camera (it then writes no file for it), B is not
+delivered: Chris gets A alone, with the procedure's report saying why. A
+one-camera B is not part of this change.
+
+Refused before anything is written (exit 5): a `--calibration-variant` build
+in a root not named `<root>_<variant>`, a table build in a root holding a
+variant (and the reverse), an `--eo` path that does not exist (it is taken
+as given: never a file of the same name elsewhere, never the table's), an
+acceptance FAIL. A B file changed since B was built is a rebuild refused
+without `--replace` (stamps record each calibration's sha256). B's README also
+says that its camera position is the Jan solution's while the mount's GCP
+solutions of Aug 2024 and Jan 2025 put the cameras up to 0.59 m apart in
+height (c2; nothing of the solution from the held GCPs is used by B's build), and
+that the pointing step's sea-horizon check of the October photos against B is
+independent of the photo matches.
+
+Send Chris, per root: `2024-10-23/dem/2024-10-23_dem.tif` (+ `_spread`,
+`_count`), the DEM page, `README.txt` and `provenance.json`. The GeoTIFFs are
+EPSG:6348 (NAD83(2011) / UTM 19N) + NAVD88.
 
 The October date also needs its forcing files, which are NOT downloaded:
 * WIS ST63064 hourly waves (`WIS_ST63064_2024-10_to_2025-03.csv`) and/or
@@ -624,5 +710,6 @@ The October date also needs its forcing files, which are NOT downloaded:
   `sigma_m` in water_level.csv and the forcing report change only when the
   forcing step is rebuilt (which rebuilds the detection after it).
 
-Run `--date 2024-10-23 --force-disabled --dry-run` first: it lists each
-forcing file found or NOT FOUND.
+Run each command with `--dry-run` first: it lists each forcing file found or
+NOT FOUND, each calibration and what it was solved from, the held check per
+camera, and whether a real run would be refused.
