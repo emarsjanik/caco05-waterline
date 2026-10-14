@@ -2289,6 +2289,26 @@ def test_oct_pointing_pattern(d):
           f"a kept 'small change' day: the README gives its measured turn and its DEM effect per range band "
           f"({len(bands)} bands: " + ", ".join(f"{b['dem_abs_error_m']:.2f} m at {b['range_m']} m" for b in bands)
           + "); nothing for a day left out")
+    # where the ~0.1 deg of a match rests: the inliers' spread is recorded, and a deciding match bunched in a small
+    # part of the frame says so (review r1: a 300 px patch reads roll up to 0.17 deg; every tested match spread
+    # 180 px or more)
+    import pointing_check as pc_
+    box = np.array([[x, y] for x in np.linspace(1000, 1300, 31) for y in np.linspace(500, 600, 11)])
+    spr = pc_.inlier_spread(box)
+    fr = sp.feature_record({"d_azimuth": 0.8, "d_tilt": 0.02, "d_roll": -0.01, "inliers": 341, "turn_sigma": 60.0,
+                            "runner_up_inliers": 3, "inlier_spread_px": spr}, Path("x.jpg"))
+    brow = [dict(_pt_row("c2", "2024-10-21", "matches", 9.0, 0.14, -0.01, 0.6, edge=faint), **fr),
+            dict(oct_rows()[3])]
+    sp.pointing_verdicts(brow, ref_day="2024-10-23")
+    want = [float(np.std(box[:, 1], ddof=1)), float(np.std(box[:, 0], ddof=1))]      # an axis-aligned box
+    check(np.allclose(spr, want, atol=0.01) and fr["inlier_spread_px"] == "32/90"
+          and brow[0]["verdict"] == "DIFFERENT POINTING" and sp.bunched(brow[0])
+          and "its 341 inliers are bunched (spread 32 x 90 px; every match the ~0.1 deg rests on spread 180 px or more)"
+          in brow[0]["why"] and "spread over the frame is good to ~0.1 deg on the views tested" in brow[0]["why"]
+          and not sp.bunched(dict(brow[0], inlier_spread_px="250/520")) and not sp.bunched({"inliers": 50}),
+          "a match's inlier spread is recorded (inlier_spread_px, minor/major px); a deciding match bunched under "
+          "180 px says so in its why (the verdict unchanged), and the claim reads 'spread over the frame ... on the "
+          "views tested'")
     # the README's why for days nothing read: matched within noise is said so, never 'too few matched features'
     rows = oct_rows()
     sp.pointing_verdicts(rows, ref_day="2024-10-23")

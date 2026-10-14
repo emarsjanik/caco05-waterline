@@ -212,12 +212,24 @@ def turn_sigma(world, cam, inl, R, R_ref):
     return float(np.sqrt(max(float(w @ N @ w), 0.0) / s2))
 
 
+def inlier_spread(px):
+    """How widely matched points spread over the frame: the standard deviations (px) of their pixel positions along
+    the minor and major axes of their scatter (sqrt of the eigenvalues of its covariance), [minor, major]. A rotation
+    fitted to points bunched in a small part of the frame reads roll (and tilt) less well. None under 3 points."""
+    px = np.asarray(px, float)
+    if len(px) < 3:
+        return None
+    ev = np.linalg.eigvalsh(np.cov(px.T))
+    return [float(np.sqrt(max(ev.min(), 0.0))), float(np.sqrt(max(ev.max(), 0.0)))]
+
+
 def measure(img, refs, io, min_inliers=40, second=False):
     """-> dict with the best reference's result. second=True adds the runner-up consensus of the
     best reference's matches (runner_up()): 'runner_up_inliers', 'runner_up_deg' (its angle from
     the best rotation) and 'runner_up_d' (its azimuth/tilt/roll change from the reference, deg,
     as d_*). The best result itself is unchanged (the same RANSAC, the same seed). 'turn_sigma': the
-    best rotation's distance from no turn in units of its standard error (turn_sigma())."""
+    best rotation's distance from no turn in units of its standard error (turn_sigma()); 'inlier_spread_px':
+    how widely its inliers spread over the new frame (inlier_spread())."""
     f = features(img)
     best, geom = None, None
     for ref in refs:
@@ -236,7 +248,8 @@ def measure(img, refs, io, min_inliers=40, second=False):
                     "residual_deg": float(np.median(ang_err(R, world[inl], cam[inl]))) if n_in else np.nan,
                     "d_azimuth": d[0], "d_tilt": d[1], "d_roll": d[2],
                     "eo": np.r_[ref.eo[:3], az, tilt, roll], "eo_ref": ref.eo_name,
-                    "turn_sigma": turn_sigma(world, cam, inl, R, ref.R)}
+                    "turn_sigma": turn_sigma(world, cam, inl, R, ref.R),
+                    "inlier_spread_px": inlier_spread(p_new[inl])}
             geom = (world, cam, inl, R, ref)
     if second and best is not None:
         world, cam, inl, R, ref = geom

@@ -434,7 +434,8 @@ POINT_WARN_DEG, POINT_FAIL_DEG = 0.1, 0.5
 # min_inliers). At or above it the rotation is good to ~0.1 deg: on real pairs with a known answer,
 # 69 results at >= 40 inliers erred by <= 0.063 deg; on 402 planted 0.05-2.5 deg rotations by
 # <= 0.053 deg (a frame against itself) and <= 0.101 deg (against another day; 40-59 inliers: <= 0.10
-# deg on 45 trials); no matched trial with a true rotation under 0.45 deg was called MOVED (0 of 229)
+# deg on 45 trials, 29 of them against another day); no matched trial with a true rotation under 0.45 deg
+# was called MOVED (0 of 229)
 # and every one of 0.55 deg or more was (157 of 157). Below it errors grow fast (20-39 inliers: up
 # to 0.18 deg; 10-19: 0.58 deg; under 10: anything), and two scenes that do not match share at most
 # 4. So a MATCHED result is trusted both ways: a turn above POINT_FAIL_DEG is a different pointing
@@ -457,7 +458,8 @@ POINT_WARN_DEG, POINT_FAIL_DEG = 0.1, 0.5
 # (over it: DIFFERENT POINTING, whatever the horizon reads; 0.1 deg of tilt is ~0.13-0.17 m of DEM),
 # its pan by POINT_FAIL_DEG (no horizon sees a pan); a smaller turn is a 'small change', kept. A match
 # reads tilt and roll to MATCH_ERR_DEG only (the planted rotations against another day: <= 0.101 deg at
-# 40-59 inliers, 28 trials; <= 0.093 at 60-99, 35; <= 0.060 at 100-199, 10), so a change of 0.2-0.3 deg
+# 40-59 inliers, 29 trials; <= 0.094 at 60-99, 41; <= 0.060 at 100-199, 11 -- every run of that study; its
+# first summary, without one of them, read 28 / 35 / 10), so a change of 0.2-0.3 deg
 # it reads may be one over RUN_TOL_DEG (a clear horizon scatters about as much from day to day at rest: the
 # NUC's clear days of 29 Sep - 2 Oct 2026, their features within 0.02 deg, read c1 +0.90 to +0.96 deg of
 # tilt and +0.16 to +0.26 of roll): a CLEAR horizon that reads the change over RUN_TOL_DEG and agrees with
@@ -482,6 +484,17 @@ POINT_WARN_DEG, POINT_FAIL_DEG = 0.1, 0.5
 # (blind_match, features_trusted); the reference day's own frames are exempt.
 MATCH_INLIERS = 40
 MATCH_ERR_DEG = 0.1
+# What MATCH_ERR_DEG rests on (review r1): the planted rotations against ANOTHER day are of CACO05 c2 2026 only (29
+# trials at 40-59 inliers, 41 at 60-99, 11 at 100-199); the matches of a frame against itself add CACO05 c1 2026
+# and CACO03 c1 Jan 2025; no CACO04 (Mar 2025) or CACO03 c2 view was tried. Every match against another day had
+# its inliers spread 180 px or more along the minor axis of their scatter (pointing_check.inlier_spread; 180-292 px,
+# 292-618 along the major one). A match bunched in a smaller part of the frame reads roll
+# (and tilt) less well (a review model: 50 rays in a 300 px patch, roll errors up to 0.17 deg): the spread is
+# written for every match (inlier_spread_px) and a deciding match under MATCH_SPREAD_TESTED_PX says so in its why
+# and in the README; it does not change the verdict.
+MATCH_SPREAD_TESTED_PX = 180
+MATCH_GOOD = (f"a match of {MATCH_INLIERS} or more features spread over the frame is good to ~{MATCH_ERR_DEG:g} deg on "
+              f"the views tested")
 AMBIGUOUS_INLIERS = 40
 TURN_SIGMA_MIN = 4.0
 AMBIGUOUS_DEG = 0.3
@@ -2035,7 +2048,7 @@ def feature_record(m, probe, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG):
     unreadable."""
     rec = {"feature_frame": probe.name if probe is not None else "", "inliers": "", "d_azimuth_deg": "",
            "d_tilt_deg": "", "d_roll_deg": "", "turn_sigma": "", "runner_up_inliers": "", "runner_up_deg": "",
-           "runner_up_d": ""}
+           "runner_up_d": "", "inlier_spread_px": ""}
     if m is None:
         return dict(rec, features="not measured" if probe is None else "unreadable")
     if m.get("status") == "unmatched":                       # fog, rain, night, few features
@@ -2048,6 +2061,8 @@ def feature_record(m, probe, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG):
     # its rotation means nothing and is not written
     shown = n2 >= RUNNER_UP_SHOWN_MIN
     ts = m.get("turn_sigma")
+    spr = m.get("inlier_spread_px")
+    rec.update(inlier_spread_px="/".join(f"{x:.0f}" for x in spr) if spr else "")
     rec.update(inliers=m["inliers"], d_azimuth_deg=round(m["d_azimuth"], 3), d_tilt_deg=round(m["d_tilt"], 3),
                d_roll_deg=round(m["d_roll"], 3), turn_sigma=round(float(ts), 1) if ts is not None else "",
                runner_up_inliers=n2,
@@ -2078,6 +2093,29 @@ def _sigma(r):
         return float(r.get("turn_sigma"))
     except (TypeError, ValueError):
         return None
+
+
+def spread_of(r):
+    """A row's inlier_spread_px as [minor, major] (px), or None (not measured: an older build's row)."""
+    try:
+        a, b = (float(x) for x in str(r.get("inlier_spread_px") or "").split("/"))
+        return [a, b]
+    except ValueError:
+        return None
+
+
+def bunched(r):
+    """A match whose inliers spread less than MATCH_SPREAD_TESTED_PX along the minor axis of their scatter: smaller
+    than any match MATCH_ERR_DEG rests on."""
+    sp_ = spread_of(r)
+    return sp_ is not None and sp_[0] < MATCH_SPREAD_TESTED_PX
+
+
+def bunched_text(r):
+    sp_ = spread_of(r) or [0.0, 0.0]
+    return (f"its {_inliers(r)} inliers are bunched (spread {sp_[0]:.0f} x {sp_[1]:.0f} px; every match the "
+            f"~{MATCH_ERR_DEG:g} deg rests on spread {MATCH_SPREAD_TESTED_PX} px or more): its tilt and roll may be read "
+            f"worse than that")
 
 
 def no_feature_reading(days, rows):
@@ -2365,9 +2403,8 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
             ftxt = f"{n} matched features show a turn of {rot} deg (pan/tilt/roll) from the reference"
         if kind == "MOVED":
             r["verdict"] = "DIFFERENT POINTING"
-            r["why"] = (f"{ftxt}, more than {fail} deg (a match of {MATCH_INLIERS} or more features is good to "
-                        f"~0.1 deg); {hstate}" + (" (it cannot see a pan)" if fit_ and clear_ and not jump
-                                                  and not disagree else ""))
+            r["why"] = (f"{ftxt}, more than {fail} deg ({MATCH_GOOD}); {hstate}"
+                        + (" (it cannot see a pan)" if fit_ and clear_ and not jump and not disagree else ""))
         elif kind == "ok":
             r["verdict"] = "matches"
             r["why"] = ""
@@ -2376,7 +2413,7 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
                 overruled.append(r["date"])
                 r["why"] = (f"{hz}, on an edge that is not a clear horizon ({dz}); but {n} matched features show at "
                             f"most {_turn(r):.2f} deg of turn ({rot} deg pan/tilt/roll) from the reference, {warn} deg "
-                            f"or less (a match of {MATCH_INLIERS} or more features is good to ~0.1 deg)"
+                            f"or less ({MATCH_GOOD})"
                             + (f", and that small turn is {ts:.0f} times its own standard error from none: the scene "
                                f"matched (dirt on the housing window matches at exactly zero turn)"
                                if ts is not None and r is not ref else "")
@@ -2407,9 +2444,8 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
             ft, fr = feat_of(r)
             if max(abs(ft), abs(fr)) > tol:
                 r["verdict"] = "DIFFERENT POINTING"
-                r["why"] = (f"{ftxt}: a change of tilt or roll of more than {tol} deg (a match of {MATCH_INLIERS} or "
-                            f"more features is good to ~0.1 deg, and a turned match is the scene, not dirt on the "
-                            f"window); {hstate}")
+                r["why"] = (f"{ftxt}: a change of tilt or roll of more than {tol} deg ({MATCH_GOOD}, and a turned "
+                            f"match is the scene, not dirt on the window); {hstate}")
             elif jump and clear_ and abs(h0 - at - ft) <= MATCH_ERR_DEG and abs(h1 - ar - fr) <= MATCH_ERR_DEG:
                 # a match reads tilt/roll to ~MATCH_ERR_DEG: a clear horizon the features confirm within that
                 # error tells whether the change is over tol
@@ -2483,6 +2519,11 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
             else:
                 r["verdict"] = "unchecked"
                 r["why"] = f"neither the features nor the horizon gave a reading ({ftxt}; {hstate})"
+    # a deciding match whose inliers are bunched: its why says so (not the verdict: MATCH_SPREAD_TESTED_PX)
+    for r in rows:
+        if trusted(r) and r.get("features") in ("ok", "moved", "MOVED") and bunched(r):
+            note = bunched_text(r)
+            r["why"] = (r["why"] + "; " + note) if r.get("why") else note[:1].upper() + note[1:]
     # Days nothing could read are taken in with the days left out next to them: nothing shows the camera back,
     # so such a day is not kept as if it matched (review 2, simR: c1 turned -1.2 deg on 26-28 Sep, 28 Sep's
     # 3-frame horizon fit failed at 14.6 px and its features did not match; it was 'unchecked', kept, and its
@@ -2799,7 +2840,7 @@ def step_pointing(plan, args, state):
                   "horizon_dtilt_deg", "horizon_droll_deg", "horizon_fit_px", "horizon_frames", "horizon_edge",
                   "horizon_prominence", "horizon_rival", "horizon_sky_above", "horizon_to_limit_px", "features",
                   "feature_frame", "inliers", "d_azimuth_deg", "d_tilt_deg", "d_roll_deg", "turn_sigma",
-                  "runner_up_inliers", "runner_up_d", "next_to"]
+                  "inlier_spread_px", "runner_up_inliers", "runner_up_d", "next_to"]
         with open(csv_out, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             w.writeheader()
@@ -7682,6 +7723,15 @@ def collect_caveats(plan, args, state, forcing, prov):
         small_ = small_change_caveat(plan, cam, res.get("rows") or [], skip if ran_ else skip_days_of(res, None))
         if small_:
             cav.append(small_)
+        bun_ = [r_ for r_ in res.get("rows") or [] if r_.get("verdict") not in LEFT_OUT_VERDICTS and bunched(r_)
+                and features_trusted(r_)]
+        if bun_:
+            cav.append(f"{cam}: kept on matched features whose inliers are bunched in a small part of the frame ("
+                       + ", ".join(f"{r_['date']}: {_inliers(r_)} inliers, spread {spread_of(r_)[0]:.0f} x "
+                                   f"{spread_of(r_)[1]:.0f} px" for r_ in bun_)
+                       + f"): every match the ~{MATCH_ERR_DEG:g} deg of a match rests on spread "
+                         f"{MATCH_SPREAD_TESTED_PX} px or more, so these days' tilt and roll may be read worse than "
+                         f"that (pointing/pointing_{cam}.csv, inlier_spread_px).")
         if info.get("fitted_horizon_days") and not info.get("clear_horizon_days"):
             px_ = info.get("fitted_horizon_offset_px")
             cav.append(f"{cam}: no day of the window showed a clear sea horizon (the edge read as the horizon was "
