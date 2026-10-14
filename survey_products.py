@@ -7121,7 +7121,7 @@ def setup_caveats(plan, args, state, forcing, fits, era, prov=None):
             if era in ("adcp", "chatham") and wv.get("tp_currency_setup_bias_m") is not None:
                 cav.append(f"Wave-period currency: C = {C} was fitted with NDBC 44008 peak periods; this date "
                            f"uses the ADCP's (or WIS converted to it): expected setup bias "
-                           f"{wv['tp_currency_setup_bias_m']:+.3f} m.")
+                           f"{wv['tp_currency_setup_bias_m']:+.3f} m (the DEM about {share_text()} of it).")
             if era in ("adcp", "chatham"):
                 cav.append(still_water_caveat(C, wv, era))
         same = [s for s in plan.get("surveys") or []
@@ -7331,7 +7331,8 @@ def transfer_caveat(wl, period, n_tr, n_all):
     else:
         # hours the ADCP lacks inside its record (the pooled tests stand), or a forcing.json without them
         reach = wl.get("extrapolation_reach_days") or []
-        parts.append(f"Extrapolation RMS {wl.get('extrapolation_rms_m')} m; each transferred level carries "
+        parts.append(f"Extrapolation RMS {wl.get('extrapolation_rms_m')} m (pooled over both directions); each "
+                     f"transferred level carries "
                      f"{sig} m as its sigma_m"
                      + (f"; the extrapolation tests predict {' and '.join(f'{a}-{b}' for a, b in reach)} days "
                         f"beyond their fit windows" if reach else ""))
@@ -7346,7 +7347,62 @@ def transfer_caveat(wl, period, n_tr, n_all):
                      + (f" (over the ADCP overlap, the mean error of a whole week left out and predicted from the "
                         f"rest, 13.5-18 UTC, was {wm['min_m']:+.3f} .. {wm['max_m']:+.3f} m, RMS {wm['rms_m']:.3f} m, "
                         f"over {wm['weeks']} weeks)" if wm else ""))
-    return ". ".join(parts) + ". Every elevation of the DEM moves with it."
+    return (". ".join(parts) + ". Every line moves with it, and the DEM by about " + share_text()
+            + " of it once re-projected (a higher water level also places the line further landward, on higher "
+              "beach: the share of a level shift a line keeps, as of the setup in the paired C = 0 builds).")
+
+
+def share_text():
+    """'0.6-0.8 x' (SHARE_KEPT_RANGE): how much of a shift of the water level (or setup, or datum) the DEM keeps."""
+    return f"{SHARE_KEPT_RANGE[0]}-{SHARE_KEPT_RANGE[1]} x"
+
+
+def datum_size_text(d):
+    """The size the ADCP datum assumption could have, from the evidence there is (forcing.json adcp_datum; the 2026
+    GNSS-R comparison): a few cm, not measured."""
+    a, b = d.get("offset_from_chatham_mean_m"), d.get("offset_from_msl_constant_m")
+    alt = (f"the two ways of putting the ADCP on NAVD88 differ by {abs(float(a) - float(b)):.3f} m (Chatham's mean "
+           f"level {float(a):+.4f} m, the tide model's MSL-to-NAVD88 constant {float(b):+.4f} m)"
+           if a is not None and b is not None else "")
+    return ("Its size is not measured; the evidence bounds it to a few cm: " + (alt + "; " if alt else "")
+            + "on the live station the GNSS-R level sits ~0.02 m below Chatham's after its datum fix (itself +/-0.061 m, "
+              "NGS OPUS with GEOID18), a comparison of mean levels of the open coast and the harbour")
+
+
+def wave_conversion_caveat(wv):
+    """The README's line for hours whose waves are WIS / NDBC converted to the ADCP's currency: the setup error the
+    conversion causes as cross-validated (forcing.json waves.combination.setup_blend_cv, or a lone source's
+    setup_cv_on_common_m), how much of it a DEM keeps, that it was tested on December hours only, and that a seasonal
+    bias would be shared by every frame (review r1: one of the two largest per-frame error terms of 2024-10-23, given
+    no size). None when no hour is converted."""
+    used = wv.get("sources_used") or {}
+    n_conv = sum(int(v) for k, v in used.items() if k != "adcp")
+    n_all = sum(int(v) for v in used.values())
+    if not n_conv:
+        return None
+    comb = wv.get("combination") or {}
+    cv = comb.get("setup_blend_cv") or {}
+    one = comb.get("setup_cv_on_common_m") or {}
+    labels = "; ".join(v for k, v in (wv.get("source_labels") or {}).items() if k != "adcp")
+    sw = (wv.get("setup_in_window") or {}).get("daytime_median_m")
+    head = (f"Waves converted: {'every' if n_conv == n_all else f'{n_conv} of {n_all}'} wave hour(s) of this date "
+            f"{'are' if n_conv != 1 else 'is'} {labels or 'a converted source'}, put into the ADCP's currency (the "
+            f"setup coefficient's)")
+    if cv.get("rms_m") is None:
+        return head + (". The setup error of the conversion was not cross-validated on hours all sources share "
+                       "(forcing_report.txt gives each source's own); a seasonal bias of it would be shared by every "
+                       "frame of the window.")
+    lo, hi = SHARE_KEPT_RANGE
+    cp = comb.get("common_period") or ["?", "?"]
+    return (head + f". The setup they give was cross-validated against the ADCP's own setup on the "
+            f"{comb.get('common_hours')} h all sources share ({cp[0]} .. {cp[1]} UTC) only: RMS {cv['rms_m']:.3f} m, "
+            f"bias {cv.get('bias_m', 0.0):+.3f} m"
+            + (" (" + ", ".join(f"{k} alone {v:.3f} m" for k, v in sorted(one.items())) + ")" if one else "")
+            + (f", against a setup of {sw:.2f} m (daytime median) in this window" if sw is not None else "")
+            + f". A line keeps about {lo}-{hi} x a setup error once re-projected, so ~{cv['rms_m'] * lo:.2f}-"
+              f"{cv['rms_m'] * hi:.2f} m RMS per frame. Those hours are of December only: a seasonal bias of the "
+              f"conversion (e.g. October swell directions, not tested) would be shared by every frame of the window, "
+              f"not averaged away (forcing_report.txt, 'Combination for hours without the ADCP').")
 
 
 def mount_solutions(cam, station, cal_dir, leave_out_dates=()):
@@ -7472,14 +7528,18 @@ def collect_caveats(plan, args, state, forcing, prov):
         n_all = sum(int(v) for v in srcs.values())
         cav.append("ADCP datum: the ADCP's NAVD88 offset was derived from the Chatham gauge's mean level over "
                    "the deployment (adcp_to_navd88.py), i.e. Marconi's mean level is assumed equal to "
-                   f"Chatham's{' (' + str(d.get('source')) + ')' if d.get('source') else ''}. Every elevation "
-                   "shares this datum error"
+                   f"Chatham's{' (' + str(d.get('source')) + ')' if d.get('source') else ''}. Every line "
+                   "shares this datum error (the DEM about " + share_text() + " of it, once re-projected)"
                    + (" (no ADCP level is used here, but the Chatham transfer was fitted to the ADCP's NAVD88 "
-                      "levels, so it carries the same datum)." if n_all and n_tr == n_all else "."))
+                      "levels, so it carries the same datum)" if n_all and n_tr == n_all else "")
+                   + ". " + datum_size_text(d) + ".")
         if n_tr:
             cav.append(transfer_caveat(wl, (forcing or {}).get("period") or {}, n_tr, n_all))
         for c in wv.get("caveats") or []:
             cav.append("Waves: " + c)
+        wc_ = wave_conversion_caveat(wv)
+        if wc_:
+            cav.append(wc_)
     else:
         had = [c for c in plan["cams"] if (((read_stamp(out, f"detect_{c}") or {}).get("setup") or {}).get("had_setup"))]
         C = fits[0]["coef"] if fits else args.setup_coef
@@ -7501,9 +7561,9 @@ def collect_caveats(plan, args, state, forcing, prov):
                        "its still-water (GNSS-R) level.")
         cav.append("GNSS-R datum: the live water level is the gnssrefl spline put on NAVD88 through ONE survey of the "
                    "antenna, NGS OPUS with GEOID18 (+0.349 m from the earlier CSRS-PPP CGVD2013 height; ellipsoid "
-                   "heights agree to 2 mm; +/-0.061 m, mostly the geoid model). Every elevation of this DEM shares "
-                   "that offset. It largely cancels against RTK shots on NAVD88 (GEOID18), the same geoid model, but "
-                   "not in the absolute NAVD88 heights of the GeoTIFFs.")
+                   "heights agree to 2 mm; +/-0.061 m, mostly the geoid model). Every line shares that offset (the "
+                   "DEM about " + share_text() + " of it, once re-projected). It largely cancels against RTK shots on "
+                   "NAVD88 (GEOID18), the same geoid model, but not in the absolute NAVD88 heights of the GeoTIFFs.")
     # an earlier real measurement of these photos first: it can contradict the expectations below
     cav[:0] = [prior_check_caveat(plan, pc, fits, forcing, prov) for pc in prior_checks(plan)]
     cav += setup_caveats(plan, args, state, forcing, fits, era, prov)
@@ -9005,7 +9065,11 @@ def write_readme(plan, args, prov):
           f"Chatham transfer ({wl.get('method')}) was not needed")
     else:
         w(f"  water level: {wl.get('method')}; rows by source {srcs}"
-          + (f"; transfer CV RMS {wl.get('cv_rms_m')} m, extrapolation RMS {wl.get('extrapolation_rms_m')} m"
+          + (f"; transfer CV RMS {wl.get('cv_rms_m')} m, extrapolation RMS {wl.get('extrapolation_rms_m')} m pooled "
+             f"over both directions"
+             + (f" (each level's sigma_m {wl.get('transfer_sigma_m')} m: {wl.get('transfer_sigma_basis')})"
+                if wl.get("transfer_sigma_m") is not None and wl.get("transfer_sigma_basis") else
+                "; KNOWN CAVEATS gives the test of this date's side")
              if any('chatham' in str(k) for k in srcs) else ""))
     w(f"  waves: {wv.get('method') or wv.get('hs_currency')}; sources {wv.get('sources_used') or wv.get('source')}")
     st = prov["setup"]

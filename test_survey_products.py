@@ -3780,13 +3780,40 @@ def test_oct_transfer_caveat(d):
     check("carries 0.095 m as its sigma_m" in c and "older" not in c and "-0.089 .. +0.102 m" in c
           and "RMS 0.051 m" in c and "13 weeks" in c,
           "new forcing.json: each level carries 0.095 m; a whole week's mean error -0.089..+0.102 m (RMS 0.051)")
+    check(c.endswith("Every line moves with it, and the DEM by about 0.6-0.8 x of it once re-projected (a higher water "
+                     "level also places the line further landward, on higher beach: the share of a level shift a line "
+                     "keeps, as of the setup in the paired C = 0 builds)."),
+          "... a level error moves every line, and the DEM by about 0.6-0.8 x of it (not 1:1)")
+    # the ADCP datum: a size from the evidence there is; converted waves: the setup error they cause (review r1)
+    wl2 = dict(wl, adcp_datum={"offset_from_chatham_mean_m": 0.101, "offset_from_msl_constant_m": 0.1127,
+                               "offset_used_m": 0.1012, "source": "adcp_to_navd88.py"})
+    wv = {"sources_used": {"hs=wis+ndbc44013;tp=wis": 169},
+          "source_labels": {"hs=wis+ndbc44013;tp=wis": "Hs: WIS 63064 + NDBC 44013 converted; Tp: WIS 63064"},
+          "setup_in_window": {"daytime_median_m": 0.361},
+          "combination": {"common_hours": 532, "common_period": ["2024-12-09 18:00", "2024-12-31 23:00"],
+                          "setup_cv_on_common_m": {"wis": 0.0964, "ndbc44013": 0.0791},
+                          "setup_blend_cv": {"n": 532, "rms_m": 0.079, "bias_m": 0.0041, "p95_abs_m": 0.1844}}}
+    cav = sp.collect_caveats(plan, a, {}, {"period": dict(OCT_PERIOD), "water_level": wl2, "waves": wv}, {})
+    dat = next((x for x in cav if x.startswith("ADCP datum")), "")
+    wcv = next((x for x in cav if x.startswith("Waves converted")), "")
+    check("the DEM about 0.6-0.8 x of it" in dat and "differ by 0.012 m" in dat and "a few cm" in dat
+          and "~0.02 m below Chatham" in dat,
+          "ADCP datum: a size from the evidence (0.012 m between the two datum routes; GNSS-R ~0.02 m below Chatham): "
+          "a few cm, not measured; the DEM about 0.6-0.8 x of it")
+    check(wcv.startswith("Waves converted: every wave hour(s) of this date are Hs: WIS 63064 + NDBC 44013 converted")
+          and "532 h all sources share (2024-12-09 18:00 .. 2024-12-31 23:00 UTC) only: RMS 0.079 m, bias +0.004 m"
+          in wcv and "ndbc44013 alone 0.079 m, wis alone 0.096 m" in wcv and "setup of 0.36 m" in wcv
+          and "~0.05-0.06 m RMS per frame" in wcv and "shared by every frame of the window" in wcv
+          and sp.wave_conversion_caveat({"sources_used": {"adcp": 171}}) is None,
+          "converted waves: the setup error they cause (CV RMS and bias, December only), what a line keeps of it, and "
+          "a seasonal bias shared by every frame; nothing for an ADCP-only date")
     # (3) an ADCP-era date with a few transferred hours inside the record: the pooled RMS, no side
     wl = dict(OCT_WL_OLD, sources_used={"adcp": 300, "chatham_transfer": 12}, period_vs_adcp="96% covered")
     forcing = {"period": {"start_utc": "2025-01-16 00:00", "end_utc": "2025-01-24 00:00"}, "water_level": wl,
                "waves": {}}
     c = [x for x in sp.collect_caveats(plan, a, {}, forcing, {}) if "Chatham gauge 8447435 transferred" in x][0]
     check(c.startswith("12 of 312 water levels") and "backward" not in c and "FURTHER THAN TESTED" not in c
-          and "Extrapolation RMS 0.0851 m" in c and "not averaged away" not in c,
+          and "Extrapolation RMS 0.0851 m (pooled over both directions)" in c and "not averaged away" not in c,
           "a hole inside the record: the pooled RMS, no side, no FURTHER THAN TESTED, no window-mean sentence")
     # (4) the README's WHAT THIS IS: no 'measured water level' for a date none of whose levels is
     w = sp.level_words({"water_level": {"sources_used": {"chatham_transfer": 1681}}})

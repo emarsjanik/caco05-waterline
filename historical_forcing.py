@@ -1294,8 +1294,9 @@ def currency_note(fits, coef, swr=None):
         bias = w.get("_setup_bias")
         if bias is not None:
             lines.append(f"  => setup from the ADCP period is {bias:+.3f} m (median) relative to setup "
-                         f"from an open-ocean peak period; historical products are expected to sit")
-            lines.append("     that much higher than the live currency would put them (not corrected).")
+                         f"from an open-ocean peak period; historical products' lines are expected to sit")
+            lines.append("     that much higher than the live currency would put them, their DEM about 0.6-0.8 x that")
+            lines.append("     once re-projected (not corrected).")
     else:
         lines.append("  (no WIS overlap given: the Tp currency bias could not be estimated)")
     return lines + [""] + lines_ref, bias
