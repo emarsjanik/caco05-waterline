@@ -24,8 +24,38 @@ coefficient and the DEM settings (cell, minimum frames, spread, Hs and
 day-offset limits, GeoTIFF EPSG) reported are those the outputs on disk were
 built with, never a later command line's: `--steps compare --dem-cell 1`
 warns that the option is not applied and says to rerun `--steps
-dem,maps,compare`. The DEM's day test (a camera-day off the DEM made
-without it by more than 0.15 m is left out) is not run on fewer than 3
+dem,maps,compare`. The DEM's day test (`--dem-max-day-offset`, 0.15 m;
+docs/VALIDATION.md section 2.3a) leaves out a camera-day whose waterlines
+sit, on median, more than 0.15 m from the DEM of the other kept days. It is
+iterative: the day furthest over the limit goes first and the others are
+measured again without it, until none is over. A day is left out only when
+the test can judge it: 3 or more testable days kept, and where it is
+compared its DEM holds two or more other kept days, or one (a lone partner)
+that the rest confirm. A day it cannot judge (two days that only see each
+other, the last two days) keeps the first pass's verdict (over the limit
+there: left out; within: kept) and is tried again in later rounds; a day
+left out is taken back, closest first and one at a time, when it is within
+0.15 m of the kept days and its return puts no kept day over. One within
+the limit whose return would put a kept day over stays out: the README
+calls it a "refused take-back", never "off the rest". A day testable in the
+first pass with too few comparable samples left at the end is kept
+untested. When the final DEM leaves out or keeps over the limit a day it
+could not judge, or keeps one untested, the build log and the README print
+the day test's WARNING. A second WARNING flags a camera whose day offsets
+run one way with time (5 or more days, a range over 0.15 m, |Spearman rho|
+> 0.8, and up to 8 days a rho that random orders reach at most 2 % of the
+time: 1.00 over 5 days, 0.89 over 6): real beach change or a drift
+(pointing, lens, detection), whose far end the test then trims. A single
+day left out at the first or last of a camera's days cannot make that
+trend alone: the other days must run the same way (|rho| > 0.8), and when
+they would not warn on their own the WARNING says the trend "rests on"
+that day. With the days in two groups of equal weight (say three at 0 m
+and three at +0.6 m) the first day left out decides which group stays and
+nothing warns: read a day left out at little over the limit, or one
+camera's days left out together, with care. The README's WHAT WAS USED
+names every camera-day left out with how (left out, not judged, refused
+take-back), its offsets and why; its KNOWN CAVEATS repeat the WARNINGs.
+The test is not run on fewer than 3
 camera-days: with fewer than 3 the test cannot tell which day is off
 (`dem_from_contours.py` keeps them all in that case, and exits 4 rather
 than crash if a test ever rejects them all), so the option is not passed;

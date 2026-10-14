@@ -37,7 +37,8 @@ python3 dem_figure.py --self-test                # ends "SELF-TEST PASSED"
 python3 daily_elevation_map.py --self-test       # ends "SELF-TEST PASSED"
 python3 test_survey_products.py                  # ends "all survey_products tests passed" (see below)
 python3 test_survey_compare.py                   # ends "all survey_compare tests passed"
-python3 test_historical_forcing.py               # ends "75/75 checks passed"
+python3 test_historical_forcing.py               # ends "100/100 checks passed"
+python3 test_dem_day_test.py                     # ends "all DEM day-test tests passed" (section 2.3a)
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
@@ -223,6 +224,79 @@ themselves change only through the filter.
 | The page's REMINDER | [REAL] | main printed "the DEM reads LOW ... Not corrected here" although the contours carry the setup since 6 Oct; this PR prints "Elevations include the wave setup ... on 100% of the points" | same | the cron log after `DEM written` |
 | Two camera-days 0.3 m apart with `--max-day-offset 0.15` | [SYNTH] test | both kept, DEM built; the pre-PR script crashed (ValueError) | `python3 test_survey_products.py` (`test_dem_two_days`) | - |
 | Exit codes: 0 built, 3 grids but no page, 4 no points (or every camera-day rejected); the old page is removed first | code | the cron logs a distinct WARNING for 3 and for 4 (`waterline_timex_cron.sh`, section 6); the survey products report the reason from `logs/dem.log` | read the cron's branches | the cron log |
+
+### 2.3a The DEM's day test (`--max-day-offset`, every DEM: cron and survey dates)
+
+**Claim.** The day test leaves out a camera-day whose waterlines sit, on median, more than the
+limit (0.15 m) from the DEM of the other days, judged against days that are themselves kept,
+and says when it could not judge or when a camera's days drift. Before this PR it ran once,
+each day against the DEM of all the others, so the days it was about to reject shaped that
+DEM: on the station's whole-archive DEM of 13 Oct 2026 c1's pre-storm days (+0.27 to +1.40 m)
+pulled c1's cells up and four post-storm c1 days were rejected as LOW [REAL].
+
+How it decides (`dem_from_contours.day_consistency`; the rule as printed is
+`DAY_TEST_METHOD`, also in `<stem>_info.json` `filters.day_test.method`):
+* **Iterative.** First pass: every camera-day against the DEM of all the other days. Then the
+  day furthest over the limit is left out, the others are measured again without it, and so
+  on until no kept day is over (ties by name; the result does not depend on sample order).
+* **Judging.** A day is left out only when the test can judge it: at least 3 testable days
+  are kept, and in at least half the cells where it is compared its DEM holds two or more
+  other kept days, or one other day (a **lone partner**) that the rest confirm (that day's
+  offset from them, without the day judged, is within the limit). Otherwise (two days that
+  only see each other, a day whose cells only a day as far off reaches, the last two days)
+  the test cannot tell which day is off.
+* **Unjudged days** keep the first pass's verdict (the one-pass test's: over the limit there,
+  left out; within it, kept) and are tried again in later rounds; once the test can judge
+  one it is treated like any other. When the final DEM still leaves out a day it could not
+  judge, keeps one over the limit it could not judge, or keeps a day **untested** (testable in
+  the first pass, but too few comparable samples are left once the days left out are gone;
+  it keeps its place whatever its first-pass offset), the log prints one `WARNING: the day
+  test could not judge every camera-day -- ...` line naming them, with their offsets.
+* **Take-back.** Each day left out is then measured against the DEM of the kept days; the
+  closest one within the limit is taken back, one at a time, if that puts no kept day over the
+  limit. A day within the limit whose return would put a kept day over stays out and is
+  recorded as a **refused take-back**: it is NOT "off the rest by more than the limit", and no
+  page or README says it is (`dem_figure.day_test_reason`: "within +/-0.15 m of the kept days,
+  left out as taking them back would put a kept day over").
+* **Even split.** With the days in two groups of about equal weight (say three at 0 m and three
+  at +0.6 m on the same cells), the first day left out decides which group stays, whichever
+  the noise puts further out (one pass rejected both). Nothing warns of this: read a day left
+  out at little over the limit, or a camera's days left out together, with care.
+* **Trend WARNING.** A camera whose final day offsets run one way with time gets `WARNING:
+  <cam>'s camera-day offsets run one way with time ...`: real beach change through the window,
+  or an error that drifts with time (pointing, lens, a detection bias that follows the tides
+  or waves); the day test then trims whichever end lies further out, and iterating does not
+  cure that. The rule (`day_trends`): at least 5 testable days, max - min offset above the
+  limit, |Spearman rho| of offset against date above 0.8 and, up to 8 days, a rho that days in
+  random order reach in that direction at most 2 % of the time (exact over every order, for
+  the offsets' own ties; `DAY_TREND_ALPHA` 0.02). That asks rho 1.00 over 5 days and 0.89 over
+  6; from 7 days on it is |rho| > 0.8 itself (0.82 over 7, 0.81 over 8).
+* **The end-day rule.** One bad day at an end ranks first or last and lifts rho, so when exactly
+  one of a camera's days was left out and it is its first or last, the camera's other days
+  must still run the same way, |rho| > 0.8 in that direction (not the chance part, which the 4
+  days left of 5 can never reach). When they would not pass the whole rule on their own the
+  WARNING says the trend **rests on** that day ("it rests on <day>, the one day left out, at an
+  end: ... the end of the trend or one bad day beyond it").
+
+Where it shows: the log's `Day consistency` block (first-pass and final offsets, order left
+out, not judged, taken back, refused) and its WARNING lines (`station_status.py` counts them,
+one per warning); `<stem>_info.json` `filters.day_test` (`rejected`: each day left out with
+`how` -- left out, not judged, refused take-back --, `offset_m`, `offset_at_step_m` and `why`;
+`warning`; `trend_warnings` with `without.alone`); the DEM page's heading ("N camera-days off
+the rest by > 0.15 m", or "left out by the day test (±0.15 m; K within it but at odds with a
+kept day)", and the number of WARNINGs); a survey-date README (WHAT WAS USED, under the DEM:
+each camera-day left out, how, its offsets and why; KNOWN CAVEATS: the WARNINGs, as
+`provenance.json` caveats too); the comparison's FRAMES line (frames left out per reason).
+
+| what | data | number | reproduce here | check on the NUC |
+|---|---|---|---|---|
+| One bad day; two that mask each other in one pass; a cluster that swamps good days (the whole-archive case, replayed); a day left out because a worse day shaped its DEM (taken back); a take-back that would push a kept day over (refused, recorded) | [SYNTH] test | only the planted days left out in each; the swamp replay keeps every post-storm day (one pass lost 4) | `python3 test_dem_day_test.py` (118 checks) | - |
+| Lone partner, unjudged days, untested days, a day judged later, every day disagreeing | [SYNTH] test | a fringe day 0.57 m LOW whose cells one other day reaches is left out (the low beach -0.497 / -0.283 m, truth -0.50 / -0.30; kept, it read -1.07 / -0.86); two days that only see each other keep the first pass's verdict with the WARNING; four days that all disagree: every day rejected, exit 4, `dem_failure_reason` "rejected every camera-day" | same | the cron log |
+| The station's 7-day offsets of 5-11 Oct 2026, replayed | [REAL offsets, SYNTH samples] | within 5.4 mm of the station's; 5 Oct c1 and 8 Oct c2 left out (as one pass), 11 Oct kept, the c1 trend WARNING; without 7 or 9 Oct (5 days, the low end trimmed): the WARNING, resting on 5 Oct | same (`test_nuc_7day`, `test_trend_end`) | `grep -n "Day consistency\|WARNING" logs/timex_cron.log` after a run |
+| Trend WARNING rates, simulated full-pipeline windows (limit 0.15 m, fixed seeds, 1000 of each kind) | [SYNTH] | 7-day two-camera windows: no trend 2-6 %, one bad day (0.4 m) at an end 3-6 %, a trend of 0.03-0.06 m/day 67-87 %; a camera on 5 of 7 days: trend of 0.04-0.08 m/day 31-68 %, bad end day 4-6 %, no trend 1 %; on 6 days: trend 62-94 %, bad end day 6 %, no trend 1 % | the scratch simulation (numbers quoted in `dem_from_contours.py` above `DAY_TREND_MIN_DAYS`); the exact rule values in `test_dem_day_test.py` (`test_trend_rule`) | - |
+| Survey-date fixture builds 2025-01-23 and 2025-03-06 with the first iterative version (daytest-fix d28b5ec; not rebuilt since with the lone-partner rule and the first-pass fallback, which can change which days a DEM leaves out) | [SYNTH] | DEM grids byte-identical to the one-pass builds, comparisons unchanged; Mar gets the trend WARNING (c2 +0.066 to -0.093 m over 3-9 Mar, rho -0.96, the fixture's known detector drift) | `survey_products.py --date ... --output-root <fixture root>` | the README's WHAT WAS USED and KNOWN CAVEATS |
+| Run time | [SYNTH] | a synthetic year (730 camera-days, 668k samples, 167 left out) 68 s on Python 3.8 / numpy 1.17 (23 min for the first iterative version, 175 s CPU for the one pass); ~2.5 min of CPU at the station's density (1.5M samples) | `python3 test_dem_day_test.py --year` | the cron's run time |
+| What goes to Chris says each day's reason | [SYNTH] test | a refused take-back reads "within +/-0.15 m of the kept days, left out as taking them back would put a kept day over", never "off the rest"; README lines per day (how, offsets, why); WARNINGs among the caveats; a trend 'rests on' its trimmed end day only when `without.alone` is false | `python3 test_survey_products.py` (`test_day_test_record`), `python3 test_survey_compare.py` (`test_fix2`) | a built README |
 
 ### 2.4 Week-to-week change map
 
@@ -1197,7 +1271,8 @@ only if it holds over several weeks of different waves; then change it in all th
 | setting | value | where | why |
 |---|---|---|---|
 | Max offshore Hs for the DEM | 1.5 m | cron `DEM_MAX_HS` | the setup errs most in big waves |
-| Day-offset test | 0.15 m; not run on fewer than 3 camera-days | cron `DEM_MAX_DAY_OFFSET` | catches a camera-day displaced as a whole |
+| Day-offset test | 0.15 m, iterative (a day left out only when judged; take-back; section 2.3a); not run on fewer than 3 camera-days | cron `DEM_MAX_DAY_OFFSET` | catches a camera-day displaced as a whole |
+| Day-trend WARNING | >= 5 testable days, range > the limit, \|rho\| > 0.8 and, up to 8 days, a chance <= 2 % (1.00 over 5 days, 0.89 over 6); the lone-end-day rule | `dem_from_contours.py` `DAY_TREND_*` | section 2.3a |
 | DEM cell / frames / spread | 2 m / >= 3 / <= 0.5 m | cron | repeatability |
 | Change: LoD floor / crossings | 0.05 m / >= 5 in both | `dem_change.py` | errors a single week cannot see |
 | Change: degenerate reference | < 200 cells or < 0.5 m relief | `dem_change.py` | the 8 Oct false "uniform" map |
