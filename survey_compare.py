@@ -500,8 +500,11 @@ def dem_frame_selection(cont, info, inside=None):
                 key_of[f_] = f"{c_} {local_day(e_)}" if np.isfinite(e_) else None
         bad = np.array([key_of[f_] in rej for f_ in cont["frame"].tolist()], bool) & keep
         if bad.any():
-            why[f"camera-days off the rest by > {filt.get('max_day_offset')} m"] = \
-                sorted(set(cont["frame"][bad].tolist()))
+            # each day by its own reason (the iterative test's record: a day left out within the
+            # limit of the kept days is not 'off the rest'), worded as the DEM page words it
+            from dem_figure import day_test_reason
+            for f_ in sorted(set(cont["frame"][bad].tolist())):
+                why.setdefault(day_test_reason(filt, key_of[f_]), []).append(f_)
         keep &= ~bad
     notes = []
     other = int(filt.get("excluded_frames") or 0) + int(filt.get("frames_rejected") or 0)
@@ -2325,7 +2328,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             fs = {"dem_frames": int(len(set(cont["frame"].tolist()))),
                   "left_out_frames": int(len(set(cont_out["frame"].tolist()))) if cont_out is not None else 0,
                   "left_out_why": {k: len(v) for k, v in out_why.items()}, "note": sel_note or None}
-            why_txt = "; ".join(f"{v} with {k}" for k, v in fs["left_out_why"].items())
+            why_txt = "; ".join(f"{v} {'of' if k.startswith('camera-days') else 'with'} {k}"
+                                for k, v in fs["left_out_why"].items())
             lines.append(f"  FRAMES: the statistics above are on the {fs['dem_frames']} frames the DEM gridded "
                          f"(its own filters, from {info_p.name})"
                          + (f"; it left out {fs['left_out_frames']} frame(s) ({why_txt}), compared apart below"

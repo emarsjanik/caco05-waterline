@@ -7241,6 +7241,13 @@ def collect_caveats(plan, args, state, forcing, prov):
     if unc:
         cav.append("Hours with no wave record in the forcing: " + "; ".join(unc[:6])
                    + (f" (+{len(unc) - 6} more)" if len(unc) > 6 else "") + ".")
+    # the DEM's day test, from its own record: a camera-day it could not judge or kept untested, and a
+    # camera whose day offsets run one way with time (its WARNINGs, as dem_from_contours printed them)
+    flt_ = (load_json(Path(f"{dem_stem(plan)}_info.json")) or {}).get("filters") or {}
+    if flt_.get("max_day_offset") is not None:
+        from dem_figure import day_test_warnings
+        for ln in day_test_warnings(flt_):
+            cav.append("DEM day test " + ln + " (WHAT WAS USED: each camera-day it left out, how and why)")
     for cam, days in (prov.get("frames_per_day") or {}).items():
         window = days_between(plan["cams"][cam]["first"], plan["cams"][cam]["last"]) if cam in plan["cams"] else []
         empty = [d for d in window if not days.get(d)]
@@ -7626,13 +7633,14 @@ def pointing_vs_survey(plan, cam, offset, sens, prov, fits):
 def dem_gridded_frames(plan):
     """
     Which waterline frames the DEM gridded, from the file it read (waterline_file) and its own
-    record (dem/<date>_info.json: its window, its wave filter (a frame with offshore Hs > max_hs is
-    left out; one with no wave record is kept, as there) and the camera-days its day test rejected,
-    local days as it counts them), as survey_compare.dem_frame_selection.
+    record (dem/<date>_info.json, dem/<date>_<variant>_info.json with another calibration (dem_stem):
+    its window, its wave filter (a frame with offshore Hs > max_hs is left out; one with no wave record
+    is kept, as there) and the camera-days its day test rejected, local days as it counts them, each
+    with its own reason (dem_figure.day_test_reason)), as survey_compare.dem_frame_selection.
     -> {"gridded": {camera: {frame: (epoch, utc day)}}, "left_out": {camera: {frame: (epoch, utc day,
     why)}}, "max_hs": float or None}, or None without the DEM's record or the file.
     """
-    info = load_json(plan["out"] / "dem" / f"{plan['date']}_info.json")
+    info = load_json(Path(f"{dem_stem(plan)}_info.json"))        # a variant's DEM is <date>_<variant>
     if not info:
         return None
     filt = info.get("filters") or {}
@@ -7662,7 +7670,10 @@ def dem_gridded_frames(plan):
                 elif rej and e == e:
                     from dem_from_contours import local_day
                     if f"{cam} {local_day(e)}" in rej:
-                        why = f"camera-days off the rest by > {filt.get('max_day_offset')} m (the DEM's day test)"
+                        # by the day's own reason (a day the iterative test left out within the limit
+                        # of the kept days is not 'off the rest'), as the DEM page words it
+                        from dem_figure import day_test_reason
+                        why = day_test_reason(filt, f"{cam} {local_day(e)}") + " (the DEM's day test)"
                 if why:
                     res["left_out"].setdefault(cam, {})[k] = (e, day, why)
                 else:
@@ -8519,6 +8530,23 @@ def level_words(prov):
     return "the measured water level "
 
 
+def dem_built_from_lines(info):
+    """The README's lines (WHAT WAS USED, under the DEM) on what the DEM gridded and what its filters
+    left out, from its own record (<stem>_info.json): the frames and days, then the day test's record --
+    each camera-day it left out, how and why (only a day 'left out' is off the rest by more than the
+    limit: dem_figure's wording, as on the DEM page) and its WARNINGs (also among the KNOWN CAVEATS)."""
+    from dem_figure import day_test_left_out, day_test_rejected_lines, day_test_warnings
+    flt_ = info.get("filters") or {}
+    out = [f"      gridded {sum(info['frames'].values())} frames ("
+           + ", ".join(f"{k} {v}" for k, v in sorted(info["frames"].items())) + f") on {info.get('days')} days; "
+           f"left out before gridding: {flt_.get('rough_frames', 0)} frames with Hs > {flt_.get('max_hs')} m, "
+           + (day_test_left_out(flt_, "+/-") if flt_.get("max_day_offset") else "no day test")]
+    if flt_.get("max_day_offset"):
+        out += [f"        day test: {ln}" for ln in day_test_rejected_lines(flt_)]
+        out += [f"        day test {ln}" for ln in day_test_warnings(flt_)]
+    return out
+
+
 def write_readme(plan, args, prov):
     out = plan["out"]
     d = plan["date"]
@@ -8732,12 +8760,8 @@ def write_readme(plan, args, prov):
           f"{cl.get('blanked')}" + (f" ({cl['blanked_why']})" if cl.get("blanked_why") else ""))
     bf = dm.get("built_from") or {}
     if bf.get("frames"):
-        flt_ = bf.get("filters") or {}
-        w(f"      gridded {sum(bf['frames'].values())} frames ("
-          + ", ".join(f"{k} {v}" for k, v in sorted(bf["frames"].items())) + f") on {bf.get('days')} days; "
-          f"left out before gridding: {flt_.get('rough_frames', 0)} frames with Hs > {flt_.get('max_hs')} m, "
-          + (f"{len(flt_.get('camera_days_rejected') or [])} camera-days off the rest by > "
-             f"{flt_.get('max_day_offset')} m" if flt_.get("max_day_offset") else "no day test"))
+        for ln in dem_built_from_lines(bf):
+            w(ln)
     w(f"      GeoTIFFs: {dm['geotiff']}")
     sw = prov["software"]
     w(f"  software: {sw.get('note')} (per step in provenance.json software.by_step)")

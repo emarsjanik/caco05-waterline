@@ -588,6 +588,33 @@ def test_fix2(d):
     k3 = [k for k in why3 if k.startswith("camera-days")]
     check(k3 and why3[k3[0]] == ["f07", "f13", "f19", "f25"] and int((~sel3).sum()) == 10 * 40,
           "a rejected camera-day (c1 2025-01-19 local) leaves out its 4 frames (the rough one counted once)")
+    # the iterative day test's record (dem_from_contours day_test.rejected): a day left out within the limit
+    # of the kept days (taking it back would put a kept day over) is not 'off the rest by > 0.15 m'
+    dt4 = {"rejected": [{"day": "c1 2025-01-19", "how": "refused take-back", "offset_m": 0.08,
+                         "offset_at_step_m": 0.21, "why": "left out 1st; within the limit of the kept days, but "
+                                                          "taking it back would put c2 2025-01-20 over the limit"},
+                        {"day": "c2 2025-01-20", "how": "left out", "offset_m": -0.3, "offset_at_step_m": -0.3,
+                         "why": "left out 2nd: off the DEM of the other kept days by more than the limit"}],
+           "refused_take_back": [{"day": "c1 2025-01-19", "offset_m": 0.08, "would_push": ["c2 2025-01-20"]}]}
+    info4 = dict(info, filters=dict(info["filters"], camera_days_rejected=["c1 2025-01-19", "c2 2025-01-20"],
+                                    day_test=dt4))
+    sel4, why4, _ = sc.dem_frame_selection(c, info4)
+    held = [k for k in why4 if k.startswith("camera-days within")]
+    off = [k for k in why4 if k.startswith("camera-days off the rest")]
+    check(held == ["camera-days within +/-0.15 m of the kept days, left out as taking them back would put a kept day "
+                   "over"] and why4[held[0]] == ["f07", "f13", "f19", "f25"]
+          and off == ["camera-days off the rest by > 0.15 m"] and len(why4[off[0]]) == 4,
+          f"each rejected camera-day by its own reason: c1 19 Jan (refused take-back) is NOT 'off the rest', c2 20 Jan "
+          f"(left out) is, as the DEM page words them ({sorted(why4)})")
+    Path(str(dem_p).replace("_dem.asc", "_info.json")).write_text(json.dumps(info4))
+    out4 = Path(d) / "out_dt4"
+    h4, _ = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "test", name="dt4", output_dir=str(out4),
+                  survey_date="2025-01-23", photo_dates=("2025-01-18", "2025-01-23"), contours=str(cp))
+    txt4 = (out4 / "dt4_comparison.txt").read_text()
+    check("4 of camera-days within +/-0.15 m of the kept days, left out as taking them back would put a kept day over"
+          in " ".join(txt4.split()) and "4 of camera-days off the rest by > 0.15 m" in " ".join(txt4.split())
+          and set(h4["waterlines"]["frame_set"]["left_out_why"]) == set(why4),
+          "the comparison's FRAMES line and record give each reason with its frame count ('N of camera-days ...')")
     Path(str(dem_p).replace("_dem.asc", "_info.json")).unlink()
 
 

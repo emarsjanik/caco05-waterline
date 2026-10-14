@@ -2408,6 +2408,111 @@ def _rotated(img, io, eo_src, eo_dst, step=4):
     return cv2.remap(img, mapx, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
 
+def test_day_test_record(d):
+    print("the DEM's day test record reaches the README, the caveats and the per-frame reasons (a variant's DEM too)")
+    import dem_from_contours as dfc
+    import dem_figure
+    out = Path(d) / "daytest_rec"
+    for sub in ("dem", "waterlines", "pointing", "logs"):
+        (out / sub).mkdir(parents=True, exist_ok=True)
+    # a record as dem_from_contours writes it: c1 19 Jan left out 1st, then refused take-back (within the
+    # limit of the kept days, but taking it back would put c2 20 Jan over); c2 20 Jan left out 2nd; c1 22 Jan
+    # not judged (over the limit in the first pass, its DEM one other day); c2's offsets run one way with time,
+    # the trend resting on c2 23 Jan, the one day left out at its end
+    lim = 0.15
+    days = {"c1 2025-01-19": 0.21, "c2 2025-01-20": -0.30, "c1 2025-01-22": 0.40, "c1 2025-01-21": 0.02,
+            "c2 2025-01-21": 0.01, "c2 2025-01-22": -0.05}
+    dt = {"first": {k: (v, 300) for k, v in days.items()},
+          "final": dict({k: (v, 300) for k, v in days.items()}, **{"c1 2025-01-19": (0.08, 300)}),
+          "steps": [("c1 2025-01-19", 0.21, 300), ("c2 2025-01-20", -0.30, 300)],
+          "not_judged": [{"day": "c1 2025-01-22", "offset": 0.40, "first": 0.40, "left_out": True,
+                          "why": "its DEM is one other day (c2 2025-01-22) that the rest do not confirm"}],
+          "refused": [("c1 2025-01-19", 0.08, ["c2 2025-01-20"])], "taken_back": [],
+          "rejected": ["c1 2025-01-19", "c1 2025-01-22", "c2 2025-01-20"], "untested": [], "over_kept": [],
+          "too_few": False, "testable": 6}
+    trend = {"camera": "c2", "days": 5, "spearman_rho": -1.0, "chance": 1 / 120.0, "range_m": 0.31,
+             "first": ("2025-01-19", 0.012), "last": ("2025-01-23", -0.298),
+             "without": {"day": "c2 2025-01-23", "days": 4, "spearman_rho": -1.0, "chance": 1 / 24.0,
+                         "range_m": 0.09, "alone": False}}
+    rec = dfc.day_test_record(dt, lim, [trend])
+    filt = dict(max_hs=1.5, rough_frames=0, max_day_offset=lim, camera_days_rejected=list(dt["rejected"]), **rec)
+    how = {r["day"]: r["how"] for r in filt["day_test"]["rejected"]}
+    check(how == {"c1 2025-01-19": "refused take-back", "c1 2025-01-22": "not judged", "c2 2025-01-20": "left out"}
+          and filt["day_test"]["warning"] and filt["day_test"]["trend_warnings"][0]["without"]["alone"] is False,
+          f"the fixture is dem_from_contours' own record: one day of each 'how', its WARNING, a trend ({how})")
+    # one wording: the DEM page's
+    check(dem_figure.day_test_left_out(filt) == "3 camera-days left out by the day test (±0.15 m; 1 within it but "
+                                                "at odds with a kept day)"
+          and dem_figure.day_test_left_out(filt, "+/-").startswith("3 camera-days left out by the day test (+/-0.15")
+          and dem_figure.day_test_left_out(dict(filt, day_test=None)) == "3 camera-days off the rest by > 0.15 m",
+          "dem_figure.day_test_left_out: 'off the rest' only without a day left out within the limit")
+    r_ = {k: dem_figure.day_test_reason(filt, k) for k in how}
+    check(r_["c2 2025-01-20"] == "camera-days off the rest by > 0.15 m"
+          and r_["c1 2025-01-19"].startswith("camera-days within +/-0.15 m of the kept days")
+          and "off the rest" not in r_["c1 2025-01-19"] and "could not judge" in r_["c1 2025-01-22"]
+          and dem_figure.day_test_reason(dict(filt, day_test=None), "c1 2025-01-19") ==
+          "camera-days off the rest by > 0.15 m",
+          "dem_figure.day_test_reason: each day by its 'how'; a record of the one-pass test: 'off the rest'")
+    # the README's lines under the DEM (WHAT WAS USED)
+    info = {"window_start": "2025-01-18", "window_end": "2025-01-23", "frames": {"c1": 10, "c2": 10}, "days": 6,
+            "filters": filt}
+    rl = "\n".join(sp.dem_built_from_lines(info))
+    check("3 camera-days left out by the day test (+/-0.15 m; 1 within it but at odds with a kept day)" in rl
+          and "off the rest by > 0.15 m" not in rl.split("\n")[0]
+          and "day test: c1 2025-01-19: refused take-back, +0.080 m from the DEM of the kept days (+0.210 m when it "
+              "was left out); why: left out 1st; within the limit of the kept days, but taking it back would put "
+              "c2 2025-01-20 over the limit" in rl
+          and "day test: c2 2025-01-20: left out, -0.300 m from the DEM of the kept days; why: left out 2nd" in rl
+          and "day test: c1 2025-01-22: not judged" in rl
+          and "day test WARNING: the day test could not judge every camera-day -- left out without being judged: "
+              "c1 2025-01-22." in rl
+          and "day test WARNING: c2's camera-day offsets run one way with time over 5 days (Spearman rho -1.00, "
+              "which days in random order reach 1 time in 120" in rl
+          and "it rests on c2 2025-01-23, the one day left out, at an end: the other 4 days give rho -1.00" in rl
+          and all(ord(ch) < 128 for ch in rl),
+          "README: every camera-day left out with how, its offsets and why; the WARNING; the trend 'rests on' its "
+          "trimmed end day (ASCII)")
+    alone = json.loads(json.dumps(filt))
+    alone["day_test"]["trend_warnings"][0]["without"]["alone"] = True
+    tw = dem_figure.day_test_warnings(alone)[-1]
+    check("without c2 2025-01-23, the one day left out, at an end, the other 4 days give rho -1.00" in tw
+          and "they pass the rule on their own" in tw and "rests on" not in tw,
+          "a trend whose other days pass the rule alone does not 'rest on' the trimmed day")
+    # a variant's DEM (B: dem/<date>_gcpfree_*): its record is the one read (was dem/<date>_info.json only)
+    plan = {"era": "adcp", "date": "2025-01-23", "first": "2025-01-18", "last": "2025-01-23", "out": out,
+            "surveys": [], "cams": {c: {"eo_file": f"CACO03_{c}_20250123_EO.yaml", "first": "2025-01-18",
+                                        "last": "2025-01-23", "variant": "gcpfree"} for c in ("c1", "c2")}}
+    (out / "dem" / "2025-01-23_gcpfree_info.json").write_text(json.dumps(info))
+    with open(out / "waterlines" / "contour_points_ground.csv", "w") as f:
+        f.write("source_file,camera,capture_time_utc,capture_epoch,offshore_hs_m\n")
+        for cam, day in (("c1", 19), ("c2", 20), ("c1", 21), ("c1", 22)):
+            t = datetime(2025, 1, day, 16, tzinfo=timezone.utc)
+            f.write(f"{photo_name(t, 'CACO03', cam)},{cam},{t:%Y-%m-%dT%H:%M:%SZ},{int(t.timestamp())},0.8\n")
+    old_wf = sp.waterline_file
+    sp.waterline_file = lambda plan_, quiet_=False: out / "waterlines" / "contour_points_ground.csv"
+    try:
+        dg = sp.dem_gridded_frames(plan)
+    finally:
+        sp.waterline_file = old_wf
+    lw = {cam: sorted({v[2] for v in fr.values()}) for cam, fr in ((dg or {}).get("left_out") or {}).items()}
+    check(dg is not None and lw.get("c1") == sorted([
+        "camera-days within +/-0.15 m of the kept days, left out as taking them back would put a kept day over "
+        "(the DEM's day test)", r_["c1 2025-01-22"] + " (the DEM's day test)"])
+          and lw.get("c2") == ["camera-days off the rest by > 0.15 m (the DEM's day test)"]
+          and len(dg["gridded"].get("c1") or {}) == 1,
+          f"dem_gridded_frames reads the variant DEM's record; each left-out frame by its day's own reason ({lw})")
+    forcing = {"waves": {"setup_in_window": {"median_m": 0.29, "daytime_median_m": 0.28}}}
+    cav = [c for c in sp.collect_caveats(plan, SimpleNamespace(setup_coef=sp.SETUP_COEF), {}, forcing, {})
+           if c.startswith("DEM day test")]
+    check(len(cav) == 2 and cav[0].startswith("DEM day test WARNING: the day test could not judge every camera-day")
+          and "it rests on c2 2025-01-23" in cav[1] and all("WHAT WAS USED" in c for c in cav),
+          "KNOWN CAVEATS: the day test's WARNING and its trend WARNING, from the (variant) DEM's own record")
+    (out / "dem" / "2025-01-23_gcpfree_info.json").write_text(json.dumps(dict(info, filters=dict(
+        filt, day_test=dict(filt["day_test"], warning=None, trend_warnings=[])))))
+    check(not [c for c in sp.collect_caveats(plan, SimpleNamespace(setup_coef=sp.SETUP_COEF), {}, forcing, {})
+               if c.startswith("DEM day test")], "no WARNING in the record: no day-test caveat")
+
+
 def test_feature_runner_up(d):
     print("pointing_check.measure(second=True) on a drawn scene turned 1.0 deg under dirt fixed on the window")
     import cv2
@@ -5307,6 +5412,7 @@ def main():
         test_keep_moved_days(d)
         test_pointing_verdicts(d)
         test_storm_and_wave_caveats(d)
+        test_day_test_record(d)
         test_feature_runner_up(d)
         test_live_rows(d)
         test_config(d)
