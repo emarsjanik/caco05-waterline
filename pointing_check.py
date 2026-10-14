@@ -188,11 +188,36 @@ def runner_up(world, cam, inl):
     return int(inl2.sum()), R2
 
 
+def turn_sigma(world, cam, inl, R, R_ref):
+    """How far the fitted rotation R is from the reference's R_ref (no turn), in units of its own
+    standard error: sqrt(w' N w) / s, w the rotation vector of R R_ref^T, N = sum(I - p p') over the
+    inliers' predicted rays p (the least-squares normal matrix of a small rotation) and s the
+    inliers' residual scatter per ray component. Dirt or drops on the housing window move with the
+    camera and match at EXACTLY zero turn, so their consensus reads this much from zero by noise
+    alone (a chi of 3 degrees of freedom: <= ~3); a match of the scene between two days reads more,
+    the camera's own small day-to-day turns (Oct 2026: synthetic drops on real frames, consensus of
+    the drops alone 0.5-2.7; the real 26-28 Sep storm frames against 7 Oct, the camera at rest:
+    see survey_products TURN_SIGMA_MIN). -> float, or None with fewer than 8 inliers."""
+    n = int(inl.sum())
+    if n < 8:
+        return None
+    p = world[inl] @ R.T
+    e = cam[inl] - p
+    s2 = float(np.sum(e * e)) / (2 * n - 3)
+    if not s2 > 0:
+        return None
+    N = n * np.eye(3) - p.T @ p
+    dR = R @ R_ref.T
+    w = np.array([dR[2, 1] - dR[1, 2], dR[0, 2] - dR[2, 0], dR[1, 0] - dR[0, 1]]) / 2.0
+    return float(np.sqrt(max(float(w @ N @ w), 0.0) / s2))
+
+
 def measure(img, refs, io, min_inliers=40, second=False):
     """-> dict with the best reference's result. second=True adds the runner-up consensus of the
     best reference's matches (runner_up()): 'runner_up_inliers', 'runner_up_deg' (its angle from
     the best rotation) and 'runner_up_d' (its azimuth/tilt/roll change from the reference, deg,
-    as d_*). The best result itself is unchanged (the same RANSAC, the same seed)."""
+    as d_*). The best result itself is unchanged (the same RANSAC, the same seed). 'turn_sigma': the
+    best rotation's distance from no turn in units of its standard error (turn_sigma())."""
     f = features(img)
     best, geom = None, None
     for ref in refs:
@@ -210,7 +235,8 @@ def measure(img, refs, io, min_inliers=40, second=False):
             best = {"reference": ref.path.name, "matches": len(p_ref), "inliers": n_in,
                     "residual_deg": float(np.median(ang_err(R, world[inl], cam[inl]))) if n_in else np.nan,
                     "d_azimuth": d[0], "d_tilt": d[1], "d_roll": d[2],
-                    "eo": np.r_[ref.eo[:3], az, tilt, roll], "eo_ref": ref.eo_name}
+                    "eo": np.r_[ref.eo[:3], az, tilt, roll], "eo_ref": ref.eo_name,
+                    "turn_sigma": turn_sigma(world, cam, inl, R, ref.R)}
             geom = (world, cam, inl, R, ref)
     if second and best is not None:
         world, cam, inl, R, ref = geom
