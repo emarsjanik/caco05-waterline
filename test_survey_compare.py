@@ -683,6 +683,53 @@ def test_setup_fit_label(d):
           "the docstring's RTK example is labelled CIRCULAR (C = 0.037 was fitted to those shots)")
 
 
+def test_left_out_frames_window(d):
+    print("the frames the DEM left out are counted over its whole window, not only its gridded days")
+    dem_p, dem = make_dem(d)
+    lid = make_lidar(d, water_below=1.0)
+    out = Path(d) / "out_lowin"
+    cp = Path(d) / "contours_lowin.csv"
+    rng = np.random.default_rng(5)
+    head = ["source_file", "camera", "capture_time_utc", "capture_epoch", "tide_elevation_navd88",
+            "offshore_hs_m", "offshore_tp_s", "setup_correction_m", "beach_elevation_navd88",
+            "easting_utm19", "northing_utm19"]
+    with open(cp, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(head)
+        for k in range(24):
+            cam = "c1" if k % 2 else "c2"
+            day = 18 + k % 6
+            ep = 1737158400 + (day - 18) * 86400 + 54000 + k * 60
+            hs = 2.2 if day < 20 else 0.8             # 18-19 Jan: a storm; the DEM leaves every frame out
+            E = rng.uniform(X0 + 5, X0 + 35, 30)
+            N = rng.uniform(Y0 + 10, Y0 + 110, 30)
+            for e, n in zip(E, N):
+                z = beach(e, n) - 0.1
+                w.writerow([f"g{k:02d}", cam, f"2025-01-{day:02d}T15:00:00+00:00", ep, f"{z:.4f}", hs, 8.0, "0.0",
+                            f"{z:.4f}", f"{e:.3f}", f"{n:.3f}"])
+    # the DEM gridded 20-23 Jan (first_date, last_date: what survey_products passes as the photo dates) and
+    # left out the 8 rough frames of 18-19 Jan, inside its window 18-23 Jan
+    info = {"window_start": "2025-01-18", "window_end": "2025-01-23", "first_date": "2025-01-20",
+            "last_date": "2025-01-23", "frames": {"c1": 8, "c2": 8},
+            "filters": {"max_hs": 1.5, "rough_frames": 8, "excluded_frames": 0, "frames_rejected": 0,
+                        "max_day_offset": 0.15, "camera_days_rejected": []}}
+    Path(str(dem_p).replace("_dem.asc", "_info.json")).write_text(json.dumps(info))
+    try:
+        h, log = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "test", name="lowin",
+                       output_dir=str(out), survey_date="2025-01-23", photo_dates=("2025-01-20", "2025-01-23"),
+                       contours=str(cp))
+    finally:
+        Path(str(dem_p).replace("_dem.asc", "_info.json")).unlink()
+    fs = h["waterlines"]["frame_set"]
+    txt = (out / "lowin_comparison.txt").read_text()
+    check(fs["dem_frames"] == 16 and fs["left_out_frames"] == 8 and fs["left_out_why"] == {"offshore Hs > 1.5 m": 8}
+          and "it left out 8 frame(s) (8 with offshore Hs > 1.5 m)" in txt,
+          f"FRAMES: the DEM's 16 gridded frames (20-23 Jan) and the 8 it left out on 18-19 Jan, before its first "
+          f"gridded day, as its own record counts them (was 0) ({fs['dem_frames']}, {fs['left_out_frames']})")
+    check(abs(h["waterlines"]["median"] + 0.1) < 0.01 and "480 georectified points 2025-01-20 to 2025-01-23" in log,
+          "the statistics stay those of the gridded days' frames")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
@@ -723,6 +770,7 @@ def main():
         test_no_overlap(d)
         test_fix2(d)
         test_setup_fit_label(d)
+        test_left_out_frames_window(d)
         test_py38()
     finally:
         os.chdir(start)

@@ -1796,8 +1796,20 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     cont_out, out_why, sel_note = None, {}, ""
     if contours:
         print(f"waterlines        : reading {contours} ...")
-        cont = read_contours(contours, *(photo_dates or (None, None)))
-        print(f"waterlines        : {len(cont['E'])} georectified points"
+        lo_, hi_ = photo_dates or (None, None)
+        w0, w1 = (dem_info or {}).get("window_start"), (dem_info or {}).get("window_end")
+        # the frames the DEM left out are looked for over its whole window: the photo dates are its
+        # first and last GRIDDED days, and a frame it left out before or after them is still one it
+        # left out (the DEM's own count of them covers the window)
+        rlo = min(lo_, w0) if (lo_ and w0) else (None if w0 else lo_)
+        rhi = max(hi_, w1) if (hi_ and w1) else (None if w1 else hi_)
+        cont = read_contours(contours, rlo, rhi)
+        inside = np.ones(len(cont["E"]), bool)
+        if lo_:
+            inside &= cont["day"] >= lo_
+        if hi_:
+            inside &= cont["day"] <= hi_
+        print(f"waterlines        : {int(inside.sum())} georectified points"
               + (f" {photo_dates[0]} to {photo_dates[1]}" if photo_dates else ""))
         # the statistics are those of the frames the DEM gridded; the frames it left out (high waves,
         # rejected camera-days: the largest setups, where C and the still water err most) are
@@ -1805,7 +1817,9 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         sel, out_why, sel_note = dem_frame_selection(cont, dem_info)
         if sel is not None and not sel.all():
             cont_out = subset_contours(cont, ~sel)
-            cont = subset_contours(cont, sel)
+            cont = subset_contours(cont, sel & inside)
+        elif not inside.all():
+            cont = subset_contours(cont, inside)
             print(f"waterlines        : {len(set(cont_out['frame'].tolist()))} frame(s) the DEM left out are "
                   f"compared apart (" + "; ".join(f"{k}: {len(v)}" for k, v in out_why.items()) + ")")
         if sel_note:
