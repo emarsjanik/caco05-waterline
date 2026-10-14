@@ -579,6 +579,8 @@ python3 survey_products.py --date 2024-10-23 \
          c2=calibration/gcpfree/runs/<run id>/CACO03_c2_gcpfree-oct2024_EO.yaml \
     --calibration-variant gcpfree \
     --output-root /mnt/I2Rgus_Data/survey_products_gcpfree --dry-run   # then without --dry-run
+#   (built exactly as A was: the same options as A's build, --a-root <A's root> if A is not in the default
+#   root; the first build writes calibration/gcpfree/runs/<run id>/B_BUILD.txt: commit it at once)
 python3 survey_products.py --summary --output-root /mnt/I2Rgus_Data/survey_products_gcpfree
 python3 survey_products.py --date 2024-10-23 --share --output-root /mnt/I2Rgus_Data/survey_products_gcpfree
 #   -> survey_products_gcpfree/share/2024-10-23_B_gcpfree.tgz
@@ -665,17 +667,29 @@ Two DEMs are delivered, each in its own root (one calibration per root):
    any run:
    `python3 gcpfree_eo.py --preregister --outcome-if-one-camera <both-or-none|per-camera> --decided-by "<name>"`
    then `git add calibration/gcpfree/PREREGISTERED.txt && git commit`.
-   Every run (a trial too) refuses without it, uncommitted, changed since its
-   commit, naming another `gcpfree_eo.py` or module sha256, or once any run
-   was made under another version of it. Only this file makes delivery runs:
-   a pre-registration anywhere else (`--preregistered` another file, another
-   folder or clone) makes TRIAL runs only, and `survey_products.py` accepts a
-   B only from `calibration/gcpfree/runs/` of this repository, made under this
-   file as it was committed before the run.
+   The file also PINS THE PHOTOS: the name, size and sha256 of every Oct, Jan
+   and (c2) Dec photo a run selects from the station's three folders; a run
+   that selects other photos (one removed, replaced or added after a look) is
+   refused. It is the only pre-registration there is (`calibration/gcpfree/`
+   next to `gcpfree_eo.py`; there is no option for another): EVERY run, a
+   trial (one camera, other `--roots`) too, refuses (exit 2) without it,
+   uncommitted, changed since its commit, naming another `gcpfree_eo.py` or
+   module sha256, pinning no photos, or once any run was made under another
+   version of it; so the rule is committed before this code solves any photo.
+   Every run, trials included, is recorded in `calibration/gcpfree/runs/`
+   (commit each folder), and B's README lists them all with their start
+   times. **A trial is a full result (every verdict and angle): never run one
+   on the station.** A run is also refused while a commit outside the
+   branch's history (another branch, a stash, the reflog: a branch made from
+   before the pre-registration, a reset) wrote a pre-registration or run
+   record the branch does not hold. `survey_products.py` accepts a B only from
+   `calibration/gcpfree/runs/` of this repository, made under this file as it
+   was committed before the run.
    **Send Chris the procedure's sha256 before A is built or shared** (`sha256sum
    gcpfree_eo.py`, = `GCPFREE_PINS[-1]`), and the PREREGISTERED.txt sha256 as
    soon as it is committed: he then knows both were fixed before he saw A.
-2. `python3 test_gcpfree_eo.py` (synthetic, in a temporary folder, ~15 min)
+2. `python3 test_gcpfree_eo.py` (synthetic, in a temporary folder, ~25-30 min
+   here under load; allow 30-40 on the NUC)
    and `python3 gcpfree_eo.py --dry-run` (the pre-registration, the photos
    per day, the Jan 2025 EO against the visible horizon on 23 Jan; of the
    Oct photos it only lists the names and checks the frame size: nothing is
@@ -692,8 +706,10 @@ Two DEMs are delivered, each in its own root (one calibration per root):
    under the rule, and `run.json`. **Commit that folder at once, in ONE
    commit (never amended), and write down each B file's sha256 and send it to
    Chris, before the B DEM is built and before anything is compared with the
-   A DEM.** `survey_products.py` builds no B whose file, report or `run.json`
-   is uncommitted, changed since, or touched by more than one commit. (The A
+   A DEM.** `survey_products.py` builds no B whose file, report, `run.json` or
+   `run_report.txt` is uncommitted, changed since, or touched by more than one
+   commit, nor while any run folder there (a trial, a run cut off) is
+   uncommitted. (The A
    DEM is built first, before this run: nothing of it reaches the procedure,
    whose code is pinned by sha256 and whose outcome rule is committed before
    any run; B's README states when A's DEM was built against the pin, the
@@ -705,7 +721,15 @@ Two DEMs are delivered, each in its own root (one calibration per root):
 4. Build B with the cameras it delivered (`--eo c2=...` alone for a c2-only
    B: a camera is left out only when its report in the same run folder says
    NOT DELIVERED), `--calibration-variant gcpfree`, in its own root (commands
-   above); `--share` it.
+   above), EXACTLY AS A WAS BUILT, only the calibration different: the
+   committed `surveys/*.csv`, every result-changing option as A's build
+   recorded it (A's provenance: give `--a-root` when A is in another root),
+   the search envelope A's detection used (path and sha256) and A's forcing
+   (inputs, then its water level and waves byte for byte). Anything else is
+   refused (exit 5, `NOT the pre-registered B build`). Its first build writes
+   `B_BUILD.txt` (its root and command) into the run folder: **commit it at
+   once**; the B is then built and shared from that root only, with that
+   command. `--share` it.
 5. Only then compare A and B (`dem_change.py`): a report, nothing is tuned
    to it.
 
@@ -743,9 +767,14 @@ under the procedure's names:
   and the commit it has now (not changed or committed again since), from the
   station's three photo folders, and it is the first finished delivery run
   there (or the one allowed second run, with Aug photos), no run's record
-  (`run.json`) there having been removed or changed since its commit;
-* the B file, its report and `run.json` are committed in this repository,
-  unchanged, in one commit, each touched by that commit only;
+  (`run.json`) there having been removed or changed since its commit, every
+  run's record there committed (a trial, a run cut off), and the photos the
+  run used are the ones its pre-registration pins;
+* no commit outside this branch's history (another branch, a stash, the
+  reflog) wrote a pre-registration or run record this branch does not hold;
+* the B file, its report, `run.json` and `run_report.txt` are committed in
+  this repository, unchanged, in one commit, each touched by that commit
+  only;
 * its `# Variant: ... --calibration-variant <name>` line is the report's;
 * its `# Solved by gcpfree_eo.py: <reference>.yaml rotated by <angle> deg`
   line is true of its numbers (0.01 deg), its camera position is that of the
@@ -755,8 +784,13 @@ under the procedure's names:
   and, for a GCP solution known here, its archived content.
 What these checks cannot see: a B edited BEFORE its first commit with its
 report and `run.json` rewritten to agree, by an edit that keeps the `rotated
-by` magnitude (a small tilt, say). Only the B sha256s written down and sent
-to Chris when the run ended show that; hence step 3.
+by` magnitude (a small tilt, say); a copy of the procedure run outside this
+repository (another clone, a copy of the script) before the pre-registration,
+or a whole re-clone of the repository after a first run; a branch or stash
+removed together with its reflog entries; a trial or a run cut off whose
+folder was deleted before it was committed. Only the sha256s sent to Chris
+beforehand (the procedure's before A, the pre-registration's when committed,
+each B file's when its run ends) answer those; hence steps 1 and 3.
 A calibration turned by hand (e.g. with `estimate_eo_rotation.py`, its
 `rotated by` line and an `# acceptance:` line added) is traced the same way
 but is never INDEPENDENT on a blind date: such a turn could have been chosen
@@ -780,16 +814,25 @@ their millimetre DEM errors say nothing of a tilt: 4 px of tilt moves
 waterlines metres at 200-400 m); and the inherited camera position, the
 largest DEM effect of five synthetic position-inheritance cases (c1 DEM |dz|
 median 0.011 m, p90 0.026 m; c2 0.018 m, 0.086 m; the largest of five cases,
-not a bound), while the mount's GCP solutions of Aug 2024 and Jan 2025 put
-the camera 0.36 m (c1) / 1.23 m (c2) apart. It also says the run and its
+not a bound; the cases were written after A's rows had been seen, and c1's
+comes from a -0.55 m height case that equals c1's A minus Jan offset: the
+EXPOSURE statement says so), while the mount's GCP solutions of Aug 2024 and
+Jan 2025 put the camera 0.36 m (c1) / 1.23 m (c2) apart. It also says the run and its
 folder, the outcome rule, the pre-registration (its path, sha256 and
 commits), the photo folders and the B file's commit; the procedure's EXPOSURE
 statement (what its makers had seen of A, and when); the ORDER of the pin, the
 pre-registration (the commit that set the rule in force, and every commit of
-the file with its rule when there are several), A's DEM (from A's root: the
-root B's is named after, or `--a-root`), the B run and B's commit, with a NOTE
-when the rule was changed, when A's DEM came before the rule in force was
-committed, or before B's commit; and that the pointing step's
+the file with its rule when there are several), A's DEM (when it was FIRST
+built, kept across rebuilds of its DEM step, and when last rebuilt; from A's
+root: the root B's is named after, or `--a-root`), the B run and B's commit,
+and every run of the procedure in `runs/` with its start, with a NOTE when
+the rule was changed, when A's DEM came before the rule in force was
+committed, or before B's commit, when a run started before the rule was
+committed, when a trial was made before B's run, when a run never finished,
+when no A product was found (the order is then not known), or when B was
+built with other code than A; each camera's search envelope with its sha256
+(the file A's detection used: Chris can check it against his copy of the Jan
+2025 lidar); and that the pointing step's
 sea-horizon check of the October photos against B is independent of the
 photo matches.
 
@@ -799,9 +842,12 @@ variant (and the reverse), an `--eo` path that does not exist (it is taken
 as given: never a file of the same name elsewhere, never the table's), an
 acceptance FAIL, a camera left out that the procedure delivered, B files of
 two runs, a B under another variant name than its run's, a B whose run
-folder is not committed yet (commit it first). A B file changed since B was
-built is a rebuild refused without `--replace` (stamps record each
-calibration's sha256).
+folder is not committed yet (commit it first), a B not built as A was or in a
+second root (step 4), a photo folder holding a photo-named file that is (or
+links to) a file named like the held survey (refused in the photo scan,
+before any step, a dry run too). A B file changed since B was built is a
+rebuild refused without `--replace` (stamps record each calibration's
+sha256; a file restored byte for byte, e.g. by git, rebuilds nothing).
 
 **Telling A and B apart once shared.** B's DEM and map files carry the
 variant in their names (`2024-10-23_gcpfree_dem.tif`, `_spread`, `_count`,
@@ -813,14 +859,20 @@ prefix, and his check's label. `--share` packs each into one archive
 named by its calibration, `2024-10-23_A_official_calibration.tgz` and
 `2024-10-23_B_gcpfree.tgz` (+ `.sha256`), with README, provenance, GeoTIFFs
 (EPSG:6348, NAD83(2011) / UTM 19N + NAVD88), the DEM page, the maps, the
-calibration files used, for B the procedure's reports, `run.json` and
+calibration files used (the detector reads every lens as
+`CACO05_<cam>_20240801_IO.yaml`; a CACO03 product also carries
+`CACO03_<cam>_20240801_IO.yaml`, the file `gcpfree_eo.py` solved with, and its
+MANIFEST says they are the same lens, the CACO05 file holding its numbers
+rounded), for B the procedure's reports, `run.json`, `B_BUILD.txt` and
 `PREREGISTERED.txt` (and the report of a camera it did not deliver), and a
 MANIFEST of every file's sha256 (for B also its procedure line with the run
 folder and commit, the stated uncertainty, the EXPOSURE statement and the
 ORDER); never written over (`--replace`). Refused: a B that is no longer the
-procedure's, and any product (A or B) whose calibration file is no longer the
-one it was built with (its sha256 against the provenance and the detection's
-stamp): an archive never pairs a DEM with another calibration file.
+procedure's, a B from another root than its `B_BUILD.txt` names (or with that
+file uncommitted), and any product (A or B) whose calibration file is no
+longer the one it was built with (its sha256 against the provenance and the
+detection's stamp): an archive never pairs a DEM with another calibration
+file.
 
 The October date also needs its forcing files, which are NOT downloaded:
 * WIS ST63064 hourly waves (`WIS_ST63064_2024-10_to_2025-03.csv`) and/or
