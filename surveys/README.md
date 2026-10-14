@@ -724,7 +724,9 @@ Two DEMs are delivered, each in its own root (one calibration per root):
    refused. It is the only pre-registration there is (`calibration/gcpfree/`
    next to `gcpfree_eo.py`; there is no option for another): EVERY run, a
    trial (one camera, other `--roots`) too, refuses (exit 2) without it,
-   uncommitted, changed since its commit, naming another `gcpfree_eo.py` or
+   uncommitted, changed since its commit, not pushed (its commit on no
+   remote-tracking branch: `git branch -r --contains <commit>` names none; the
+   script's own messages print the `git push`), naming another `gcpfree_eo.py` or
    module sha256, pinning no photos, or once any run was made under another
    version of it; so the rule is committed before this code solves any photo.
    Every run, trials included, is recorded in `calibration/gcpfree/runs/`
@@ -812,8 +814,10 @@ MANIFEST say both, in these words.
   the pinned procedure (gcpfree_eo.py, its five modules and constants, by
   sha256: `GCPFREE_PINS`); every run, a trial too, is refused unless this
   repository's `calibration/gcpfree/PREREGISTERED.txt` (the outcome rule and
-  the photos, by sha256) is committed and unchanged, and every run is
-  recorded in `calibration/gcpfree/runs/`; the first delivery run fixes B;
+  the photos, by sha256) is committed, unchanged and pushed (its commit on a
+  remote-tracking branch: the computer's record that a push was made; when
+  GitHub received it, only GitHub shows), and every run is recorded in
+  `calibration/gcpfree/runs/`; the first delivery run fixes B;
   B's file, report and run record are committed once and unchanged; B's DEM
   is built as A was (the committed tables, A's options, A's envelope, A's
   forcing), in one root; the procedure never opens calibration A, a GCP or

@@ -4656,7 +4656,7 @@ class GcpfreeRepo:
     it). gcpfree_eo.py writes its pre-registration (committed at once); runs are written by gcpfree_eo.py's own
     finish_run from given results and committed in one commit, as on the station."""
 
-    def __init__(self, root, rule="per-camera"):
+    def __init__(self, root, rule="per-camera", push=False):
         import gcpfree_eo as G
         self.G, self.root, self.rule = G, Path(root), rule
         self.root.mkdir(parents=True)
@@ -4665,9 +4665,21 @@ class GcpfreeRepo:
         self.prereg = G.write_preregistration(self.dir / "PREREGISTERED.txt", rule, "the owner (a test)", G.ROOTS,
                                               photos=FAKE_PHOTOS)
         self.commit("gcpfree: pre-registration")
+        if push:
+            self.push()
         self.info, probs = G.preregistration(self.prereg)
-        assert not probs, probs
+        # gcpfree_eo.py refuses a run until the commit is pushed; these runs are written by its finish_run directly
+        # (no run is refused here), so an unpushed pre-registration stands for the B README's 'on NO remote branch'
+        assert not [x for x in probs if push or "on no remote-tracking branch" not in x], probs
         self.saved = []
+
+    def push(self):
+        """The owner's `git push`: to a bare repository standing in for GitHub (origin/<branch> then holds it)."""
+        bare = Path(str(self.root) + "_github.git")
+        if not bare.exists():
+            git_in(bare.parent, "init", "-q", "--bare", bare.name)
+            git_in(self.root, "remote", "add", "origin", str(bare))
+        return git_in(self.root, "-c", "push.negotiate=false", "push", "-q", "origin", "HEAD")
 
     def commit(self, msg):
         git_in(self.root, "add", "-A")
@@ -4793,9 +4805,11 @@ def test_gcpfree_b(d):
           f"constants as they are")
     r = subprocess.run(["git", "-C", str(HERE), "diff", "--quiet", "HEAD", "--", "gcpfree_eo.py", *sorted(G.MODULES)],
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if r.returncode != 0:
+    if r.returncode == 1:
         print("  (note: gcpfree_eo.py or a module differs from its last commit: the pin must match the COMMITTED files "
               "before any B is made)")
+    elif r.returncode != 0:                 # 128/129: not a git checkout here (e.g. a copy made by git archive)
+        print("  (note: git cannot read a checkout here: the committed state of the pinned files is not checked)")
     check(sp.GCPFREE_STATION_ROOTS == G.ROOTS and set(sp.GCPFREE_VARIANTS) == {G.B_VARIANT, G.B2_VARIANT}
           and list(sp.GCPFREE_VARIANTS) == [G.B_VARIANT, G.B2_VARIANT]
           and os.path.realpath(str(sp.GCPFREE_DIR)) == os.path.realpath(str(G.OUT_DIR))
@@ -4978,6 +4992,14 @@ def test_gcpfree_b(d):
               and len(gf["protocol"]) == 3,
               "B's README, BLIND: what the code enforces, what rests on the owner (committed AND pushed before any "
               "run), and the pre-registration commit with where its public time is (here no remote holds it: said)")
+        rpush = GcpfreeRepo(d / "pushed", push=True)
+        rs_ = sp.commit_remote_state(rpush.prereg, rpush.info["commit"])
+        txt_ = sp.prereg_commit_text({"preregistration": rpush.info, "preregistration_here": str(rpush.prereg)})
+        check(rpush.info.get("remote_branches") and rs_["branches"] == rpush.info["remote_branches"]
+              and rs_["url"].endswith("pushed_github.git") and f"held by {rs_['branches'][0]} of " in txt_
+              and "NO remote branch" not in txt_ and "pushed (its commit on a remote-tracking branch" in sp.B_PROTOCOL_ENFORCED,
+              f"a pushed pre-registration: gcpfree_eo.py allows a run (its commit on {rs_['branches']}), and B's README "
+              f"says 'held by {rs_['branches'][0]} of <the remote>'; the code's part says it refuses until pushed")
         info_ = {"procedure_sha256": pc["procedure_sha256"], "preregistration": pc["preregistration"],
                  "outcome_rule": "per-camera", "run_id": "x", "run_started_utc": "2026-10-14 00:00:00",
                  "committed": dict(pc["committed"], date="2099-01-01T00:00:00+00:00"),

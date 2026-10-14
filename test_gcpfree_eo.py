@@ -10,7 +10,7 @@ WHY. Calibration B goes to a blind check: it must never read calibration A
 (CACO03_<cam>_20241023_EO.yaml), a GCP or target file or the calibration
 history; it must recover a known turn when the photos allow it and say NOT
 DELIVERED (no B file) when they do not, never falling back to anything; its
-outcome rule must be the owner's, pre-registered and committed before any
+outcome rule must be the owner's, pre-registered, committed and pushed before any
 run; and nothing it delivers may be chosen after seeing a result (run
 folders, no overwrite, one more run only with Aug photos).
 
@@ -556,6 +556,16 @@ def git(repo, *a):
                           + list(a), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
 
 
+def push(repo):
+    """The owner's `git push` after a commit: to a bare repository of the test standing in for GitHub (made at the
+    first push), which puts the commit on a remote-tracking branch (origin/<branch>), as on the station."""
+    bare = Path(str(repo) + "_github.git")
+    if not bare.exists():
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        git(repo, "remote", "add", "origin", str(bare))
+    return git(repo, "-c", "push.negotiate=false", "push", "-q", "origin", "HEAD")
+
+
 def main_q(argv):
     """gcpfree_eo.main, its output captured. -> (exit status, output)"""
     import io as io_
@@ -686,11 +696,14 @@ def test_runs(d, canned):
         pinned = G.read_preregistration(pr)["photos"]
         n_c1 = sum(1 for r in pinned if r[0] == "c1")
         check(rc == 0 and "outcome_if_one_camera: per-camera" in txt and f"procedure_sha256: {G.own_sha256()}" in txt
+              and "COMMIT AND PUSH THIS FILE" in txt and "&& git push" in txt and "commit AND push it" in out
+              and f"-C {pr.parent} push" in out
               and pinned == G.photo_manifest(G.ROOTS) and n_c1 == 15 and len(pinned) == 39
               and f"photos_sha256: {G.photos_sha256(pinned)}" in txt
               and all(len(r[5]) == 64 and isinstance(r[4], int) for r in pinned),
               "--preregister: the owner's rule, the procedure's and its modules' sha256, the photo folders and the 39 "
-              "photos a run selects (c1 15: Oct and Jan; c2 24: and Dec), each with its size and sha256")
+              "photos a run selects (c1 15: Oct and Jan; c2 24: and Dec), each with its size and sha256; its header "
+              "and the console say commit AND push")
         rc, out = main_q(base + ["--preregister", "--outcome-if-one-camera", "both-or-none", "--decided-by", "x"])
         check(rc == 2 and "exists" in out, "... written once (a second --preregister is refused)")
         rc, out = main_q(base)
@@ -704,8 +717,20 @@ def test_runs(d, canned):
         rc, out = main_q(base)
         check(rc == 2 and "changed after its last commit" in out, "changed after its commit: REFUSED")
         git(repo, "commit", "-q", "-am", "prereg: who decided")
+        head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        rc, out = main_q(base)
+        rc2, out2 = main_q(base + ["--camera", "c2"])
+        rc3, out3 = main_q(base + ["--dry-run"])
+        check(rc == 2 and rc2 == 2 and f"its commit {head[:10]} is on no remote-tracking branch (not pushed)" in out
+              and "push it (git push) BEFORE any run, a trial too" in out and "on no remote-tracking branch" in out2
+              and not solved and not (pr.parent / "runs").exists()
+              and "a run (a trial too) is REFUSED" in out3 and "git push" in out3,
+              "committed but NOT pushed: every run REFUSED, a trial too, nothing solved (the time GitHub receives the "
+              "push is the rule's only public timestamp); the dry run says so")
+        push(repo)
         rc, out = main_q(base + ["--dry-run"])
-        check(rc == 0 and "OK" in out and "DELIVERY" in out and not (pr.parent / "runs").exists()
+        check(rc == 0 and "OK" in out and "pushed: on origin/" in out and "DELIVERY" in out
+              and not (pr.parent / "runs").exists()
               and "a run would not be refused for its photos" in out
               and "the 39 photos selected now are the pre-registered ones" in out,
               "--dry-run: the pre-registration OK (2 commits, no run yet), a DELIVERY run, its photos there and the "
@@ -741,24 +766,28 @@ def test_runs(d, canned):
         check(rc == 4 and len(runs) == 1 and runs[0].name.endswith("_trial") and not list(runs[0].glob("*_EO.yaml"))
               and tj["status"] == "finished" and tj["preregistration"]["path"] == str(pr.resolve())
               and tj["photos_used"] == [r for r in pinned if r[0] == "c2"]
-              and "Commit it too, at once" in out,
+              and "Commit and push it too, at once" in out and "git push" in out,
               "--camera c2: a TRIAL run (exit 4) under this repository's pre-registration, recorded in its runs/ "
               "(its report, its photos, no B file); commit it too")
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "the trial")
+        push(repo)
         # the rule cannot change once a run (a trial too) was made under it
         pr.write_text(pr.read_text().replace("outcome_if_one_camera: per-camera", "outcome_if_one_camera: both-or-none"))
         git(repo, "commit", "-q", "-am", "prereg: other rule")
+        push(repo)
         rc, out = main_q(base)
         check(rc == 2 and "another version of the pre-registration" in out,
               "the rule changed after a trial was made: REFUSED (a rule is never chosen after seeing a result)")
         git(repo, "checkout", "-q", "HEAD~1", "--", str(pr.relative_to(repo)))
         git(repo, "commit", "-q", "-am", "prereg: as it was")
+        push(repo)
         # delivery run 1: c1 NOT DELIVERED, c2 DELIVERED (per-camera): a c2-only B
         scen[("c1", False)] = nd_of(canned["c1_aug_only"])
         rc, out = main_q(base)
         r1 = sorted(p for p in (pr.parent / "runs").iterdir() if not p.name.endswith("_trial"))
-        check(rc == 3 and len(r1) == 1, f"delivery run 1 (exit {rc}): c2 delivered, c1 not")
+        check(rc == 3 and len(r1) == 1 and "and push it (git add" in out and "&& git push)" in out,
+              f"delivery run 1 (exit {rc}): c2 delivered, c1 not; it says commit AND push the run folder")
         r1 = r1[0]
         b2 = r1 / G.OUT_EO.format(cam="c2")
         check(b2.exists() and not (r1 / G.OUT_EO.format(cam="c1")).exists()
@@ -842,6 +871,7 @@ def test_runs(d, canned):
         main_q(["--preregister", "--outcome-if-one-camera", "both-or-none", "--decided-by", "the owner"])
         git(repo2, "add", "-A")
         git(repo2, "commit", "-q", "-m", "prereg")
+        push(repo2)
         rc, out = main_q([])
         rr = sorted((repo2 / "runs").iterdir())[0]
         rep2 = json.loads((rr / (G.OUT_REPORT.format(cam="c2") + ".json")).read_text())
@@ -857,6 +887,7 @@ def test_runs(d, canned):
         main_q(["--preregister", "--outcome-if-one-camera", "per-camera", "--decided-by", "the owner"])
         git(repo3, "add", "-A")
         git(repo3, "commit", "-q", "-m", "prereg")
+        push(repo3)
         owg = Path(G.ROOTS[1])
         owg.rename(owg.with_name("owg_unmounted"))
         try:
@@ -903,6 +934,7 @@ def test_foreign_history(d, scen):
     rc, _ = main_q(["--preregister", "--outcome-if-one-camera", "both-or-none", "--decided-by", "the owner"])
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "gcpfree: pre-registration")
+    push(repo)
     rc, out = main_q([])
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "gcpfree: delivery run 1")

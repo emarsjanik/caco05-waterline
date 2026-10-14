@@ -30,9 +30,11 @@ PRE-REGISTRATION FILE (required). calibration/gcpfree/PREREGISTERED.txt next
 to this script (PREREG; there is no other), written by `--preregister` with
 the OWNER's choice of the outcome rule (below) and the PHOTO MANIFEST (name,
 size and sha256 of every Oct, Jan and, for c2, Dec photo a run selects from
-the station's three folders), and COMMITTED to git before any run. EVERY run,
-a trial too, is made under this file and refuses (exit 2) while it is
-missing, not committed, changed since its last commit, names another sha256
+the station's three folders), COMMITTED to git and PUSHED (git push) before
+any run. EVERY run, a trial too, is made under this file and refuses (exit 2)
+while it is missing, not committed, changed since its last commit, its commit
+on no remote-tracking branch (not pushed: the time GitHub receives the push is
+the rule's only public timestamp), names another sha256
 of this script or of its modules (estimate_eo_rotation.py, georectify.py,
 horizon_check.py, detect_original_view.py, view_reproject.py), names photo
 folders other than the station's three (ROOTS), pins no photos, or states no
@@ -170,7 +172,7 @@ run's B is a SECOND, separately labelled product (--calibration-variant
 gcpfree-aug, in its own root) and the first B stays the delivered one. The
 B file and its report name the variant; survey_products.py refuses any
 other. Commit each run's folder (B file, reports, run.json: ONE commit, never
-amended) and write down its B sha256s AT ONCE, before the B DEM is built and
+amended), push it, and write down its B sha256s AT ONCE, before the B DEM is built and
 before anything is compared with the A DEM: survey_products.py builds and
 shares a B only when its file, report and run.json are committed, unchanged,
 each touched by one commit. (The A DEM may be built before this procedure
@@ -686,13 +688,29 @@ def git_state(path):
     except OSError as exc:
         return False, None, f"git cannot be run ({exc})", []
     if tracked.returncode != 0:
-        return False, None, "it is not committed to git (git add + git commit it first)", []
+        return False, None, "it is not committed to git (git add + git commit + git push it first)", []
     log = git("log", "--format=%H %cI", "--", p.name)
     hist = [dict(zip(("commit", "date"), ln.split(" ", 1))) for ln in log.stdout.splitlines() if ln.strip()]
     st = git("status", "--porcelain", "--", p.name)
     if st.returncode != 0 or st.stdout.strip():
         return False, None, "it was changed after its last commit (commit the change, or restore it)", hist
     return True, (hist[0]["commit"] if hist else None), "", hist
+
+
+def remote_branches(path, commit):
+    """The remote-tracking branches (as this computer last pushed to or fetched them) whose history holds `commit`.
+    -> ([branch names], why none: '' when there is one)."""
+    p = Path(path).resolve()
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    try:
+        r = subprocess.run(["git", "-C", str(p.parent), "branch", "-r", "--contains", commit], stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, universal_newlines=True, env=env)
+    except OSError as exc:
+        return [], f"not checked: git cannot be run ({exc})"
+    if r.returncode != 0:
+        return [], f"not checked: git branch -r --contains failed ({r.stderr.strip()[:200]})"
+    br = [ln.strip() for ln in r.stdout.splitlines() if ln.strip() and "->" not in ln]
+    return br, ("" if br else "on no remote-tracking branch (not pushed)")
 
 
 def preregistration(path, roots=None):
@@ -710,6 +728,14 @@ def preregistration(path, roots=None):
     info["commit"], info["git_history"] = commit, hist
     if not ok:
         probs.append(f"{p}: {why}")
+    elif commit:
+        br, why_r = remote_branches(p, commit)
+        info["remote_branches"] = br
+        if not br:
+            probs.append(f"{p}: its commit {commit[:10]} is {why_r}: push it (git push) BEFORE any run, a trial too. The "
+                         f"time GitHub receives the push is the rule's only public timestamp (a commit's date is set "
+                         f"by this computer's clock), and a rule never pushed could be chosen again after a look (a "
+                         f"local reset). After the push, git branch -r --contains {commit[:10]} names the remote branch")
     if pr.get("procedure_sha256") != own_sha256():
         probs.append(f"{p} pre-registers gcpfree_eo.py sha256 {str(pr.get('procedure_sha256'))[:12]}..., this "
                      f"gcpfree_eo.py is {own_sha256()[:12]}...: not the pre-registered procedure")
@@ -769,10 +795,11 @@ def write_preregistration(path, outcome, decided_by, roots, photos=None):
     now = datetime.now(timezone.utc)
     p.write_text(
         "# PRE-REGISTRATION of calibration B (gcpfree_eo.py) for the BLIND 23 Oct 2024 DEM\n"
-        f"# Written by gcpfree_eo.py --preregister on {now:%Y-%m-%d %H:%M} UTC. COMMIT THIS FILE before any run:\n"
-        f"#   git add {p.name} && git commit -m 'gcpfree: pre-registration'\n"
-        "# gcpfree_eo.py refuses to run while it is missing, uncommitted or changed since its commit, or while\n"
-        "# the procedure or its modules differ from the sha256s below.\n"
+        f"# Written by gcpfree_eo.py --preregister on {now:%Y-%m-%d %H:%M} UTC. COMMIT AND PUSH THIS FILE before any\n"
+        f"# run:  git add {p.name} && git commit -m 'gcpfree: pre-registration' && git push\n"
+        "# gcpfree_eo.py refuses to run while it is missing, uncommitted, changed since its commit or not pushed\n"
+        "# (its commit on no remote-tracking branch), or while the procedure or its modules differ from the\n"
+        "# sha256s below.\n"
         "procedure: gcpfree_eo.py\n"
         f"procedure_sha256: {own_sha256()}\n"
         f"modules_sha256: {json.dumps(module_sha256(), sort_keys=True)}\n"
@@ -1790,8 +1817,10 @@ def run(args, argv):
     if args.preregister:
         p = write_preregistration(PREREG, args.outcome_if_one_camera, args.decided_by, roots)
         print(f"wrote {p} (the outcome rule '{args.outcome_if_one_camera}' and "
-              f"{len(read_preregistration(p)['photos'])} photos)\nNow commit it before any run: git -C {p.parent} add "
-              f"{p.name} && git -C {p.parent} commit -m 'gcpfree: pre-registration ({args.outcome_if_one_camera})'")
+              f"{len(read_preregistration(p)['photos'])} photos)\nNow commit AND push it before any run (a trial too; "
+              f"every run is refused until its commit is on a remote branch): git -C {p.parent} add {p.name} && "
+              f"git -C {p.parent} commit -m 'gcpfree: pre-registration ({args.outcome_if_one_camera})' && "
+              f"git -C {p.parent} push\nThen send Chris its sha256 (sha256sum {p}) and the commit hash")
         return 0
     import cv2
     if not hasattr(cv2, "SIFT_create"):
@@ -1884,13 +1913,15 @@ def run(args, argv):
             + ("" if not r["reasons"] else "  -- " + "; ".join(r["reasons"])))
     rc = finish_run(run_dir, run_info, results, lines, log)
     if eligible:
-        log(f"\nrun folder {run_dir}: commit it now, in ONE commit (git add {run_dir} && git commit), and write down "
-            f"the sha256 of each B file (and send them to Chris), BEFORE the B DEM is built and before anything is "
+        log(f"\nrun folder {run_dir}: commit it now, in ONE commit, and push it (git add {run_dir} && git commit && "
+            f"git push), and write down the sha256 of each B file (and send them to Chris), BEFORE the B DEM is built "
+            f"and before anything is "
             f"compared with the A DEM: survey_products.py builds no B whose file, report or run.json is uncommitted, "
             f"changed or touched by more than one commit")
     else:
-        log(f"\nTRIAL run folder {run_dir}: reports only, nothing delivered. Commit it too, at once (the record of every "
-            f"run: survey_products.py lists it in B's README, and builds no B DEM while a run folder is uncommitted)")
+        log(f"\nTRIAL run folder {run_dir}: reports only, nothing delivered. Commit and push it too, at once (git add "
+            f"{run_dir} && git commit && git push: the record of every run: survey_products.py lists it in B's "
+            f"README, and builds no B DEM while a run folder is uncommitted)")
     (run_dir / "run_report.txt").write_text("\n".join(lines) + "\n")
     return rc
 
@@ -1907,7 +1938,8 @@ def dry_run(args, cams, roots, prereg_info, probs, eligible, out_dir, log):
                                                               + "; ".join(probs)))
     if not probs:
         log(f"  outcome_if_one_camera {prereg_info.get('outcome_if_one_camera')} (decided by "
-            f"{prereg_info.get('decided_by')} on {prereg_info.get('decided_on')}); commit {prereg_info.get('commit')}; "
+            f"{prereg_info.get('decided_by')} on {prereg_info.get('decided_on')}); commit {prereg_info.get('commit')}, "
+            f"pushed: on {', '.join(prereg_info.get('remote_branches') or [])}; "
             f"{len(prereg_info.get('photos') or [])} photos pinned")
     log(f"this run would be a {'DELIVERY' if eligible else 'TRIAL'} run"
         + ("" if eligible else f" (reports only: {'; '.join(trial_reasons(args, roots))}; a trial is a FULL result: "

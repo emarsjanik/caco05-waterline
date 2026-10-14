@@ -720,7 +720,7 @@ VARIANT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 # pinned version (pre-registration or run), its pin is never removed or edited (a B made by it stays traceable);
 # until then (Oct 2026: no run outside tests) the single pin follows the committed files.
 GCPFREE_PINS = [
-    {"gcpfree_eo.py": "2387f2d3857dbaf544406608e3393ff2a21dc7309355088871bd99dc6388adcc",
+    {"gcpfree_eo.py": "e97c24f045c56f85284499c0145dddca8761c0f94ec3612d92eea1bebf52ec2a",
      "modules": {
          "estimate_eo_rotation.py": "2fbb27b69db3604498b5cfd63739e4ab5ebdbb061e58e2397bc1323956406e72",
          "georectify.py": "e9f1d2c1872697b1be5d805d2762c40b9e32752251f0e9e6d6cb75f5bc7eba1e",
@@ -728,11 +728,11 @@ GCPFREE_PINS = [
          "detect_original_view.py": "c807b2f907b4856cda08b21ddcf46c1c0470bd23b7559f990fc21e831a19036a",
          "view_reproject.py": "2d63650ec558c90f7aada6a223f6dfb6dd61dc55f5998d9a8f0cf737de3cd817"},
      "constants_sha256": "6259cec4a81e4e0d7da96fec2a6ec4430e589b5a5935401ab274f069feee9f96",
-     "pinned": "2026-10-14 (review round 2: every run, a trial too, under this repository's committed "
-               "pre-registration, which also pins the photos; records outside the branch's history refused; the "
-               "EXPOSURE statement on the position cases; no gate, threshold, window or rule of the computation "
-               "changed, the constants are the same). It replaces the pins of review rounds 0 and 1 of 2026-10-14 "
-               "(4314fe3a5f09... the last), under which nothing was run outside tests"},
+     "pinned": "2026-10-14 (integration review round 1: every run, a trial too, refused until the "
+               "pre-registration's commit is on a remote-tracking branch (pushed), and its messages say 'git push'; "
+               "no gate, threshold, window or rule of the computation changed, the constants are the same). It "
+               "replaces the pins of review rounds 0-2 of 2026-10-14 (2387f2d3857d... the last), under which nothing "
+               "was run outside tests and whose sha256 was not yet sent to the holder"},
 ]
 # gcpfree_eo.py's ROOTS: the station's photo folders a delivery run must use (a B made from other folders is a test of
 # the procedure, never the delivered B)
@@ -5777,7 +5777,9 @@ B_PROTOCOL_ENFORCED = (
     "WHAT THE CODE ENFORCES (survey_products.py and gcpfree_eo.py, on this computer): B is made only by the pinned "
     "procedure (gcpfree_eo.py, its five modules and its constants, by sha256: GCPFREE_PINS); every run of it, a trial "
     "too, is refused unless this repository's calibration/gcpfree/PREREGISTERED.txt (the outcome rule, and the photos "
-    "a run uses, by sha256) is committed and unchanged, and every run is recorded in calibration/gcpfree/runs/; the "
+    "a run uses, by sha256) is committed, unchanged and pushed (its commit on a remote-tracking branch: this "
+    "computer's record that a push was made, not of when GitHub received it), and every run is recorded in "
+    "calibration/gcpfree/runs/; the "
     "first delivery run fixes B (one more only with Aug 2024 photos, for a camera not delivered); B's file, report "
     "and run record must be committed once and unchanged since; B's DEM is built as A was (the committed tables, A's "
     "build options, the search envelope A's detection used, A's forcing), in one root; the procedure never opens "
@@ -5785,7 +5787,9 @@ B_PROTOCOL_ENFORCED = (
     "ORDER above is read from git and from the run records")
 B_PROTOCOL_OWNER = (
     "WHAT RESTS ON THE OWNER FOLLOWING THE PROCEDURE (no software on a computer the owner controls can prove it): that "
-    "PREREGISTERED.txt was committed AND pushed to GitHub before any run of gcpfree_eo.py, a trial included; that no "
+    "PREREGISTERED.txt was committed AND pushed to GitHub before any run of gcpfree_eo.py, a trial included (the "
+    "procedure refuses a run until a remote-tracking branch holds the commit, but only GitHub's receipt time shows "
+    "when the push reached it); that no "
     "copy of the procedure was run anywhere else (another clone, a copied script) before it; that no run folder, "
     "branch or reflog entry was deleted and the repository not re-cloned; that no B file was edited before its commit; "
     "that this computer's clock, which dates every git commit and run above, was right. What answers these comes from "
