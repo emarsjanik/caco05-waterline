@@ -73,6 +73,7 @@ import csv
 import json
 import shutil
 import argparse
+import time
 import tempfile
 import calendar
 import contextlib
@@ -151,6 +152,27 @@ def real_rtk():
 def skip(what, why):
     SKIPPED.append((what, why))
     print(f"  skip  {what} ({why})")
+
+
+def command_line_shown(proc, timeout=30.0):
+    """Wait until /proc shows the command line of a process just started: when Popen returns, the
+    kernel may not have set it yet, and /proc/<pid>/cmdline then reads empty, so
+    survey_products.build_running() would take a build just started for another program and the lock
+    checks would fail by timing alone (seen here with Python 3.11, whose subprocess starts children with
+    vfork, in 33 of 240 tries with six runs at once; not seen with 3.8). A build that holds a lock has long
+    had its own. -> True when shown, or when there is no /proc (alive is then all that can be told)."""
+    f = Path(f"/proc/{proc.pid}/cmdline")
+    if not Path("/proc/self/cmdline").exists():
+        return True
+    t_end = time.time() + timeout
+    while time.time() < t_end:
+        try:
+            if f.read_bytes():
+                return True
+        except OSError:
+            return False
+        time.sleep(0.01)
+    return False
 
 
 def photo_name(t, station, cam):
@@ -1348,11 +1370,15 @@ def test_fix2(d):
                               "2026-09-29"])
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
     try:
+        shown = [command_line_shown(proc) for proc in (first, other)]
+        check(all(shown), "the two stand-in processes have their command lines in /proc"
+                          + ("" if all(shown) else f" (shown: {shown}, after 30 s)"))
         lock = dict(held, pid=first.pid)
         (out / sp.LOCK_NAME).write_text(json.dumps(lock))
         ok2, why2 = sp.take_lock(out, a, "2026-09-29")
         check(ok1 and held.get("pid") == os.getpid() and not ok2 and "RUNNING" in why2,
-              "a second build of the date is refused while the first runs")
+              "a second build of the date is refused while the first runs" + ("" if ok1 and not ok2 else
+                                                                               f" (got: {why2[:120]})"))
         if Path(f"/proc/{other.pid}/cmdline").exists():
             (out / sp.LOCK_NAME).write_text(json.dumps(dict(held, pid=other.pid)))
             ok5, note5 = sp.take_lock(out, a, "2026-09-29")
