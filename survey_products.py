@@ -7323,7 +7323,9 @@ def collect_caveats(plan, args, state, forcing, prov):
     if flt_.get("max_day_offset") is not None:
         from dem_figure import day_test_warnings
         for ln in day_test_warnings(flt_):
-            cav.append("DEM day test " + ln + " (WHAT WAS USED: each camera-day it left out, how and why)")
+            cav.append("DEM day test " + ln + (" (WHAT WAS USED: each camera-day it left out, how and why)"
+                                               if flt_.get("camera_days_rejected") else
+                                               " (it left out no camera-day)"))
     for cam, days in (prov.get("frames_per_day") or {}).items():
         window = days_between(plan["cams"][cam]["first"], plan["cams"][cam]["last"]) if cam in plan["cams"] else []
         empty = [d for d in window if not days.get(d)]

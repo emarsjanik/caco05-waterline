@@ -2565,6 +2565,14 @@ def test_day_test_record(d):
           and "it rests on c2 2025-01-23" in cav[1] and all("WHAT WAS USED" in c for c in cav),
           "KNOWN CAVEATS: the day test's WARNING and its trend WARNING, from the (variant) DEM's own record")
     (out / "dem" / "2025-01-23_gcpfree_info.json").write_text(json.dumps(dict(info, filters=dict(
+        filt, camera_days_rejected=[], day_test=dict(filt["day_test"], warning=None, rejected=[], trend_warnings=[
+            dict(filt["day_test"]["trend_warnings"][0], without=None)])))))
+    cav = [c for c in sp.collect_caveats(plan, SimpleNamespace(setup_coef=sp.SETUP_COEF), {}, forcing, {})
+           if c.startswith("DEM day test")]
+    check(len(cav) == 1 and "c2's camera-day offsets run one way" in cav[0] and "rests on" not in cav[0]
+          and cav[0].endswith("(it left out no camera-day)"),
+          "a trend WARNING with no day left out (the Mar 2025 fixture's case): the caveat says none was left out")
+    (out / "dem" / "2025-01-23_gcpfree_info.json").write_text(json.dumps(dict(info, filters=dict(
         filt, day_test=dict(filt["day_test"], warning=None, trend_warnings=[])))))
     check(not [c for c in sp.collect_caveats(plan, SimpleNamespace(setup_coef=sp.SETUP_COEF), {}, forcing, {})
                if c.startswith("DEM day test")], "no WARNING in the record: no day-test caveat")
