@@ -789,13 +789,17 @@ only if it holds over several weeks of different waves; then change it in all th
   NDBC 44013: `0.827 x Hs + 0.151 m` or direction-aware (r 0.87). Combined setup CV RMS
   0.079 m [REAL], 534 h of December overlap for WIS. Not used by the two enabled 2025 dates
   (ADCP waves throughout). Source: `historical_forcing.py`, `forcing_report.txt`.
-* Known limit, not fixed in this PR: the conversions are chosen by the setup error they cause,
-  so a `--setup-coef 0` build of hours without the ADCP (no setup, no error to choose by)
-  takes the first conversion listed (Hs linear, Tp raw), not those of the C = 0.037 build.
-  No date switched on has such hours (ADCP waves throughout) and every `chatham`-era date is
-  switched off, so no build is concerned now. The fix (judge them with the station's C) belongs
-  with the change that switches one on: it changes `historical_forcing.py`, and so reruns the
-  forcing and the detection (~50 min per two-camera week) of every date already built.
+* The conversions are chosen by the setup error they cause. Until this PR's review round a
+  `--setup-coef 0` build of hours without the ADCP (no setup, no error to choose by) took the
+  first conversion listed (Hs linear, Tp raw: WIS Tp bias -0.35 s), another wave currency than
+  the C = 0.037 build's. That mattered as soon as 2024-10-23 was switched on (`chatham` era,
+  WIS/NDBC waves throughout): its README recommends a C = 0 build with `--fit-setup` to refit C,
+  whose lines would then have carried other waves. Fixed: with C = 0, `historical_forcing.py`
+  judges the conversions with the station's C (`conversions_judged_with_c` in forcing.json), so a
+  C = 0 build converts every hour exactly as the C build does [SYNTH] (`test_historical_forcing.py`,
+  "C = 0 currency": the same Hs, Tp and sigmas on all 168 converted hours). It costs no extra
+  rebuild: `historical_forcing.py` changes in this PR anyway, so every date's forcing and
+  detection rerun once after the pull.
 
 ### 4.6 Camera pointing (calibrations) and the sea-horizon check
 

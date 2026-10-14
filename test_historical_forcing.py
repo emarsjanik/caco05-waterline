@@ -302,6 +302,27 @@ def test_end_to_end(fx, out):
     return js
 
 
+def test_c0_same_currency(fx, out):
+    """A C = 0 build converts the waves exactly as the station's C does (review r1: with no setup to judge by, the
+    conversions fell to the first listed, Hs linear and Tp raw, another wave currency than the C build's)."""
+    kw = dict(adcp=fx["adcp"], adcp_navd88=fx["adcp_navd88"], chatham=fx["chatham"], wis=fx["wis"], ndbc=None,
+              download=False, plot=False)
+    res_c, _ = quiet(lambda: build("2025-02-17", "2025-02-25", Path(out) / "c", **kw))
+    res_0, _ = quiet(lambda: build("2025-02-17", "2025-02-25", Path(out) / "c0", **dict(kw, setup_coef=0.0)))
+    wc, w0 = pd.read_csv(res_c["waves_csv"]), pd.read_csv(res_0["waves_csv"])
+    jc = json.loads((Path(out) / "c" / "forcing.json").read_text())["waves"]
+    j0 = json.loads((Path(out) / "c0" / "forcing.json").read_text())["waves"]
+    conv = (wc["source"] != "adcp").to_numpy()
+    cols = [c for c in wc.columns if c not in ("time", "source")]
+    same = (len(wc) == len(w0) and list(wc["source"]) == list(w0["source"]) and list(wc.columns) == list(w0.columns)
+            and all(np.allclose(pd.to_numeric(wc[c], errors="coerce").to_numpy(float),
+                                pd.to_numeric(w0[c], errors="coerce").to_numpy(float), equal_nan=True) for c in cols))
+    check("C = 0: the converted waves are those of the station's C (the same values every hour)",
+          bool(conv.any()) and same and j0.get("conversions_judged_with_c") == hf.SETUP_COEF
+          and j0.get("setup_coef") == 0.0 and jc.get("conversions_judged_with_c") == hf.SETUP_COEF,
+          f"{int(conv.sum())} converted hours; columns {cols}; judged with C = {j0.get('conversions_judged_with_c')}")
+
+
 def test_adcp_only(fx, out):
     res, _ = quiet(lambda: build("2025-01-16", "2025-01-24", out, adcp=fx["adcp"],
                                             adcp_navd88=fx["adcp_navd88"], chatham=fx["chatham"],
@@ -732,6 +753,7 @@ def main():
                    ("harmonic", test_harmonic_recovery, (fx,)),
                    ("e2e", test_end_to_end, (fx, work / "e2e")),
                    ("adcp-only", test_adcp_only, (fx, work / "adcp_only")),
+                   ("C = 0 currency", test_c0_same_currency, (fx, work / "c0_currency")),
                    ("partial and errors", test_partial_and_errors, (fx, work / "errors")),
                    ("download", test_download_fallback, (fx, work / "download")),
                    ("before record", test_before_record_e2e, (fx, work / "before_record"))]
