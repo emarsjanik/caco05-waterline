@@ -615,7 +615,10 @@ python3 survey_products.py --date 2024-10-23 --dry-run   # BLIND, calibration A:
 python3 survey_products.py --date 2024-10-23             # A, default root
 python3 survey_products.py --date 2024-10-23 --share     # -> survey_products/share/2024-10-23_A_official_calibration.tgz
 # B, LATER (after the owner has pre-registered the outcome rule; below, "23 Oct 2024: BLIND"):
-#   gcpfree_eo.py writes calibration/gcpfree/runs/<run id>/ (a B file only for a camera it delivers)
+#   gcpfree_eo.py --preregister ...; git commit AND git push PREREGISTERED.txt BEFORE any gcpfree_eo.py run
+#   (a trial included); its sha256 and commit to Chris before A's DEM is shared
+#   gcpfree_eo.py writes calibration/gcpfree/runs/<run id>/ (a B file only for a camera it delivers):
+#   commit and push it in one commit, and send Chris each B file's sha256, the moment the run ends
 python3 survey_products.py --date 2024-10-23 \
     --eo c1=calibration/gcpfree/runs/<run id>/CACO03_c1_gcpfree-oct2024_EO.yaml \
          c2=calibration/gcpfree/runs/<run id>/CACO03_c2_gcpfree-oct2024_EO.yaml \
