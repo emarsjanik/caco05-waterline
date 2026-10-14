@@ -9030,7 +9030,10 @@ def host_name():
 
 def build_running(pid):
     """Is process `pid` (on this computer) alive and a survey_products.py build? A pid reused by
-    another program after a power cut is not one (Linux: /proc/<pid>/cmdline says)."""
+    another program after a power cut is not one (Linux: /proc/<pid>/cmdline says): a build is a
+    process one of whose command-line arguments (NUL-separated there) is a path whose last part is
+    survey_products.py. 'survey_products' anywhere else in the command line (an interpreter in a
+    folder of that name, a file such as survey_products_notes.txt, a test folder) is not one."""
     try:
         os.kill(int(pid), 0)
     except PermissionError:
@@ -9038,9 +9041,10 @@ def build_running(pid):
     except (OSError, ValueError, TypeError):
         return False
     try:
-        return b"survey_products" in Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+        argv = Path(f"/proc/{int(pid)}/cmdline").read_bytes().split(b"\0")
     except OSError:
         return True                        # no /proc: alive is all that can be told
+    return any(os.path.basename(a) == b"survey_products.py" for a in argv)
 
 
 def take_lock(out, args, date):

@@ -2731,11 +2731,27 @@ def test_fix2(d):
     held = sp.load_json(out / sp.LOCK_NAME) or {}
     first = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", "survey_products.py", "--date",
                               "2026-09-29"])
-    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    # 'another program': a command line the test controls (not this Python, whose path the test cannot
+    # choose: an interpreter in a folder named survey_products would read as a build)
+    other = subprocess.Popen(["sleep", "300"] if shutil.which("sleep") else
+                             [sys.executable, "-c", "import time; time.sleep(300)"])
+    # 'survey_products' inside other arguments: this test's own folder (survey_products_test_...), a file
+    # named like the script but not it, the script's name with a suffix
+    lookalike = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", str(Path(d) / "x.txt"),
+                                  str(Path(d) / "survey_products_notes.txt"), "survey_products.py.bak",
+                                  "--survey_products"])
+    abs_path = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)",
+                                 str(HERE / "survey_products.py"), "--date", "2026-09-29"])
     try:
-        shown = [command_line_shown(proc) for proc in (first, other)]
-        check(all(shown), "the two stand-in processes have their command lines in /proc"
+        shown = [command_line_shown(proc) for proc in (first, other, lookalike, abs_path)]
+        check(all(shown), "the four stand-in processes have their command lines in /proc"
                           + ("" if all(shown) else f" (shown: {shown}, after 30 s)"))
+        if Path(f"/proc/{other.pid}/cmdline").exists():
+            check(sp.build_running(first.pid) and sp.build_running(abs_path.pid)
+                  and not sp.build_running(other.pid) and not sp.build_running(lookalike.pid),
+                  "build_running: an argument whose last part is survey_products.py is a build (as given, or a full "
+                  "path); 'sleep 300', or 'survey_products' inside other arguments (the test's folder "
+                  f"{Path(d).parent.name}, survey_products_notes.txt, survey_products.py.bak), is not")
         lock = dict(held, pid=first.pid)
         (out / sp.LOCK_NAME).write_text(json.dumps(lock))
         ok2, why2 = sp.take_lock(out, a, "2026-09-29")
@@ -2750,7 +2766,7 @@ def test_fix2(d):
         else:
             skip("pid-reused lock check", "no /proc here: a live pid is all that can be told")
     finally:
-        for proc in (first, other):
+        for proc in (first, other, lookalike, abs_path):
             proc.kill()
             proc.wait()
     (out / sp.LOCK_NAME).write_text(json.dumps(held))      # this run's own lock again
