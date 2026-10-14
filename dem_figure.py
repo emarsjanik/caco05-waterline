@@ -746,8 +746,13 @@ def title_lines(info, cells, station, cutoff, min_points, cell):
                         f"{f['max_frame_offset']:g} m")
     if f.get("max_day_offset") is not None:
         n = len(f.get("camera_days_rejected") or [])
+        # a day the iterative test left out although within the limit of the kept days (taking
+        # it back would put a kept day over: day_test.refused_take_back) is not 'off the rest'
+        held = len((f.get("day_test") or {}).get("refused_take_back") or [])
         left_out.append(f"{n} camera-day{'' if n == 1 else 's'} off the rest by > "
-                        f"{f['max_day_offset']:g} m")
+                        f"{f['max_day_offset']:g} m" if not held else
+                        f"{n} camera-day{'' if n == 1 else 's'} left out by the day test "
+                        f"(±{f['max_day_offset']:g} m; {held} within it but at odds with a kept day)")
     if f.get("excluded_frames"):
         left_out.append(f"{f['excluded_frames']:,} frames by name (--exclude)")
     if left_out:

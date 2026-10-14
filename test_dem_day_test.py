@@ -4,7 +4,7 @@ Tests For The DEM Day Test (dem_from_contours.py --max-day-offset)
 =====================================================================
 Plain python3 (no pytest needed on the station):
 
-    python3 test_dem_day_test.py [--keep DIR]
+    python3 test_dem_day_test.py [--keep DIR] [--year]
 
 WHY. The day test decides which camera-days make every DEM: the cron's
 whole-archive and 7-day DEMs, dem_change.py's rebuilt reference week and
@@ -22,12 +22,21 @@ one way with time. These checks plant the answer and ask for it back:
   * a cluster of off days that swamps good ones in one pass (the
     whole-archive case): the good days are kept;
   * a day left out early because a worse day shaped its DEM: taken back;
-  * a steady trend: the WARNING, and what the test trims;
+    one whose return would put a kept day over: kept out, and recorded;
+  * a fringe day whose cells only one other day reaches, that day being
+    checked by the rest: left out (as one pass did);
+  * days the test cannot judge (two days that only see each other, the
+    last two days that disagree): the one-pass verdict, and a WARNING;
+    every day disagreeing: every day rejected, exit 4, as before;
+  * a steady trend: the WARNING, and what the test trims; days without a
+    trend: the WARNING stays rare;
   * the station's 7-day c1/c2 pattern of 5-11 Oct 2026, replayed;
-  * fewer than 3 days, or a camera whose days only see each other: the
-    test cannot tell which day is off and leaves none of them out;
+  * fewer than 3 days: none left out;
   * the offsets equal the one-pass code's, whatever the order of the
-    samples, and ties are broken by name;
+    samples, ties are broken by name, and random scenarios keep the
+    test's bookkeeping;
+  * run time: a quarter-year archive with many days left out in seconds
+    (--year: a year, 730 camera-days);
   * the command line: the log block survey_products.py reads, and
     <stem>_info.json (camera_days_rejected as before, plus each left-out
     day's offset and the test's numbers).
@@ -51,7 +60,7 @@ import tempfile
 import contextlib
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -258,8 +267,36 @@ def test_engine():
     sub = pk != "c2 2025-03-07"
     check(loo.offset("c2 2025-03-08", ref) == dfc.day_offsets(pc[sub], pv[sub], pk[sub], MIN_FRAMES)["c2 2025-03-08"],
           "an offset against a subset of days equals the one-pass offset with the other days removed")
-    check(loo.support("c2 2025-03-08") == 4.0 and loo.support("c2 2025-03-08", ref) == 3.0,
-          "support: 8 Mar's DEM holds 4 other days on the low beach (7 Mar and three good days), 3 without 7 Mar")
+    every = np.ones(len(loo.names), bool)
+    j1, j2 = loo.judge("c2 2025-03-08", every, LIMIT), loo.judge("c2 2025-03-08", ref, LIMIT)
+    check(j1["judged"] and j1["share"] == 1.0 and j2["judged"] and j2["share"] == 1.0 and not j1["alone"],
+          "judge: on the low beach 8 Mar's DEM holds 7 Mar and three good days, three without 7 Mar: "
+          "two or more other days in every cell, so the test can tell which is off")
+    # offsets(): every key at once, the same to the bit as offset() one key at a time, against any
+    # set of reference keys (a key in it leaves its own samples out), here and on random data with ties
+    rng = np.random.RandomState(8)
+    cases = [(pc, pv, pk, MIN_FRAMES, 30)]
+    for _ in range(40):
+        n = int(rng.randint(50, 600))
+        v = rng.normal(0, 0.3, n)
+        cases.append((rng.randint(0, 40, n).astype(np.int64), np.round(v, 1) if rng.rand() < 0.5 else v,
+                      np.array(["k%d" % i for i in rng.randint(0, 9, n)]), int(rng.randint(1, 5)),
+                      int(rng.randint(1, 30))))
+    same, tried = True, 0
+    for c_, v_, k_, mf, mp in cases:
+        lo = dfc.LeaveOneOut(c_, v_, k_, mf, mp)
+        for _ in range(4):
+            r_, t_ = rng.rand(len(lo.names)) < 0.7, rng.rand(len(lo.names)) < 0.8
+            got = lo.offsets(r_, t_)
+            for i, name in enumerate(lo.names.tolist()):
+                if t_[i]:
+                    a, b = got[name], lo.offset(name, r_)
+                    tried += 1
+                    same &= a[1] == b[1] and (a[0] == b[0] or (np.isnan(a[0]) and np.isnan(b[0])))
+                else:
+                    same &= name not in got
+    check(same, f"offsets() equals offset() to the bit for every key and reference set ({tried} offsets, "
+                f"{len(cases)} sample sets, ties included)")
 
 
 def test_spearman():
@@ -345,8 +382,27 @@ def test_take_back():
           and dt["refused"][0][2] == ["c2 2025-03-02"] and abs(o2) <= LIMIT,
           f"3 Mar is {o3:+.3f} m from the kept days, but would put 2 Mar ({o2:+.3f} m) over the limit")
     text = " ".join(x.strip() for x in dfc.day_test_report(dt, LIMIT, 1))
-    check(text.count("not taken back:") == 1 and "not taken back: c2 2025-03-03" in text
+    check(sum(x.strip().startswith("not taken back:") for x in dfc.day_test_report(dt, LIMIT, 1)) == 1
+          and "not taken back: c2 2025-03-03" in text
           and "would put c2 2025-03-02 over the limit" in text, "... and the lines say so, once")
+    lines = dfc.day_test_report(dt, LIMIT, 1)
+    row = [ln for ln in lines if ln.startswith("   c2 2025-03-03")][0]
+    check("REJECTED" in row and "within the limit of the kept days, not taken back" in row
+          and "taken back: none (the days within the limit of the kept days would each put a kept day over it"
+          in text and "every day left out is still over the limit, or not comparable" not in text.split(
+              "taken back: none")[1][:60],
+          "its line and the 'taken back: none' line do not claim every day left out is over the limit")
+    rec = dfc.day_test_record(dt, LIMIT, [])["day_test"]
+    check(rec["refused_take_back"] == [{"day": "c2 2025-03-03", "offset_m": round(o3, 4),
+                                        "would_push": ["c2 2025-03-02"]}],
+          "<stem>_info.json: day_test.refused_take_back names it, its offset and the day it would push")
+    import dem_figure
+    info = {"filters": {"max_day_offset": LIMIT, "camera_days_rejected": dt["rejected"],
+                        **dfc.day_test_record(dt, LIMIT, [])}}
+    left = dem_figure.title_lines(info, {"filled": 1, "blanked": 0, "no_value": 0}, "TEST", 0.5, 3, 2.0)[2]
+    check(any("2 camera-days left out by the day test (±0.15 m; 1 within it but at odds with a kept day)" in x
+              for x in left) and not any("off the rest by" in x for x in left),
+          "the page does not call it 'off the rest by > 0.15 m'")
     check(all(abs(dt["final"][k][0]) <= LIMIT for k in dt["final"] if k not in dt["rejected"]),
           "every kept day within the limit")
 
@@ -380,6 +436,41 @@ def test_trend():
     check(four == [], "fewer than 5 testable days: no warning")
 
 
+def test_trend_rule():
+    print("the trend rule: what |rho| it asks for, and how often it fires with no trend")
+    need = {n: dfc.trend_rho_needed(n) for n in range(5, 10)}
+    check([round(need[n], 3) for n in range(5, 10)] == [1.0, 0.943, 0.893, 0.833, 0.8],
+          f"|rho| needed: 5 days 1.00 (strictly monotonic), 6 {need[6]:.3f}, 7 {need[7]:.3f}, 8 {need[8]:.3f}, "
+          f"from 9 on > 0.8")
+    from itertools import permutations
+    p = np.array(list(permutations(range(9))), dtype=np.int64)
+    rho9 = 1.0 - 6.0 * ((p - np.arange(9)) ** 2).sum(axis=1) / (9 * 80.0)
+    vals = np.unique(np.round(rho9, 9))
+    exact9 = min(v for v in vals if (rho9 >= v - 1e-9).mean() <= dfc.DAY_TREND_ALPHA)
+    check(exact9 < dfc.DAY_TREND_MIN_RHO,
+          f"9 days, all 362880 orders: the 1 % value is {exact9:.3f}, below 0.8, so from 9 days on the 0.8 "
+          f"floor is the stricter (the 1 % value falls as days are added)")
+    two_swaps = {f"c1 2026-10-{i:02d}": o for i, o in enumerate([-0.1, -0.2, 0.05, 0.0, 0.15, 0.2], 5)}
+    rising = {f"c1 2026-10-{i:02d}": o for i, o in enumerate([-0.2, -0.1, 0.0, 0.05, 0.1, 0.2], 5)}
+    check(dfc.day_trends(two_swaps, LIMIT) == [] and len(dfc.day_trends(two_swaps, LIMIT, alpha=1.0)) == 1
+          and abs(dfc.day_trends(rising, LIMIT)[0]["chance"] - 1 / 720.0) < 1e-12
+          and "which days in random order reach 1 time in 720;" in dfc.day_trend_warning(
+              dfc.day_trends(rising, LIMIT)[0], LIMIT, [])[0],
+          "6 days rising with two pairs swapped (rho 0.89, reached by 1.7 % of random orders): no warning "
+          "(|rho| > 0.8 alone warned); strictly rising: WARNING, chance 1/720")
+    # no trend: independent day biases, two cameras, 7 days, as the NUC's c2 (sd ~0.08 m)
+    rng = np.random.RandomState(12)
+    n, fired, old = 4000, 0, 0
+    days = [f"2026-10-{d:02d}" for d in range(5, 12)]
+    for _ in range(n):
+        off = {f"{c} {d}": float(rng.normal(0, 0.08)) for c in ("c1", "c2") for d in days}
+        fired += bool(dfc.day_trends(off, LIMIT))
+        old += bool(dfc.day_trends(off, LIMIT, alpha=1.0))           # |rho| > 0.8 alone (d28b5ec)
+    check(fired / n < 0.03 and old / n > 2 * fired / n,
+          f"{n} 7-day windows of two cameras with no trend (day biases sd 0.08 m): WARNING in "
+          f"{100.0 * fired / n:.1f} % (|rho| > 0.8 alone: {100.0 * old / n:.1f} %)")
+
+
 def test_nuc_7day():
     print("the station's 7-day DEM of 5-11 Oct 2026, replayed")
     bias, days, err = replay_nuc()
@@ -400,36 +491,107 @@ def test_nuc_7day():
 
 
 def test_too_few():
-    print("the test cannot tell which day is off: none left out")
+    print("fewer than 3 testable days: the test cannot tell which day is off, none left out")
     days = [("c2 2025-03-06", 0.0, range(100), 3), ("c2 2025-03-07", 0.3, range(100), 3)]
     dt, one = run(days)
     check(dt["too_few"] and dt["rejected"] == [] and dt["steps"] == [], "two days 0.3 m apart: both kept")
     lines = dfc.day_test_report(dt, LIMIT)
     check(any("kept: fewer than 3 testable days" in x for x in lines) and "every day kept" in lines[-1]
-          and not any("REJECTED" in x for x in lines), "... and the lines say so (as test_survey_products expects)")
-    days = [("c2 2025-03-06", 0.0, range(100), 3), ("c2 2025-03-07", 0.4, range(100), 3),
-            ("c2 2025-03-08", -0.4, range(100), 3)]
+          and not any("REJECTED" in x for x in lines) and dfc.day_test_warning(dt, LIMIT) == ("", []),
+          "... and the lines say so (as test_survey_products expects), no WARNING (as before)")
+    # untestable days (too few comparable samples) are kept and do not count
+    days = [("c2 2025-03-0%d" % d, 0.0, range(100), 3) for d in (1, 2, 3, 4)]
+    days.append(("c2 2025-03-05", 0.5, range(5), 3))                     # 15 samples < 30
     dt, one = run(days)
-    check(len(dt["rejected"]) == 1 and "only 2 testable camera-day(s) kept" in dt["stop"],
-          f"three days, two off either way: one left out ({dt['rejected'][0]}), then the test stops with two")
-    # c1's two days only see each other (c2 does not share their cells): neither can be judged
+    check(np.isnan(dt["first"]["c2 2025-03-05"][0]) and dt["rejected"] == [] and not dt["untested"],
+          "a day with fewer than 30 comparable samples: kept, not testable (and not 'kept untested')")
+
+
+def scenario_fringe(checked=True):
+    """The low beach (cells 0-19) is reached by two c2 days only: 20 Sep (good, 3 frames per cell)
+    and 22 Sep (0.57 m LOW, 8 frames). Nine good days cover cells 20-99. With checked, 20 Sep also
+    reaches cells 20-49, where the nine days check it; without, 20 and 22 Sep only see each other."""
+    days = [(f"c2 2026-09-{d}", 0.0, range(20, 100), 1) for d in range(11, 20)]
+    days.append(("c2 2026-09-20", 0.0, range(50 if checked else 20), 3))
+    days.append(("c2 2026-09-22", -0.57, range(20), 8))
+    return days
+
+
+def test_fringe():
+    print("a fringe day whose cells only one other day reaches")
+    dt, one = run(scenario_fringe())
+    check(one_pass_rejects(one) == ["c2 2026-09-22"],
+          f"one pass: 22 Sep rejected ({one['c2 2026-09-22'][0]:+.3f} m), 20 Sep kept "
+          f"({one['c2 2026-09-20'][0]:+.3f} m)")
+    loo = dfc.LeaveOneOut(*pairs(scenario_fringe()), MIN_FRAMES)
+    j = loo.judge("c2 2026-09-22", np.ones(len(loo.names), bool), LIMIT)
+    check(j["judged"] and j["share"] == 1.0 and not j["alone"],
+          "judged: its DEM is 20 Sep alone, but the nine other days check 20 Sep where they meet it "
+          "(within the limit): 20 Sep vouches")
+    check(dt["rejected"] == ["c2 2026-09-22"] and not dt["not_judged"] and not dt["untested"]
+          and dfc.day_test_warning(dt, LIMIT) == ("", []),
+          "iterative: 22 Sep left out, every other day kept, no WARNING (the guard of d28b5ec kept it, "
+          "silently)")
+    dt, one = run(scenario_fringe(checked=False))
+    check(one_pass_rejects(one) == ["c2 2026-09-20", "c2 2026-09-22"],
+          "20 and 22 Sep only see each other: one pass rejected both")
+    check(dt["rejected"] == ["c2 2026-09-20", "c2 2026-09-22"]
+          and [r["day"] for r in dt["not_judged"]] == ["c2 2026-09-20", "c2 2026-09-22"]
+          and all(r["left_out"] for r in dt["not_judged"]),
+          "iterative: neither can be judged -- the first pass's verdict, both left out")
+    head, lines = dfc.day_test_warning(dt, LIMIT)
+    check(head.startswith("WARNING: the day test could not judge every camera-day -- left out without being "
+                          "judged: c2 2026-09-20, c2 2026-09-22")
+          and sum("WARNING" in x for x in lines) == 1 and all(x.startswith("   ") for x in lines[1:]),
+          "one WARNING line names them")
+    rep = dfc.day_test_report(dt, LIMIT, 1)
+    check(all("REJECTED (not judged: over the limit in the first pass)" in x for x in rep
+              if x.startswith("   c2 2026-09-2")),
+          "their lines say why")
+
+
+def test_cannot_judge():
+    print("days the test cannot judge keep the first pass's verdict, with a WARNING")
+    # c1's two days only see each other (c2 does not share their cells)
     days = [("c1 2026-10-0%d" % d, 0.3 * (d - 1), range(100), 3) for d in (1, 2)]
     days += [("c2 2026-10-0%d" % d, 0.0, range(100, 200), 3) for d in (1, 2, 3, 4, 5)]
     dt, one = run(days)
     check(one_pass_rejects(one) == ["c1 2026-10-01", "c1 2026-10-02"],
           "c1's two days only see each other: one pass rejected BOTH (7 testable days in all)")
-    check(dt["rejected"] == [] and "fewer than 2 other kept camera-days" in dt["stop"],
-          "iterative: neither left out (each one's DEM is the other day alone)")
-    lines = dfc.day_test_report(dt, LIMIT)
-    text = " ".join(x.strip() for x in lines)
-    check("none left out: c1 2026-10-01, c1 2026-10-02 over the limit but kept" in text,
-          "... and the lines say why")
-    # untestable days (too few comparable samples) are kept and do not count
-    days = [("c2 2025-03-0%d" % d, 0.0, range(100), 3) for d in (1, 2, 3, 4)]
-    days.append(("c2 2025-03-05", 0.5, range(5), 3))                     # 15 samples < 30
+    check(dt["rejected"] == ["c1 2026-10-01", "c1 2026-10-02"] and len(dt["not_judged"]) == 2
+          and "alone, which the other kept days do not confirm" in dt["not_judged"][0]["why"],
+          "iterative: neither can be judged (each one's DEM is the other day alone): both left out, as one pass")
+    # the same, with 30 % of c1's cells shared with c2: the overlap tells which c1 day is off
+    days = [("c1 2026-10-05", 0.0, range(100), 3), ("c1 2026-10-06", 1.0, range(100), 3)]
+    days += [(f"c2 2026-10-0{d}", 0.0, range(70, 300), 3) for d in range(3, 10)]
     dt, one = run(days)
-    check(np.isnan(dt["first"]["c2 2025-03-05"][0]) and dt["rejected"] == [],
-          "a day with fewer than 30 comparable samples: kept, not testable")
+    check(one_pass_rejects(one) == ["c1 2026-10-05", "c1 2026-10-06"] and dt["rejected"] == ["c1 2026-10-06"]
+          and not dt["not_judged"],
+          "with 30 % of their cells shared with c2: 6 Oct (+1.0 m) left out, 5 Oct kept (one pass: both out); "
+          "5 Oct, checked by c2 where they meet, vouches")
+    # three days, two off either way: one goes, then two are left that disagree
+    days = [("c2 2025-03-06", 0.0, range(100), 3), ("c2 2025-03-07", 0.4, range(100), 3),
+            ("c2 2025-03-08", -0.4, range(100), 3)]
+    dt, one = run(days)
+    nj = {r["day"]: r for r in dt["not_judged"]}
+    check(dt["rejected"] == one_pass_rejects(one) == ["c2 2025-03-07", "c2 2025-03-08"]
+          and len(dt["steps"]) == 2 and sorted(nj) == ["c2 2025-03-06", dt["steps"][1][0]]
+          and not nj["c2 2025-03-06"]["left_out"] and "only 2 testable camera-day(s) kept" in nj["c2 2025-03-06"]["why"],
+          f"three days 0, +0.4, -0.4 m: {dt['steps'][0][0][3:]} left out, then two that disagree: the first "
+          f"pass's verdict, 6 Mar kept and {dt['steps'][1][0][3:]} left out, as one pass")
+    head = dfc.day_test_warning(dt, LIMIT)[0]
+    check("kept over the limit without being judged: c2 2025-03-06" in head
+          and "kept untested" not in head, f"WARNING: {head[9:100]}...")
+    # every day disagrees: every day rejected (one pass too), so the command line exits 4 as before
+    days = [(f"c1 2026-10-0{d}", 0.4 * (d - 1), range(100), 3) for d in range(1, 5)]
+    dt, one = run(days)
+    check(dt["rejected"] == one_pass_rejects(one) == sorted(k for k, _, _, _ in days)
+          and [r["day"] for r in dt["not_judged"]] == ["c1 2026-10-01", "c1 2026-10-02"],
+          "4 days 0, +0.4, +0.8, +1.2 m: 4 and 3 Oct left out, then 1 and 2 Oct cannot be judged and were "
+          "over the limit in the first pass: every day rejected, as one pass")
+    rep = dfc.day_test_report(dt, LIMIT, 1200)
+    check(sum("REJECTED" in x for x in rep[1:5]) == 4, "every day's line says REJECTED (survey_products "
+                                                         "reads 'rejected every camera-day' from that)")
 
 
 def test_deterministic():
@@ -518,6 +680,191 @@ def test_cli(d):
           "without --max-day-offset: no test, day_test None")
 
 
+def check_invariants(dt, limit=LIMIT):
+    """What every result of day_consistency must hold. -> '' or what failed."""
+    rej, back = set(dt["rejected"]), set(dt["taken_back"])
+    steps = [x[0] for x in dt["steps"]]
+    nj = {r["day"]: r for r in dt["not_judged"]}
+    refused = {r[0] for r in dt["refused"]}
+    fin, first = dt["final"], dt["first"]
+    if dt["too_few"]:                       # fewer than 3 testable days: every day kept, as before
+        return "" if not (steps or rej or nj) and fin == first else "too few: every day kept"
+    if not (rej <= set(steps) and not (rej & back) and set(steps) == rej | back and len(steps) == len(set(steps))):
+        return "bookkeeping: left out = rejected + taken back, each once"
+    for k, r in nj.items():
+        if r["left_out"] != (np.isfinite(first[k][0]) and abs(first[k][0]) > limit):
+            return f"{k}: a day not judged keeps the first pass's verdict"
+        if r["left_out"] and k not in steps:
+            return f"{k}: not judged, over in the first pass, not left out"
+    for k in fin:
+        o = fin[k][0]
+        if k not in rej and np.isfinite(o) and abs(o) > limit and k not in nj:
+            return f"{k}: kept over the limit, but judged"
+        if k in rej and np.isfinite(o) and abs(o) <= limit and k not in refused:
+            return f"{k}: rejected within the limit of the kept days, not a refused take-back"
+    if sorted(dt["over_kept"]) != sorted(k for k in fin if k not in rej and np.isfinite(fin[k][0])
+                                         and abs(fin[k][0]) > limit):
+        return "over_kept"
+    head, lines = dfc.day_test_warning(dt, limit)
+    if bool(head) != bool(dt["not_judged"] or dt["untested"]) or sum("WARNING" in x for x in lines) > 1:
+        return "one WARNING line exactly when a day was not judged or is kept untested"
+    rep = dfc.day_test_report(dt, limit, 1 if rej else None)
+    if sum("REJECTED" in x for x in rep) != len(rej) or not rep[0].startswith("Day consistency"):
+        return "the report's REJECTED lines"
+    json.dumps(dfc.day_test_record(dt, limit, dfc.day_trends({k: v[0] for k, v in fin.items()}, limit)),
+               allow_nan=False)
+    return ""
+
+
+def random_days(seed):
+    """A random two-camera window: up to 8 days a camera, a quarter of them off by N(0, 0.3) m, on
+    random stretches of cells (some that only one day reaches), 1-5 frames a cell."""
+    rng = np.random.RandomState(seed)
+    days = []
+    for cam, c0 in (("c1", 0), ("c2", int(rng.randint(50, 200)))):
+        for d in range(int(rng.randint(1, 9))):
+            bias = float(rng.choice([0.0, 0.0, 0.0, rng.normal(0, 0.3)]))
+            lo = c0 + int(rng.randint(0, 60))
+            days.append((f"{cam} 2026-10-{d + 1:02d}", bias, range(lo, lo + int(rng.randint(5, 120))),
+                         int(rng.randint(1, 6))))
+    return days, float(rng.choice([0.02, 0.12]))
+
+
+def test_random(n=150):
+    print(f"{n} random windows: the bookkeeping holds, the result does not depend on the sample order")
+    bad, stats = [], {"left out": 0, "taken back": 0, "refused": 0, "not judged": 0, "untested": 0}
+    for seed in range(n):
+        days, sigma = random_days(seed)
+        pc, pv, pk = pairs(days, sigma=sigma, seed=seed)
+        dt = dfc.day_consistency(pc, pv, pk, LIMIT, MIN_FRAMES)
+        p = np.random.RandomState(seed + 1000).permutation(len(pc))
+        why = check_invariants(dt)
+        if not why and dt != dfc.day_consistency(pc[p], pv[p], pk[p], LIMIT, MIN_FRAMES):
+            why = "order dependent"
+        if why:
+            bad.append(f"seed {seed}: {why}")
+        stats["left out"] += len(dt["steps"])
+        stats["taken back"] += len(dt["taken_back"])
+        stats["refused"] += len(dt["refused"])
+        stats["not judged"] += len(dt["not_judged"])
+        stats["untested"] += len(dt["untested"])
+    check(not bad, "invariants hold (" + ", ".join(f"{k} {v}" for k, v in stats.items()) + ")"
+          + ("" if not bad else ": " + "; ".join(bad[:5])))
+
+
+def archive(ndays, npre, seed=1):
+    """A synthetic whole archive: two cameras, ndays days each; c1's first npre days 0.3-1.4 m high (a
+    beach before a storm), one day in ten off by 0.2-0.5 m either way, the rest within ~0.05 m.
+    Frames of 22 (c1) or 32 (c2) cells, 25 or 40 a day. -> (pairs, planted biases)"""
+    rng = np.random.RandomState(seed)
+    nx = 50
+    cams = {"c1": (0, 22, 25), "c2": (18, 50, 40)}
+    pc, pv, pk, truth = [], [], [], {}
+    for d in range(ndays):
+        day = (np.datetime64("2026-07-01") + d).astype(str)
+        for cam, (a0, a1, nf) in cams.items():
+            if cam == "c1" and d < npre:
+                bias = 0.3 + 1.1 * rng.rand()
+            elif rng.rand() < 0.1:
+                bias = rng.choice([-1, 1]) * (0.2 + 0.3 * rng.rand())
+            else:
+                bias = rng.normal(0, 0.05)
+            truth[f"{cam} {day}"] = bias
+            lo = rng.randint(0, 20)
+            hi = lo + rng.randint(20, 30)
+            cols = np.arange(a0, a1)
+            for f in range(nf):
+                x = rng.randint(lo, hi)
+                cells = cols * nx + x
+                fn = rng.normal(0, 0.04)
+                pc.append(cells)
+                pv.append(0.02 * x + bias + fn + rng.normal(0, 0.03, len(cells)))
+                pk.append(np.array([f"{cam} {day}"] * len(cells)))
+    return (np.concatenate(pc), np.concatenate(pv), np.concatenate(pk)), truth
+
+
+def test_timing(year=False):
+    import time
+    ndays, npre, limit_s = (365, 90, 600) if year else (90, 30, 30)
+    print(f"run time: {2 * ndays} camera-days, many left out")
+    (pc, pv, pk), truth = archive(ndays, npre)
+    t0 = time.time()
+    dt = dfc.day_consistency(pc, pv, pk, LIMIT, MIN_FRAMES)
+    took = time.time() - t0
+    bad = {k for k, b in truth.items() if abs(b) > LIMIT}
+    check(took < limit_s and len(dt["rejected"]) >= 0.95 * len(bad) and set(dt["rejected"]) <= bad | set(
+              k for k in truth if abs(truth[k]) > 0.1),
+          f"{2 * ndays} camera-days, {len(pc):,} samples, {len(dt['steps'])} left out one at a time: "
+          f"{took:.1f} s (limit {limit_s} s; the cron's flock skips a run that overlaps the next); "
+          f"{len(set(dt['rejected']) & bad)} of the {len(bad)} planted off days found")
+
+
+HEADER = ("source_file,camera,capture_time_utc,capture_epoch,easting_utm19,northing_utm19,"
+          "tide_elevation_navd88,beach_elevation_navd88")
+
+
+def ground_file(path, frames):
+    """frames: [(day of Sep 2026, UTC hour, minute, beach row x, dz)]: a c2 frame of 20 points along
+    row x (northing 2x + 1 m) at elevation 0.2 x - 0.5 + dz, the station's ground-file columns."""
+    rows = [HEADER]
+    for day, h, m, x, dz in frames:
+        t = datetime(2026, 9, day, h, m, tzinfo=timezone.utc)
+        f = f"f{day}_{h}_{m}_{x}"
+        z = 0.2 * x - 0.5 + dz
+        for col in range(20):
+            rows.append(f"{f},c2,{t:%Y-%m-%dT%H:%M:%S}+00:00,{int(t.timestamp())},{420001.0 + 2 * col:.2f},"
+                        f"{4638001.0 + 2 * x:.2f},{z:.3f},{z:.3f}")
+    Path(path).write_text("\n".join(rows) + "\n")
+
+
+def dem_rows(stem):
+    """The DEM's rows south to north (beach row x = 0 first), NaN where blank."""
+    a = np.loadtxt(f"{stem}_dem.asc", skiprows=6)[::-1]
+    return np.where(a == -9999, np.nan, a)
+
+
+def test_cli_cannot_judge(d):
+    print("dem_from_contours.py: a fringe day, and days that all disagree")
+    import survey_products as sp
+    rng = np.random.RandomState(1)
+    # the review's case: 9 good days on rows 2-9; the low beach (rows 0-1) reached by 20 Sep (good,
+    # 3 frames a row, also on rows 2-4) and 22 Sep (0.57 m LOW, 16 frames a row)
+    frames = [(day, 12 + i, 0, x, rng.normal(0, 0.02)) for day in range(11, 20) for i, x in enumerate(range(2, 10))]
+    frames += [(20, 12 + r, 10 * x, x, rng.normal(0, 0.02)) for r in range(3) for x in (0, 1)]
+    frames += [(20, 16 + r, 10 * x, x, rng.normal(0, 0.02)) for r in range(3) for x in range(2, 5)]
+    frames += [(22, 4 + r, 3 * x, x, -0.57 + rng.normal(0, 0.02)) for r in range(16) for x in (0, 1)]
+    g, stem = Path(d) / "fringe.csv", Path(d) / "fringe"
+    ground_file(g, frames)
+    r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(stem),
+                        "--max-day-offset", str(LIMIT), "--no-plot"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(d))
+    (Path(d) / "fringe.log").write_text(r.stdout)
+    rej = [ln for ln in r.stdout.splitlines() if "REJECTED" in ln]
+    z = dem_rows(stem)
+    check(r.returncode == 0 and len(rej) == 1 and "c2 2026-09-22" in rej[0] and "WARNING" not in r.stdout,
+          "a day 0.57 m low on cells only one other (checked) day reaches: it alone is REJECTED, no WARNING")
+    check(abs(np.nanmean(z[0]) + 0.50) < 0.03 and abs(np.nanmean(z[1]) + 0.30) < 0.03,
+          f"the low beach comes out right: rows 0 and 1 {np.nanmean(z[0]):+.3f}, {np.nanmean(z[1]):+.3f} m "
+          f"(truth -0.50, -0.30; with that day kept, as d28b5ec did, -1.07 and -0.86)")
+    # every day disagrees: one camera, 4 days at 0, +0.4, +0.8, +1.2 m on the same rows
+    frames = [(day, 12 + r, 5 * x, x, 0.4 * i + rng.normal(0, 0.02))
+              for i, day in enumerate((11, 12, 13, 14)) for r in range(3) for x in range(10)]
+    g, stem = Path(d) / "apart.csv", Path(d) / "apart"
+    ground_file(g, frames)
+    r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(stem),
+                        "--max-day-offset", str(LIMIT), "--no-plot"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(d))
+    (Path(d) / "apart.log").write_text(r.stdout)
+    warn = [ln for ln in r.stdout.splitlines() if "WARNING" in ln]
+    check(r.returncode == 4 and "No points left: the day-consistency test rejected every camera-day" in r.stdout
+          and not Path(f"{stem}_dem.asc").exists(),
+          "4 days that all disagree: every camera-day rejected, exit 4, no grids (as the one-pass test)")
+    check(len(warn) == 1 and "left out without being judged: c2 2026-09-11, c2 2026-09-12" in warn[0],
+          "one WARNING line: the last two days could not be judged")
+    check("rejected every camera-day (4 of 4)" in sp.dem_failure_reason(Path(d) / "apart.log"),
+          "survey_products.dem_failure_reason reads it as before ('rejected every camera-day')")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
@@ -533,6 +880,8 @@ def test_py38():
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--keep", default=None, help="keep the outputs, in a new folder inside this one")
+    ap.add_argument("--year", action="store_true",
+                    help="time a year of camera-days (730, ~170 left out; about a minute) instead of a quarter")
     args = ap.parse_args()
     if args.keep:
         Path(args.keep).mkdir(parents=True, exist_ok=True)
@@ -548,10 +897,16 @@ def main():
         test_swamp()
         test_take_back()
         test_trend()
+        test_trend_rule()
         test_nuc_7day()
         test_too_few()
+        test_fringe()
+        test_cannot_judge()
         test_deterministic()
+        test_random()
+        test_timing(args.year)
         test_cli(d)
+        test_cli_cannot_judge(d)
         test_py38()
     finally:
         os.chdir(start)
