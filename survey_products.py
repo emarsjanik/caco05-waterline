@@ -3783,8 +3783,11 @@ def calibration_identity(plan, args, blind_note=True):
         sha = file_sha(c["eo_path"])[:12] if c.get("eo_path") else "missing"
         lab = ""
         if plan.get("blind"):
-            lab = " " + held_check(calibration_origin(c.get("eo_path") or c.get("eo_file"), eo_dirs(args)),
-                                   plan["blind"], envelope_check(plan, cam, args))[0]
+            o_ = calibration_origin(c.get("eo_path") or c.get("eo_file"), eo_dirs(args))
+            lab = " " + held_check(o_, plan["blind"], envelope_check(plan, cam, args))[0]
+            if lab == " INDEPENDENT" and (o_.get("procedure") or {}).get("pinned"):
+                # the label separated from the README: it still points to what the procedure's makers had seen of A
+                lab += " (procedure made with stated exposure to A: README EXPOSURE)"
         parts.append(f"{cam} {c.get('eo_file')} sha256 {sha}{lab}")
     for cam in sorted(plan.get("not_delivered") or {}):
         parts.append(f"{cam} NOT DELIVERED by the GCP-free procedure (no data)")
@@ -3829,8 +3832,12 @@ def dem_cmds(plan, args, day_test=True):
     station = "/".join(sorted({c["station"] for c in plan["cams"].values()}))
     cal = calibration_label(plan, args)
     var = sorted({c["variant"] for c in plan["cams"].values() if c.get("variant")})   # an --eo build says which
+    held_day = (plan.get("blind") or {}).get("survey_date")
     page = [sys.executable, HERE / "dem_figure.py", stem, "--calibration", out / "dem" / "view_calibration",
             "--station", (f"{station} Marconi Beach (calibration {'/'.join(var)}: {cal})" if var else
+                          # a blind date's table calibration solved from the held survey's GCPs: said on the page
+                          f"{station} Marconi Beach (table calibration {cal}: solved from the held GCPs)"
+                          if held_day and held_day in cal.split(", ") else
                           f"{station} Marconi Beach (calibration {cal})")]
     return stem, cmd, tif, page
 
@@ -5921,9 +5928,16 @@ def gcpfree_disclosure(plan, args, pcs):
         flags.append("B was committed after A's DEM was built: only B's sha256, written down (and sent) when its run "
                      "ended, shows it was not changed in between")
     if t["a_dem_last"] and t["b_run"] and t["a_dem_last"] > t["b_run"]:
-        # B's DEM is built with A's options as A was LAST built: a rebuild of A after B's run could have set them
-        # with B's calibration known (a rebuild after a code change keeps them: A's provenance gives its commands)
-        flags.append(f"A's DEM was rebuilt ({utc_text(t['a_dem_last'])}) after B's run began: B's DEM is built with "
+        # B's DEM is built with A's options as A was LAST built: a build of A after B's run could have set them with
+        # B's calibration known (a rebuild after a code change keeps them: A's provenance gives its commands). A DEM
+        # built for the FIRST time after B's run is not a rebuild (review r1: 'rebuilt' next to 'first built' then)
+        first_after = not t["a_dem"] or t["a_dem"] >= t["a_dem_last"] or t["a_dem"] > t["b_run"]
+        flags.append((f"A's DEM was first built ({utc_text(t['a_dem'] or t['a_dem_last'])}) after B's run began: its "
+                      f"options could have been chosen with B known, and B's DEM is built with them; A's provenance "
+                      f"gives the command of that build"
+                      + (f" (and of its last rebuild, {utc_text(t['a_dem_last'])})"
+                         if t["a_dem"] and t["a_dem_last"] != t["a_dem"] else "")) if first_after else
+                     f"A's DEM was rebuilt ({utc_text(t['a_dem_last'])}) after B's run began: B's DEM is built with "
                      f"A's options as last built, which could then have been chosen with B known; A's provenance gives "
                      f"the command of that rebuild (a rebuild after a code change keeps A's options)")
     def ran(sw):                                   # {script: {sha256 it ran with}} of a product's steps
@@ -6341,6 +6355,21 @@ def eo_acceptance_problem(plan, args):
     return ""
 
 
+def variant_lookalike(variant):
+    """A --calibration-variant name that reads as the GCP-free procedure's B without being one of its names
+    (GCPFREE_VARIANTS): 'gcpfree...' (gcpfree-oct, gcpfree2) or 'b', 'b2', 'b-...'. Its files and archive would be
+    named like B's (2024-10-23_gcpfree-oct_dem.tif, ..._gcpfree-oct_calibration.tgz) with only the text inside saying
+    what it is (review r1). -> text ('' when fine)."""
+    v = str(variant or "")
+    if not v or v in GCPFREE_VARIANTS:
+        return ""
+    if v.startswith("gcpfree") or re.match(r"^b\d*(-|$)", v):
+        return (f"--calibration-variant {v!r} reads as the pre-registered GCP-free procedure's calibration B "
+                f"({', '.join(GCPFREE_VARIANTS)}), whose names belong to the B files it delivered: another "
+                f"calibration takes a name that cannot be read as B (e.g. turned-oct, handfit-2)")
+    return ""
+
+
 def procedure_variant_problem(plan, args):
     """The GCP-free procedure's variant names (GCPFREE_VARIANTS) belong to its B files: a B it made is built as the
     variant it names (gcpfree for the delivered B; gcpfree-aug for the second product of its one allowed second
@@ -6350,6 +6379,9 @@ def procedure_variant_problem(plan, args):
     given = {cam: c for cam, c in plan["cams"].items() if c.get("eo_given") and c.get("eo_path")}
     if not given:
         return ""
+    look = variant_lookalike(variant)
+    if look:
+        return look
     procs = {cam: procedure_check(c["eo_path"], eo_dirs(args)) for cam, c in given.items()}
     probs = []
     if variant in GCPFREE_VARIANTS:
@@ -8057,8 +8089,11 @@ PER_DAY_ROWS_NOTE = (
 
 # The same on a BLIND product, which has no comparison: what the holder's own check may see by day.
 PER_DAY_ROWS_NOTE_BLIND = (
-    "This product has no comparison (blind). A check that splits its error by day (the photo days: provenance.json "
-    "frames_per_day) may show a step or trend between days: it may be change of the beach OR a method error that "
+    "This product has no comparison (blind). The DEM merges the days; a check that splits its error by day needs the "
+    "waterline points themselves (waterlines/contour_points_ground_filtered.csv, or contour_points_ground.csv when no "
+    "filtered file was used: each point with its frame's capture time, still water and setup; in the --share archive "
+    "too; the photo days: provenance.json frames_per_day). Such a check may show a step or trend between days: it may "
+    "be change of the beach OR a method error that "
     "depends on the conditions (the elevation, the waves and setup, the tide phase of the hours sampled, which moves "
     "from day to day): on a static synthetic beach this method's per-day medians drift by up to ~0.17 m over a week "
     "(Jan -0.09 m, Mar -0.17 m, with a ~0.07 m step across a wave event), and days at the same median elevation still "
@@ -8626,7 +8661,7 @@ def write_provenance(plan, args, state, final=True):
                     settings_from=("the DEM on disk (its build stamp)" if dem_built else
                                    "this run's options (no DEM built yet)"),
                     requested_this_run=dem_want,
-                    files={k: f"{out / 'dem' / plan['date']}_{k}" for k in ("dem", "spread", "count")},
+                    files={k: f"{dem_stem(plan)}_{k}" for k in ("dem", "spread", "count")},
                     cells=dstamp.get("cells"),
                     built_from=info,
                     geotiff=(f"asc_to_geotiff.py: tagged EPSG:{dem_set.get('geotiff_epsg')}"
@@ -9033,6 +9068,8 @@ def write_readme(plan, args, prov):
     w("  compare/      " + (f"none: a blind product ({bl['statement']})" if bl else
                            "DEM - survey grids/points, report, figure, json"))
     w("  provenance.json  every source above, machine-readable")
+    w("  (survey_products.py --share packs all of these into one archive with a MANIFEST, but not waterlines/<cam>/, "
+      "pointing/reference_<cam>/ or logs/stamps/, and of the two waterline files only the one the DEM used)")
     w("")
     w("EXACT COMMANDS (rebuild everything: the first line; each step's own command below it)")
     for k, v in prov["commands"].items():
@@ -10838,6 +10875,11 @@ def lens_note(io_, cam, station, files, seen):
                "not compared (not readable)"))
 
 
+def reasons_text(reasons):
+    """Reasons joined with '; ', each once, in their first order (two cameras of one B share its build record)."""
+    return "; ".join(dict.fromkeys(r for r in reasons if r))
+
+
 def share(args):
     """
     One archive of a built date to send (e.g. to the holder of a blind date's survey): README, provenance, the
@@ -10895,8 +10937,11 @@ def share(args):
                 elif not g.get("committed") or g.get("commits") != 1:
                     problems.append(f"{rec['path']} is {g.get('why') or 'committed more than once'}: commit it (once) "
                                     f"before the B is shared")
+    for v_ in sorted(var):
+        if variant_lookalike(v_):
+            problems.append(variant_lookalike(v_))
     if problems:
-        print(f"--share: {name} REFUSED: " + "; ".join(problems))
+        print(f"--share: {name} REFUSED: " + reasons_text(problems))
         return EXIT_CODES["refused"]
     sdir = Path(args.share_dir or (Path(args.output_root) / "share"))
     tgz = sdir / f"{name}.tgz"
@@ -10917,6 +10962,23 @@ def share(args):
                 files.append((Path(st + suf), f"dem/{Path(st + suf).name}"))
     for f in sorted((out / "maps").glob("*.png")) if (out / "maps").is_dir() else []:
         files.append((f, f"maps/{f.name}"))
+    # what the README's FILES section and caveats point to, so the holder can check the forcing, the pointing and
+    # the DEM day by day from the archive alone (review r1): the forcing, each camera's pointing table, the
+    # waterlines the DEM used with the filter's report, the comparison (none on a blind date) and the step logs.
+    # Not packed: waterlines/<cam>/ (the detection's work folders, with copies of the photos), the other waterline
+    # file, pointing/reference_<cam>/ (a copy of the reference photo) and logs/stamps/ (build records)
+    for sub, pats in (("forcing", ("forcing_report.txt", "forcing.json", "water_level.csv", "waves.csv", "forcing.png")),
+                      ("pointing", tuple(f"pointing_{c}.{e}" for c in sorted(cams) for e in ("csv", "json"))),
+                      ("waterlines", ("consistency_report.csv", "no_setup_frames.csv")
+                       + tuple(f"consistency_{c}.png" for c in sorted(cams))),
+                      ("compare", ("*",)), ("logs", ("*.log",))):
+        for pat in pats:
+            for f in sorted((out / sub).glob(pat)) if (out / sub).is_dir() else []:
+                if f.is_file() and (f, f"{sub}/{f.name}") not in files:
+                    files.append((f, f"{sub}/{f.name}"))
+    wl = waterline_file(product_plan(prov, out), quiet_=True)
+    if wl.is_file():
+        files.append((wl, f"waterlines/{wl.name}"))
     seen = set()
     for cam, v in sorted(cams.items()):
         cal = v.get("calibration") or {}
@@ -10939,6 +11001,23 @@ def share(args):
                 if q.is_file() and q not in seen:
                     seen.add(q)
                     files.append((q, f"calibration/gcpfree_run_{rd.name}/{q.name}"))
+            # the GCP solution(s) B was turned from (its report's b_reference_eo and Jan 2025 reference_eo), so the
+            # holder can check B's 'rotated by', 'pan change' and 'Position kept from' lines from the archive alone
+            rep_ = load_json(Path(str(pc.get("report") or ""))) or {}
+            for key in ("b_reference_eo", "reference_eo"):
+                nm, want_ = str(rep_.get(key) or ""), str(rep_.get(key + "_sha256") or "").lower()
+                q = next((Path(c_) / nm for c_ in (rd, Path(args.calibration), HERE / "calibration")
+                          if nm and (Path(c_) / nm).is_file()), None)
+                if nm and (q is None or q in seen):
+                    if q is None:
+                        prereg.append(f"reference EO {nm} (B's report: sha256 {want_[:16]}): not found here, not packed")
+                    continue
+                if q is not None:
+                    seen.add(q)
+                    files.append((q, f"calibration/{q.name}"))
+                    prereg.append(f"reference EO {nm} (what B was turned from, {key}): sha256 {file_sha(q)[:16]}, "
+                                  + ("the file B's report recorded" if file_sha(q) == want_ else
+                                     f"NOT the file B's report recorded ({want_[:16]})"))
             # the pre-registration (the outcome rule, fixed before any run): calibration/gcpfree/PREREGISTERED.txt,
             # two folders up from runs/<run id>/; said whether it is still the file the run recorded
             q = rd.parent.parent / "PREREGISTERED.txt"
@@ -10970,8 +11049,12 @@ def share(args):
              f"calibration: {'/'.join(sorted(var))}" + (" (the table's, survey_dates.csv)" if var == {"table"} else
                                                          " (--eo; NOT the table's)")]
     if bl:
+        lab_ = (bl.get("check") or {}).get("label")
         lines += [f"BLIND: {bl.get('statement')}",
-                  f"his check of this DEM: {(bl.get('check') or {}).get('label')} (per camera below; README: BLIND)"]
+                  f"his check of this DEM: {lab_}"
+                  + (" (procedure made with stated exposure to A: README EXPOSURE, and below)"
+                     if lab_ == "INDEPENDENT" and (bl.get("gcpfree") or {}).get("exposure") else "")
+                  + " (per camera below; README: BLIND)"]
     lines += ["cameras:"] + ident
     for cam, v in sorted(cams.items()):
         cal = v.get("calibration") or {}
@@ -10994,6 +11077,12 @@ def share(args):
               "maps/<date>_waterlines_plan.png; a variant: <date>_<variant>_dem.tif, maps/<date>_<variant>_waterlines_"
               "plan.png); every GeoTIFF's description (and, on a blind date or with a variant, the plan view's title) "
               "names the calibration (EO files, sha256) and, on a blind date, the GeoTIFFs the holder's-check label.",
+              "What of the build's folder is here (README: FILES): README.txt, provenance.json, dem/, maps/, forcing/ "
+              "(water level, waves, the forcing report), pointing/<cam>.csv and .json (each day's verdict and why), "
+              f"waterlines/{wl.name} (the waterline points the DEM used, each with its frame's capture time: a check "
+              "by day or by frame starts there) with the consistency filter's report, compare/ (none on a blind "
+              "date), logs/*.log and calibration/. Not here: waterlines/<cam>/ (the detection's work folders, with "
+              "copies of the photos), pointing/reference_<cam>/ (a copy of the reference photo), logs/stamps/.",
               "", "files (sha256, bytes, path):"]
     lines += [f"  {file_sha(src)}  {src.stat().st_size:>10}  {arc}" for src, arc in files]
     sdir.mkdir(parents=True, exist_ok=True)

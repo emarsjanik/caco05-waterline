@@ -4838,6 +4838,18 @@ def test_gcpfree_b(d):
         base.update(kw)
         return cfg_args(**base)
 
+    check(sp.reasons_text(["x is NOT committed", "y", "x is NOT committed", ""]) == "x is NOT committed; y",
+          "a refusal gives each reason once (two cameras of one B share its build record)")
+    look = {v: sp.variant_lookalike(v) for v in ("gcpfree-oct", "gcpfree2", "b", "b2", "b-oct", "gcpfree",
+                                                 "gcpfree-aug", "turned", "bird", "handfit-2")}
+    check(all(look[v] for v in ("gcpfree-oct", "gcpfree2", "b", "b2", "b-oct"))
+          and not any(look[v] for v in ("gcpfree", "gcpfree-aug", "turned", "bird", "handfit-2"))
+          and "reads as the pre-registered GCP-free procedure's calibration B" in look["gcpfree-oct"]
+          and sp.procedure_variant_problem({"cams": {"c2": {"eo_given": True, "eo_path": "/x/hand_turned_EO.yaml"}}},
+                                           SimpleNamespace(calibration_variant="gcpfree-oct")) == look["gcpfree-oct"],
+          "a variant name that reads as B (gcpfree-oct, gcpfree2, b2, b-oct) is refused unless it is one of the "
+          "procedure's own names (gcpfree, gcpfree-aug): no lookalike file or archive name")
+
     def share_args(rt, sdir):
         return SimpleNamespace(date="2024-10-23", output_root=str(d / rt), share_dir=str(d / sdir), replace=False,
                                calibration=str(HERE / "calibration"))
@@ -4927,7 +4939,8 @@ def test_gcpfree_b(d):
               "variant in the name), tagged EPSG:6348")
         ident = sp.calibration_identity(pb, a)
         check(ident.startswith("calibration variant gcpfree (--eo): c2 CACO03_c2_gcpfree-oct2024_EO.yaml sha256 "
-                               + sp.file_sha(r1["c2"])[:12] + " INDEPENDENT")
+                               + sp.file_sha(r1["c2"])[:12] + " INDEPENDENT (procedure made with stated exposure to "
+                                 "A: README EXPOSURE)")
               and "c1 NOT DELIVERED by the GCP-free procedure" in ident and "BLIND: survey held by Dr Chris Sherwood" in ident
               and ident.encode("ascii"),
               f"the GeoTIFF description: '{ident[:110]}...'")
@@ -4952,10 +4965,13 @@ def test_gcpfree_b(d):
         # A, then B: README, provenance, the GeoTIFF description, the maps
         ida = sp.calibration_identity(pa, aa)
         check(ida.startswith("calibration of the table (survey_dates.csv): c1 CACO03_c1_20241023_EO.yaml sha256 ")
-              and "PARTLY-CIRCULAR" in ida and sp.dem_stem(pa).name == "2024-10-23"
+              and "PARTLY-CIRCULAR" in ida and "stated exposure" not in ida and sp.dem_stem(pa).name == "2024-10-23"
               and sp.map_png(pa, "plan").name == "2024-10-23_waterlines_plan.png",
               "A's GeoTIFF description: the table's calibration, its EO files and sha256, PARTLY-CIRCULAR; stem "
               "2024-10-23, maps 2024-10-23_waterlines_*")
+        check("CACO03 Marconi Beach (table calibration 2024-10-23: solved from the held GCPs)"
+              in sp.cmd_text(sp.dem_cmds(pa, aa)[3]),
+              "A's DEM page heading says its calibration is the table's, solved from the held GCPs (PARTLY-CIRCULAR)")
         provb, rdb = fake_built_product(pb, a)
         unc = next((ln for ln in rdb.splitlines() if "STATED UNCERTAINTY" in ln), "")
         check(provb["status"] == "complete" and provb["blind"]["check"]["label"] == "INDEPENDENT"
@@ -4971,6 +4987,11 @@ def test_gcpfree_b(d):
               "B's README: c1 NOT DELIVERED with the procedure's report, B's two stated uncertainty terms (the "
               "position term the largest of five cases, neither a validated bound; no synthetic DEM figure for the "
               "rotation), the DEM and map files with the variant")
+        dfiles = (provb.get("dem") or {}).get("files") or {}
+        check(sorted(dfiles) == ["count", "dem", "spread"]
+              and all(v == f"{pb['out'] / 'dem' / '2024-10-23_gcpfree'}_{k}" for k, v in dfiles.items()),
+              "B's provenance.json names B's own DEM grids (dem/2024-10-23_gcpfree_dem, _spread, _count), never A's "
+              f"names ({dfiles.get('dem')})")
         gf = provb["blind"]["gcpfree"]
         check("EXPOSURE (stated by the people who made this procedure" in rdb and "A minus the Jan 2025 solution" in rdb
               and "ORDER (what decides B, and A): procedure pinned" in rdb and "outcome rule 'per-camera' pre-registered"
@@ -5117,6 +5138,22 @@ def test_gcpfree_b(d):
                   "lens" in man_b,
               "their MANIFESTs: what each is, its calibration and the holder's-check label, every file's sha256; B's "
               "also its procedure (run folder, pre-registration, commit), EXPOSURE, ORDER and stated uncertainty")
+        ref_b = "CACO03_c2_20250123_EO.yaml"
+        check("2024-10-23_B_gcpfree/waterlines/contour_points_ground.csv" in nb
+              and "2024-10-23_A_official_calibration/waterlines/contour_points_ground.csv" in na
+              and "2024-10-23_B_gcpfree/pointing/pointing_c2.json" in nb
+              and f"2024-10-23_B_gcpfree/calibration/{ref_b}" in nb and f"calibration/{ref_b}" not in " ".join(na)
+              and f"reference EO {ref_b} (what B was turned from, b_reference_eo): sha256 " in man_b
+              and "the file B's report recorded" in man_b
+              and "What of the build's folder is here (README: FILES)" in man_b
+              and "waterlines/contour_points_ground.csv (the waterline points the DEM used" in man_b
+              and not any("/waterlines/c2/" in n or "reference_c2" in n or "/stamps/" in n for n in nb),
+              "the archives hold what their README points to: the waterlines the DEM used (a check by day or by "
+              "frame), the pointing tables, the forcing and logs; B's also the GCP solution it was turned from, with "
+              "the sha256 its report recorded; never the detection's work folders or the reference photo copy")
+        check("his check of this DEM: INDEPENDENT (procedure made with stated exposure to A: README EXPOSURE" in man_b
+              and "stated exposure" not in man_a,
+              "B's MANIFEST label line points to the EXPOSURE statement (A's has none)")
         rc, out = quiet(sp.share, share_args("out_gcpfree", "share"))
         check(rc == sp.EXIT_CODES["refused"] and "never written over" in out, "--share again: never written over")
         # the pre-registration changed after the run (not yet committed): B is no longer the pre-registered one
@@ -5259,6 +5296,13 @@ def test_gcpfree_b_build(d):
                   f"B's ORDER after A's DEM step was rebuilt: '{a_line[:70]}...', and the NOTEs stay (A came first)")
             check(any("A's DEM was rebuilt (" in x and "after B's run began" in x for x in g["order_flags"]),
                   "A's DEM rebuilt after B's run began (B is built with A's options as last built): a NOTE says so")
+            g_first = sp.gcpfree_disclosure(pb, ab, {"c2": dict(info_, run_started_utc="2026-10-01 11:00:00",
+                                                                run_finished_utc="2026-10-01 11:10:00")})
+            fl = [x for x in g_first["order_flags"] if "after B's run began" in x]
+            check(len(fl) == 1 and fl[0].startswith("A's DEM was first built (2026-10-01 12:00 UTC) after B's run began")
+                  and "rebuilt (" not in fl[0] and "and of its last rebuild" in fl[0],
+                  "B's run began before A's DEM was FIRST built: the NOTE says 'first built' (not 'rebuilt', which "
+                  "contradicted the ORDER's 'first built'), and names the last rebuild too")
             g_early = sp.gcpfree_disclosure(pb, ab, {"c2": dict(info_, run_started_utc="2099-01-01 00:00:00",
                                                                 run_finished_utc="2099-01-01 00:10:00")})
             check(not any("after B's run began" in x for x in g_early["order_flags"]),
