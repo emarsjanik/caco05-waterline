@@ -380,11 +380,12 @@ def test_reach(label):
     m = TEST_LABEL.search(str(label or ""))
     if not m:
         return None
-    f0, f1, s0, s1 = (to_epoch([x])[0] for x in m.groups())
+    f0, f1, s0, s1 = (float(to_epoch([x])[0]) for x in m.groups())
+    # whole days as int: round() of a numpy float stays a float on numpy 1.17 (the station's), '0.0-23.0'
     if s1 <= f0:
-        return ("before", round((f0 - s1) / 86400.0), round((f0 - s0) / 86400.0))
+        return ("before", int(round((f0 - s1) / 86400.0)), int(round((f0 - s0) / 86400.0)))
     if s0 >= f1:
-        return ("after", round((s0 - f1) / 86400.0), round((s1 - f1) / 86400.0))
+        return ("after", int(round((s0 - f1) / 86400.0)), int(round((s1 - f1) / 86400.0)))
     return None
 
 
