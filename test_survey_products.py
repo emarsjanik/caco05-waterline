@@ -1227,7 +1227,11 @@ def test_keep_moved_days(d):
     check(sp.skip_days_of(res, SimpleNamespace(keep_moved_days=False)) == ["2025-01-24"], "default: the day is left out")
     check(sp.skip_days_of(res, SimpleNamespace(keep_moved_days=True)) == [], "--keep-moved-days on a rerun: kept")
     check(sp.skip_days_of(dict(res, leave_out=False), SimpleNamespace(keep_moved_days=False)) == [],
-          "most days differ: nothing left out automatically")
+          "a result of the rule before Oct 2026 whose 'most days differ' guard kept every day: none (as its "
+          "detection did)")
+    check(all(sp.pointing_leave_out([{"date": "2025-01-2%d" % k, "verdict": v} for k, v in enumerate(vs)])["leave_out"]
+              for vs in (["DIFFERENT POINTING"] * 3 + ["matches"], ["UNCONFIRMED"] * 4, [])),
+          "the rule of Oct 2026 never keeps days automatically ('leave_out' always True)")
 
 
 # -- pointing verdicts (Oct 2026): what the step concludes from the two methods' measurements --------
@@ -1313,7 +1317,7 @@ def test_pointing_verdicts(d):
     sp.pointing_verdicts(blindrows, ref_day="2026-09-29")
     vb = by(blindrows)
     check(vb["2026-09-28"]["verdict"] == "UNCONFIRMED" and "could not be fitted (residual 14.6 px)" in vb["2026-09-28"]["why"]
-          and "the day next to it, 2026-09-27, has a different pointing" in vb["2026-09-28"]["why"]
+          and "the day next to it, 2026-09-27, was measured to differ from the reference" in vb["2026-09-28"]["why"]
           and vb["2026-10-01"]["verdict"] == "unchecked" and "left out" not in vb["2026-09-28"]["why"],
           "a day nothing could read next to a left-out day (c1 28 Sep, its fit failed): UNCONFIRMED; one between "
           "matching days (1 Oct) stays 'unchecked'")
@@ -1321,8 +1325,11 @@ def test_pointing_verdicts(d):
                                        d_azimuth_deg="", d_tilt_deg="", d_roll_deg="")
     sp.pointing_verdicts(blindrows)
     check([vb[x]["verdict"] for x in ("2026-09-28", "2026-09-29", "2026-09-30")]
-          == ["UNCONFIRMED", "UNCONFIRMED", "matches"] and "2026-09-28, has an unconfirmed" in vb["2026-09-29"]["why"],
-          "... a run of such days after a left-out day: each UNCONFIRMED")
+          == ["UNCONFIRMED", "UNCONFIRMED", "matches"]
+          and "it is in a run of such days next to 2026-09-27, which was measured to differ" in vb["2026-09-29"]["why"]
+          and sp.pointing_leave_out(blindrows)["next_to_days"] == ["2026-09-28", "2026-09-29"],
+          "... a run of such days after a day measured to differ: each UNCONFIRMED, its why naming the day the run "
+          "starts at")
     # ... but never the reference day: the other days are measured against its frame, so a neighbour that
     # differs from it says nothing of it (its run stops there)
     sp.pointing_verdicts(blindrows, ref_day="2026-09-29")
@@ -1330,6 +1337,53 @@ def test_pointing_verdicts(d):
           == ["UNCONFIRMED", "unchecked", "matches"],
           "... the reference day itself, nothing read on it and next to a left-out day: 'unchecked', not UNCONFIRMED "
           f"({vb['2026-09-29']['verdict']})")
+    # ... but never from a day UNCONFIRMED on a horizon reading alone that is not a clear horizon (review 3: one
+    # misread fog edge with unmatched features, 19 Jan, took the three fog days after it, whose fits failed, with
+    # it: 4 of 7 days left out, where the same days next to a matching day stay 'unchecked'): such a reading
+    # alone never shows a day moved, so it does not reach past its own day
+    STORMY = (6.1, 0.72, 0.00, 62)
+    fog = [dict(_pt_row("c2", "2025-01-18", "off the calibration", 34.0, 0.56, -0.68, 0.3, "ok", 2000,
+                        (0.004, 0.003, 0.01)), turn_sigma=30.0),
+           _pt_row("c2", "2025-01-19", "off the calibration", 34.0, 2.6, 1.2, 3.0, "unmatched", 4, edge=STORMY)]
+    fog += [_pt_row("c2", f"2025-01-{dd}", "unclear", 34.0, t, r_, f_, "unmatched", n_, edge=STORMY)
+            for dd, t, r_, f_, n_ in (("20", 0.9, -0.2, 25.0, 6), ("21", 0.4, -0.9, 30.0, 3), ("22", 1.4, 0.2, 18.0, 7))]
+    fog += [dict(_pt_row("c2", "2025-01-23", "off the calibration", 34.0, 0.56, -0.68, 0.3, "ok", 3000), turn_sigma=2.0),
+            _pt_row("c2", "2025-01-24", "unclear", 34.0, 0.7, -0.5, 22.0, "unmatched", 2, edge=STORMY)]
+    sp.pointing_verdicts(fog, ref_day="2025-01-23")
+    vf = by(fog)
+    lof = dict(sp.pointing_leave_out(fog), rows=fog)
+    check([vf[f"2025-01-{dd}"]["verdict"] for dd in range(18, 25)]
+          == ["matches", "UNCONFIRMED", "unchecked", "unchecked", "unchecked", "matches", "unchecked"]
+          and sp.skip_days_of(lof, SimpleNamespace(keep_moved_days=False)) == ["2025-01-19"]
+          and lof["horizon_alone_days"] == ["2025-01-19"] and not lof["next_to_days"],
+          "a fog week (review 3): the day UNCONFIRMED on a misread horizon alone is left out, the days nothing read "
+          "next to it stay 'unchecked', kept (were UNCONFIRMED: 4 of 7 days left out)")
+    # ... while a day UNCONFIRMED on more (a clear-looking one-day jump with no feature reading) starts a run
+    vf["2025-01-19"].update(**dict(zip(sp.EDGE_KEYS, EDGE_CLEAR["c2"])))
+    sp.pointing_verdicts(fog, ref_day="2025-01-23")
+    lof = dict(sp.pointing_leave_out(fog), rows=fog)
+    check([vf[f"2025-01-{dd}"]["verdict"] for dd in range(19, 23)] == ["UNCONFIRMED"] * 4
+          and "the day next to it, 2025-01-19, is UNCONFIRMED on a horizon jump on a clear-looking edge"
+          in vf["2025-01-20"]["why"] and "a run of such days next to 2025-01-19" in vf["2025-01-22"]["why"]
+          and vf["2025-01-24"]["verdict"] == "unchecked" and lof["next_to_days"] == ["2025-01-20", "2025-01-21",
+                                                                                      "2025-01-22"]
+          and "3 of them (2025-01-20, 2025-01-21, 2025-01-22) are UNCONFIRMED only because nothing could read them"
+          in (sp.pointing_majority_note(lof, SimpleNamespace(keep_moved_days=False)) or ""),
+          "... the same days next to a clear-looking one-day jump: UNCONFIRMED, a run from it; the warning counts "
+          "them as left out for the day next to them")
+    # ... and next to misread horizons on two days running, a storm (review 3's own S_* scenarios: real frames,
+    # c1 turned 0.3-1.0 deg on all three storm days; 26/27 Sep misread with unmatched features, 28 Sep's fit
+    # failed: without this 28 Sep was 'unchecked', kept, its frames turned)
+    vf["2025-01-19"].update(**dict(zip(sp.EDGE_KEYS, STORMY)))
+    vf["2025-01-20"].update(horizon="off the calibration", horizon_fit_px=2.0, horizon_dtilt_deg=3.1)
+    sp.pointing_verdicts(fog, ref_day="2025-01-23")
+    lof = dict(sp.pointing_leave_out(fog), rows=fog)
+    check([vf[f"2025-01-{dd}"]["verdict"] for dd in range(19, 23)] == ["UNCONFIRMED"] * 4
+          and lof["horizon_alone_days"] == ["2025-01-19", "2025-01-20"] and lof["next_to_days"] == ["2025-01-21",
+                                                                                                    "2025-01-22"]
+          and "the day next to it, 2025-01-20, is UNCONFIRMED on a misread horizon next to another day left out"
+          in vf["2025-01-21"]["why"] and vf["2025-01-24"]["verdict"] == "unchecked",
+          "... misread horizons on two days running (a storm): the days nothing read after them UNCONFIRMED too")
     check(i1["clear_horizon_days"] == 4 and abs(i1["window_horizon_dtilt_deg"] - 0.928) < 0.0011
           and abs(i1["window_horizon_droll_deg"] - 0.240) < 0.0011 and abs(i1["window_horizon_offset_px"] - 42.55) < 0.06
           and i1["horizon_not_clear_days"] == ["2026-09-26", "2026-09-27", "2026-09-28"] and abs(old_med - 0.956) < 1e-9,
@@ -1359,8 +1413,9 @@ def test_pointing_verdicts(d):
     # -- the zero-turn guard (review 2: window dirt matches at exactly zero turn when fog hides the scene). The
     # NUC's rows predate turn_sigma (an older row counts as the scene, as above); with the values the real storm
     # frames project for them (the real c2 26-28 Sep frames against the real 7 Oct frame, their standard errors
-    # scaled to the NUC's inlier counts: ~17, ~9, ~9) nothing changes; at a dirt-like 2.0 every day that no
-    # clear horizon confirms is UNCONFIRMED, the reference day and the clear days are not
+    # scaled to the NUC's inlier counts: ~17, ~9, ~9) nothing changes; at a dirt-like 2.0 the days whose horizon
+    # jumps on a misread edge are UNCONFIRMED, and 28 Sep (its fit failed) next to them, two such days running
+    # (a storm), the reference day and the clear days are not
     for sig, want in (({"2026-09-26": 17.5, "2026-09-27": 8.7, "2026-09-28": 8.4}, ["matches"] * 3),
                       ({"2026-09-26": 2.0, "2026-09-27": 2.0, "2026-09-28": 2.0}, ["UNCONFIRMED"] * 3)):
         c2s = _nuc_rows("c2")
@@ -1373,14 +1428,15 @@ def test_pointing_verdicts(d):
               and all(vs[x]["verdict"] == "horizon only" and "no further from no turn than their own noise" in
                       vs[x]["why"] for x in ("2026-09-30", "2026-10-01", "2026-10-02"))
               and (want[0] == "matches" or ("than their own noise (2.0 standard errors, under 4)" in vs["2026-09-27"]["why"]
-                                            and "2026-09-27, has an unconfirmed pointing" in vs["2026-09-28"]["why"])),
+                                            and "the day next to it, 2026-09-27, is UNCONFIRMED on a misread horizon "
+                                                "next to another day left out" in vs["2026-09-28"]["why"])),
               f"NUC c2 with turn_sigma {sig['2026-09-27']} on 26-28 Sep: {got} (28 Sep, its fit failed: a day nothing "
-              f"read, next to a left-out day); the reference day matches whatever its turn_sigma, the clear days at a "
-              f"dirt-like 2.0 are 'horizon only' (the match is no reading), kept")
+              f"read, next to two days misread, a storm); the reference day matches whatever its turn_sigma, the clear "
+              f"days at a dirt-like 2.0 are 'horizon only' (the match is no reading), kept")
     # ... the reviewer's DIRT2 (the real c1 storm frames, c1 turned -1.2 deg, the same synthetic drops on every
     # frame: 113 and 165 inliers at 0.00 deg, turn_sigma 1.1 and 2.7, the horizon misread) and DIRT2_ST10 (c2
     # tilted +1.0 deg on 28 Sep, its fit failed: 244 inliers at 0.00 deg, turn_sigma 2.1): UNCONFIRMED, left out
-    # (the first version of the rule kept all three)
+    # (the first version of the rule kept all three; 28 Sep through 26/27 Sep, misread two days running)
     dr = [_pt_row("c1", "2026-09-26", "off the calibration", 205.4, 4.32, 0.23, 1.9, "ok", 113, (0.001, 0.0, -0.001),
                   edge=EDGE_STORM[("c1", "2026-09-26")]),
           _pt_row("c1", "2026-09-27", "off the calibration", 246.2, 4.87, 0.17, 4.0, "ok", 165, (0.001, 0.0, 0.0),
@@ -1397,7 +1453,7 @@ def test_pointing_verdicts(d):
           and all(vd[x]["verdict"] == "horizon only" for x in ("2026-09-30", "2026-10-01", "2026-10-02"))
           and "could not be fitted" in vd["2026-09-28"]["why"],
           "DIRT2: a dirt-only consensus (turn_sigma 1.1-2.7) against a misread horizon, or with no horizon fit next "
-          "to such a day: UNCONFIRMED, left out; the clear days 'horizon only', kept")
+          "to two such days: UNCONFIRMED, left out; the clear days 'horizon only', kept")
     # -- printed: every day's why below the table, the left-out days with their verdicts
     res1 = dict(sp.pointing_leave_out(c1), rows=c1, info=dict(i1, calibration="CACO05_c1_20251113_EO-CV.yaml"))
     _, txt = quiet(sp.print_pointing, "c1", res1, SimpleNamespace(keep_moved_days=False))
@@ -1545,6 +1601,23 @@ def test_pointing_verdicts(d):
               f"{'without edge numbers' if edge == '' else 'misread' if edge else 'clear'} at {hz_dt - 0.55:+.2f} deg: "
               f"{want}" + ("" if want != "DIFFERENT POINTING" or feat == "MOVED" else
                            " (a tilt or roll over 0.3 deg from turned features)"))
+    # -- a turned match on few inliers (40-99: tilt/roll to ~0.1 deg only) that reads a change within 0.3 deg, on a
+    # day whose CLEAR horizon reads one over 0.3 deg and agrees with the features within 0.3 (review 3: 0.28 on 50
+    # inliers against a clear 0.37 was a 'small change', kept): DIFFERENT POINTING; at 100 inliers or more, or
+    # with the horizon misread or contradicting the features, the features decide alone
+    for n_, dtf, hz_dt, edge, want in ((50, 0.28, 0.92, None, "DIFFERENT POINTING"),
+                                       (99, 0.25, 0.86, None, "DIFFERENT POINTING"),
+                                       (50, 0.28, 0.84, None, "small change"),      # the horizon reads 0.29
+                                       (100, 0.28, 0.92, None, "small change"),
+                                       (50, 0.28, 0.92, MISREAD, "small change"),
+                                       (50, 0.15, 2.55, None, "small change")):     # contradicted: 2.0 vs 0.15
+        rows = [dict(r) for r in base] + [_pt_row("c2", "2026-10-05", "off the calibration", 33.0 + 66 * (hz_dt - 0.55),
+                                                  hz_dt, -0.67, 0.2, "moved", n_, (0.0, dtf, 0.0), edge=edge)]
+        sp.pointing_verdicts(rows)
+        r = by(rows)["2026-10-05"]
+        check(r["verdict"] == want and (want == "small change" or "which the features confirm within 0.3 deg" in r["why"]),
+              f"a turn of {dtf} deg read on {n_} features, horizon {'misread' if edge else 'clear'} at "
+              f"{hz_dt - 0.55:+.2f} deg: {want}")
     # -- a camera tilted 0.6 deg on half the clear days, features unmatched there (review scenario E: real
     # frames, the land fogged): the window's median falls between the two pointings (0.91/1.51/1.51/0.90 ->
     # 1.21) and saw nothing; judged against the reference (29 Sep, its own frames matched) both days are
@@ -1559,14 +1632,24 @@ def test_pointing_verdicts(d):
     i = sp.pointing_verdicts(rows, ref_day="2026-09-29")
     v = by(rows)
     lo = sp.pointing_leave_out(rows)
+    res = dict(lo, rows=rows, info=dict(i, reference_day="2026-09-29"))
+    warn_ = sp.other_pointing_warning(res["info"], lo, "pointing/") or ""
     check([v[x]["verdict"] for x in ("2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02")]
           == ["matches", "DIFFERENT POINTING", "DIFFERENT POINTING", "UNCONFIRMED"]
           and "where the reference day 2026-09-29 reads +0.91/+0.26" in v["2026-09-30"]["why"]
           and i["horizon_anchor_deg"] == [0.908, 0.255] and i["clear_horizon_days"] == 1
-          and lo["measured_different_days"] == ["2026-09-30", "2026-10-01"] and not lo["leave_out"],
+          and lo["measured_different_days"] == ["2026-09-30", "2026-10-01"] and lo["leave_out"]
+          and i["other_pointing"] == {"days": ["2026-09-30", "2026-10-01"], "reference_days": ["2026-09-29"],
+                                      "change_deg": [None, 0.598, 0.0]}
+          and sp.skip_days_of(res, SimpleNamespace(keep_moved_days=False))
+          == ["2026-09-26", "2026-09-27", "2026-09-28", "2026-09-30", "2026-10-01", "2026-10-02"]
+          and warn_.startswith("2 of the 3 days measured differ from the reference 2026-09-29 and agree with each "
+                               "other (+0.60/+0.00 deg tilt/roll, pan not measured")
+          and "the window holds two pointings" in warn_ and "--keep-moved-days keeps every day" in warn_,
           "a 0.6 deg tilt on half the clear days (features unmatched): measured against the reference day, not "
-          "missed by a median that falls between the pointings (2 of the 3 days measured differ: the 'most days "
-          "differ' guard then keeps them, with its warning)")
+          "missed by a median that falls between the pointings; 2 of the 3 days measured differ and agree: the "
+          "window's other pointing is named, and its days left out with the rest (the 'most days differ' guard "
+          "kept all 7, UNCONFIRMED storm days included)")
     rows = [dict(r) for r in storm3 + E] + [_pt_row("c1", "2026-10-03", "off the calibration", 41.8, 0.91, 0.25, 0.4,
                                                     "ok", 900)]
     sp.pointing_verdicts(rows, ref_day="2026-09-29")
@@ -1576,6 +1659,72 @@ def test_pointing_verdicts(d):
           and (sp.pointing_majority_note(res, SimpleNamespace(keep_moved_days=False)) or "").startswith(
               "6 of the window's 8 days are left out"),
           "... with one more matched day: left out, and the warning counts the 6 of 8 days left out")
+    check(not sp.pointing_verdicts([dict(r) for r in rows], ref_day="2026-09-29")["other_pointing"],
+          "... and no other pointing named: the 2 days that differ do not outnumber the 2 at the reference's")
+    # -- review 3, H_T06 (real frames: c1 tilted exactly +0.6 deg on 30 Sep - 2 Oct, read +0.592-0.598 on ~1680
+    # inliers, its clear horizon +1.49-1.51 against +0.91; 26-28 Sep UNCONFIRMED, as the sandbox's storm frames
+    # did not match its stand-in reference): 3 of the 4 days measured differ, and agree. The 'most days differ'
+    # guard kept all 7 days (two pointings and the storm days in one product); now every one of them is left
+    # out and the step names the other pointing
+    ht = _nuc_rows("c1")
+    by(ht)["2026-09-27"].update(features="unmatched", inliers=9, d_azimuth_deg="", d_tilt_deg="", d_roll_deg="")
+    for day, t_ in (("2026-09-30", 0.598), ("2026-10-01", 0.597), ("2026-10-02", 0.592)):
+        by(ht)[day].update(features="MOVED", inliers=1680, d_azimuth_deg=0.001, d_tilt_deg=t_, d_roll_deg=0.002,
+                           horizon_dtilt_deg=0.91 + t_, horizon_offset_px=70.8, turn_sigma=80.0)
+    iht = sp.pointing_verdicts(ht, ref_day="2026-09-29")
+    loht = sp.pointing_leave_out(ht)
+    resht = dict(loht, rows=ht, info=dict(iht, reference_day="2026-09-29"))
+    no = SimpleNamespace(keep_moved_days=False)
+    wht = sp.other_pointing_warning(resht["info"], loht, "pointing/") or ""
+    check([r["verdict"] for r in ht] == ["UNCONFIRMED"] * 3 + ["matches"] + ["DIFFERENT POINTING"] * 3
+          and loht["leave_out"] and sp.skip_days_of(resht, no) == [r["date"] for r in ht if r["date"] != "2026-09-29"]
+          and iht["other_pointing"]["days"] == ["2026-09-30", "2026-10-01", "2026-10-02"]
+          and iht["other_pointing"]["change_deg"] == [0.001, 0.597, 0.002]
+          and wht.startswith("3 of the 4 days measured differ from the reference 2026-09-29 and agree with each other "
+                             "(+0.00/+0.60/+0.00 deg pan/tilt/roll")
+          and "the reference's (2026-09-29) is the smaller group" in wht
+          and (sp.pointing_majority_note(resht, no) or "").startswith("6 of the window's 7 days are left out"),
+          "H_T06 (review 3): a +0.6 deg tilt on 3 of the 4 days measured: all 6 days that differ or are unconfirmed "
+          "left out (were all kept), the other pointing named, and the count of days left out")
+    _, txt = quiet(sp.print_pointing, "c1", dict(resht, info=dict(resht["info"], warning=wht)), no)
+    check("the window holds two pointings" in txt and "LEFT OUT of the detection: 2026-09-26 (UNCONFIRMED)" in txt
+          and "KEPT" not in txt,
+          "print: the other pointing's warning and the days left out, none KEPT")
+    # ... and the build is not complete: its product rests on the reference's pointing, the smaller group, the
+    # wrong one if the reference day is the odd one out (review 3, REF_T06: the reference day tilted 0.6 deg)
+    hd = Path(d) / "two_pointings"
+    (hd / "pointing").mkdir(parents=True)
+    (hd / "pointing" / "pointing_c1.json").write_text(json.dumps(resht))
+    plan_h = {"out": hd, "date": "2026-09-29", "cams": {"c1": {}}}
+    tp = []
+    for stamp in (None, {"skip_days": sp.skip_days_of(resht, no), "keep_moved_days": False},
+                  {"skip_days": [], "keep_moved_days": True}):
+        if stamp is not None:
+            sp.write_stamp(hd, "detect_c1", {"x": len(tp)}, extra=stamp)
+        tp.append(next((m for m in sp.missing_parts(plan_h, {}) if "two pointings" in m), ""))
+    check(tp[0].startswith("c1: the window holds two pointings: 2026-09-30, 2026-10-01, 2026-10-02 agree with each "
+                           "other, away from the reference's (2026-09-29); the detection has not run")
+          and "the product rests on the reference's, the smaller group; if the reference day is the odd one out"
+          in tp[1] and "the product holds both (the other's 2026-09-30, 2026-10-01, 2026-10-02 kept)" in tp[2],
+          "two pointings in the window: a missing part (status partial), whatever the detection did")
+    # -- review 3, turn_full: c1 as on the NUC (26/28 Sep UNCONFIRMED, 27 Sep -1.21 deg of pan) and an exact
+    # +0.45 deg roll on 30 Sep and 1 Oct (2286/2103 inliers, the clear horizon +0.69 against +0.24): 3 of the 5
+    # days measured differ, but not in one way: no other pointing, every one of them left out (the guard kept
+    # all 7, the rolled days gridded: ~0.6 m of DEM at 250-350 m)
+    tf = _nuc_rows("c1")
+    for day, n_ in (("2026-09-30", 2286), ("2026-10-01", 2103)):
+        by(tf)[day].update(features="moved", inliers=n_, d_azimuth_deg=0.002, d_tilt_deg=0.001, d_roll_deg=0.449,
+                           horizon_droll_deg=0.69, turn_sigma=60.0)
+    itf = sp.pointing_verdicts(tf, ref_day="2026-09-29")
+    restf = dict(sp.pointing_leave_out(tf), rows=tf, info=dict(itf, reference_day="2026-09-29"))
+    check([r["verdict"] for r in tf] == ["UNCONFIRMED", "DIFFERENT POINTING", "UNCONFIRMED", "matches",
+                                          "DIFFERENT POINTING", "DIFFERENT POINTING", "matches"]
+          and itf["other_pointing"] is None and sp.other_pointing_warning(restf["info"], restf, "x") is None
+          and sp.skip_days_of(restf, no) == ["2026-09-26", "2026-09-27", "2026-09-28", "2026-09-30", "2026-10-01"],
+          "turn_full (review 3): days that differ from the reference but not from each other in one way (a -1.21 deg "
+          "pan; a +0.45 deg roll): no other pointing named, all left out (were all kept)")
+    check(not [m for m in sp.missing_parts(plan_h, {"pointing": {"c1": restf}}) if "two pointings" in m],
+          "... and no 'two pointings' missing part")
     # ... with nothing tying the clear days to the reference (no feature reading, the reference day not clear):
     # two equal groups; neither is called measured, and 'horizon only' says the window may hold two pointings
     rows = [dict(r) for r in storm3] + [dict(r, features="unmatched", inliers=3, d_azimuth_deg="", d_tilt_deg="",
@@ -1957,12 +2106,25 @@ def test_storm_and_wave_caveats(d):
           and not any(c.startswith("c1: days left out of the detection") for c in cav2),
           "README rewritten by a later run without --keep-moved-days: still 'KEPT (--keep-moved-days)', from the "
           "detection's stamp")
-    sp.write_stamp(out, "detect_c1", {"x": 5}, extra={"skip_days": []})          # an older stamp: no option recorded
-    cav2 = sp.collect_caveats(plan, cfg_args(), {}, forcing, frames(new))
-    check(any(c.startswith("c1: days with a different or unconfirmed pointing KEPT in the detection "
-                           "(--keep-moved-days)") for c in cav2),
-          "an older detection stamp without the option: the days the rule left out but the detection kept were "
-          "kept by --keep-moved-days")
+    # an older stamp, as the deployed code writes it (no option recorded), that left out no day, under results
+    # that leave days out (review 3: the README inferred '--keep-moved-days', which was never passed, while the
+    # step said 'LEFT OUT of the detection'): the option is never inferred; either reason is named
+    sp.write_stamp(out, "detect_c1", {"x": 5}, extra={"skip_days": [], "setup_coef": 0.037})
+    cav2 = [c for c in sp.collect_caveats(plan, cfg_args(), {}, forcing, frames(new)) if c.startswith("c1: ")]
+    check(any(c.startswith("c1: the detection left out no day, where these pointing results leave out 2026-09-26, "
+                           "2026-09-27, 2026-09-28 by default: it ran with other pointing results (the pointing step was "
+                           "run again since) or with --keep-moved-days (its record, of an older build, does not say "
+                           "which); run the detection again") for c in cav2)
+          and not any("KEPT in the detection" in c for c in cav2)
+          and any(c.startswith("c1: days with a different or unconfirmed pointing: 2026-09-26 (UNCONFIRMED: ")
+                  and "The detection has not run with these pointing results" in c for c in cav2),
+          "an older detection stamp without the option that left out no day, under results that leave days out: "
+          "'other pointing results or --keep-moved-days', never 'KEPT (--keep-moved-days)'")
+    check(sp.kept_reason({"leave_out": True}, cfg_args(), {"skip_days": []}).startswith(
+              "--keep-moved-days, or other pointing results: the detection's record, of an older build, does not say")
+          and sp.kept_reason({"leave_out": False}, cfg_args(), {"skip_days": []}).startswith("most days differ")
+          and sp.kept_reason({"leave_out": True}, cfg_args(), {"keep_moved_days": True}) == "--keep-moved-days",
+          "kept_reason never infers --keep-moved-days from the pointing result")
     # ... and with no detection at all (a pointing-only or partial build, or a failed detection): neither
     # KEPT nor 'left out of the detection' (review 2: the README said both, for the same days)
     sp.drop_stamp(out, "detect_c1")
@@ -1981,8 +2143,9 @@ def test_storm_and_wave_caveats(d):
     # would leave out, never 'KEPT' (it left out 30 Sep only; these results leave out 26-28 Sep)
     sp.write_stamp(out, "detect_c1", {"x": 6}, extra={"skip_days": ["2026-09-30"], "keep_moved_days": False})
     c1_ = [c for c in sp.collect_caveats(plan, cfg_args(), {}, forcing, frames(new)) if c.startswith("c1: ")]
-    check(any(c.startswith("c1: the detection ran with other pointing results than these") and "left out 2026-09-30;"
-              in c and "--steps detect" in c for c in c1_)
+    check(any(c.startswith("c1: the detection left out 2026-09-30, where these pointing results leave out 2026-09-26, "
+                           "2026-09-27, 2026-09-28: it ran with other pointing results (the pointing step was run "
+                           "again since); run the detection again") and "--steps detect" in c for c in c1_)
           and any(c.startswith("c1: days with a different or unconfirmed pointing: 2026-09-26 (UNCONFIRMED: ")
                   and "The detection has not run with these pointing results: it leaves such days out" in c for c in c1_)
           and not any("KEPT in the detection" in c or c.startswith("c1: days left out of the detection") for c in c1_),
@@ -1995,6 +2158,36 @@ def test_storm_and_wave_caveats(d):
               for c in c1_) and not any("other pointing results" in c or "has not run" in c for c in c1_),
           "... a detection made with these results: its left-out days, nothing about other results")
     sp.drop_stamp(out, "detect_c1")
+    # WHAT THIS IS: the DEM's own frames and days next to the waterlines' (review 3: '7 days' where the DEM
+    # gridded 4, its wave filter having taken the storm's frames)
+    check(sp.dem_days_text(plan, frames(nuc)["frames_per_day"])
+          == "; the DEM grids 28 of their 34 frames, on 2026-09-29 .. 2026-10-02 (4 days)"
+          and sp.dem_days_text(plan, frames(after)["frames_per_day"]) == ""
+          and sp.dem_days_text(plan, frames(nuc, dem=False)["frames_per_day"]) == "",
+          "WHAT THIS IS: the DEM's 28 of 34 frames on 4 days, when it gridded fewer than the waterlines hold; nothing "
+          "added when it gridded them all, or without its record")
+    # 'horizon only' days whose features matched within their own noise (the Mar 2025 fixture's c2: 51-59 inliers,
+    # turn_sigma 0.7-3.4): the README says why the pan was not measured (review 3)
+    mar = [dict(_pt_row("c2", f"2026-09-{dd}", "matches", 8.0, 0.15, 0.0, 0.4, "ok", n_, (0.001, 0.002, -0.004),
+                        edge=EDGE_FIXTURE), turn_sigma=ts_)
+           for dd, n_, ts_ in (("26", 55, 3.0), ("27", 51, 2.4), ("28", 59, 1.3), ("29", 57, 0.7))]
+    mar.append(_pt_row("c2", "2026-09-30", "matches", 8.0, 0.15, 0.0, 0.4, "unmatched", 12, edge=EDGE_FIXTURE))
+    im = sp.pointing_verdicts(mar, ref_day="2026-09-29")
+    (out / "pointing" / "pointing_c2.json").write_text(json.dumps(dict(sp.pointing_leave_out(mar), rows=mar, info=im)))
+    hz = next((c for c in sp.collect_caveats(plan, a, {}, forcing, frames(new)) if c.startswith("c2: pan not measured")),
+              "")
+    check(hz.startswith("c2: pan not measured on 2026-09-26, 2026-09-27, 2026-09-28, 2026-09-30 (horizon only); on "
+                        "2026-09-26, 2026-09-27, 2026-09-28 the features matched, but within their own noise "
+                        "(turn_sigma under 4"),
+          "README: 'horizon only' days whose features matched within their own noise say so (the unmatched day not)")
+    mar[-1].update(features="ok", inliers=52, d_azimuth_deg=0.0, d_tilt_deg=0.001, d_roll_deg=0.0, turn_sigma=1.9)
+    im = sp.pointing_verdicts(mar, ref_day="2026-09-29")
+    (out / "pointing" / "pointing_c2.json").write_text(json.dumps(dict(sp.pointing_leave_out(mar), rows=mar, info=im)))
+    hz = next((c for c in sp.collect_caveats(plan, a, {}, forcing, frames(new)) if c.startswith("c2: pan not measured")),
+              "")
+    check(hz.startswith("c2: pan not measured on 2026-09-26, 2026-09-27, 2026-09-28, 2026-09-30 (horizon only); on each "
+                        "the features matched, but within their own noise"),
+          "... and when every such day's match was within its noise: 'on each', not the list twice")
 
 
 def _rotated(img, io, eo_src, eo_dst, step=4):
