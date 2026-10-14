@@ -7674,7 +7674,7 @@ def write_readme(plan, args, prov):
       + (f" (the calibration variant in the file names: {plan_variant(plan)})" if plan_variant(plan) else ""))
     w("  maps/         waterlines drawn on the photos, per camera (daily_elevation_map.py, as the station's own "
       "maps: its colour bar says which elevation colours the lines); plan view "
-      + ("(BLIND: no survey drawn" if bl else "over the survey (")
+      + ("(BLIND: no survey drawn; " if bl else "over the survey (")
       + "coloured by still water + setup, the elevation the DEM uses)")
     w("  compare/      " + (f"none: a blind product ({bl['statement']})" if bl else
                            "DEM - survey grids/points, report, figure, json"))

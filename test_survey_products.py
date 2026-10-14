@@ -4406,6 +4406,8 @@ def test_gcpfree_b(d):
           and any(c.startswith("c1 is NOT in this product") for c in provb["caveats"]),
           "B's README: c1 NOT DELIVERED with the procedure's report, B's two stated uncertainty terms (neither a "
           "validated bound), the DEM stem with the variant")
+    check("plan view (BLIND: no survey drawn; coloured by still water + setup" in rdb,
+          "B's README FILES: the blind plan view's line reads as a sentence ('no survey drawn; coloured by ...')")
     aa = full_args(output_root=str(d / "out"))
     pa, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, aa)
     ida = sp.calibration_identity(pa, aa)
