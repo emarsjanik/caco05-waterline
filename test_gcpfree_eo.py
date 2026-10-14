@@ -22,8 +22,10 @@ CACO03_<cam>_20250123_EO.yaml, Oct photos with it turned by a known
 rotation (the brief's test sizes), Dec photos (c2) half way, Aug photos with
 CACO03_<cam>_20240827_EO.yaml. A decoy calibration A, a decoy calibration
 history and a decoy GCP file sit in the test's calibration folder: an audit
-hook (sys.addaudithook: every open by any reader, Python or C) records any
-open of a file named like them, and one fails the test. The run logic
+hook (sys.addaudithook: every open made through Python, by any module:
+builtins, io, pathlib, os, numpy, PIL) and a watch on cv2.imread (OpenCV
+reads files in C++, which no audit hook sees) record any read of a file named
+like them, and one fails the test. The run logic
 (pre-registration, run folders, outcome rules, the second run) is tested
 with the real procedure's results of the rendered sets, replayed.
 
@@ -57,7 +59,8 @@ from georectify import load_intrinsics, load_extrinsics, cirn_angles_to_R, undis
 TURN = {"c1": (-12.5, 0.6, -0.4), "c2": (-13.4, -0.5, 0.3)}  # test sizes only (deg: pan, tilt, roll)
 N_OK = [0]
 
-# ---- 'never opened': an audit hook sees every open, whoever makes it (builtins, io, pathlib, numpy, cv2)
+# ---- 'never opened': an audit hook sees every open made through Python, whatever module makes it (builtins, io,
+# pathlib, os, numpy, PIL); OpenCV reads its files in C++, unseen by it, so cv2.imread is watched as well (watch_cv2)
 HELD = re.compile(r"(20241023_EO|calibration_history|Extrinsic_Targets|2024-?10-?23[^/]*(xyz|gcp|target|survey))",
                   re.I)
 WATCH = {"on": False, "opened": []}
@@ -78,6 +81,21 @@ def _audit(event, args):
 
 if hasattr(sys, "addaudithook"):
     sys.addaudithook(_audit)
+
+
+def watch_cv2():
+    """cv2.imread through _audit too (the procedure reads every photo with it). -> a function that undoes it."""
+    import cv2
+    real = cv2.imread
+
+    def imread(path, *a, **kw):
+        _audit("open", (path, "r", None))
+        return real(path, *a, **kw)
+    cv2.imread = imread
+
+    def undo():
+        cv2.imread = real
+    return undo
 
 
 def check(cond, msg):
@@ -206,6 +224,26 @@ def cal_eos(cam):
 
 
 # ------------------------------------------------------------------ pure parts
+
+def test_watch_sees_reads(d):
+    print("the 'never opened' watch itself: it sees a Python open and an OpenCV read of a decoy")
+    import cv2
+    decoy = G.CAL / "CACO03_c1_20241023_EO.yaml"
+    WATCH["on"] = True
+    try:
+        with open(str(decoy)) as f:
+            f.read()
+        python_seen = list(WATCH["opened"])
+        del WATCH["opened"][:]
+        cv2.imread(str(decoy), cv2.IMREAD_GRAYSCALE)          # not an image: None, but the read was asked for
+        cv2_seen = list(WATCH["opened"])
+        del WATCH["opened"][:]
+    finally:
+        WATCH["on"] = False
+    if hasattr(sys, "addaudithook"):
+        check(python_seen == [str(decoy)], "a Python open() of the decoy calibration A is seen (audit hook)")
+    check(cv2_seen == [str(decoy)], "a cv2.imread of the decoy calibration A is seen (the cv2 watch)")
+
 
 def test_guard(d):
     print("guard: never calibration A, a GCP or target file, the calibration history; by name and by link")
@@ -506,6 +544,49 @@ def nd_of(res):
     return r
 
 
+def test_pinned_version(d):
+    print("only the version survey_products.py pins is pre-registered or run (the one delivery run is never spent "
+          "on a B that would not count)")
+    pins, why = G.pinned_versions()
+    check(pins and pins[-1]["gcpfree_eo.py"] == G.own_sha256() and pins[-1]["modules"] == G.module_sha256()
+          and G.pin_problem() == "",
+          f"survey_products.py's GCPFREE_PINS[-1] is this gcpfree_eo.py ({G.own_sha256()[:12]}...) and its modules")
+    other = d / "pins_other" / "survey_products.py"
+    other.parent.mkdir()
+    other.write_text("GCPFREE_PINS = [\n    {'gcpfree_eo.py': '" + "1" * 64 + "', 'modules': "
+                     + repr(G.module_sha256()) + "},\n]\n")
+    repo = d / "prereg_pin"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    pr = repo / "PREREGISTERED.txt"
+    real, real_roots = G.PINS_FILE, list(G.ROOTS)
+    G.ROOTS = roots_of(d / "roots")                     # the 'station's' folders of this test (never the station's)
+    try:
+        rc, out = main_q(["--preregistered", str(pr), "--preregister", "--outcome-if-one-camera", "per-camera",
+                          "--decided-by", "the owner"])
+        G.PINS_FILE = other
+        rc2, out2 = main_q(["--preregistered", str(pr), "--dry-run"])
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "prereg")
+        rc3, out3 = main_q(["--preregistered", str(pr), "--camera", "c2"])
+        pr2 = d / "prereg_pin2" / "PREREGISTERED.txt"
+        rc4, out4 = main_q(["--preregistered", str(pr2), "--preregister", "--outcome-if-one-camera", "per-camera",
+                            "--decided-by", "the owner"])
+        G.PINS_FILE = d / "pins_none" / "survey_products.py"
+        rc5, out5 = main_q(["--preregistered", str(pr), "--camera", "c2"])
+    finally:
+        G.PINS_FILE, G.ROOTS = real, real_roots
+    check(rc == 0 and pr.exists(), "the pinned version: --preregister writes the file")
+    check(rc2 == 0 and "REFUSED: this gcpfree_eo.py" in out2 and "not the version survey_products.py pins" in out2,
+          "--dry-run under another pin: says the procedure is not the pinned version")
+    check(rc3 == 2 and "not the version survey_products.py pins" in out3 and not (repo / "runs").exists(),
+          "a run under another pin: REFUSED (exit 2), no run folder")
+    check(rc4 == 2 and not pr2.exists() and "nothing pre-registered" in out4,
+          "--preregister under another pin: REFUSED, nothing written")
+    check(rc5 == 2 and "cannot be read" in out5 and not (repo / "runs").exists(),
+          "no survey_products.py to read the pins from: REFUSED")
+
+
 def test_runs(d, canned):
     print("runs: the committed pre-registration, run folders never overwritten, one more run only with Aug photos")
     real_run_camera, real_roots = G.run_camera, list(G.ROOTS)
@@ -700,12 +781,14 @@ def main():
     (cal / "calibration_history.csv").write_text("file,camera,x,y,z\nDECOY,c1,0,0,999\n")
     (cal / "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv").write_text("1,0,0,999\n")
     station_cal, G.CAL = G.CAL, cal
+    unwatch = watch_cv2()
     start = os.getcwd()
     os.chdir(str(d))
     print(f"test folder: {d}")
     t0 = datetime.now()
     try:
         test_py38()
+        test_watch_sees_reads(d)
         test_guard(d)
         test_archived(d)
         test_ransac()
@@ -717,12 +800,14 @@ def main():
         test_c1_with_aug(d)
         canned["c1_aug_only"] = test_c1_aug_only(d)
         test_not_delivered(d)
+        test_pinned_version(d)
         test_runs(d, canned)
         if hasattr(sys, "addaudithook"):
             check(not WATCH["opened"], "nothing named like calibration A, a GCP file or the history was ever opened")
     finally:
         os.chdir(start)
         G.CAL = station_cal
+        unwatch()
         if not args.keep:
             shutil.rmtree(str(d), ignore_errors=True)
     print(f"all gcpfree_eo tests passed ({N_OK[0]} checks, {(datetime.now() - t0).total_seconds():.0f} s)")

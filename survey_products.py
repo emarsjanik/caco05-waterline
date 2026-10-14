@@ -690,13 +690,15 @@ VARIANT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 # content: the sha256 of gcpfree_eo.py and of every module it runs, as committed. A turned calibration is called
 # INDEPENDENT of a held survey only when it was made by exactly this code (its 'Made by gcpfree_eo.py (sha256 H)'
 # line), its numbers are those of the report written beside it (same angles, same verdict, the report's record of
-# the file's sha256), the run was a delivery run, and its 'X.yaml rotated by N deg' line is true of its numbers.
-# Otherwise it is 'not the pre-registered procedure': never INDEPENDENT (a B nudged by hand, made by an edited
-# procedure, or chosen after seeing A). test_survey_products.py checks that the LAST pin is the files as committed:
-# change gcpfree_eo.py or one of its modules and a new pin is appended in the same commit, BEFORE any B is made
-# with it. A pin is never removed or edited (a B made by an earlier pre-registered version stays traceable).
+# the file's sha256), the run was a delivery run, and its 'X.yaml rotated by N deg' line names the reference its
+# report names and is true of the two files' numbers (procedure_check). Otherwise it is 'not the pre-registered
+# procedure': never INDEPENDENT (a B nudged by hand, made by an edited procedure, or chosen after seeing A).
+# test_survey_products.py checks that the LAST pin is the files as committed: change gcpfree_eo.py or one of its
+# modules and a new pin is appended in the same commit, BEFORE any B is made with it. Once the station has run a
+# pinned version (pre-registration or run), its pin is never removed or edited (a B made by it stays traceable);
+# until then (Oct 2026: no run outside tests) the single pin follows the committed files.
 GCPFREE_PINS = [
-    {"gcpfree_eo.py": "a7a0c43b61fe3c1407a1450f5f8200ee4ebb6ae41ad0161e9c01e1103a06b14d",
+    {"gcpfree_eo.py": "0323f0157cafe73757bbd98b63738c52c50f9620861452bcb017aa527205e8e6",
      "modules": {
          "estimate_eo_rotation.py": "2fbb27b69db3604498b5cfd63739e4ab5ebdbb061e58e2397bc1323956406e72",
          "georectify.py": "e9f1d2c1872697b1be5d805d2762c40b9e32752251f0e9e6d6cb75f5bc7eba1e",

@@ -32,7 +32,11 @@ georectify.py, horizon_check.py, detect_original_view.py, view_reproject.py),
 names photo folders other than the station's three (ROOTS), or states no valid
 rule; and once any run has been made under it, under any other version of it
 (so a rule can never be chosen after seeing a result). Each run records the
-file's sha256 and its git history (every commit that touched it).
+file's sha256 and its git history (every commit that touched it). Nothing is
+pre-registered or run unless this file and its modules are the version
+survey_products.py pins last (its GCPFREE_PINS, read without importing it):
+a B of any other version would be 'NOT the pre-registered procedure' there,
+and the one delivery run would be spent on it.
 
 STEPS (per camera)
   1. Photos (CACO03 timex, full frame as the lens file, each name once):
@@ -130,8 +134,11 @@ camera at all, the second run's B is "B" instead; otherwise the second
 run's B is a SECOND, separately labelled product (--calibration-variant
 gcpfree-aug, in its own root) and the first B stays the delivered one. The
 B file and its report name the variant; survey_products.py refuses any
-other. Commit each run's folder (and write down its B sha256s) before
-calibration A is built or compared with anything.
+other. Commit each run's folder and write down its B sha256s AT ONCE,
+before the B DEM is built and before anything is compared with the A DEM.
+(The A DEM may be built before this procedure runs: nothing of it, and
+nothing of calibration A, reaches this procedure, whose code is pinned by
+sha256 in survey_products.py and whose outcome rule is pre-registered.)
 
 STATED UNCERTAINTY (two terms, on every delivered B; NEITHER is a validated
 bound on real photos):
@@ -336,6 +343,43 @@ def module_sha256():
     return {m: sha256(HERE / m) for m in MODULES}
 
 
+PINS_FILE = HERE / "survey_products.py"     # its GCPFREE_PINS: the versions of this procedure whose B it accepts
+
+
+def pinned_versions(path=None):
+    """survey_products.py's GCPFREE_PINS, read with ast (never imported). -> (list or None, why not)."""
+    import ast
+    p = Path(path or PINS_FILE)
+    try:
+        tree = ast.parse(Path(guard(p)).read_text())
+    except (OSError, SyntaxError, ValueError) as exc:
+        return None, f"{p} cannot be read ({exc.__class__.__name__})"
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "GCPFREE_PINS" for t in node.targets):
+            try:
+                return ast.literal_eval(node.value), ""
+            except ValueError:
+                break
+    return None, f"{p} has no GCPFREE_PINS"
+
+
+def pin_problem():
+    """'' when this gcpfree_eo.py and its modules are the version survey_products.py pins last (GCPFREE_PINS[-1]);
+    else why not: a B made by any other version is 'NOT the pre-registered procedure' there, and the one delivery
+    run would be spent on it, so nothing is pre-registered or run."""
+    pins, why = pinned_versions()
+    if not pins:
+        return f"the versions of this procedure survey_products.py accepts cannot be read: {why or 'none pinned'}"
+    own, mods, last = own_sha256(), module_sha256(), pins[-1]
+    if last.get("gcpfree_eo.py") == own and last.get("modules") == mods:
+        return ""
+    bad = [m for m in MODULES if (last.get("modules") or {}).get(m) != mods[m]]
+    return (f"this gcpfree_eo.py (sha256 {own[:12]}...)" + (f" or its modules ({', '.join(bad)})" if bad else "")
+            + f" is not the version survey_products.py pins last (GCPFREE_PINS[-1]: gcpfree_eo.py "
+              f"{str(last.get('gcpfree_eo.py'))[:12]}...): a B it made would be 'NOT the pre-registered procedure'. "
+              f"Bring the checkout to the committed version (git status; git pull) before anything else")
+
+
 def archived(path):
     """The calibration file at path, refused unless its content is the archived one (ARCHIVED_SHA256)."""
     p = guard(path)
@@ -415,6 +459,9 @@ def preregistration(path, roots=None):
     bad = [m for m in MODULES if mods.get(m) != now[m]]
     if bad:
         probs.append(f"the procedure's modules differ from the pre-registered ones: {', '.join(bad)}")
+    pp = pin_problem()
+    if pp:
+        probs.append(pp)
     if pr.get("outcome_if_one_camera") not in OUTCOME_RULES:
         probs.append(f"outcome_if_one_camera is {pr.get('outcome_if_one_camera')!r}: it must be one of "
                      f"{' | '.join(OUTCOME_RULES)} (the owner's choice)")
@@ -438,6 +485,9 @@ def write_preregistration(path, outcome, decided_by, roots):
         raise Refused(f"--outcome-if-one-camera must be one of {' | '.join(OUTCOME_RULES)} (the owner's choice)")
     if not (decided_by or "").strip():
         raise Refused("--decided-by: who chose the outcome rule")
+    pp = pin_problem()
+    if pp:
+        raise Refused(f"nothing pre-registered: {pp}")
     p.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
     p.write_text(
@@ -1491,7 +1541,7 @@ def run(args, argv):
             + ("" if not r["reasons"] else "  -- " + "; ".join(r["reasons"])))
     rc = finish_run(run_dir, run_info, results, lines, log)
     log(f"\nrun folder {run_dir}: commit it now (git add {run_dir} && git commit), and write down the sha256 of "
-        f"each B file, BEFORE calibration A is built or compared with anything")
+        f"each B file, BEFORE the B DEM is built and before anything is compared with the A DEM")
     (run_dir / "run_report.txt").write_text("\n".join(lines) + "\n")
     return rc
 
@@ -1499,6 +1549,9 @@ def run(args, argv):
 def dry_run(args, cams, roots, prereg_info, probs, eligible, out_dir, log):
     """Writes nothing. The pre-registration, what a run would be now, the photos, and the reference EO's
     horizon offset on its own anchor-day photos (no Oct photo is read for it)."""
+    pp = pin_problem()
+    log(f"procedure: gcpfree_eo.py sha256 {own_sha256()}: " + ("the version survey_products.py pins (GCPFREE_PINS)"
+                                                               if not pp else "REFUSED: " + pp))
     log(f"pre-registration {prereg_info.get('path')}: " + ("OK" if not probs else "a run is REFUSED: " + "; ".join(probs)))
     if not probs:
         log(f"  outcome_if_one_camera {prereg_info.get('outcome_if_one_camera')} (decided by "
