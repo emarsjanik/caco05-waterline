@@ -322,7 +322,11 @@ def test_label_checks(d):
     cal = Path(d) / "cal"
     cal.mkdir(exist_ok=True)
     shutil.copy(io_src, cal / "CACO05_c1_20240801_IO.yaml")
-    fit = cal / "CACO05_c1_2025-01-18_to_2025-01-23_lidar_EO.yaml"
+    # a lidar fit of the test's own, under a name fit_eo_to_survey.py never writes: the carried correction below
+    # names it, and its lineage is also looked for in the repository's calibration/, where the NUC keeps its
+    # real CACO05_c1_2025-01-18_to_2025-01-23_lidar_EO.yaml (found next to the EO first, but no station file
+    # can stand in for this one whatever the order)
+    fit = cal / "CACO05_c1_selftest_2025-01-18_to_2025-01-23_lidar_EO.yaml"
     fit.write_text("x: 420088.0\ny: 4638319.0\nz: 20.8\nazimuth: 72.0\ntilt: 71.6\nroll: -6.6\n"
                    f"# fit_eo_to_survey.py: CACO03_c1_20250123_EO.yaml with azimuth +1.0 fitted to "
                    f"{lid.name} using 40 waterline frames 2025-01-18 to 2025-01-23; position kept.\n")
