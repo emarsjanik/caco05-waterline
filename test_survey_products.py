@@ -4491,6 +4491,98 @@ def test_gcpfree_b(d):
     check(held is sp.BLIND_DATES["2024-10-23"], "BLIND_DATES untouched")
 
 
+def test_gcpfree_turn_line(d):
+    print("a pinned B's 'X.yaml rotated by N deg' line: X is its report's reference, here with the content the report "
+          "recorded, and N is true of the two files' numbers; else NOT the pre-registered procedure")
+    import hashlib
+    import gcpfree_eo as G
+    from georectify import load_extrinsics, load_intrinsics
+    d = Path(d) / "gcpfree_turn"
+    runs = d / "calibration" / "gcpfree" / "runs"
+    runs.mkdir(parents=True)
+    (runs.parent / "PREREGISTERED.txt").write_text("outcome_if_one_camera: per-camera\n(a test)\n")
+    cal = HERE / "calibration"
+    ref_f, io_f = G.REF_EO_FILE["jan"].format(cam="c2"), G.IO_FILE.format(cam="c2")
+    e, io_ = load_extrinsics(cal / ref_f), load_intrinsics(cal / io_f)
+    B = e.copy()
+    B[3:6] += np.radians((-13.4, -0.5, 0.3))                  # the brief's test size, not a measured turn
+    link = {"label": "direct Jan->Oct", "gate_F": True, "gate_S": True, "has_B": True,
+            "solve": {"inliers": 300, "matches": 2000, "resid_med_px": 0.6, "jackknife_max_px": 0.8,
+                      "inlier_new_days": ["2024-10-21", "2024-10-23", "2024-10-25"], "why": ""},
+            "per_day": {"days": [{"day": "2024-10-21", "inliers": 90, "diff_px": 0.7}], "measured": 3,
+                        "off_days": [], "gate_S": True, "why": ""},
+            "horizon": {"status": "pass", "why": "a test"}, "new_photos": ["oct.jpg"], "ref_photos": ["jan.jpg"]}
+    res = {"camera": "c2", "io": io_f, "io_sha256": sp.file_sha(cal / io_f), "reference_eo": ref_f,
+           "reference_eo_sha256": sp.file_sha(cal / ref_f), "direct": link, "verdict": "DELIVERED",
+           "source": "direct Jan->Oct", "notes": [], "reasons": [], "b_reference_eo": ref_f,
+           "b_reference_eo_sha256": sp.file_sha(cal / ref_f), "B": G.eo_deg(B), "pan_change_deg": -13.4}
+    res["uncertainty"] = G.stated_uncertainty(res, io_)
+    info = {"run_id": "20261014T030000Z", "run_no": 1, "eligible": True, "variant": "gcpfree", "first_run": None,
+            "status": "running", "started_utc": "2026-10-14 03:00:00", "argv": ["gcpfree_eo.py"],
+            "argv_text": "gcpfree_eo.py", "roots": list(G.ROOTS), "camera": "both", "aug_dir": None,
+            "procedure_sha256": G.own_sha256(), "modules_sha256": G.module_sha256(),
+            "preregistration": {"path": "calibration/gcpfree/PREREGISTERED.txt",
+                                "sha256": sp.file_sha(runs.parent / "PREREGISTERED.txt"),
+                                "outcome_if_one_camera": "per-camera", "decided_by": "the owner (a test)",
+                                "commit": "c" * 40, "git_history": [{"commit": "c" * 40, "date": "2026-10-14"}]},
+            "solved": ["c2"], "kept": {}}
+    results = G.apply_outcome({"c2": res}, "per-camera", True)
+    run = runs / info["run_id"]
+    run.mkdir()
+    with contextlib.redirect_stdout(io.StringIO()):
+        G.finish_run(run, info, results, ["a test run"], print)
+    b0 = run / G.OUT_EO.format(cam="c2")
+    m = sp.ROTATED_REF.search(" ".join(sp.eo_comment_lines(b0)))
+    pc = sp.procedure_check(b0, [str(cal)])
+    check(pc["pinned"] and m and m.group(1) == ref_f and 13.0 < float(m.group(2)) < 14.0,
+          f"as gcpfree_eo.py wrote it: '{m.group(0) if m else '?'}', true of the numbers: pinned"
+          + ("" if pc["pinned"] else f" -- NOT: {pc['why']}"))
+
+    def forged(name, edit_b=None, ref_beside=None, edit_report=None):
+        """A copy of the run, edited, its report and run.json made to agree with the edited B (a consistent
+        forgery: only the turn line, the reference named, or the reference's content tells)."""
+        f = d / "forged" / name
+        shutil.copytree(str(run), str(f))
+        b = f / b0.name
+        if edit_b:
+            b.write_text(edit_b(b.read_text()))
+        sha = hashlib.sha256(b.read_bytes()).hexdigest()
+        rp = f / (G.OUT_REPORT.format(cam="c2") + ".json")
+        js = json.loads(rp.read_text())
+        js["b_file_sha256"] = sha
+        if edit_report:
+            edit_report(js)
+        rp.write_text(json.dumps(js))
+        rj = json.loads((f / "run.json").read_text())
+        rj["cameras"]["c2"]["b_file_sha256"] = sha
+        (f / "run.json").write_text(json.dumps(rj))
+        if ref_beside:
+            (f / ref_f).write_text(ref_beside)
+        return b
+    turn = m.group(2)
+    other = "CACO03_c2_20240827_EO.yaml"
+    jan_tilted = re.sub(r"^tilt: (\S+)$", lambda t: f"tilt: {float(t.group(1)) + 1.0:.4f}",
+                        (cal / ref_f).read_text(), flags=re.M)
+    cases = [("angle", dict(edit_b=lambda t: t.replace(f"rotated by {turn} deg", f"rotated by {float(turn) + 1:.3f} deg")),
+              "but its numbers are turned"),
+             ("other_ref", dict(edit_b=lambda t: t.replace(f"{ref_f} rotated by", f"{other} rotated by")),
+              f"names {other}, its report's reference is {ref_f}"),
+             ("ref_content", dict(ref_beside=jan_tilted), "is not the one its report says it was turned from (sha256)"),
+             ("ref_missing", dict(edit_b=lambda t: t.replace(f"{ref_f} rotated by", "CACO03_c2_20250199_EO.yaml rotated by"),
+                                  edit_report=lambda js: js.update(b_reference_eo="CACO03_c2_20250199_EO.yaml")),
+              "is not here")]
+    for name, kw, words in cases:
+        b = forged(name, **kw)
+        pcx = sp.procedure_check(b, [str(cal)])
+        lab = sp.held_check(sp.calibration_origin(b, [str(cal)]), sp.blind_of("2024-10-23"))[0]
+        msg = sp.procedure_variant_problem({"cams": {"c2": {"eo_given": str(b), "eo_path": b}}},
+                                           SimpleNamespace(calibration_variant="gcpfree", calibration=str(cal)))
+        check(not pcx["pinned"] and any(words in w for w in pcx["why"]) and lab == "PARTLY-CIRCULAR"
+              and "these are not B files it made" in msg,
+              f"B {name} (report and run.json resealed): '{words}': NOT the pre-registered procedure, never "
+              f"INDEPENDENT, not built as gcpfree")
+
+
 def test_one_setup_coef():
     print("one setup coefficient for the station and the products")
     import historical_forcing as hf
@@ -4587,6 +4679,7 @@ def main():
         test_c_change(d)
         test_blind_and_calibration(d)
         test_gcpfree_b(d)
+        test_gcpfree_turn_line(d)
         test_fit_setup_flat(d)
         with unblinded():            # the GCP path as it runs once Chris has reported
             test_oct_path(d)
