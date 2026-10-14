@@ -197,7 +197,10 @@ TOWER_EN = (420085.05, 4638322.39)
 SEAM_NORTHING = 4638415.0
 DISTANCE_BINS = (0, 100, 150, 200, 250, 300, 400, 600, 1e9)
 BAND = 0.5                       # elevation band width, m
-NOMINAL_EPSG = 32619             # as asc_to_geotiff.py writes the DEM
+# The horizontal EPSG of the difference GeoTIFF when this script runs on its own: NAD83(2011) / UTM 19N, the frame
+# of the surveys and of our grids (survey_products.py always passes its DEM's, GEOTIFF_EPSG = 6348). Until Oct 2026
+# it was 32619 (WGS 84 / UTM 19N), a NOMINAL tag from an old .prj; --epsg 32619 still writes it (labelled nominal).
+DEFAULT_EPSG = 6348
 MIN_BAND_N = 10                  # fewer values than this in a group: flagged as few
 MIN_SPREAD_N = 3                 # fewer than this: no NMAD / p5 / p95 (one value has NMAD 0)
 TIME_GAP_WARN_DAYS = 3
@@ -1741,7 +1744,7 @@ def draw_figure(path, ctx):
 def compare(dem_path, survey_path, survey_type, label, why, name=None, output_dir=".",
             survey_date=None, photo_dates=None, contours=None, camera_eo=None, camera_io=None,
             spread=None, count=None, envelope_source=None, min_cover=0.5, tolerance=1.0,
-            epsg=NOMINAL_EPSG, plot=True, transect_tolerance=TRANSECT_TOLERANCE,
+            epsg=DEFAULT_EPSG, plot=True, transect_tolerance=TRANSECT_TOLERANCE,
             transect_split=TRANSECT_SPLIT, transect_min_points=TRANSECT_MIN_POINTS, eo_dirs=None,
             synthetic=None):
     """
@@ -2673,8 +2676,9 @@ def main():
                          "*_corr_EO.yaml came from), and the shots a setup coefficient was fitted to; default: "
                          "the EO's own folder and calibration/ (the shots: the survey's folder and the station's "
                          "survey folders)")
-    ap.add_argument("--epsg", type=int, default=NOMINAL_EPSG,
-                    help="horizontal EPSG written into the difference GeoTIFF (default 32619)")
+    ap.add_argument("--epsg", type=int, default=DEFAULT_EPSG,
+                    help="horizontal EPSG written into the difference GeoTIFF (default 6348 = NAD83(2011) / UTM 19N; "
+                         "32619, WGS 84, the default until Oct 2026, is written as a nominal tag)")
     ap.add_argument("--synthetic", default=None, metavar="NOTE",
                     help="the DEM was built from SYNTHETIC test photos (e.g. the test fixture): every output "
                          "says so ('SYNTHETIC FIXTURE: tests the pipeline, not the beach') with this note")

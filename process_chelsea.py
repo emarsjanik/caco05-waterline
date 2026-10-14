@@ -351,9 +351,10 @@ def main():
                     help="Leave out whole days whose elevations differ from the other days' "
                          "DEM by more than this (m, default 0.15, as the station cron): catches "
                          "days where the detector followed snow or shadow. 0 disables.")
-    ap.add_argument("--epsg", type=int, default=32619,
-                    help="Coordinate system of the GeoTIFF DEMs (default 32619 = WGS 84 / UTM 19N, "
-                         "as the project's .prj; 6348 = NAD83(2011) / UTM 19N).")
+    ap.add_argument("--epsg", type=int, default=6348,
+                    help="Coordinate system of the GeoTIFF DEMs (default 6348 = NAD83(2011) / UTM 19N, the frame of "
+                         "the GCPs and the surveys, as survey_products.py; 32619 = WGS 84 / UTM 19N, the default "
+                         "until Oct 2026, was a nominal tag from an old .prj).")
     ap.add_argument("--interpolate-edge", type=float, default=6.0,
                     help="Fill DEM cells between waterlines by interpolation, bridging at most "
                          "this many metres (default 6). The upper beach is crossed by too few "
