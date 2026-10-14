@@ -771,7 +771,17 @@ def test_table_commas(d):
     rows, out = quiet(sp.read_table, bad, sp.CONFIG_FIELDS)
     check("WARNING" in out and "line 2: 1 field(s) more than its 11 columns" in out and rows[0]["notes"] == "c2 only",
           "a table row with more fields than columns (a comma in a text not in quotes): a WARNING naming the line")
-    short = d / "short_surveys.csv"            # the optional last column left off: read as empty, no warning
+    # a row that only ends in a comma (or two, or one and a space) has an empty extra field: nothing is dropped
+    trail = d / "trailing_dates.csv"
+    trail.write_text("date,camera,enabled,station,first_day,last_day,eo_file,envelope_survey,utc_hours,era,notes\n"
+                     "2025-03-06,c2,1,CACO04,2025-03-03,2025-03-09,CACO04_c2_20250219_EO.yaml,,13.5-18,adcp,"
+                     "\"c2 only, CACO04\",\n"
+                     "2025-03-07,c2,1,CACO04,2025-03-03,2025-03-09,CACO04_c2_20250219_EO.yaml,,13.5-18,adcp,"
+                     "c2 again,, \n")
+    rows, out = quiet(sp.read_table, trail, sp.CONFIG_FIELDS)
+    check("WARNING" not in out and [r["notes"] for r in rows] == ["c2 only, CACO04", "c2 again"],
+          "a row ending in empty extra fields (a trailing comma, no text after it): read whole, no warning")
+    short = d / "short_surveys.csv"           # the optional last column left off: read as empty, no warning
     short.write_text("date,name,path,survey_type,survey_date,label,why,label_override_reason\n"
                      "2026-09-29,rtk_b,2026-09-29_b.csv,points,2026-09-29,INDEPENDENT,second set\n")
     rows, out = quiet(sp.read_table, short, sp.SURVEY_FIELDS)

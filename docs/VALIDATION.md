@@ -73,8 +73,9 @@ envelope was placed with, or a points survey made on its calibration's day unles
 `surveys/README.md` says (a date added, switched on or off, a survey file given, a second
 survey of a date, a row without its optional last column, a text with a comma inside double
 quotes) never fails it. A comma outside double quotes does, as the README says: the product
-then warns and cuts the text. Every `label_override_reason` the tables hold is listed (the
-text after such a comma, in a row without its last column, would land there unwarned).
+then warns and cuts the text; a row that only ends in a comma loses nothing and is not
+warned about. Every `label_override_reason` the tables hold is listed (the text after such
+a comma, in a row without its last column, would land there unwarned).
 
 What was asked for in the tables (23 Oct 2024 and 19 Mar 2025 switched off, the windows, the
 29 Sep 2026 RTK row and its text, envelopes from the other lidar, every calibration in the

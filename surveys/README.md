@@ -102,7 +102,9 @@ inside the text is written twice: `""`). Without the quotes the comma ends
 the text: `survey_products.py` warns (`... field(s) more than its ... columns
 (a comma in a text that is not in double quotes?)`) and drops what follows,
 and the last group of `test_survey_products.py` (the station's own tables)
-FAILs on that warning. In `surveys.csv`, a row that leaves off its optional
+FAILs on that warning. A row that only ends in a comma (an empty field past
+the last column, as a spreadsheet may save it) loses nothing: no warning.
+In `surveys.csv`, a row that leaves off its optional
 last column gives no warning at all: the text after the comma becomes that
 row's `label_override_reason`, which overrules the downgrades that column can
 overrule (`--dry-run` then prints `[overruled in surveys.csv (<the text>):

@@ -581,9 +581,11 @@ def read_table(path, fields):
             sys.exit(f"{path}: missing column(s) {', '.join(missing)} (expected {', '.join(fields)})")
         rows = []
         for r in rd:
-            if r.get(None) and (str(path), rd.line_num) not in _TABLE_WARNED:
-                # csv puts the fields past the header under None; read as they are, the text after a
-                # comma that is not inside double quotes would be dropped without a word
+            # csv puts the fields past the header under None; read as they are, the text after a comma
+            # that is not inside double quotes would be dropped without a word. Empty ones (a row ending
+            # in a comma, as a spreadsheet may save it) drop nothing and are not warned about
+            extra = [x for x in (r.get(None) or []) if (x or "").strip()]
+            if extra and (str(path), rd.line_num) not in _TABLE_WARNED:
                 _TABLE_WARNED.add((str(path), rd.line_num))
                 warn(f"{path} line {rd.line_num}: {len(r[None])} field(s) more than its {len(rd.fieldnames)} "
                      f"columns (a comma in a text that is not in double quotes?): the text after it is dropped")
