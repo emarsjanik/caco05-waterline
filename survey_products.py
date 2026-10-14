@@ -695,7 +695,7 @@ VARIANT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 # change gcpfree_eo.py or one of its modules and a new pin is appended in the same commit, BEFORE any B is made
 # with it. A pin is never removed or edited (a B made by an earlier pre-registered version stays traceable).
 GCPFREE_PINS = [
-    {"gcpfree_eo.py": "0bb300d61d2ad06f18b651df76cc907533a3d184f27ea9a6f7201c5afe6d5dee",
+    {"gcpfree_eo.py": "a7a0c43b61fe3c1407a1450f5f8200ee4ebb6ae41ad0161e9c01e1103a06b14d",
      "modules": {
          "estimate_eo_rotation.py": "2fbb27b69db3604498b5cfd63739e4ab5ebdbb061e58e2397bc1323956406e72",
          "georectify.py": "e9f1d2c1872697b1be5d805d2762c40b9e32752251f0e9e6d6cb75f5bc7eba1e",
@@ -9205,8 +9205,10 @@ def main():
     ap.add_argument("--calibration", default=str(HERE / "calibration"), help="calibration folder")
     ap.add_argument("--eo", nargs="+", default=None, metavar="CAM=PATH",
                     help="build with these calibrations (EO files, each path taken as given) instead of the table's "
-                         "eo_file, one per camera the date builds (e.g. c1=calibration/CACO03_c1_20241023_gcpfree_EO.yaml "
-                         "c2=...); --date only, with --calibration-variant NAME, into a root named <root>_NAME, e.g. "
+                         "eo_file, one per camera the date builds (a camera the GCP-free procedure did NOT DELIVER may "
+                         "be left out: its report beside the given B files says so), e.g. "
+                         "c2=calibration/gcpfree/runs/<run id>/CACO03_c2_gcpfree-oct2024_EO.yaml; --date only, with "
+                         "--calibration-variant NAME, into a root named <root>_NAME, e.g. "
                          f"{DEFAULT_OUTPUT_ROOT}_gcpfree (any other root is refused, exit 5). A file whose "
                          "stated acceptance is FAIL ('# acceptance: FAIL', 'NOT DELIVERED') is refused; a missing one too (never "
                          "the table's instead)")

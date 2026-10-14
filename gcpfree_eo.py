@@ -965,7 +965,11 @@ def link_why(lk):
         parts.append("horizon FAIL: " + h.get("why", ""))
     elif h.get("status") == "unavailable":
         parts.append("horizon unavailable: " + h.get("why", ""))
-    return "; ".join(x for x in parts if x) or "passed"
+    out = []
+    for x in parts:                                       # each reason once (a failed solve's 'why' is the link's too)
+        if x and x not in out:
+            out.append(x)
+    return "; ".join(out) or "passed"
 
 
 def decide(res):
