@@ -781,7 +781,12 @@ def run_cmd(cmd, log_path, cwd=None):
     runtime guard (an audit hook) does not reach into the child processes, so their arguments are checked here
     (BlindSurvey)."""
     for c in cmd:
-        b = held_file_name(c) if isinstance(c, (str, Path)) else None
+        if not isinstance(c, (str, Path)) or not BLIND_DATES:
+            continue
+        # a path (a Path, or a string with no white space) by its name and the name of the file it really is; any
+        # other argument (a sentence, e.g. a GeoTIFF description) by its last component only, with no file look-up
+        path_like = isinstance(c, Path) or not any(ch.isspace() for ch in str(c))
+        b = held_file_name(c) if path_like else held_name(os.path.basename(str(c)))
         if b:
             raise BlindSurvey(f"refused to start {Path(str(cmd[1] if len(cmd) > 1 else cmd[0])).name}: it would be "
                               f"handed {c}, named like a survey of {b['survey_date']}, and {blind_statement(b)} "
