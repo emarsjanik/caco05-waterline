@@ -5649,6 +5649,67 @@ def a_product_times(args, date, variant):
     return a_product(args, date, variant)
 
 
+# What makes a GCP-free B independent of the held survey, said plainly to its holder and to the owner (B's README
+# BLIND section and the share MANIFEST): what the code enforces, and what rests on the owner following the
+# procedure -- software on a computer the owner controls cannot prove that a rule was fixed before anyone looked.
+B_PROTOCOL_ENFORCED = (
+    "WHAT THE CODE ENFORCES (survey_products.py and gcpfree_eo.py, on this computer): B is made only by the pinned "
+    "procedure (gcpfree_eo.py, its five modules and its constants, by sha256: GCPFREE_PINS); every run of it, a trial "
+    "too, is refused unless this repository's calibration/gcpfree/PREREGISTERED.txt (the outcome rule, and the photos "
+    "a run uses, by sha256) is committed and unchanged, and every run is recorded in calibration/gcpfree/runs/; the "
+    "first delivery run fixes B (one more only with Aug 2024 photos, for a camera not delivered); B's file, report "
+    "and run record must be committed once and unchanged since; B's DEM is built as A was (the committed tables, A's "
+    "build options, the search envelope A's detection used, A's forcing), in one root; the procedure never opens "
+    "calibration A, a GCP or target file or the calibration history, and no build looks for the held survey; the "
+    "ORDER above is read from git and from the run records")
+B_PROTOCOL_OWNER = (
+    "WHAT RESTS ON THE OWNER FOLLOWING THE PROCEDURE (no software on a computer the owner controls can prove it): that "
+    "PREREGISTERED.txt was committed AND pushed to GitHub before any run of gcpfree_eo.py, a trial included; that no "
+    "copy of the procedure was run anywhere else (another clone, a copied script) before it; that no run folder, "
+    "branch or reflog entry was deleted and the repository not re-cloned; that no B file was edited before its commit; "
+    "that this computer's clock, which dates every git commit and run above, was right. What answers these comes from "
+    "outside this computer: the sha256s of the procedure and of the pre-registration, sent to the holder before A's "
+    "DEM was shared; each B file's sha256, sent the moment its run ended; and the time GitHub received the "
+    "pre-registration commit (below)")
+
+
+def commit_remote_state(path, commit):
+    """Where the commit `commit` of the repository holding `path` is known to be pushed: the remote-tracking branches
+    holding it as this computer last fetched them, and origin's URL (any credentials left out). -> {"branches": [...],
+    "url": str or None, "why": ''}."""
+    q = Path(os.path.realpath(str(path)))
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(q.parent)] + list(a), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True)
+    if not commit:
+        return {"branches": [], "url": None, "why": "no commit"}
+    try:
+        br = git("branch", "-r", "--contains", str(commit))
+        url = git("remote", "get-url", "origin")
+    except OSError as exc:
+        return {"branches": [], "url": None, "why": f"git cannot be run ({exc})"}
+    names = [x.strip() for x in br.stdout.splitlines() if x.strip() and "->" not in x] if br.returncode == 0 else []
+    u = url.stdout.strip() if url.returncode == 0 and url.stdout.strip() else None
+    return {"branches": names, "url": re.sub(r"//[^/@]*@", "//", u) if u else None, "why": ""}
+
+
+def prereg_commit_text(pc):
+    """The pre-registration's commit as B's holder is told it: its hash, its date by this computer's clock, whether a
+    remote branch this computer has fetched holds it, and where its public time is."""
+    pr = (pc or {}).get("preregistration") or {}
+    c = pr.get("commit")
+    rs = commit_remote_state(pc.get("preregistration_here") or GCPFREE_DIR / "PREREGISTERED.txt", c)
+    return (f"PRE-REGISTRATION COMMIT: {c or '(none found)'} ({pr.get('commit_date')} by this computer's clock; the "
+            f"file's sha256 {str(pr.get('sha256'))[:12]}...); "
+            + (f"held by {', '.join(rs['branches'])} of {rs['url'] or 'the remote'} as this computer last fetched it"
+               if rs["branches"] else
+               "on NO remote branch this computer has fetched (not pushed, or not fetched since)")
+            + ". A commit's own date is set by the computer that made it: the public timestamp is the time GitHub "
+              "received the push, which the holder can check on the repository's GitHub page (its Activity, or the "
+              "GitHub events API) against this commit hash and the sha256 he was sent")
+
+
 def gcpfree_disclosure(plan, args, pcs):
     """What the holder of a blind date's survey is told of a GCP-free B, besides its procedure line: the EXPOSURE
     statement of its procedure (from its report), and the ORDER of what decides B and of A: the procedure's pin, the
@@ -5753,6 +5814,7 @@ def gcpfree_disclosure(plan, args, pcs):
                      f"provenance files)")
     return {"exposure": pc.get("exposure") or "the procedure's report states no exposure",
             "order": order, "order_flags": flags,
+            "protocol": [B_PROTOCOL_ENFORCED, B_PROTOCOL_OWNER, prereg_commit_text(pc)],
             "times": {k: (v.strftime("%Y-%m-%dT%H:%M:%SZ") if v else None) for k, v in t.items()},
             "a_product": {k: v for k, v in a.items() if k not in ("options", "software")},
             "runs": [dict(r, started=utc_text(r["started"]), finished=utc_text(r["finished"])) for r in runs],
@@ -8640,6 +8702,8 @@ def write_readme(plan, args, prov):
             w("  ORDER (what decides B, and A): " + "; ".join(gf.get("order") or []) + ".")
             for x in gf.get("order_flags") or []:
                 w(f"    NOTE: {x}.")
+            for x in gf.get("protocol") or []:
+                w(f"  {x}.")
         if ck.get("label") != "INDEPENDENT":
             w("  A DEM of this date built with a calibration that used none of his points (--eo ... "
               "--calibration-variant, in its own --output-root) lets his check test the camera geometry too.")
@@ -10734,6 +10798,7 @@ def share(args):
     if gf:
         lines += [gf.get("exposure") or "", "ORDER (what decides B, and A): " + "; ".join(gf.get("order") or [])]
         lines += [f"NOTE: {x}" for x in gf.get("order_flags") or []]
+        lines += [f"{x}." for x in gf.get("protocol") or []]
     lines += sorted(set(prereg))
     lines += [x for x in lens if x]
     lines += ["The DEM and map files carry the calibration variant in their names (the table's: <date>_dem.tif, "

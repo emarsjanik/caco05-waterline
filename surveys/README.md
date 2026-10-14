@@ -696,7 +696,13 @@ Two DEMs are delivered, each in its own root (one calibration per root):
    the procedure's report). Nobody else chooses it, and it is chosen before
    any run:
    `python3 gcpfree_eo.py --preregister --outcome-if-one-camera <both-or-none|per-camera> --decided-by "<name>"`
-   then `git add calibration/gcpfree/PREREGISTERED.txt && git commit`.
+   then `git add calibration/gcpfree/PREREGISTERED.txt && git commit`, **and
+   `git push` that commit to GitHub at once, before ANY run of
+   `gcpfree_eo.py`, a trial included**: the time GitHub receives the push is
+   the rule's public timestamp (a commit's own date is set by the computer
+   that made it, so it proves nothing on its own); B's README and MANIFEST
+   cite the commit and say whether a remote branch holds it, and Chris can
+   check on GitHub when it arrived.
    The file also PINS THE PHOTOS: the name, size and sha256 of every Oct, Jan
    and (c2) Dec photo a run selects from the station's three folders; a run
    that selects other photos (one removed, replaced or added after a look) is
@@ -715,9 +721,11 @@ Two DEMs are delivered, each in its own root (one calibration per root):
    record the branch does not hold. `survey_products.py` accepts a B only from
    `calibration/gcpfree/runs/` of this repository, made under this file as it
    was committed before the run.
-   **Send Chris the procedure's sha256 before A is built or shared** (`sha256sum
-   gcpfree_eo.py`, = `GCPFREE_PINS[-1]`), and the PREREGISTERED.txt sha256 as
-   soon as it is committed: he then knows both were fixed before he saw A.
+   **Send Chris the procedure's sha256 before A's DEM is shared** (ideally
+   before it is built: `sha256sum gcpfree_eo.py`, = `GCPFREE_PINS[-1]`), and
+   the PREREGISTERED.txt sha256 with its commit hash as soon as it is
+   committed and pushed (also before A's DEM is shared): he then knows both
+   were fixed before he saw A.
 2. `python3 test_gcpfree_eo.py` (synthetic, in a temporary folder, ~25-30 min
    here under load; allow 30-40 on the NUC)
    and `python3 gcpfree_eo.py --dry-run` (the pre-registration, the photos
@@ -734,9 +742,9 @@ Two DEMs are delivered, each in its own root (one calibration per root):
    (`CACO03_<cam>_gcpfree-oct2024_report.json/.txt`), a B file
    (`CACO03_<cam>_gcpfree-oct2024_EO.yaml`) only for a camera DELIVERED
    under the rule, and `run.json`. **Commit that folder at once, in ONE
-   commit (never amended), and write down each B file's sha256 and send it to
-   Chris, before the B DEM is built and before anything is compared with the
-   A DEM.** `survey_products.py` builds no B whose file, report, `run.json` or
+   commit (never amended), push it, and send Chris each B file's sha256 the
+   moment the run ends, before the B DEM is built and before anything is
+   compared with the A DEM.** `survey_products.py` builds no B whose file, report, `run.json` or
    `run_report.txt` is uncommitted, changed since, or touched by more than one
    commit, nor while any run folder there (a trial, a run cut off) is
    uncommitted. (The A
@@ -775,6 +783,41 @@ gcpfree-aug`, root `/mnt/I2Rgus_Data/survey_products_gcpfree-aug`, archive
 `2024-10-23_B2_gcpfree_aug.tgz`) and the first run's B stays the delivered
 one. The B file and its report name the variant; `survey_products.py`
 refuses any other.
+
+### What the code enforces, and what rests on the owner
+
+B is independent of Chris's GCPs only if nothing about it was chosen after
+anyone saw A or a result. Part of that the code enforces; part of it no
+software can prove, because the computer that runs the procedure is the
+owner's: its clock dates every commit and run, and its repository can be
+re-cloned or have history deleted. B's README (BLIND section) and the share
+MANIFEST say both, in these words.
+
+* **Enforced** (`survey_products.py` and `gcpfree_eo.py`): B is made only by
+  the pinned procedure (gcpfree_eo.py, its five modules and constants, by
+  sha256: `GCPFREE_PINS`); every run, a trial too, is refused unless this
+  repository's `calibration/gcpfree/PREREGISTERED.txt` (the outcome rule and
+  the photos, by sha256) is committed and unchanged, and every run is
+  recorded in `calibration/gcpfree/runs/`; the first delivery run fixes B;
+  B's file, report and run record are committed once and unchanged; B's DEM
+  is built as A was (the committed tables, A's options, A's envelope, A's
+  forcing), in one root; the procedure never opens calibration A, a GCP or
+  target file or the calibration history, and no build looks for the held
+  survey; B's ORDER (the pin, the rule, A's DEM first built and last
+  rebuilt, every run, B's commit, with NOTEs) is read from git and the run
+  records.
+* **Resting on the owner**: PREREGISTERED.txt committed AND pushed to GitHub
+  before any run of `gcpfree_eo.py`, a trial included; no copy of the
+  procedure run anywhere else (another clone, a copied script) before it; no
+  run folder, branch or reflog entry deleted, the repository not re-cloned;
+  no B file edited before its commit; the computer's clock right.
+* **What answers those, from outside this computer**: the sha256s of the
+  procedure and of the pre-registration (with its commit hash), sent to Chris
+  before A's DEM is shared; each B file's sha256, sent the moment its run
+  ends; and the time GitHub received the pre-registration commit (the
+  repository's activity on GitHub), which the owner cannot set. B's README
+  cites that commit (`PRE-REGISTRATION COMMIT: ...`) and says whether a
+  remote branch this computer has fetched holds it.
 
 ### What makes a B file the pre-registered procedure's
 

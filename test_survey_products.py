@@ -4737,6 +4737,17 @@ def test_gcpfree_b(d):
         check("NOTE: A's DEM was built BEFORE" not in rdb and "NOTE: B was committed after A's DEM" not in rdb
               and gf["times"]["a_dem"] >= gf["times"]["b_commit"] >= gf["times"]["prereg"],
               "... and what came first (here: the rule, B's commit, then A's DEM: no NOTE)")
+        pr_c = pc["preregistration"]["commit"]
+        rdb1 = " ".join(rdb.split())
+        check("WHAT THE CODE ENFORCES (survey_products.py and gcpfree_eo.py, on this computer)" in rdb1
+              and "WHAT RESTS ON THE OWNER FOLLOWING THE PROCEDURE (no software on a computer the owner controls can "
+                  "prove it): that PREREGISTERED.txt was committed AND pushed to GitHub before any run of "
+                  "gcpfree_eo.py, a trial included" in rdb1
+              and f"PRE-REGISTRATION COMMIT: {pr_c}" in rdb1 and "the time GitHub received the push" in rdb1
+              and "on NO remote branch this computer has fetched (not pushed, or not fetched since)" in rdb1
+              and len(gf["protocol"]) == 3,
+              "B's README, BLIND: what the code enforces, what rests on the owner (committed AND pushed before any "
+              "run), and the pre-registration commit with where its public time is (here no remote holds it: said)")
         info_ = {"procedure_sha256": pc["procedure_sha256"], "preregistration": pc["preregistration"],
                  "outcome_rule": "per-camera", "run_id": "x", "run_started_utc": "2026-10-14 00:00:00",
                  "committed": dict(pc["committed"], date="2099-01-01T00:00:00+00:00"),
@@ -4846,6 +4857,8 @@ def test_gcpfree_b(d):
               and "c2 procedure: made by the pre-registered procedure" in man_b
               and str(runs / "20261014T010000Z") in man_b and "EXPOSURE (stated by" in man_b
               and "ORDER (what decides B, and A)" in man_b and "STATED UNCERTAINTY" in man_b
+              and "WHAT THE CODE ENFORCES" in man_b and "WHAT RESTS ON THE OWNER" in man_b
+              and "PRE-REGISTRATION COMMIT: " in man_b and "WHAT RESTS ON THE OWNER" not in man_a
               and "EXPOSURE" not in man_a
               and "lens c2: CACO05_c2_20240801_IO.yaml is the file the detector reads" in man_b
               and "CACO03_c2_20240801_IO.yaml, this CACO03 product's own lens file, is in the archive too: the same "
