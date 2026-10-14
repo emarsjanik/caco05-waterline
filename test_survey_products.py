@@ -114,16 +114,24 @@ TEST_DIRS = {}
 
 def real_rtk():
     """The real RTK file the station's C was fitted to, looked for as survey_products looks (the path
-    surveys.csv gives, by the product's own rule, survey_products.resolve_file: a path with a folder in it
-    as given, a bare name in the survey folders; then that name in every survey folder) and confirmed by
-    its sha256. -> (path, "") or (None, why it cannot be used)."""
+    surveys.csv gives -- a row of the fit's file name, or the points row of the fit's survey date under
+    whatever name the owner gave it --, by the product's own rule, survey_products.resolve_file: a path
+    with a folder in it as given, a bare name in the survey folders; then that name, and the fit's own
+    file name, in every survey folder) and confirmed by its sha256, the product's rule for 'the same
+    shots'. -> (path, "") or (None, why it cannot be used)."""
     fit = sp.SETUP_FITS[sp.SETUP_COEF]
     try:
         rows, _ = quiet(sp.read_table, sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
     except (SystemExit, Exception):     # a table survey_products cannot read (refused, not UTF-8, bad csv):
         rows = []                       # test_station_tables, run last, says so
-    given = [r["path"] for r in rows if Path(r.get("path") or "").stem == fit["survey_stem"]]
-    given = given or [fit["survey_stem"] + ".csv"]
+    given = []
+    for r in rows:
+        g = (r.get("path") or "").strip()
+        if g and g not in given and (Path(g).stem == fit["survey_stem"] or (
+                r.get("survey_type") == fit.get("survey_type") and r.get("survey_date") == fit.get("survey_date"))):
+            given.append(g)
+    if fit["survey_stem"] + ".csv" not in given:
+        given.append(fit["survey_stem"] + ".csv")
     found = []
     for g in given:
         for f in sp.resolve_file(g, RTK_DIRS) + [Path(x) / Path(g).name for x in RTK_DIRS]:
@@ -366,9 +374,17 @@ def test_labels(d):
     sp.honest_label(rtk, p, args, other, verdict=v)
     check(v.label == "INDEPENDENT" and v.overridden and "CIRCULAR" in v.overridden[0],
           "... overruled only by label_override_reason, and the overruled downgrade is kept")
+    # the same shots cannot be overruled: by their name, always (the file need not be here); by their
+    # content on the test's own fit (test_fit_recognised), and on the real shots when they are here
     v = sp.Verdict(dict(rtk, label_override_reason="anything"))
-    sp.honest_label(rtk, p, args, real if real.exists() else rtkf, verdict=v)
-    check(v.label == "CIRCULAR", "the same shots (content or name) cannot be overruled")
+    sp.honest_label(rtk, p, args, rtkf, verdict=v)
+    check(v.label == "CIRCULAR" and not v.overridden,
+          "the same shots by name (2026-09-29_Marconi_Checkshots.csv) cannot be overruled by label_override_reason")
+    if real.exists():
+        v = sp.Verdict(dict(rtk, label_override_reason="anything"))
+        sp.honest_label(dict(rtk, survey_date=""), p, args, real, verdict=v)
+        check(v.label == "CIRCULAR" and not v.overridden,
+              "... nor the real shots renamed, by their content (station file)")
     # a C declared fitted to a survey file: CIRCULAR against that file
     lab, why = sp.honest_label(rtk, p, SimpleNamespace(setup_coef=0.05, setup_fitted_to=str(other),
                                                        survey_dirs=[]), other)
@@ -574,6 +590,29 @@ def test_fit_recognised(d):
         lab, why = label(renamed)
         check(lab == "CIRCULAR" and "same content (sha256)" in why[0],
               "the fitted shots under another name: CIRCULAR, by their content")
+        v = sp.Verdict(dict(s, label_override_reason="anything"))
+        sp.honest_label(s, p, here, renamed, fits=fits, verdict=v)
+        check(v.label == "CIRCULAR" and not v.overridden,
+              "... and label_override_reason cannot overrule it: the same shots by content (test_labels: by name)")
+        # real_rtk(), which finds the real shots for the checks that need them, on this fit: the points row of
+        # the fit's date under another name is looked up by the product's rule and confirmed by its sha256
+        saved = (sp.SETUP_FITS[sp.SETUP_COEF], sp.DEFAULT_SURVEYS, list(RTK_DIRS))
+        tbl = d / "surveys_renamed.csv"
+        tbl.write_text("date,name,path,survey_type,survey_date,label,why\n"
+                       "2026-10-15,shots,renamed_export.csv,points,2026-10-15,INDEPENDENT,the owner's own name\n")
+        try:
+            sp.SETUP_FITS[sp.SETUP_COEF], sp.DEFAULT_SURVEYS, RTK_DIRS[:] = sp.SETUP_FITS[fake], tbl, [str(elsewhere)]
+            got, _ = real_rtk()
+            check(got == elsewhere / "renamed_export.csv",
+                  f"real_rtk: the fit's shots under the name surveys.csv's points row of its date gives, confirmed by "
+                  f"sha256 ({got})")
+            (elsewhere / "renamed_export.csv").write_text("Name,Easting,Northing,Elevation\n1,1,1,1\n")
+            got, why_ = real_rtk()
+            check(got is None and "sha256 is not the one" in why_,
+                  "... a file of that name with other content: not used, and said so")
+        finally:
+            sp.SETUP_FITS[sp.SETUP_COEF], sp.DEFAULT_SURVEYS = saved[0], saved[1]
+            RTK_DIRS[:] = saved[2]
         rex = shots(elsewhere / "reexport.csv", dE=0.004, dated=False)
         lab, why = label(rex)
         check(lab == "CIRCULAR" and "40 of its 40 points lie within 0.05 m" in why[0] and "re-exported" in why[0],
