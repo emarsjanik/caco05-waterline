@@ -170,14 +170,16 @@ def test_dsm_offset(d):
     # cells the lidar covers completely: exactly +0.20 (a part-covered cell at the water edge
     # takes the median of its dry part, biased up the slope by up to slope x cell / 4)
     g_d, _ = read_asc(out / "synth_dsm_dem_minus_survey.asc")
-    full_cells = np.isfinite(g_d) & ((dem - OFFSET) > 1.0 + 0.05 + 1e-6)
+    with np.errstate(invalid="ignore"):              # NaN cells are never full (numpy < 1.18 warns)
+        full_cells = np.isfinite(g_d) & ((dem - OFFSET) > 1.0 + 0.05 + 1e-6)
     check(full_cells.sum() > 500 and np.allclose(g_d[full_cells], OFFSET, atol=2e-4),
           f"{int(full_cells.sum())} fully covered cells: exactly +0.200")
     check(h["nmad"] < 0.01 and abs(h["mean"] - OFFSET) < 0.01, "NMAD ~ 0, mean +0.20")
     check(h["within_0.10"] == 0.0 and h["within_0.50"] == 1.0, "shares within +/-0.10 / 0.50")
     # coverage: the lidar is masked below 1.0 m, the DEM goes below that
     zdem = dem - OFFSET
-    full = np.isfinite(zdem) & (zdem > 1.0 + 0.05)
+    with np.errstate(invalid="ignore"):
+        full = np.isfinite(zdem) & (zdem > 1.0 + 0.05)
     check(h["dem_cells_compared"] >= full.sum() and h["dem_cells_compared"] < np.isfinite(dem).sum(),
           f"water-masked cells not compared ({h['dem_cells_compared']} of {h['dem_cells']})")
     check(h["dem_cells_no_survey"] > 0, "cells without survey counted")

@@ -179,7 +179,8 @@ def fit_reference(ep, lv, r_ep, r_lv, keep):
             coef, *_ = np.linalg.lstsq(A, lv[use], rcond=None)
             res = lv - (coef[0] * x + coef[1])
             sigma = max(1.4826 * np.nanmedian(np.abs(res[use])), 0.03)
-            use = m & (np.abs(res) < max(3 * sigma, 0.15))
+            with np.errstate(invalid="ignore"):     # a NaN residual is never kept (numpy < 1.18 warns)
+                use = m & (np.abs(res) < max(3 * sigma, 0.15))
         rms = float(np.sqrt(np.mean(res[use] ** 2)))
         if best is None or rms < best[4]:
             best = (float(coef[0]), lag_min * 60.0, float(coef[1]), float(sigma), rms)
@@ -214,7 +215,9 @@ def run_qc(ep, lv, reference=None, waves=None):
             predicted = a * reference_at(reference[0], reference[1], ep - lag_s) + b
             limit = max(REF_LIMIT, REF_SIGMAS * sigma)
             allowance, runup = wave_allowances(ep, waves)
-            for i in np.flatnonzero(np.isfinite(predicted) & (np.abs(lv - predicted) > limit)):
+            with np.errstate(invalid="ignore"):     # NaN levels are never over the limit (numpy < 1.18 warns)
+                over = np.isfinite(predicted) & (np.abs(lv - predicted) > limit)
+            for i in np.flatnonzero(over):
                 excess = lv[i] - predicted[i]
                 if 0 < excess <= limit + allowance[i]:
                     mark(i, SUSPECT, "possible_setup")
