@@ -74,8 +74,15 @@ envelope was placed with, or a points survey made on its calibration's day unles
 survey of a date, a row without its optional last column, a text with a comma inside double
 quotes) never fails it. A comma outside double quotes does, as the README says: the product
 then warns and cuts the text; a row that only ends in a comma loses nothing and is not
-warned about. Every `label_override_reason` the tables hold is listed (the text after such
-a comma, in a row without its last column, would land there unwarned).
+warned about. A table the product cannot read at all (e.g. saved by a spreadsheet in Latin-1,
+not UTF-8) is one of the problems listed, after the code's checks. Every
+`label_override_reason` the tables hold is listed (the text after such a comma, in a row
+without its last column, would land there unwarned). With the tables, and whether or not they
+pass, it checks the live cron as it is on the computer: `SETUP_COEF` in
+`waterline_timex_cron.sh`, read as `survey_products.py` reads it (empty is C = 0), must be the
+products' C, or the live waterlines and the products carry different setups (the cron's own
+comments say `SETUP_COEF=""` for a refit: the test then FAILs, naming the cron's value, as
+`survey_products.py` warns).
 
 What was asked for in the tables (23 Oct 2024 and 19 Mar 2025 switched off, the windows, the
 29 Sep 2026 RTK row and its text, envelopes from the other lidar, every calibration in the
@@ -96,9 +103,10 @@ Three kinds of check depend on the computer, and are skipped, counted and explai
 cannot run. Two checks of `test_survey_products.py` (the real RTK file renamed, and re-exported
 under another date, must still be CIRCULAR) need the real `2026-09-29_Marconi_Checkshots.csv`
 (the same rules are also checked, everywhere, on a test fit of the test's own). The test looks
-for it as the survey products do (the name `surveys/surveys.csv` gives, in the station's survey
-folders: `Chelsea_calibration`, `waterline`, `waterline/calibration`, the repo's `calibration`
-and `surveys`; `--survey-dirs <folder>` adds one) and confirms it by its sha256. If it is not
+for it as the survey products do (the path `surveys/surveys.csv` gives: one with a folder in it
+as given, a bare name in the station's survey folders: `Chelsea_calibration`, `waterline`,
+`waterline/calibration`, the repo's `calibration` and `surveys`; `--survey-dirs <folder>` adds
+one) and confirms it by its sha256. If it is not
 found, the two checks print `skip` and the last line reads `all survey_products tests passed (2
 skipped: renamed-RTK check, re-exported-RTK check: the real RTK file
 2026-09-29_Marconi_Checkshots.csv is not in ...)`: put the file in one of those folders, or

@@ -31,10 +31,12 @@ STATION FILES. The checks run inside their own temporary folder (also the
 current folder for the run, so a file name never finds a file of the folder
 the test was started from), on fixture tables, survey files and folders of
 their own: the outcome is the same on the station NUC as in a clean
-checkout. Three kinds of check read the station's own state, and say so:
+checkout. Four kinds of check read the station's own state, and say so:
   * the station's surveys/survey_dates.csv and surveys/surveys.csv as they
-    are now, which the owner edits (test_station_tables, run last so a table
-    problem cannot hide the code's results, every problem listed): only what
+    are now, which the owner edits (test_station_tables, run last with the
+    live cron so a table problem cannot hide the code's results, every
+    problem listed; a table the product cannot read at all, e.g. not UTF-8,
+    is one of them): only what
     survey_products needs of them or does with them -- read with no warning
     (no text cut by a comma outside quotes), every date switched off refused
     and planned with --force-disabled, every date switched on planned, the
@@ -45,7 +47,13 @@ checkout. Three kinds of check read the station's own state, and say so:
     every label_override_reason they hold is listed. An edit the product
     reads with no warning and accepts never fails it (a text with a comma
     goes inside double quotes: surveys/README.md);
-  * the two checks on the real 2026-09-29 RTK file, run when it is found;
+  * the live cron, waterline_timex_cron.sh as the station runs it (the
+    owner may edit it, e.g. SETUP_COEF="" for a refit): its C, read as
+    survey_products reads it, must be the products' (test_live_cron, last,
+    with the tables: each runs even when the other fails);
+  * the two checks on the real 2026-09-29 RTK file, run when it is found
+    where surveys.csv says (the product's own rule: a path with a folder as
+    given, a bare name in the survey folders);
   * the commit a stamp records, checked when the code is a git checkout.
 What was asked for in the tables (the dates switched off, windows, the 29 Sep
 RTK row and its text, envelopes, calibrations in the repository, the Oct GCP
@@ -104,34 +112,40 @@ TEST_DIRS = {}
 
 
 def real_rtk():
-    """The real RTK file the station's C was fitted to, looked for as survey_products looks (the name
-    surveys.csv gives, in the survey folders) and confirmed by its sha256.
-    -> (path, "") or (None, why it cannot be used)."""
+    """The real RTK file the station's C was fitted to, looked for as survey_products looks (the path
+    surveys.csv gives, by the product's own rule, survey_products.resolve_file: a path with a folder in it
+    as given, a bare name in the survey folders; then that name in every survey folder) and confirmed by
+    its sha256. -> (path, "") or (None, why it cannot be used)."""
     fit = sp.SETUP_FITS[sp.SETUP_COEF]
     try:
         rows, _ = quiet(sp.read_table, sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)
-    except SystemExit:                  # a table survey_products cannot read: test_station_tables says so
-        rows = []
-    names = [Path(r["path"]).name for r in rows if Path(r.get("path") or "").stem == fit["survey_stem"]]
-    names = names or [fit["survey_stem"] + ".csv"]
+    except (SystemExit, Exception):     # a table survey_products cannot read (refused, not UTF-8, bad csv):
+        rows = []                       # test_station_tables, run last, says so
+    given = [r["path"] for r in rows if Path(r.get("path") or "").stem == fit["survey_stem"]]
+    given = given or [fit["survey_stem"] + ".csv"]
+    found = []
+    for g in given:
+        for f in sp.resolve_file(g, RTK_DIRS) + [Path(x) / Path(g).name for x in RTK_DIRS]:
+            if f not in found and f.is_file():
+                found.append(f)
     differ, unreadable = [], []
-    for n in names:
-        for x in RTK_DIRS:
-            f = Path(x) / n
-            if not f.is_file():
-                continue
-            try:
-                if sp.sha256(f) == fit["survey_sha256"]:
-                    return f, ""
-                differ.append(str(f))
-            except OSError as exc:
-                unreadable.append(f"{f} ({exc.strerror or exc})")
+    for f in found:
+        try:
+            if sp.sha256(f) == fit["survey_sha256"]:
+                return f, ""
+            differ.append(str(f))
+        except OSError as exc:
+            unreadable.append(f"{f} ({exc.strerror or exc})")
     if unreadable:
         return None, f"the real RTK file is here but cannot be read: {', '.join(unreadable)}"
     if differ:
         return None, (f"found {', '.join(differ)}, but its sha256 is not the one C = {sp.SETUP_COEF} was fitted to "
                       f"(SETUP_FITS): re-saved or edited? The file as surveyed is needed")
-    return None, f"the real RTK file {names[0]} is not in {', '.join(RTK_DIRS)}; --survey-dirs adds folders"
+    g = given[0]
+    if "/" in g or os.sep in g:
+        return None, (f"the real RTK file {g} (surveys.csv) is not there, nor by its name in {', '.join(RTK_DIRS)}; "
+                      f"--survey-dirs adds folders")
+    return None, f"the real RTK file {g} is not in {', '.join(RTK_DIRS)}; --survey-dirs adds folders"
 
 
 def skip(what, why):
@@ -994,10 +1008,16 @@ def test_station_tables(d):
     for path, fields in ((sp.DEFAULT_CONFIG, sp.CONFIG_FIELDS), (sp.DEFAULT_SURVEYS, sp.SURVEY_FIELDS)):
         # read as the product reads them (its warning is printed once per line and run: forget earlier reads)
         sp._TABLE_WARNED.difference_update({k for k in sp._TABLE_WARNED if k[0] == str(Path(path))})
+        err = ""
         try:
             tables[path], out = quiet(sp.read_table, path, fields)
-        except SystemExit as exc:
-            tables[path], out = None, f"WARNING {exc}"
+        except SystemExit as exc:           # the product's own refusal (no such file, a column missing)
+            tables[path], out, err = None, "", str(exc)
+        except Exception as exc:            # e.g. not UTF-8 (a spreadsheet saving Latin-1), or a csv.Error: the
+            tables[path], out, err = None, "", f"{type(exc).__name__}: {exc}"     # product cannot read it either
+        if err:
+            tcheck(False, f"surveys/{Path(path).name}: survey_products cannot read it: {err}")
+            continue
         warned = [ln.split(": ", 1)[-1] for ln in out.splitlines() if "WARNING" in ln]
         tcheck(not warned, f"surveys/{Path(path).name}: read by survey_products with no warning"
                            + (f": {'; '.join(warned)}" if warned else ""))
@@ -1925,12 +1945,41 @@ def test_filter_leaves_nothing_old(d):
 def test_one_setup_coef():
     print("one setup coefficient for the station and the products")
     import historical_forcing as hf
-    cron = sp.cron_settings(sp.LIVE_CRON).get("SETUP_COEF")
-    check(cron is not None and abs(float(cron) - sp.SETUP_COEF) < 1e-12 and abs(hf.SETUP_COEF - sp.SETUP_COEF) < 1e-12,
-          f"waterline_timex_cron.sh SETUP_COEF {cron}, survey_products {sp.SETUP_COEF}, historical_forcing "
-          f"{hf.SETUP_COEF}: the same C")
+    check(abs(hf.SETUP_COEF - sp.SETUP_COEF) < 1e-12,
+          f"survey_products {sp.SETUP_COEF}, historical_forcing {hf.SETUP_COEF}: the same C "
+          f"(the live cron's: test_live_cron, with the station's state)")
     check(any(abs(k - sp.SETUP_COEF) < 1e-12 for k in sp.SETUP_FITS),
           "the station's C has a SETUP_FITS entry (where it was fitted: which comparisons are CIRCULAR)")
+
+
+def test_live_cron():
+    """The cron the station runs, as it is on this computer (waterline_timex_cron.sh, which the owner may edit:
+    its own comments say SETUP_COEF="" for a refit), read as survey_products.main() reads it (no value or ''
+    is C = 0; a value that is not a number is named): the live waterlines and the products must carry the
+    same C, or main() warns. Run with the station's tables, last."""
+    print("the live cron's setup coefficient (waterline_timex_cron.sh as it is now)")
+    raw = sp.cron_settings(sp.LIVE_CRON).get("SETUP_COEF")
+    try:
+        c = float(raw) if raw not in (None, "") else 0.0
+    except ValueError:
+        c = None
+    check(c is not None and abs(c - sp.SETUP_COEF) < 1e-12,
+          f"{sp.LIVE_CRON.name} SETUP_COEF {raw!r} "
+          + ("(not a number)" if c is None else f"(C = {c:g})") + f", survey_products {sp.SETUP_COEF}: the same C")
+
+
+def test_station_state(d):
+    """The station's own state, last, so it cannot hide the code's results: its tables (test_station_tables)
+    and its live cron (test_live_cron), each run even when the other fails, every failure raised at the end."""
+    failed = []
+    for fn, a in ((test_station_tables, (d,)), (test_live_cron, ())):
+        try:
+            fn(*a)
+        except AssertionError as exc:
+            print(f"  FAIL  {exc}")
+            failed.append(str(exc))
+    if failed:
+        raise AssertionError(" || ".join(failed))
 
 
 def test_py38():
@@ -1987,11 +2036,11 @@ def main():
         test_fit_setup_flat(d)
         test_one_setup_coef()
         test_py38()
-        # the tables last: the repository's as shipped, then the station's as they are now, so a table the
-        # owner has edited cannot stop the checks of the code before they have run
+        # the tables last: the repository's as shipped, then the station's as they are now (with its live
+        # cron), so a table or cron the owner has edited cannot stop the checks of the code before they have run
         test_tables_changed_note(d)
         test_shipped_tables(d)
-        test_station_tables(d)
+        test_station_state(d)
     finally:
         os.chdir(start)
         if not args.keep:
