@@ -1195,7 +1195,8 @@ def build_plan(date, cfg_rows, survey_rows, args):
         guard = arm_blind_guard()
         say("BLIND", f"{date}: DEM only. {blind_statement(blind)} ({blind['survey']}); no survey of this date is "
                      f"looked for, opened or compared (survey_products.py BLIND_DATES"
-                     + ("; a file named like it is refused if anything tries to open it)" if guard else ")"))
+                     + ("; a Python-level open of a file named like it is refused in this process, and no step is "
+                        "started with one)" if guard else ")"))
     return plan
 
 
@@ -5486,8 +5487,11 @@ def not_delivered_cameras(date_cams, given, dirs=()):
     runs = {pc.get("run_dir") for pc in procs.values()}
     for cam in missing:
         if not procs or not all(pc.get("pinned") for pc in procs.values()):
-            bad[cam] = ("only calibration B files of the pre-registered procedure (gcpfree_eo.py, as pinned here) may "
-                        "leave out a camera the procedure did not deliver")
+            notb = "; ".join(f"{c}: {'; '.join(pc.get('why') or [])}" for c, pc in sorted(procs.items())
+                             if not pc.get("pinned"))
+            bad[cam] = ("only calibration B files of the pre-registered procedure (gcpfree_eo.py, as pinned here), as "
+                        "it delivered them here, may leave out a camera the procedure did not deliver"
+                        + (f"; these are not (or not yet): {notb}" if notb else ""))
             continue
         if len(runs) != 1:
             bad[cam] = "the --eo files come from different runs of the procedure"
