@@ -1804,6 +1804,22 @@ def storm_days_of(plan, days):
     return out
 
 
+# check_pointing's reference for a calibration the GCP-free procedure turned to the window's own photos
+# (turned_to_window): it has no solve day, so the reference is the day nearest the survey, and that is no lack
+TURNED_REF_KIND = "the day nearest the survey (this calibration was turned to the window's own photos"
+
+
+def turned_to_window(c, args):
+    """Was this camera's calibration made by the GCP-free procedure (gcpfree_eo.py's format: its comment lines say
+    so; procedure_check), which turns a GCP solution to the DEM window's own photos pooled? Such a calibration has
+    no solve day of its own (its file name holds none)."""
+    try:
+        o = calibration_origin(c.get("eo_path") or c.get("eo_file"), eo_dirs(args))
+    except Exception:                          # what it was made from cannot be read: not claimed
+        return False
+    return bool((o.get("procedure") or {}).get("format"))
+
+
 def check_pointing(plan, cam, photos, args):
     """
     Per day: the sea horizon against the calibration (tilt and roll; horizon_check.py's fit) with
@@ -1828,8 +1844,12 @@ def check_pointing(plan, cam, photos, args):
     else:
         target = date_cls.fromisoformat(survey_day(plan))
         ref_day = min(days, key=lambda d: abs((date_cls.fromisoformat(d) - target).days))
-        ref_kind = (f"the day nearest the survey ({cal_day or 'calibration day'} has no photos here): "
-                    f"changes are against that day, not the calibration")
+        if cal_day is None and turned_to_window(c, args):
+            ref_kind = (f"{TURNED_REF_KIND}, pooled: it has no solve day): changes are against that day, the "
+                        f"date's own")
+        else:
+            ref_kind = (f"the day nearest the survey ({cal_day or 'calibration day'} has no photos here): "
+                        f"changes are against that day, not the calibration")
     ref_src = days[ref_day][0]
     rdir = plan["out"] / "pointing" / f"reference_{cam}"
     shutil.rmtree(rdir, ignore_errors=True)
@@ -2060,9 +2080,35 @@ def _sigma(r):
         return None
 
 
+def no_feature_reading(days, rows):
+    """Why the features gave no reading on `days` (rows: the pointing rows), in words, grouped: the days whose
+    MATCH_INLIERS or more features matched within their own noise (blind_match), those with too few matched
+    features, those with no second photo or an unreadable one. Never 'too few matched features' of a day whose
+    CSV row shows hundreds."""
+    by = {r.get("date"): r for r in rows}
+    groups = {}
+    for d in sorted(days):
+        r = by.get(d) or {}
+        k = ("blind" if blind_match(r) and _inliers(r) >= MATCH_INLIERS else
+             "none" if r.get("features") == "not measured" else
+             "unreadable" if r.get("features") == "unreadable" else "few")
+        groups.setdefault(k, []).append(d)
+    text = {"blind": (f"the features matched the reference, but within their own noise (turn_sigma under "
+                      f"{TURN_SIGMA_MIN:g}: what dirt on the window, or a camera that did not move at all, gives), "
+                      f"so the match is no reading"),
+            "few": f"too few matched features against the reference frame (under {MATCH_INLIERS})",
+            "none": "no second photo of the day to match features on",
+            "unreadable": "the photo for the feature match could not be read"}
+    if len(groups) == 1:
+        k, ds = next(iter(groups.items()))
+        return ("on each " if k == "blind" and len(ds) > 1 else "") + text[k]
+    return "; ".join(f"on {', '.join(ds)} {text[k]}" for k, ds in groups.items())
+
+
 def blind_match(r):
     """A zero-turn match ('ok') no further from no turn than its own noise (turn_sigma under
-    TURN_SIGMA_MIN): what dirt on the housing window gives whatever the camera did, so no reading."""
+    TURN_SIGMA_MIN): what dirt on the housing window gives whatever the camera did (and a camera that did not
+    move at all), so no reading."""
     ts = _sigma(r)
     return r.get("features") == "ok" and ts is not None and ts < TURN_SIGMA_MIN
 
@@ -2172,16 +2218,23 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
 
     The window's other pointing ('other_pointing'): when every day measured to differ agrees with the
     others (within RUN_TOL_DEG in tilt and roll, fail in pan) and they outnumber the days measured at
-    the reference's pointing, the reference itself may be the odd one out: the step and the README say
-    so, and the build is not complete (missing_parts). Those days are left out all the same (a product
+    the reference's pointing together with the days that read nothing else whose features matched the
+    reference at zero turn within their own noise ('zero_turn_days': blind_match, MATCH_INLIERS or more),
+    the reference itself may be the odd one out: the step and the README say so, and the build is not
+    complete (missing_parts), unless the reference day is the calibration's own solve day (its pointing is
+    then the calibration's: reference_is_calibration_day). Those days are left out all the same (a product
     of one pointing, the reference's; before Oct 2026 they were all kept, UNCONFIRMED days with them,
     which mixed two pointings).
+
+    The rows are judged in date order whatever order they come in (a tie between two groups goes to the
+    earliest day).
 
     DIFFERENT POINTING and UNCONFIRMED days are left out (LEFT_OUT_VERDICTS; pointing_leave_out says
     which are, as the detection decides it, so no why here says so); every why gives the numbers
     measured.
     """
     from horizon_check import RUN_TOL_DEG as tol
+    rows = sorted(rows, key=lambda r: str(r.get("date") or ""))     # the same dicts, completed in place
     fitted = [r for r in rows if r.get("horizon") in ("matches", "off the calibration")]
     clear = [r for r in fitted if not horizon_doubts(r)]
     ref = next((r for r in rows if ref_day and r.get("date") == ref_day), None)
@@ -2296,7 +2349,8 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
             ftxt = (f"{n} features matched the reference at {_rot(r)} deg (pan/tilt/roll), no further from no turn "
                     f"than their own noise ({_sigma(r):.1f} standard errors, under {TURN_SIGMA_MIN:g}): dirt or drops "
                     f"on the housing window match so, at exactly zero turn, whatever the camera did, when fog or "
-                    f"spray hides the scene, so the match is no reading")
+                    f"spray hides the scene (a camera that did not move at all reads so too), so the match is no "
+                    f"reading")
         elif kind == "none":
             ftxt = {"not measured": "there was no second photo of the day to match features on",
                     "unreadable": "the photo for the feature match could not be read",
@@ -2504,7 +2558,8 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
             return "was measured to differ from the reference" + pan_
         if horizon_alone(o):
             return (f"is UNCONFIRMED on a misread horizon in a storm ({storm[id(o)]}; a camera can turn in one: c1 "
-                    f"turned -1.2 deg over 26-28 Sep 2026)")
+                    f"turned -1.2 deg of pan on 27 Sep 2026, measured; on 26 and 28 Sep by tracked landmarks, "
+                    f"outside this code)")
         return (f"is UNCONFIRMED on an ambiguous feature match (the camera may have turned{pan_})"
                 if o.get("features") == "ambiguous" else "is UNCONFIRMED on a horizon jump on a clear-looking edge")
 
@@ -2568,10 +2623,18 @@ def pointing_verdicts(rows, fail=POINT_FAIL_DEG, warn=POINT_WARN_DEG, ref_day=No
 
     moved_ = [(r, change(r)) for r in rows if r.get("verdict") == "DIFFERENT POINTING"]
     same_ = [r["date"] for r in rows if r.get("verdict") in ("matches", "small change", "horizon only")]
+    # days that read nothing else, whose MATCH_INLIERS or more features matched the reference at zero turn within
+    # their own noise (blind_match): no reading of a turn, but what the reference's own pointing gives (or dirt on
+    # the window): kept 'unchecked', or UNCONFIRMED only for the day next to them. They are counted against the
+    # other pointing's days (review r1: the Oct 2024 fixture's c2, two planted +1.0 deg pan days against the
+    # reference day alone, while three days matched it at 0.00 deg on 222-236 features: 'the reference's is the
+    # smaller group' and a PARTIAL build). A day whose clear horizon jumps is not one of them.
+    zero_ = [r["date"] for r in rows if r is not ref and blind_match(r) and _inliers(r) >= MATCH_INLIERS
+             and (r.get("verdict") == "unchecked" or (r.get("verdict") == "UNCONFIRMED" and r.get("next_to")))]
     other = None
-    if moved_ and len(moved_) > len(same_) and all(agree(p, q) for _, p in moved_ for _, q in moved_):
+    if moved_ and len(moved_) > len(same_) + len(zero_) and all(agree(p, q) for _, p in moved_ for _, q in moved_):
         pans = [p[0] for _, p in moved_ if p[0] is not None]
-        other = {"days": [r["date"] for r, _ in moved_], "reference_days": same_,
+        other = {"days": [r["date"] for r, _ in moved_], "reference_days": same_, "zero_turn_days": zero_,
                  "change_deg": [round(float(np.median(pans)), 3) if pans else None,
                                 round(float(np.median([p[1] for _, p in moved_])), 3),
                                 round(float(np.median([p[2] for _, p in moved_])), 3)]}
@@ -2670,8 +2733,10 @@ def pointing_offset(info, eo_file, rate=True):
 # with a clear horizon over RUN_TOL_DEG; 'most days differ' no longer keeps days: the other pointing named),
 # 10 (storms: a run of days left out or unread with two misread days, a firm day or a storm day by the
 # waves or STORMS; a fitted horizon that is not clear reads nothing; a 'horizon only' day next to a
-# measured pan; a turned match confirmed by a clear horizon within MATCH_ERR_DEG at any inlier count).
-POINTING_VERSION = 10
+# measured pan; a turned match confirmed by a clear horizon within MATCH_ERR_DEG at any inlier count),
+# 11 (the other pointing is counted against the zero-turn days too; on the calibration's own day it is no
+# reason for a partial build and no rebuild is advised).
+POINTING_VERSION = 11
 
 
 def pointing_sig(plan, cam, args, photos):
@@ -2809,22 +2874,56 @@ def other_pointing_rebuild(op, ref_day, date=None):
             f"replace this build)")
 
 
+def reference_is_calibration_day(info):
+    """Is the pointing step's reference day the calibration's own solve day (the date in its file name, e.g.
+    CACO03_c2_20241023_EO.yaml on 2024-10-23; check_pointing takes that day as the reference whenever it has
+    photos)? Its pointing is then the calibration's: a window's other pointing, however many days hold it, can
+    never make the reference the wrong pointing FOR THIS CALIBRATION (its days would need a calibration of their
+    own). From check_pointing's info (an older result's too: it records the calibration and the reference day)."""
+    rd = (info or {}).get("reference_day")
+    return bool(rd) and eo_date((info or {}).get("calibration") or "") == rd
+
+
+def other_pointing_groups(op):
+    """The days at the reference's pointing against the other pointing's, in words: those measured there, and
+    those whose features matched the reference at zero turn within their own noise (no reading, counted with
+    them: pointing_verdicts' 'zero_turn_days')."""
+    ref, zero = op.get("reference_days") or [], op.get("zero_turn_days") or []
+    return ((", ".join(ref) or "no day measured")
+            + (f"; with {', '.join(zero)}, whose features matched it at zero turn within their own noise (no reading)"
+               if zero else ""))
+
+
 def other_pointing_warning(info, lo, where, date=None):
     """The step's (and the README's) warning when every day measured to differ from the reference
-    agrees with the others and they outnumber the days measured at the reference's pointing
-    (pointing_verdicts' 'other_pointing'): the window holds two pointings and the reference's is the
-    smaller group, so the reference itself may be the odd one out. None otherwise."""
+    agrees with the others and they outnumber the days at the reference's pointing (pointing_verdicts'
+    'other_pointing': the days measured there and the zero-turn days): the window holds two pointings and
+    the reference's is the smaller group, so the reference itself may be the odd one out. When the reference
+    is the calibration's own day (reference_is_calibration_day) it cannot be: the warning says the product
+    rests on the calibration's pointing and advises no rebuild. None otherwise."""
     op = (info or {}).get("other_pointing")
     if not op:
         return None
     pan, dt, dr = op["change_deg"]
     ref = op.get("reference_days") or []
-    return (f"{len(op['days'])} of the {lo.get('measured_days', len(op['days']) + len(ref))} days measured differ "
+    head = (f"{len(op['days'])} of the {lo.get('measured_days', len(op['days']) + len(ref))} days measured differ "
             f"from the reference {info.get('reference_day')} and agree with each other ("
             + (f"{pan:+.2f}/{dt:+.2f}/{dr:+.2f} deg pan/tilt/roll" if pan is not None else
                f"{dt:+.2f}/{dr:+.2f} deg tilt/roll, pan not measured")
-            + f" from it, median; {', '.join(op['days'])}): the window holds two pointings, and "
-            + (f"the reference's ({', '.join(ref)}) is the smaller group" if ref else
+            + f" from it, median; {', '.join(op['days'])}): the window holds two pointings")
+    if reference_is_calibration_day(info):
+        return (head + f", and more of its days at the other one than at the reference's ({other_pointing_groups(op)})"
+                f". The reference day "
+                f"is the calibration's own day ({info.get('calibration')}), so its pointing is the calibration's (only "
+                f"a turn on that very day, between the calibration's photos and the reference frame "
+                f"{info.get('reference_frame') or ''}, would make it otherwise): "
+                f"the detection leaves the other pointing's days out by default (with this calibration they would "
+                f"be gridded with that turn as a pointing error), and the product rests on the calibration's "
+                f"pointing; look at the photos ({where}). --keep-moved-days keeps every day (both pointings, the "
+                f"UNCONFIRMED days too)")
+    return (head + ", and "
+            + (f"the reference's ({other_pointing_groups(op)}) is the smaller group"
+               if op.get("reference_days") or op.get("zero_turn_days") else
                "no day was measured at the reference's pointing")
             + ". The detection leaves the other "
             f"pointing's days out by default, so the product rests on the reference's pointing; if the "
@@ -2871,7 +2970,8 @@ def pointing_majority_note(res, args, skip=None, ran=True):
             + (f". {len(alone)} of them ({', '.join(alone)}) {'is' if len(alone) == 1 else 'are'} UNCONFIRMED on a "
                f"horizon reading alone that is not "
                f"a clear horizon, with no feature reading: such a reading never shows a day moved, but in a storm "
-               f"the camera can turn on those very days (c1, 26-28 Sep 2026: -1.2 deg of pan)" if alone else "")
+               f"the camera can turn on those very days (c1, 27 Sep 2026: -1.2 deg of pan, measured; 26 and 28 Sep by "
+               f"tracked landmarks, outside this code)" if alone else "")
             + (f". {len(nxt)} of them ({', '.join(nxt)}) {'is' if len(nxt) == 1 else 'are'} UNCONFIRMED only because "
                f"nothing could read {'it' if len(nxt) == 1 else 'them'} (no feature reading, and no clear horizon; "
                f"or only a clear horizon, next to a measured pan it cannot see) next to a day left out (measured to "
@@ -6617,7 +6717,9 @@ def missing_parts(plan, state, args=None):
     is not complete either: its product rests on the reference's pointing, the smaller group, which
     is the wrong one if the reference day is the odd one out (review 3, REF_T06: the reference day
     tilted 0.6 deg, every other day at the calibration's pointing), or mixes the two with
-    --keep-moved-days; only the photos tell. -> list of text."""
+    --keep-moved-days; only the photos tell. When the reference is the calibration's own solve day
+    (reference_is_calibration_day) its pointing is the calibration's, and only a product that mixes the
+    two (or a detection not run with these results) is not complete. -> list of text."""
     out = plan["out"]
     failed = failed_cameras(plan, state)
     miss = []
@@ -6641,12 +6743,26 @@ def missing_parts(plan, state, args=None):
             miss.append(f"{cam}: pointing not checked (the pointing step has not run)")
         elif not res.get("rows"):
             miss.append(f"{cam}: pointing NOT checked (no photo of the window in the photo roots)")
+        elif (res.get("info") or {}).get("other_pointing") and reference_is_calibration_day(res.get("info")):
+            # the reference is the calibration's own day: a product on its pointing is the right one for this
+            # calibration (KNOWN CAVEATS says so); only one that holds both pointings, or a detection not run with
+            # these results, is not complete
+            op = res["info"]["other_pointing"]
+            dst = read_stamp(out, f"detect_{cam}")
+            inside = [d for d in op["days"] if d not in ((dst or {}).get("skip_days") or [])]
+            if dst is None or inside:
+                miss.append(f"{cam}: the window holds two pointings: {', '.join(op['days'])} agree with each other, "
+                            f"away from the calibration's own day {res['info'].get('reference_day')}; "
+                            + ("the detection has not run with these pointing results" if dst is None else
+                               f"the product holds both (the other's {', '.join(inside)} kept: with this "
+                               f"calibration they are gridded with that turn as a pointing error)")
+                            + f" (pointing/pointing_{cam}.csv)")
         elif (res.get("info") or {}).get("other_pointing"):
             op = res["info"]["other_pointing"]
             dst = read_stamp(out, f"detect_{cam}")
             inside = [d for d in op["days"] if d not in ((dst or {}).get("skip_days") or [])]
             miss.append(f"{cam}: the window holds two pointings: {', '.join(op['days'])} agree with each other, "
-                        f"away from the reference's ({', '.join(op.get('reference_days') or []) or 'no day measured'}); "
+                        f"away from the reference's ({other_pointing_groups(op)}); "
                         + ("the detection has not run with these pointing results" if dst is None else
                            f"the product holds both (the other's {', '.join(inside)} kept)" if inside else
                            "the product rests on the reference's, the smaller group")
@@ -7270,6 +7386,42 @@ def calibration_caveats(plan, args, prov):
     return cav
 
 
+def small_change_caveat(plan, cam, rows, skip=()):
+    """The README's line for a camera's KEPT 'small change' days (pointing_verdicts: matched features measured a turn
+    of POINT_WARN_DEG - POINT_FAIL_DEG with tilt and roll within RUN_TOL_DEG, or an ambiguous match): each day's
+    measured turn and what that tilt/roll does to its lines and to the DEM where they are gridded, per range band
+    (tilt_sensitivity, from this date's DEM and calibration). '' when there is none. Such a day is kept with the
+    calibration's pointing, so its frames carry that turn as a pointing error (review r1: up to ~0.4 m at range)."""
+    days = [r for r in rows if r.get("verdict") == "small change" and r.get("date") not in set(skip or [])]
+    if not days:
+        return ""
+    parts = []
+    for r in days:
+        if r.get("features") == "ambiguous":
+            rup = [abs(float(x)) for x in str(r.get("runner_up_d") or "").split("/") if x.strip()]
+            parts.append(f"{r['date']}: an ambiguous match ({_inliers(r)} features at zero turn and a second consensus "
+                         f"of {r.get('runner_up_inliers')} at {r.get('runner_up_d')} deg: a turn of up to "
+                         f"{max(rup) if rup else 0.0:.2f} deg)")
+            continue
+        try:
+            a, t, rl = (float(r[k]) for k in ("d_azimuth_deg", "d_tilt_deg", "d_roll_deg"))
+        except (KeyError, TypeError, ValueError):
+            parts.append(f"{r['date']}: {r.get('why') or 'a small change'}")
+            continue
+        txt = f"{r['date']}: {a:+.2f}/{t:+.2f}/{rl:+.2f} deg pan/tilt/roll on {_inliers(r)} features"
+        sens = tilt_sensitivity(plan, cam, t, rl) if max(abs(t), abs(rl)) > 0 else None
+        if sens:
+            txt += (" (its tilt/roll moves that day's lines, and the DEM where they are gridded, by "
+                    + ", ".join(f"~{x['dem_abs_error_m']:.2f} m at {x['range_m']} m" for x in sens) + ")")
+        parts.append(txt)
+    return (f"{cam}: kept with a small change of pointing, measured by matched features against the reference (a turn "
+            f"of {POINT_WARN_DEG}-{POINT_FAIL_DEG} deg, tilt and roll within the step's tolerance; a match reads them to "
+            f"~{MATCH_ERR_DEG:g} deg): " + "; ".join(parts) + ". These frames are gridded with the calibration's "
+            f"pointing, so each carries its day's turn as a pointing error (median over the cells of each range band, "
+            f"from this date's DEM and calibration; a pan moves the lines along the beach and is not in these "
+            f"numbers); the DEM holds it in proportion to that day's share of the frames (pointing/pointing_{cam}.csv).")
+
+
 def collect_caveats(plan, args, state, forcing, prov):
     cav = []
     era = plan["era"]
@@ -7431,6 +7583,9 @@ def collect_caveats(plan, args, state, forcing, prov):
                        + (f"; the detection on disk left out {', '.join(gone)}, so they are kept once it runs again"
                           if gone else "")
                        + f": {with_why(over)}.")
+        small_ = small_change_caveat(plan, cam, res.get("rows") or [], skip if ran_ else skip_days_of(res, None))
+        if small_:
+            cav.append(small_)
         if info.get("fitted_horizon_days") and not info.get("clear_horizon_days"):
             px_ = info.get("fitted_horizon_offset_px")
             cav.append(f"{cam}: no day of the window showed a clear sea horizon (the edge read as the horizon was "
@@ -7470,29 +7625,25 @@ def collect_caveats(plan, args, state, forcing, prov):
         rows_ = res.get("rows") or []
         hz_only = [r["date"] for r in rows_ if r.get("verdict") == "horizon only"]
         unchk = [r["date"] for r in rows_ if r.get("verdict") == "unchecked"]
+        # a day whose features matched, but within their own noise (blind_match), counts as no reading: said so
+        # (never 'too few matched features'), or the inlier count in the table looks like a contradiction
         if rows_ and len(unchk) == len(rows_):
-            cav.append(f"{cam}: nothing measured the pointing on any day (too few matched features against the "
-                       f"reference frame, and no clear sea horizon): a turn or tilt of the camera would not have "
-                       f"been seen.")
+            cav.append(f"{cam}: nothing measured the pointing on any day ({no_feature_reading(unchk, rows_)}, and "
+                       f"no clear sea horizon): a turn or tilt of the camera would not have been seen.")
         elif rows_ and len(hz_only) + len(unchk) == len(rows_):
-            cav.append(f"{cam}: the pan (azimuth) could not be measured on any day (too few matched features "
-                       f"against the reference frame): the days were checked by the sea horizon only (tilt and "
-                       f"roll), so a turn of the camera would not have been seen"
+            cav.append(f"{cam}: the pan (azimuth) could not be measured on any day ("
+                       f"{no_feature_reading(hz_only + unchk, rows_)}): the days were checked by the sea horizon "
+                       f"only (tilt and roll), so a turn of the camera would not have been seen"
                        + (f"; on {', '.join(unchk)} not even that (no clear sea horizon)." if unchk else "."))
         else:
             if hz_only:
-                # a day whose features matched, but within their own noise (blind_match), counts as no reading:
-                # said so, or the inlier count in the table looks like a contradiction
-                blind_ = [r["date"] for r in rows_ if r.get("verdict") == "horizon only" and blind_match(r)
-                          and _inliers(r) >= MATCH_INLIERS]
-                cav.append(f"{cam}: pan not measured on {', '.join(hz_only)} (horizon only)"
-                           + (f"; on {'each' if blind_ == hz_only else ', '.join(blind_)} the features matched, "
-                              f"but within their own noise (turn_sigma under {TURN_SIGMA_MIN:g}: what dirt on the "
-                              f"housing window gives), so that match is no reading" if blind_ else "") + ".")
+                cav.append(f"{cam}: pan not measured on {', '.join(hz_only)} (horizon only: "
+                           f"{no_feature_reading(hz_only, rows_)}).")
             if unchk:
-                cav.append(f"{cam}: pointing not measured on {', '.join(unchk)} (unchecked: too few matched "
-                           f"features and no clear sea horizon); kept.")
-        if info.get("reference_kind", "").startswith("the day nearest"):
+                cav.append(f"{cam}: pointing not measured on {', '.join(unchk)} (unchecked: "
+                           f"{no_feature_reading(unchk, rows_)}, and no clear sea horizon); kept.")
+        if info.get("reference_kind", "").startswith("the day nearest") and \
+                not info["reference_kind"].startswith(TURNED_REF_KIND):
             cav.append(f"{cam}: no photo of the calibration day in the window, so the feature check only shows "
                        f"that the days agree with each other ({info.get('reference_day')}), not with the calibration.")
     if plan.get("disabled_cams"):

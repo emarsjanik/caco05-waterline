@@ -1834,6 +1834,7 @@ def test_pointing_verdicts(d):
           and i["horizon_anchor_deg"] == [0.908, 0.255] and i["clear_horizon_days"] == 1
           and lo["measured_different_days"] == ["2026-09-30", "2026-10-01"] and lo["leave_out"]
           and i["other_pointing"] == {"days": ["2026-09-30", "2026-10-01"], "reference_days": ["2026-09-29"],
+                                      "zero_turn_days": [],
                                       "change_deg": [None, 0.598, 0.0]}
           and sp.skip_days_of(res, SimpleNamespace(keep_moved_days=False))
           == ["2026-09-26", "2026-09-27", "2026-09-28", "2026-09-30", "2026-10-01", "2026-10-02"]
@@ -2173,6 +2174,136 @@ def test_pointing_verdicts(d):
           f"{lim['horizon_to_limit_px']} px from the end '{lim['horizon_edge']}', a ramp '{ramp['horizon_edge']}'")
 
 
+def test_oct_pointing_pattern(d):
+    print("the Oct 2024 fixture's pointing pattern: two planted pan days against zero-turn days; the calibration's own "
+          "day as the reference; the README's why for unread days")
+    by = lambda rows: {r["date"]: r for r in rows}          # noqa: E731
+    faint = (8.3, 0.4, 1.0, 200)                            # prominence 8.3: not a clear horizon
+    # review r1 (runner-builds, review-blind): c2 of the synthetic Oct 2024 fixture at HEAD 123224b. 20-21 Oct carry
+    # a planted +1.0 deg pan (181/206 inliers); every other day is rendered at the reference's pointing and matches
+    # it at 0.00 deg within its own noise (no reading: blind_match), each horizon faint
+    def oct_rows():
+        rows = []
+        for day, feat, n, dd, ts in (("2024-10-20", "MOVED", 181, (1.0, 0.0, 0.0), 60.0),
+                                     ("2024-10-21", "MOVED", 206, (1.0, 0.0, 0.0), 70.0),
+                                     ("2024-10-22", "ok", 263, (0.0, 0.0, 0.0), 0.5),
+                                     ("2024-10-23", "ok", 1500, (0.0, 0.0, 0.0), 0.3),
+                                     ("2024-10-24", "ok", 234, (0.0, 0.0, 0.01), 1.9),
+                                     ("2024-10-25", "ok", 236, (0.0, 0.0, 0.0), 1.6),
+                                     ("2024-10-26", "ok", 222, (0.0, 0.0, 0.01), 2.1)):
+            r = _pt_row("c2", day, "matches", 9.0, 0.14, -0.01, 0.6, feat, n, dd, edge=faint)
+            r["turn_sigma"] = ts
+            rows.append(r)
+        return rows
+    rows = oct_rows()
+    import random
+    shuffled = [dict(r) for r in rows]
+    random.Random(7).shuffle(shuffled)
+    i = sp.pointing_verdicts(rows, ref_day="2024-10-23")
+    i_s = sp.pointing_verdicts(shuffled, ref_day="2024-10-23")
+    v, vs = by(rows), by(shuffled)
+    check([v[x]["verdict"] for x in sorted(v)] == ["DIFFERENT POINTING", "DIFFERENT POINTING", "UNCONFIRMED",
+                                                    "matches", "unchecked", "unchecked", "unchecked"]
+          and v["2024-10-22"]["next_to"] == "2024-10-21"
+          and all(vs[x]["verdict"] == v[x]["verdict"] and vs[x]["why"] == v[x]["why"] for x in v) and i_s == i,
+          "Oct fixture c2: 20-21 Oct DIFFERENT POINTING (the planted pan), 22 Oct UNCONFIRMED next to 21 Oct (its "
+          "zero-turn match is no reading: days lost, not wrong ones), 24-26 Oct unchecked, kept; the same in any "
+          "row order")
+    check(i["other_pointing"] is None,
+          "... and NO other pointing: the 2 moved days do not outnumber the reference day with the 4 days whose "
+          "features matched it at zero turn within their noise (was: 'the reference's is the smaller group', PARTIAL)")
+    # a shorter window: 20-23 Oct and 24 Oct unmatched. 22 Oct, UNCONFIRMED only for the day next to it, read
+    # nothing but zero turn and counts: 2 moved against 1 + 1, no other pointing
+    rows = oct_rows()[:4] + [dict(oct_rows()[4], features="unmatched", inliers=12, turn_sigma="")]
+    i = sp.pointing_verdicts(rows, ref_day="2024-10-23")
+    check(i["other_pointing"] is None and by(rows)["2024-10-22"]["verdict"] == "UNCONFIRMED",
+          "2 moved days against the reference day and 22 Oct (UNCONFIRMED next to 21 Oct, its features at zero turn "
+          "within their noise): not outnumbered, no other pointing")
+    # 22 Oct unmatched too: 2 moved against the reference day alone, the other pointing is named
+    rows = (oct_rows()[:2] + [dict(oct_rows()[2], features="unmatched", inliers=8, turn_sigma="")] + oct_rows()[3:4]
+            + [dict(oct_rows()[4], features="unmatched", inliers=12, turn_sigma="")])
+    i = sp.pointing_verdicts(rows, ref_day="2024-10-23")
+    op = i["other_pointing"] or {}
+    lo = sp.pointing_leave_out(rows)
+    for cal, want_cal in (("CACO03_c2_20241023_EO.yaml", True), ("CACO05_c2_20251113_EO-CV.yaml", False)):
+        info = dict(i, reference_day="2024-10-23", calibration=cal, reference_frame="1729702800.c2.timex.jpg")
+        w = sp.other_pointing_warning(info, lo, "pointing/", "2024-10-23") or ""
+        check(sp.reference_is_calibration_day(info) == want_cal and op.get("days") == ["2024-10-20", "2024-10-21"]
+              and ("the calibration's own day (CACO03_c2_20241023_EO.yaml), so its pointing is the calibration's" in w
+                   and "leave the reference day out" not in w and "is the smaller group" not in w
+                   if want_cal else
+                   "the reference's (2024-10-23) is the smaller group" in w and "leave the reference day out" in w),
+              f"other pointing against a reference that {'IS' if want_cal else 'is NOT'} the calibration's own solve "
+              f"day: " + ("the warning says the product rests on the calibration's pointing, advises no rebuild"
+                          if want_cal else "the reference may be the odd one out, the rebuild without it is given"))
+        hd = Path(d) / f"oct_two_pointings_{want_cal}"
+        (hd / "pointing").mkdir(parents=True)
+        res = dict(lo, rows=rows, info=dict(info, warning=w))
+        (hd / "pointing" / "pointing_c2.json").write_text(json.dumps(res))
+        plan_h = {"out": hd, "date": "2024-10-23", "cams": {"c2": {}}}
+        tp = []
+        for stamp in (None, {"skip_days": sp.skip_days_of(res, SimpleNamespace(keep_moved_days=False)),
+                             "keep_moved_days": False}, {"skip_days": [], "keep_moved_days": True}):
+            if stamp is not None:
+                sp.write_stamp(hd, "detect_c2", {"x": len(tp)}, extra=stamp)
+            tp.append(next((m for m in sp.missing_parts(plan_h, {}) if "two pointings" in m), ""))
+        if want_cal:
+            check(tp[0] and not tp[1] and "the product holds both" in tp[2] and "leave the reference day out" not in
+                  "".join(tp),
+                  "... on the calibration's own day: NOT a missing part once the detection left the other pointing out "
+                  "(status complete); still one while the detection has not run, or with --keep-moved-days (both "
+                  "pointings in the product)")
+        else:
+            check(all(tp) and "the smaller group" in tp[1],
+                  "... on another reference: a missing part whatever the detection did (as before)")
+    # a 'small change' day kept: the README gives its measured turn and the DEM effect per range band (review r1)
+    from georectify import load_intrinsics, load_extrinsics, pixel_to_ground
+    cal = HERE / "calibration"
+    io_f, eo_f = cal / "CACO05_c2_20240801_IO.yaml", cal / "CACO03_c2_20250123_EO.yaml"
+    io_, e_ = load_intrinsics(io_f), load_extrinsics(eo_f)
+    U, V = np.meshgrid(np.linspace(300, 2100, 40), np.linspace(280, 1100, 40))
+    X, Y = pixel_to_ground(U.ravel(), V.ravel(), np.full(U.size, 0.5), io_, e_)
+    cell = 2.0
+    xll, yll = float(np.floor(X.min())) - 4, float(np.floor(Y.min())) - 4
+    nc, nr = int((X.max() - xll) / cell) + 4, int((Y.max() - yll) / cell) + 4
+    yy = yll + (nr - 0.5 - np.arange(nr))[:, None] * cell
+    g = 0.5 + 0.05 * (yy - yy.mean()) + 0.0 * np.arange(nc)[None, :]
+    plan_s = {"date": "2025-01-23", "era": "adcp", "out": Path(d) / "small_change" / "2025-01-23",
+              "cams": {"c2": {"eo_path": eo_f, "io_path": io_f}}}
+    stem = sp.dem_stem(plan_s)
+    stem.parent.mkdir(parents=True)
+    Path(f"{stem}_dem.asc").write_text(f"ncols {nc}\nnrows {nr}\nxllcorner {xll}\nyllcorner {yll}\ncellsize {cell}\n"
+                                       f"NODATA_value -9999\n" + "\n".join(" ".join(f"{v:.3f}" for v in row)
+                                                                          for row in g) + "\n")
+    sc = [_pt_row("c2", "2025-01-22", "matches", 8.0, 0.15, 0.0, 0.4, "moved", 180, (0.32, 0.12, -0.05),
+                  edge=EDGE_CLEAR["c2"]), _pt_row("c2", "2025-01-23", features="ok", inliers=900, edge=EDGE_CLEAR["c2"])]
+    for r in sc:
+        r["turn_sigma"] = 40.0
+    sp.pointing_verdicts(sc, ref_day="2025-01-23")
+    txt = sp.small_change_caveat(plan_s, "c2", sc)
+    bands = sp.tilt_sensitivity(plan_s, "c2", 0.12, -0.05) or []
+    check(sc[0]["verdict"] == "small change" and txt.startswith("c2: kept with a small change of pointing")
+          and "2025-01-22: +0.32/+0.12/-0.05 deg pan/tilt/roll on 180 features" in txt and len(bands) >= 2
+          and all(f"~{b['dem_abs_error_m']:.2f} m at {b['range_m']} m" in txt for b in bands)
+          and not sp.small_change_caveat(plan_s, "c2", sc, skip=["2025-01-22"]),
+          f"a kept 'small change' day: the README gives its measured turn and its DEM effect per range band "
+          f"({len(bands)} bands: " + ", ".join(f"{b['dem_abs_error_m']:.2f} m at {b['range_m']} m" for b in bands)
+          + "); nothing for a day left out")
+    # the README's why for days nothing read: matched within noise is said so, never 'too few matched features'
+    rows = oct_rows()
+    sp.pointing_verdicts(rows, ref_day="2024-10-23")
+    unchk = [r["date"] for r in rows if r["verdict"] == "unchecked"]
+    t = sp.no_feature_reading(unchk, rows)
+    t2 = sp.no_feature_reading(unchk + ["2024-10-27"], rows + [_pt_row("c2", "2024-10-27", features="unmatched",
+                                                                       inliers=7, edge=faint)])
+    check(t.startswith("on each the features matched the reference, but within their own noise") and "too few" not in t
+          and "a camera that did not move at all" in t
+          and "on 2024-10-24, 2024-10-25, 2024-10-26 the features matched" in t2
+          and "on 2024-10-27 too few matched features against the reference frame (under 40)" in t2,
+          "the README's why for an unchecked day: matched within their own noise where 40+ features matched, too few "
+          "matched only where they did not")
+
+
 def test_storm_and_wave_caveats(d):
     print("README: pointing whys, the storm tail and high waves from the frames the DEM gridded, one per-day note")
     out = Path(d) / "stormcav"
@@ -2431,17 +2562,18 @@ def test_storm_and_wave_caveats(d):
     (out / "pointing" / "pointing_c2.json").write_text(json.dumps(dict(sp.pointing_leave_out(mar), rows=mar, info=im)))
     hz = next((c for c in sp.collect_caveats(plan, a, {}, forcing, frames(new)) if c.startswith("c2: pan not measured")),
               "")
-    check(hz.startswith("c2: pan not measured on 2026-09-26, 2026-09-27, 2026-09-28, 2026-09-30 (horizon only); on "
-                        "2026-09-26, 2026-09-27, 2026-09-28 the features matched, but within their own noise "
-                        "(turn_sigma under 4"),
-          "README: 'horizon only' days whose features matched within their own noise say so (the unmatched day not)")
+    check(hz.startswith("c2: pan not measured on 2026-09-26, 2026-09-27, 2026-09-28, 2026-09-30 (horizon only: on "
+                        "2026-09-26, 2026-09-27, 2026-09-28 the features matched the reference, but within their own "
+                        "noise (turn_sigma under 4") and "on 2026-09-30 too few matched features" in hz,
+          "README: 'horizon only' days whose features matched within their own noise say so (the unmatched day: too "
+          "few matched)")
     mar[-1].update(features="ok", inliers=52, d_azimuth_deg=0.0, d_tilt_deg=0.001, d_roll_deg=0.0, turn_sigma=1.9)
     im = sp.pointing_verdicts(mar, ref_day="2026-09-29")
     (out / "pointing" / "pointing_c2.json").write_text(json.dumps(dict(sp.pointing_leave_out(mar), rows=mar, info=im)))
     hz = next((c for c in sp.collect_caveats(plan, a, {}, forcing, frames(new)) if c.startswith("c2: pan not measured")),
               "")
-    check(hz.startswith("c2: pan not measured on 2026-09-26, 2026-09-27, 2026-09-28, 2026-09-30 (horizon only); on each "
-                        "the features matched, but within their own noise"),
+    check(hz.startswith("c2: pan not measured on 2026-09-26, 2026-09-27, 2026-09-28, 2026-09-30 (horizon only: on each "
+                        "the features matched the reference, but within their own noise"),
           "... and when every such day's match was within its noise: 'on each', not the list twice")
 
 
@@ -5591,6 +5723,7 @@ def main():
         test_merge_drops_no_setup(d)
         test_keep_moved_days(d)
         test_pointing_verdicts(d)
+        test_oct_pointing_pattern(d)
         test_storm_and_wave_caveats(d)
         test_day_test_record(d)
         test_feature_runner_up(d)
