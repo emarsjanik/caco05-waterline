@@ -259,7 +259,9 @@ def test_ransac():
     b[40:] = rng.normal(size=(360, 3))
     b /= np.linalg.norm(b, axis=1)[:, None]                    # 90 % outliers
     Qe, inl = G.ransac2(a, b, 3.0 / 2575.0)
-    check(Qe is not None and G.dist_deg(Qe, Q) < 1e-6 and inl[:40].all() and inl.sum() < 45,
+    # 1e-4 deg: the arccos of a trace near 3 is rounding noise below ~1e-5 deg, and that noise differs with the
+    # LAPACK under numpy (0 on numpy 1.17, 1.7e-6 deg on numpy 2.4)
+    check(Qe is not None and G.dist_deg(Qe, Q) < 1e-4 and inl[:40].all() and inl.sum() < 45,
           f"2-ray RANSAC finds a 13 deg turn among 90 % outliers ({int(inl.sum())} inliers)")
 
 
