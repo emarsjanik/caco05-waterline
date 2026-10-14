@@ -3717,7 +3717,7 @@ def test_blind_and_calibration(d):
         st_ = {"steps": {}, "failures": [], "not_applied": []}
         res_, out_ = quiet(sp.step_maps, plan_, args_, st_)
         for cam in ("c1", "c2"):
-            (outd / "maps" / f"2024-10-23_waterlines_{cam}.png").write_bytes(b"png")
+            sp.map_png(plan_, cam).write_bytes(b"png")          # <date>[_<variant>]_waterlines_<cam>.png
             sp.write_stamp(outd, f"map_{cam}", {"after": {"waterlines": sp.waterline_token(plan_)}})
         st_["steps"] = {s: "built" for s in sp.STEPS}
         res_c, out_c = quiet(sp.step_compare, plan_, args_, st_)
@@ -3849,7 +3849,7 @@ def test_blind_and_calibration(d):
               "--eo: the plan builds with the given calibrations, named variant, the table's kept for the record")
         ag = argparse.Namespace(**dict(vars(ab), calibration_variant="gcpfree", output_root=str(d / "x_gcpfree")))
         pg, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, ag)
-        check("not B files it made" in sp.option_refusal(pg, ag),
+        check("these are not (or not yet) the B files it delivered here" in sp.option_refusal(pg, ag),
               "... and under the procedure's own name (gcpfree): REFUSED (only its B is called gcpfree)")
         watch_a["on"] = True
         try:
@@ -4222,7 +4222,7 @@ def fake_built_product(plan_, args_):
     st_ = {"steps": {}, "failures": [], "not_applied": []}
     quiet(sp.step_maps, plan_, args_, st_)
     for cam in plan_["cams"]:
-        (outd / "maps" / f"{plan_['date']}_waterlines_{cam}.png").write_bytes(b"png")
+        sp.map_png(plan_, cam).write_bytes(b"png")
         sp.write_stamp(outd, f"map_{cam}", {"after": {"waterlines": sp.waterline_token(plan_)}})
     st_["steps"] = {s: "built" for s in sp.STEPS}
     res_c, _ = quiet(sp.step_compare, plan_, args_, st_)
@@ -4231,29 +4231,162 @@ def fake_built_product(plan_, args_):
     return prov_, (outd / "README.txt").read_text()
 
 
-def test_gcpfree_b(d):
-    print("calibration B of the pre-registered GCP-free procedure: pinned, checked against its report, one camera, "
-          "its own names, shared apart from A")
-    import tarfile
+def git_in(repo, *a):
+    return subprocess.run(["git", "-C", str(repo), "-c", "user.name=test", "-c", "user.email=test@example.org",
+                           "-c", "commit.gpgsign=false"] + [str(x) for x in a],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+
+
+class GcpfreeRepo:
+    """A scratch git repository standing in for this one while a calibration B is checked: its calibration/gcpfree/
+    is survey_products' GCPFREE_DIR and its top folder the repository the B's commits are checked in (while 'with'
+    it). gcpfree_eo.py writes its pre-registration (committed at once); runs are written by gcpfree_eo.py's own
+    finish_run from given results and committed in one commit, as on the station."""
+
+    def __init__(self, root, rule="per-camera"):
+        import gcpfree_eo as G
+        self.G, self.root, self.rule = G, Path(root), rule
+        self.root.mkdir(parents=True)
+        git_in(self.root, "init", "-q")
+        self.dir = self.root / "calibration" / "gcpfree"
+        self.prereg = G.write_preregistration(self.dir / "PREREGISTERED.txt", rule, "the owner (a test)", G.ROOTS)
+        self.commit("gcpfree: pre-registration")
+        self.info, probs = G.preregistration(self.prereg)
+        assert not probs, probs
+        self.saved = []
+
+    def commit(self, msg):
+        git_in(self.root, "add", "-A")
+        return git_in(self.root, "commit", "-q", "-m", msg)
+
+    def __enter__(self):
+        self.saved.append((sp.GCPFREE_DIR, dict(sp._REPO_TOP)))
+        sp.GCPFREE_DIR = self.dir
+        sp._REPO_TOP["top"] = os.path.realpath(str(self.root))
+        sp._FILE_SHA.clear()
+        return self
+
+    def __exit__(self, *exc):
+        sp.GCPFREE_DIR, top = self.saved.pop()
+        sp._REPO_TOP.clear()
+        sp._REPO_TOP.update(top)
+        sp._FILE_SHA.clear()
+
+    def run(self, run_id, results, started, run_no=1, variant="gcpfree", first_run=None, aug_dir=None, eligible=True,
+            commit=True, edit_info=None, folder=None, prereg=None):
+        """A run of the procedure with these per-camera results (gcpfree_eo.run_camera's), written by its own
+        finish_run. -> {camera: its B file's path (written only when delivered)}."""
+        G = self.G
+        folder = Path(folder or self.dir / "runs" / run_id)
+        folder.mkdir(parents=True)
+        info = {"run_id": run_id, "run_no": run_no if eligible else None, "eligible": eligible,
+                "trial_why": None if eligible else ["a test"], "variant": variant if eligible else None,
+                "first_run": first_run, "status": "running", "started_utc": started,
+                "argv": ["gcpfree_eo.py"] + (["--aug-dir", aug_dir] if aug_dir else []),
+                "argv_text": "gcpfree_eo.py" + (f" --aug-dir {aug_dir}" if aug_dir else ""), "roots": list(G.ROOTS),
+                "camera": "both", "aug_dir": aug_dir, "procedure_sha256": G.own_sha256(),
+                "modules_sha256": G.module_sha256(), "preregistration": prereg or self.info,
+                "constants": G.constants(), "constants_sha256": G.constants_sha256(), "exposure": G.EXPOSURE,
+                "solved": sorted(results), "kept": {}}
+        if edit_info:
+            edit_info(info)
+        G.apply_outcome(results, (prereg or self.info).get("outcome_if_one_camera"), eligible)
+        with contextlib.redirect_stdout(io.StringIO()):
+            G.finish_run(folder, info, results, ["a test run"], print)
+        if commit:
+            self.commit(f"gcpfree: run {run_id}")
+        return {c: folder / G.OUT_EO.format(cam=c) for c in results}
+
+
+def gcpfree_res(cam, d_angles, verdict="DELIVERED", ref="jan"):
+    """A camera's result as gcpfree_eo.run_camera returns it: made-up angles turned from the Jan 2025 (or Aug 2024)
+    solution, nothing solved here (the procedure's own tests do that); calibration A is never read."""
     import gcpfree_eo as G
     from georectify import load_extrinsics, load_intrinsics
+    cal = HERE / "calibration"
+    io_f, jan_f, ref_f = (G.IO_FILE.format(cam=cam), G.REF_EO_FILE["jan"].format(cam=cam),
+                          G.REF_EO_FILE[ref].format(cam=cam))
+    e, e_jan = load_extrinsics(cal / ref_f), load_extrinsics(cal / jan_f)
+    io_ = load_intrinsics(cal / io_f)
+    link = {"label": "direct Jan->Oct", "gate_F": verdict != "NOT DELIVERED", "gate_S": True, "has_B": True,
+            "solve": {"inliers": 300, "matches": 2000, "resid_med_px": 0.6, "jackknife_max_px": 0.8,
+                      "inlier_new_days": ["2024-10-21", "2024-10-23", "2024-10-25"], "why": ""},
+            "per_day": {"days": [{"day": "2024-10-21", "inliers": 90, "diff_px": 0.7}], "measured": 3,
+                        "off_days": [], "gate_S": True, "why": ""},
+            "horizon": {"status": "pass", "why": "a test"}, "new_photos": ["oct.jpg"], "ref_photos": ["jan.jpg"]}
+    res = {"camera": cam, "io": io_f, "io_sha256": sp.file_sha(cal / io_f), "reference_eo": jan_f,
+           "reference_eo_sha256": sp.file_sha(cal / jan_f), "direct": link, "verdict": verdict,
+           "source": None if verdict == "NOT DELIVERED" else "direct Jan->Oct", "notes": [],
+           "reasons": ["direct: 14 inliers < 60 (a test)"] if verdict == "NOT DELIVERED" else []}
+    if ref == "aug":
+        res["aug"] = {"link": dict(link, label="Aug->Oct"), "reference_eo": ref_f,
+                      "reference_eo_sha256": sp.file_sha(cal / ref_f), "has_B": True}
+    if verdict != "NOT DELIVERED":
+        B = e.copy()
+        B[3:6] += np.radians(d_angles)
+        res.update(b_reference_eo=ref_f, b_reference_eo_sha256=sp.file_sha(cal / ref_f), B=G.eo_deg(B),
+                   pan_change_deg=round(float(((np.degrees(B[3] - e_jan[3]) + 180) % 360) - 180), 4),
+                   source="Aug->Oct" if ref == "aug" else "direct Jan->Oct")
+        res["uncertainty"] = G.stated_uncertainty(res, io_)
+    return res
+
+
+def reseal(run_dir, cam, edit_b=None, edit_report=None):
+    """Edit a B file (and its report) and rewrite what is checked against it -- its report's b_file_sha256 and
+    run.json's -- to agree: a consistent forgery. -> the B file."""
+    import hashlib
+    import gcpfree_eo as G
+    b = Path(run_dir) / G.OUT_EO.format(cam=cam)
+    if edit_b:
+        b.write_text(edit_b(b.read_text()))
+    sha = hashlib.sha256(b.read_bytes()).hexdigest()
+    rp = Path(run_dir) / (G.OUT_REPORT.format(cam=cam) + ".json")
+    js = json.loads(rp.read_text())
+    js["b_file_sha256"] = sha
+    if edit_report:
+        edit_report(js)
+    rp.write_text(json.dumps(js, indent=1) + "\n")
+    rj = json.loads((Path(run_dir) / "run.json").read_text())
+    rj["cameras"][cam]["b_file_sha256"] = sha
+    (Path(run_dir) / "run.json").write_text(json.dumps(rj, indent=1) + "\n")
+    sp._FILE_SHA.clear()
+    return b
+
+
+def shifted(key, delta, fmt="{:.4f}"):
+    """An edit of a B file's number `key` (x, y, z, azimuth, tilt, roll) by delta."""
+    def edit(t):
+        v = float(re.search(rf"^{key}: (\S+)$", t, re.M).group(1))
+        return re.sub(rf"^{key}: \S+$", f"{key}: {fmt.format(v + delta)}", t, flags=re.M)
+    return edit
+
+
+def test_gcpfree_b(d):
+    print("calibration B of the pre-registered GCP-free procedure: pinned, checked against its report, made and "
+          "committed here, one camera, its own names, shared apart from A")
+    import tarfile
+    import gcpfree_eo as G
     d = Path(d) / "gcpfree_b"
     d.mkdir()
     cfg, srv, tabs = fixture_tables(d)
     # the pin is the procedure as it is here (and, once committed, as committed)
     pin = sp.GCPFREE_PINS[-1]
-    check(pin["gcpfree_eo.py"] == G.own_sha256() and pin["modules"] == G.module_sha256(),
-          f"GCPFREE_PINS[-1] is gcpfree_eo.py ({G.own_sha256()[:12]}...) and its modules as they are")
+    check(pin["gcpfree_eo.py"] == G.own_sha256() and pin["modules"] == G.module_sha256()
+          and pin["constants_sha256"] == G.constants_sha256(),
+          f"GCPFREE_PINS[-1] is gcpfree_eo.py ({G.own_sha256()[:12]}...), its modules and its pre-registered "
+          f"constants as they are")
     r = subprocess.run(["git", "-C", str(HERE), "diff", "--quiet", "HEAD", "--", "gcpfree_eo.py", *sorted(G.MODULES)],
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if r.returncode != 0:
         print("  (note: gcpfree_eo.py or a module differs from its last commit: the pin must match the COMMITTED files "
               "before any B is made)")
     check(sp.GCPFREE_STATION_ROOTS == G.ROOTS and set(sp.GCPFREE_VARIANTS) == {G.B_VARIANT, G.B2_VARIANT}
+          and list(sp.GCPFREE_VARIANTS) == [G.B_VARIANT, G.B2_VARIANT]
+          and os.path.realpath(str(sp.GCPFREE_DIR)) == os.path.realpath(str(G.OUT_DIR))
           and sp.CALIBRATION_ORIGINS["CACO03_c1_20250123_EO.yaml"][0] == G.ARCHIVED_SHA256["CACO03_c1_20250123_EO.yaml"]
           and sp.CALIBRATION_ORIGINS["CACO03_c2_20240827_EO.yaml"][0] == G.ARCHIVED_SHA256["CACO03_c2_20240827_EO.yaml"],
-          "survey_products and gcpfree_eo agree: the station's photo folders, the variant names, the archived "
-          "calibrations' sha256")
+          "survey_products and gcpfree_eo agree: the station's photo folders, the variant names, the gcpfree folder, the "
+          "archived calibrations' sha256")
     held = sp.BLIND_DATES["2024-10-23"]
     forcing = {}
     for k in ("adcp", "adcp_navd88", "chatham", "wis", "ndbc"):
@@ -4275,207 +4408,262 @@ def test_gcpfree_b(d):
         base.update(kw)
         return cfg_args(**base)
 
-    def fake_res(cam, d_angles, verdict="DELIVERED"):
-        """A camera's result as gcpfree_eo.run_camera returns it (made-up angles from the Jan 2025 solution; no
-        photo is solved here: the procedure's own tests do that)."""
-        io_f, ref_f = G.IO_FILE.format(cam=cam), G.REF_EO_FILE["jan"].format(cam=cam)
-        e = load_extrinsics(HERE / "calibration" / ref_f)
-        io = load_intrinsics(HERE / "calibration" / io_f)
-        link = {"label": "direct Jan->Oct", "gate_F": verdict != "NOT DELIVERED", "gate_S": True, "has_B": True,
-                "solve": {"inliers": 300, "matches": 2000, "resid_med_px": 0.6, "jackknife_max_px": 0.8,
-                          "inlier_new_days": ["2024-10-21", "2024-10-23", "2024-10-25"], "why": ""},
-                "per_day": {"days": [{"day": "2024-10-21", "inliers": 90, "diff_px": 0.7}], "measured": 3,
-                            "off_days": [], "gate_S": True, "why": ""},
-                "horizon": {"status": "pass", "why": "a test"}, "new_photos": ["oct.jpg"], "ref_photos": ["jan.jpg"]}
-        res = {"camera": cam, "io": io_f, "io_sha256": sp.file_sha(HERE / "calibration" / io_f), "reference_eo": ref_f,
-               "reference_eo_sha256": sp.file_sha(HERE / "calibration" / ref_f), "direct": link, "verdict": verdict,
-               "source": None if verdict == "NOT DELIVERED" else "direct Jan->Oct", "notes": [],
-               "reasons": ["direct: 14 inliers < 60 (a test)"] if verdict == "NOT DELIVERED" else []}
-        if verdict != "NOT DELIVERED":
-            B = e.copy()
-            B[3:6] += np.radians(d_angles)
-            res.update(b_reference_eo=ref_f, b_reference_eo_sha256=res["reference_eo_sha256"], B=G.eo_deg(B),
-                       pan_change_deg=float(d_angles[0]))
-            res["uncertainty"] = G.stated_uncertainty(res, io)
-        return res
+    def share_args(rt, sdir):
+        return SimpleNamespace(date="2024-10-23", output_root=str(d / rt), share_dir=str(d / sdir), replace=False,
+                               calibration=str(HERE / "calibration"))
 
-    def make_run(folder, results, rule="per-camera", variant="gcpfree", run_no=1, eligible=True):
-        folder.mkdir(parents=True)
-        info = {"run_id": folder.name, "run_no": run_no, "eligible": eligible, "variant": variant, "first_run": None,
-                "status": "running", "started_utc": "2026-10-14 01:00:00", "argv": ["gcpfree_eo.py"],
-                "argv_text": "gcpfree_eo.py", "roots": list(G.ROOTS), "camera": "both", "aug_dir": None,
-                "procedure_sha256": G.own_sha256(), "modules_sha256": G.module_sha256(),
-                "preregistration": {"path": "calibration/gcpfree/PREREGISTERED.txt", "sha256": prereg_sha,
-                                    "outcome_if_one_camera": rule, "decided_by": "the owner (a test)",
-                                    "commit": "c" * 40, "git_history": [{"commit": "c" * 40, "date": "2026-10-14"}]},
-                "solved": sorted(results), "kept": {}}
-        G.apply_outcome(results, rule, eligible)
-        with contextlib.redirect_stdout(io.StringIO()):
-            G.finish_run(folder, info, results, ["a test run"], print)
-        return {c: folder / G.OUT_EO.format(cam=c) for c in results}
+    repo = GcpfreeRepo(d / "repo")                      # stands for this repository: calibration/gcpfree/ ...
+    with repo:
+        runs = repo.dir / "runs"
+        prereg_sha = repo.info["sha256"]
+        # delivery run 1 (per-camera): c1 NOT DELIVERED, c2 DELIVERED; delivery run 2 (Aug photos) solves c1 and
+        # keeps c2: a second product (gcpfree-aug), the first run's B stays the delivered one
+        r1 = repo.run("20261014T010000Z", {"c1": gcpfree_res("c1", (0, 0, 0), "NOT DELIVERED"),
+                                           "c2": gcpfree_res("c2", (-13.4, -0.5, 0.3))}, "2026-10-14 01:00:00")
+        kept = dict(gcpfree_res("c2", (-13.4, -0.5, 0.3)), solved_in_run="20261014T010000Z")
+        r2 = repo.run("20261014T020000Z", {"c1": gcpfree_res("c1", (-10.2, 0.6, -0.4), ref="aug"), "c2": kept},
+                      "2026-10-14 02:00:00", run_no=2, variant="gcpfree-aug", first_run="20261014T010000Z",
+                      aug_dir="/aug_photos")
+        check(r1["c2"].exists() and not r1["c1"].exists() and r2["c1"].exists() and r2["c2"].exists(),
+              "gcpfree_eo.py's own writer: run 1 (per-camera) a c2 B only; run 2 (Aug photos) c1, and c2 kept")
+        pc = sp.procedure_check(r1["c2"])
+        check(pc["format"] and pc["pinned"] and not pc["why"] and pc["variant"] == "gcpfree" and pc["run_no"] == 1
+              and pc["station_roots"] and pc["outcome_rule"] == "per-camera" and pc["b_commit"]
+              and pc["committed"]["commits"] == 1 and pc["delivery_runs_here"] == ["20261014T010000Z", "20261014T020000Z"]
+              and pc["uncertainty"]["rotation_px"] == G.ROT_FLOOR_PX and "EXPOSURE" in pc["exposure"],
+              "its B: made by the pinned procedure, its report beside it agrees, the first delivery run of this "
+              "repository, under its committed pre-registration, committed once")
+        pa2 = sp.procedure_check(r2["c1"])
+        check(pa2["pinned"] and pa2["variant"] == "gcpfree-aug" and pa2["run_no"] == 2,
+              "run 2's B (Aug photos, after a run 1 without them): the one allowed second run, variant gcpfree-aug"
+              + ("" if pa2["pinned"] else f" -- NOT: {pa2['why']}"))
+        org = sp.calibration_origin(r1["c2"], [str(HERE / "calibration")])
+        lab, why = sp.held_check(org, sp.blind_of("2024-10-23"))
+        txt = sp.procedure_text(pc)
+        check(org["kind"] == "rotated" and org["gcp_dates"] == ["2025-01-23"] and lab == "INDEPENDENT"
+              and "made by the pre-registered procedure (gcpfree_eo.py sha256" in why
+              and "committed to git once" in txt and str(runs / "20261014T010000Z") in txt
+              and str(repo.dir / "PREREGISTERED.txt") in txt,
+              "the holder's check of a DEM built with it: INDEPENDENT; its run folder, pre-registration and commit "
+              "named")
 
-    runs = d / "calibration" / "gcpfree" / "runs"
-    runs.mkdir(parents=True)
-    (runs.parent / "PREREGISTERED.txt").write_text("outcome_if_one_camera: per-camera\n(a test)\n")
-    prereg_sha = sp.file_sha(runs.parent / "PREREGISTERED.txt")
-    r1 = make_run(runs / "20261014T010000Z", {"c1": fake_res("c1", (0, 0, 0), "NOT DELIVERED"),
-                                              "c2": fake_res("c2", (-13.4, -0.5, 0.3))})
-    r2 = make_run(runs / "20261014T020000Z", {"c1": fake_res("c1", (-12.5, 0.6, -0.4)),
-                                              "c2": fake_res("c2", (-13.4, -0.5, 0.3))})
-    check(r1["c2"].exists() and not r1["c1"].exists() and r2["c1"].exists(),
-          "gcpfree_eo.py's own writer: run 1 (per-camera) a c2 B only, run 2 both")
-    pc = sp.procedure_check(r1["c2"])
-    check(pc["format"] and pc["pinned"] and not pc["why"] and pc["variant"] == "gcpfree" and pc["run_no"] == 1
-          and pc["station_roots"] and pc["outcome_rule"] == "per-camera"
-          and pc["uncertainty"]["rotation_px"] == G.ROT_FLOOR_PX,
-          "its B: made by the pinned procedure, the report beside it agrees (angles, verdict, sha256, delivery run)")
-    org = sp.calibration_origin(r1["c2"], [str(HERE / "calibration")])
-    lab, why = sp.held_check(org, sp.blind_of("2024-10-23"))
-    check(org["kind"] == "rotated" and org["gcp_dates"] == ["2025-01-23"] and lab == "INDEPENDENT"
-          and "made by the pre-registered procedure (gcpfree_eo.py sha256" in why and "NOT committed" in why,
-          "the holder's check of a DEM built with it: INDEPENDENT, the procedure, its run and its git state named")
-    # forgeries and other procedures: never INDEPENDENT
-
-    def forged(name, edit_b=None, edit_report=None, drop=None):
-        f = d / "forged" / name
-        shutil.copytree(str(runs / "20261014T010000Z"), str(f))
-        b = f / G.OUT_EO.format(cam="c2")
-        if edit_b:
-            b.write_text(edit_b(b.read_text()))
-        rp = f / (G.OUT_REPORT.format(cam="c2") + ".json")
-        if edit_report:
-            js = json.loads(rp.read_text())
-            edit_report(js)
-            rp.write_text(json.dumps(js))
-        if drop:
-            (f / drop).unlink()
-        return b
-
-    def tilt_plus(t):
-        v = float(re.search(r"^tilt: (\S+)$", t, re.M).group(1))
-        return re.sub(r"^tilt: \S+$", f"tilt: {v + 0.7:.4f}", t, flags=re.M)
-    cases = [("tilt", dict(edit_b=tilt_plus), "its numbers are not the B of its report"),
-             ("sha", dict(edit_b=lambda t: t.replace(G.own_sha256(), "1" * 64)), "not the pre-registered one"),
-             ("noreport", dict(drop=G.OUT_REPORT.format(cam="c2") + ".json"), "is not beside it"),
-             ("trial", dict(edit_report=lambda js: js["run"].update(eligible=False)), "a TRIAL run"),
-             ("modules", dict(edit_report=lambda js: js["run"]["modules_sha256"].update({"georectify.py": "0" * 64})),
-              "other modules than the pre-registered ones (georectify.py)"),
-             ("norot", dict(edit_b=lambda t: t.replace(" rotated by ", " moved by ")), "rotated by <angle> deg"),
-             ("withheld", dict(edit_report=lambda js: js.update(delivery="WITHHELD (both-or-none)")),
-              "it was not delivered")]
-    for name, kw, words in cases:
-        b = forged(name, **kw)
-        pcx = sp.procedure_check(b)
-        o = sp.calibration_origin(b, [str(HERE / "calibration")])
-        check(not pcx["pinned"] and any(words in w for w in pcx["why"])
-              and sp.held_check(o, sp.blind_of("2024-10-23"))[0] == "PARTLY-CIRCULAR",
-              f"B {name}: '{words}': NOT the pre-registered procedure, never INDEPENDENT")
-    # a camera the procedure did not deliver: left out, said; a delivered one never
-    a = full_args(output_root=str(d / "out_gcpfree"), eo={"c2": str(r1["c2"])}, calibration_variant="gcpfree")
-    pb, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, a)
-    check(list(pb["cams"]) == ["c2"] and pb["not_delivered"]["c1"]["delivery"] == "NOT DELIVERED"
-          and pb["not_delivered"]["c1"]["report"].endswith("CACO03_c1_gcpfree-oct2024_report.json")
-          and sp.option_refusal(pb, a) == "",
-          "--eo c2 only, from a run that did NOT DELIVER c1: c1 left out of the plan (its report kept), not refused")
-    check(sp.dem_stem(pb).name == "2024-10-23_gcpfree" and "--epsg 6348" in sp.cmd_text(sp.dem_cmds(pb, a)[2]),
-          "its DEM files: 2024-10-23_gcpfree_dem.tif ... (the variant in the name), tagged EPSG:6348")
-    ident = sp.calibration_identity(pb, a)
-    check(ident.startswith("calibration variant gcpfree (--eo): c2 CACO03_c2_gcpfree-oct2024_EO.yaml sha256 "
-                           + sp.file_sha(r1["c2"])[:12] + " INDEPENDENT")
-          and "c1 NOT DELIVERED by the GCP-free procedure" in ident and "BLIND: survey held by Dr Chris Sherwood" in ident
-          and ident.encode("ascii"),
-          f"the GeoTIFF description: '{ident[:110]}...'")
-    a2 = full_args(output_root=str(d / "out2_gcpfree"), eo={"c2": str(r2["c2"])}, calibration_variant="gcpfree")
-    p2, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, a2)
-    msg = sp.option_refusal(p2, a2)
-    check("c1" in p2["cams"] and "the procedure DELIVERED c1" in msg,
-          "--eo c2 only, from a run that DELIVERED c1: REFUSED (a delivered camera is never left out)")
-    a3 = full_args(output_root=str(d / "out3_gcpfree"), eo={"c1": str(r2["c1"]), "c2": str(r1["c2"])},
-                   calibration_variant="gcpfree")
-    p3, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, a3)
-    check("different runs" in sp.option_refusal(p3, a3), "B files from two different runs: REFUSED")
-    a4 = full_args(output_root=str(d / "out_gcpfree-aug"), eo={"c2": str(r1["c2"])}, calibration_variant="gcpfree-aug")
-    p4, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, a4)
-    check("as --calibration-variant gcpfree" in sp.option_refusal(p4, a4),
-          "the first run's B under the second product's name (gcpfree-aug): REFUSED")
-    # B's whole product: README, provenance, the GeoTIFF description, and the share archives of A and B
-    provb, rdb = fake_built_product(pb, a)
-    check(provb["status"] == "complete" and provb["blind"]["check"]["label"] == "INDEPENDENT"
-          and "NOT DELIVERED: c1: the pre-registered GCP-free procedure did not deliver it" in rdb
-          and "STATED UNCERTAINTY of this calibration (pre-registered rule): rotation +/- 4.0 px" in rdb
-          and "NEITHER term is a validated bound on real photos" in rdb and "real-texture" not in rdb
-          and "dem/          2024-10-23_gcpfree_dem/_spread/_count" in rdb
-          and provb["cameras_not_delivered"]["c1"]["verdict"] == "NOT DELIVERED"
-          and any(c.startswith("c1 is NOT in this product") for c in provb["caveats"]),
-          "B's README: c1 NOT DELIVERED with the procedure's report, B's two stated uncertainty terms (neither a "
-          "validated bound), the DEM stem with the variant")
-    check("plan view (BLIND: no survey drawn; coloured by still water + setup" in rdb,
-          "B's README FILES: the blind plan view's line reads as a sentence ('no survey drawn; coloured by ...')")
-    aa = full_args(output_root=str(d / "out"))
-    pa, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, aa)
-    ida = sp.calibration_identity(pa, aa)
-    check(ida.startswith("calibration of the table (survey_dates.csv): c1 CACO03_c1_20241023_EO.yaml sha256 ")
-          and "PARTLY-CIRCULAR" in ida and sp.dem_stem(pa).name == "2024-10-23",
-          "A's GeoTIFF description: the table's calibration, its EO files and sha256, PARTLY-CIRCULAR; stem 2024-10-23")
-    asc = d / "geo" / "t_dem.asc"
-    asc.parent.mkdir()
-    asc.write_text("ncols 2\nnrows 2\nxllcorner 420000\nyllcorner 4638000\ncellsize 1\nNODATA_value -9999\n"
-                   "1 2\n3 -9999\n")
-    rr = subprocess.run([sys.executable, str(HERE / "asc_to_geotiff.py"), str(asc), "--epsg", "6348", "--note", ident],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-    desc, epsg = tiff_description_and_epsg(asc.with_suffix(".tif"))
-    check(rr.returncode == 0 and epsg == 6348 and desc.endswith(ident) and "EPSG:6348+5703" in desc,
-          "asc_to_geotiff.py --note: the GeoTIFF reads back EPSG 6348 and the calibration identity")
-    fake_built_product(pa, aa)
-    for rt in ("out", "out_gcpfree"):
-        rc, out = quiet(sp.share, SimpleNamespace(date="2024-10-23", output_root=str(d / rt), share_dir=str(d / "share"),
-                                                  replace=False, calibration=str(HERE / "calibration")))
-        check(rc == 0, f"--share of {rt}: written")
-    ta, tb = d / "share" / "2024-10-23_A_official_calibration.tgz", d / "share" / "2024-10-23_B_gcpfree.tgz"
-    with tarfile.open(str(ta)) as t:
-        na = t.getnames()
-        man_a = t.extractfile("2024-10-23_A_official_calibration/MANIFEST.txt").read().decode()
-    with tarfile.open(str(tb)) as t:
-        nb = t.getnames()
-        man_b = t.extractfile("2024-10-23_B_gcpfree/MANIFEST.txt").read().decode()
-    check(ta.exists() and tb.exists() and (d / "share" / "2024-10-23_B_gcpfree.tgz.sha256").exists()
-          and "2024-10-23_A_official_calibration/dem/2024-10-23_dem.tif" in na
-          and "2024-10-23_B_gcpfree/dem/2024-10-23_gcpfree_dem.tif" in nb
-          and "2024-10-23_A_official_calibration/calibration/CACO03_c1_20241023_EO.yaml" in na
-          and "2024-10-23_B_gcpfree/calibration/gcpfree_run_20261014T010000Z/CACO03_c1_gcpfree-oct2024_report.json" in nb
-          and "2024-10-23_B_gcpfree/calibration/gcpfree_run_20261014T010000Z/run.json" in nb
-          and not any("2024-10-23_A" in n for n in nb) and not any("2024-10-23_B" in n for n in na),
-          "two archives with distinct names: A (the table's calibration) and B (gcpfree, with the procedure's reports, "
-          "c1's NOT DELIVERED report among them)")
-    check("2024-10-23_B_gcpfree/calibration/PREREGISTERED.txt" in nb and not any("PREREGISTERED" in n for n in na)
-          and f"pre-registration: PREREGISTERED.txt sha256 {prereg_sha[:16]}, the file the procedure's run recorded"
-          in man_b, "B's archive holds the pre-registration (the outcome rule fixed before the run), its MANIFEST "
-                    "saying it is the file the run recorded; A's holds none")
-    check("his check of this DEM: PARTLY-CIRCULAR" in man_a and "his check of this DEM: INDEPENDENT" in man_b
-          and "c1: NOT DELIVERED by the pre-registered GCP-free procedure" in man_b and "BLIND" in man_a,
-          "their MANIFESTs: what each is, its calibration and the holder's-check label, every file's sha256")
-    rc, out = quiet(sp.share, SimpleNamespace(date="2024-10-23", output_root=str(d / "out_gcpfree"),
-                                              share_dir=str(d / "share"), replace=False,
-                                              calibration=str(HERE / "calibration")))
-    check(rc == sp.EXIT_CODES["refused"] and "never written over" in out, "--share again: never written over")
-    (runs.parent / "PREREGISTERED.txt").write_text("outcome_if_one_camera: both-or-none\n(changed after the run)\n")
-    sp._FILE_SHA.clear()
-    rc, out = quiet(sp.share, SimpleNamespace(date="2024-10-23", output_root=str(d / "out_gcpfree"),
-                                              share_dir=str(d / "share_p"), replace=False,
-                                              calibration=str(HERE / "calibration")))
-    with tarfile.open(str(d / "share_p" / "2024-10-23_B_gcpfree.tgz")) as t:
-        man_p = t.extractfile("2024-10-23_B_gcpfree/MANIFEST.txt").read().decode()
-    check(rc == 0 and f"NOT the file the run recorded (sha256 {prereg_sha[:16]}): changed after the run" in man_p,
-          "a pre-registration changed after the run: the archive's MANIFEST says so")
-    r1["c2"].write_text(tilt_plus(r1["c2"].read_text()))
-    sp._FILE_SHA.clear()
-    rc, out = quiet(sp.share, SimpleNamespace(date="2024-10-23", output_root=str(d / "out_gcpfree"),
-                                              share_dir=str(d / "share2"), replace=False,
-                                              calibration=str(HERE / "calibration")))
-    check(rc == sp.EXIT_CODES["refused"] and "NOT the pre-registered procedure's B" in out
-          and not (d / "share2" / "2024-10-23_B_gcpfree.tgz").exists(),
-          "--share of a B edited after it was built: REFUSED, no archive")
-    # the runtime guard sees through a link
+        # forgeries copied out of the runs folder: never INDEPENDENT
+        def forged(name, edit_b=None, edit_report=None, drop=None):
+            f = d / "forged" / name
+            shutil.copytree(str(runs / "20261014T010000Z"), str(f))
+            b = f / G.OUT_EO.format(cam="c2")
+            if edit_b:
+                b.write_text(edit_b(b.read_text()))
+            rp = f / (G.OUT_REPORT.format(cam="c2") + ".json")
+            if edit_report:
+                js = json.loads(rp.read_text())
+                edit_report(js)
+                rp.write_text(json.dumps(js))
+            if drop:
+                (f / drop).unlink()
+            return b
+        cases = [("copy", {}, "is not in this repository's runs folder"),
+                 ("tilt", dict(edit_b=shifted("tilt", 0.7)), "its numbers are not the B of its report"),
+                 ("sha", dict(edit_b=lambda t: t.replace(G.own_sha256(), "1" * 64)), "not the pre-registered one"),
+                 ("noreport", dict(drop=G.OUT_REPORT.format(cam="c2") + ".json"), "is not beside it"),
+                 ("trial", dict(edit_report=lambda js: js["run"].update(eligible=False)), "a TRIAL run"),
+                 ("modules", dict(edit_report=lambda js: js["run"]["modules_sha256"].update({"georectify.py": "0" * 64})),
+                  "other modules than the pre-registered ones (georectify.py)"),
+                 ("norot", dict(edit_b=lambda t: t.replace(" rotated by ", " moved by ")), "rotated by <angle> deg"),
+                 ("withheld", dict(edit_report=lambda js: js.update(delivery="WITHHELD (both-or-none)")),
+                  "it was not delivered")]
+        for name, kw, words in cases:
+            b = forged(name, **kw)
+            pcx = sp.procedure_check(b)
+            o = sp.calibration_origin(b, [str(HERE / "calibration")])
+            check(not pcx["pinned"] and any(words in w for w in pcx["why"])
+                  and sp.held_check(o, sp.blind_of("2024-10-23"))[0] == "PARTLY-CIRCULAR",
+                  f"B {name}: '{words}': NOT the pre-registered procedure, never INDEPENDENT")
+        # a camera the procedure did not deliver: left out, said; a delivered one never
+        a = full_args(output_root=str(d / "out_gcpfree"), eo={"c2": str(r1["c2"])}, calibration_variant="gcpfree")
+        pb, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, a)
+        check(list(pb["cams"]) == ["c2"] and pb["not_delivered"]["c1"]["delivery"] == "NOT DELIVERED"
+              and pb["not_delivered"]["c1"]["report"].endswith("CACO03_c1_gcpfree-oct2024_report.json")
+              and sp.option_refusal(pb, a) == "",
+              "--eo c2 only, from a run that did NOT DELIVER c1: c1 left out of the plan (its report kept), not refused")
+        check(sp.dem_stem(pb).name == "2024-10-23_gcpfree" and "--epsg 6348" in sp.cmd_text(sp.dem_cmds(pb, a)[2])
+              and sp.map_png(pb, "plan").name == "2024-10-23_gcpfree_waterlines_plan.png"
+              and sp.map_png(pb, "c2").name == "2024-10-23_gcpfree_waterlines_c2.png",
+              "its DEM and map files: 2024-10-23_gcpfree_dem.tif, 2024-10-23_gcpfree_waterlines_plan.png ... (the "
+              "variant in the name), tagged EPSG:6348")
+        ident = sp.calibration_identity(pb, a)
+        check(ident.startswith("calibration variant gcpfree (--eo): c2 CACO03_c2_gcpfree-oct2024_EO.yaml sha256 "
+                               + sp.file_sha(r1["c2"])[:12] + " INDEPENDENT")
+              and "c1 NOT DELIVERED by the GCP-free procedure" in ident and "BLIND: survey held by Dr Chris Sherwood" in ident
+              and ident.encode("ascii"),
+              f"the GeoTIFF description: '{ident[:110]}...'")
+        page = sp.dem_cmds(pb, a)[3]
+        check("CACO03 Marconi Beach (calibration gcpfree: 2025-01-23 GCPs, turned)" in sp.cmd_text(page),
+              "its DEM page names the variant first ('calibration gcpfree: 2025-01-23 GCPs, turned'; dem_figure.py "
+              "shrinks a heading that would run off the page)")
+        a2 = full_args(output_root=str(d / "out2_gcpfree-aug"), eo={"c2": str(r2["c2"])},
+                       calibration_variant="gcpfree-aug")
+        p2, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, a2)
+        msg = sp.option_refusal(p2, a2)
+        check("c1" in p2["cams"] and "the procedure DELIVERED c1" in msg,
+              "--eo c2 only, from a run that DELIVERED c1: REFUSED (a delivered camera is never left out)")
+        a3 = full_args(output_root=str(d / "out3_gcpfree"), eo={"c1": str(r2["c1"]), "c2": str(r1["c2"])},
+                       calibration_variant="gcpfree")
+        p3, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, a3)
+        check("different runs" in sp.option_refusal(p3, a3), "B files from two different runs: REFUSED")
+        a4 = full_args(output_root=str(d / "out_gcpfree-aug"), eo={"c2": str(r1["c2"])}, calibration_variant="gcpfree-aug")
+        p4, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, a4)
+        check("as --calibration-variant gcpfree" in sp.option_refusal(p4, a4),
+              "the first run's B under the second product's name (gcpfree-aug): REFUSED")
+        # A first (its DEM time goes into B's README), then B: README, provenance, the GeoTIFF description, the maps
+        aa = full_args(output_root=str(d / "out"))
+        pa, _ = quiet(sp.build_plan, "2024-10-23", cfg, srv, aa)
+        ida = sp.calibration_identity(pa, aa)
+        check(ida.startswith("calibration of the table (survey_dates.csv): c1 CACO03_c1_20241023_EO.yaml sha256 ")
+              and "PARTLY-CIRCULAR" in ida and sp.dem_stem(pa).name == "2024-10-23"
+              and sp.map_png(pa, "plan").name == "2024-10-23_waterlines_plan.png",
+              "A's GeoTIFF description: the table's calibration, its EO files and sha256, PARTLY-CIRCULAR; stem "
+              "2024-10-23, maps 2024-10-23_waterlines_*")
+        fake_built_product(pa, aa)
+        provb, rdb = fake_built_product(pb, a)
+        unc = next((ln for ln in rdb.splitlines() if "STATED UNCERTAINTY" in ln), "")
+        check(provb["status"] == "complete" and provb["blind"]["check"]["label"] == "INDEPENDENT"
+              and "NOT DELIVERED: c1: the pre-registered GCP-free procedure did not deliver it" in rdb
+              and "rotation +/- 4.0 px" in unc and "in the largest of five synthetic position-inheritance cases" in unc
+              and "NEITHER term is a validated bound on real photos" in unc and "<=" not in unc
+              and "real-texture" not in rdb and "|dz| median of 3-7 mm" not in rdb
+              and "its DEM effect as a tilt: not computed" in rdb
+              and "dem/          2024-10-23_gcpfree_dem/_spread/_count" in rdb
+              and "maps/         2024-10-23_gcpfree_waterlines_<cam>.png" in rdb
+              and provb["cameras_not_delivered"]["c1"]["verdict"] == "NOT DELIVERED"
+              and any(c.startswith("c1 is NOT in this product") for c in provb["caveats"]),
+              "B's README: c1 NOT DELIVERED with the procedure's report, B's two stated uncertainty terms (the "
+              "position term the largest of five cases, neither a validated bound; no synthetic DEM figure for the "
+              "rotation), the DEM and map files with the variant")
+        gf = provb["blind"]["gcpfree"]
+        check("EXPOSURE (stated by the people who made this procedure" in rdb and "A minus the Jan 2025 solution" in rdb
+              and "ORDER (what decides B, and A): procedure pinned" in rdb and "outcome rule 'per-camera' pre-registered"
+              in rdb and "A (the table's calibration) DEM built 20" in rdb and "B run 20261014T010000Z" in rdb
+              and gf["a_product"]["found"] and gf["times"]["prereg"] and gf["times"]["b_commit"],
+              "B's README, BLIND: the procedure's EXPOSURE statement, and the ORDER of the pin, the pre-registration, "
+              "A's DEM, the B run and its commit, with dates")
+        check("NOTE: A's DEM was built BEFORE" not in rdb and "NOTE: B was committed after A's DEM" not in rdb
+              and gf["times"]["a_dem"] >= gf["times"]["b_commit"] >= gf["times"]["prereg"],
+              "... and what came first (here: the rule, B's commit, then A's DEM: no NOTE)")
+        info_ = {"procedure_sha256": pc["procedure_sha256"], "preregistration": pc["preregistration"],
+                 "outcome_rule": "per-camera", "run_id": "x", "run_started_utc": "2026-10-14 00:00:00",
+                 "committed": dict(pc["committed"], date="2099-01-01T00:00:00+00:00"),
+                 "preregistration_here": str(d / "no_git" / "PREREGISTERED.txt")}
+        g2 = sp.gcpfree_disclosure(pb, a, {"c2": dict(info_, preregistration=dict(
+            pc["preregistration"], commit_date="2099-01-01T00:00:00+00:00"))})
+        check(any("A's DEM was built BEFORE the outcome rule in force was pre-registered" in x
+                  for x in g2["order_flags"])
+              and any("B was committed after A's DEM was built" in x for x in g2["order_flags"]),
+              "... A's DEM before the rule's pre-registration, or before B's commit: said (NOTE lines)")
+        # the rule changed (before any run) after A's DEM: the rule's history is said, from when the rule in force
+        # was first committed
+        rr = GcpfreeRepo(d / "rule_history", rule="both-or-none")
+        rr.prereg.write_text(rr.prereg.read_text().replace("outcome_if_one_camera: both-or-none",
+                                                           "outcome_if_one_camera: per-camera"))
+        git_in(rr.root, "add", "-A")
+        subprocess.run(["git", "-C", str(rr.root), "-c", "user.name=test", "-c", "user.email=test@example.org", "-c",
+                        "commit.gpgsign=false", "commit", "-q", "-m", "pre-registration: the other rule"],
+                       env=dict(os.environ, GIT_COMMITTER_DATE="2099-01-02T00:00:00+00:00"),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        hist = sp.prereg_rule_history(rr.prereg)
+        g3 = sp.gcpfree_disclosure(pb, a, {"c2": dict(info_, preregistration_here=str(rr.prereg))})
+        check([h["rule"] for h in hist] == ["both-or-none", "per-camera"]
+              and any("the outcome rule of PREREGISTERED.txt was changed before the run ('both-or-none'" in x
+                      for x in g3["order_flags"])
+              and any("A's DEM was built BEFORE the outcome rule in force was pre-registered" in x
+                      for x in g3["order_flags"])
+              and f"first committed with this rule {hist[1]['commit'][:10]}" in g3["order"][1]
+              and "the file's commits: " in g3["order"][1],
+              "... the outcome rule changed between the pre-registration's commits (after A's DEM): its history and "
+              "NOTE lines; the rule in force dated from its own first commit")
+        check("plan view (BLIND: no survey drawn; coloured by still water + setup" in rdb
+              and "its title names the calibration" in rdb,
+              "B's README FILES: the blind plan view's line reads as a sentence; its title names the calibration")
+        mp = sp.read_stamp(pb["out"], "map_plan")
+        check(mp and mp["sig"].get("calibration", "").startswith("calibration variant gcpfree (--eo): c2 "
+                                                                   "CACO03_c2_gcpfree-oct2024_EO.yaml")
+              and sp.map_png(pb, "plan").exists(),
+              "B's plan view: drawn as 2024-10-23_gcpfree_waterlines_plan.png, titled with the calibration identity")
+        check(sp.per_day_rows_note(pb).startswith("This product has no comparison (blind)")
+              and sp.per_day_rows_note(pa) == sp.PER_DAY_ROWS_NOTE_BLIND
+              and "compare/" not in sp.PER_DAY_ROWS_NOTE_BLIND and "show whether the lines moved" not in rdb
+              and "Nothing was shifted: a survey is to be compared at the DEM's coordinates" in rdb
+              and "The surveys are sampled at the DEM's coordinates" not in rdb,
+              "a blind README never points at a comparison it does not have (per-day rows, the surveys sampled)")
+        asc = d / "geo" / "t_dem.asc"
+        asc.parent.mkdir()
+        asc.write_text("ncols 2\nnrows 2\nxllcorner 420000\nyllcorner 4638000\ncellsize 1\nNODATA_value -9999\n"
+                       "1 2\n3 -9999\n")
+        rr = subprocess.run([sys.executable, str(HERE / "asc_to_geotiff.py"), str(asc), "--note", ident],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        desc, epsg = tiff_description_and_epsg(asc.with_suffix(".tif"))
+        check(rr.returncode == 0 and epsg == 6348 and desc.endswith(ident) and "EPSG:6348+5703" in desc,
+              "asc_to_geotiff.py (its default now EPSG:6348) --note: the GeoTIFF reads back EPSG 6348 and the "
+              "calibration identity")
+        for rt in ("out", "out_gcpfree"):
+            rc, out = quiet(sp.share, share_args(rt, "share"))
+            check(rc == 0, f"--share of {rt}: written" + ("" if rc == 0 else f" -- {out}"))
+        ta, tb = d / "share" / "2024-10-23_A_official_calibration.tgz", d / "share" / "2024-10-23_B_gcpfree.tgz"
+        with tarfile.open(str(ta)) as t:
+            na = t.getnames()
+            man_a = t.extractfile("2024-10-23_A_official_calibration/MANIFEST.txt").read().decode()
+        with tarfile.open(str(tb)) as t:
+            nb = t.getnames()
+            man_b = t.extractfile("2024-10-23_B_gcpfree/MANIFEST.txt").read().decode()
+        check(ta.exists() and tb.exists() and (d / "share" / "2024-10-23_B_gcpfree.tgz.sha256").exists()
+              and "2024-10-23_A_official_calibration/dem/2024-10-23_dem.tif" in na
+              and "2024-10-23_B_gcpfree/dem/2024-10-23_gcpfree_dem.tif" in nb
+              and "2024-10-23_A_official_calibration/maps/2024-10-23_waterlines_plan.png" in na
+              and "2024-10-23_B_gcpfree/maps/2024-10-23_gcpfree_waterlines_plan.png" in nb
+              and "2024-10-23_B_gcpfree/maps/2024-10-23_gcpfree_waterlines_c2.png" in nb
+              and "2024-10-23_A_official_calibration/calibration/CACO03_c1_20241023_EO.yaml" in na
+              and "2024-10-23_B_gcpfree/calibration/gcpfree_run_20261014T010000Z/CACO03_c1_gcpfree-oct2024_report.json" in nb
+              and "2024-10-23_B_gcpfree/calibration/gcpfree_run_20261014T010000Z/run.json" in nb
+              and not any("2024-10-23_A" in n for n in nb) and not any("2024-10-23_B" in n for n in na),
+              "two archives with distinct names: A (the table's calibration) and B (gcpfree, with the procedure's reports, "
+              "c1's NOT DELIVERED report among them); their maps and DEM files named apart too")
+        check("2024-10-23_B_gcpfree/calibration/PREREGISTERED.txt" in nb and not any("PREREGISTERED" in n for n in na)
+              and f"pre-registration: PREREGISTERED.txt sha256 {prereg_sha[:16]}, the file the procedure's run recorded"
+              in man_b, "B's archive holds the pre-registration (the outcome rule fixed before the run), its MANIFEST "
+                        "saying it is the file the run recorded; A's holds none")
+        check("his check of this DEM: PARTLY-CIRCULAR" in man_a and "his check of this DEM: INDEPENDENT" in man_b
+              and "c1: NOT DELIVERED by the pre-registered GCP-free procedure" in man_b and "BLIND" in man_a
+              and "c2 procedure: made by the pre-registered procedure" in man_b
+              and str(runs / "20261014T010000Z") in man_b and "EXPOSURE (stated by" in man_b
+              and "ORDER (what decides B, and A)" in man_b and "STATED UNCERTAINTY" in man_b
+              and "EXPOSURE" not in man_a,
+              "their MANIFESTs: what each is, its calibration and the holder's-check label, every file's sha256; B's "
+              "also its procedure (run folder, pre-registration, commit), EXPOSURE, ORDER and stated uncertainty")
+        rc, out = quiet(sp.share, share_args("out_gcpfree", "share"))
+        check(rc == sp.EXIT_CODES["refused"] and "never written over" in out, "--share again: never written over")
+        # the pre-registration changed after the run (not yet committed): B is no longer the pre-registered one
+        prereg_txt = repo.prereg.read_text()
+        repo.prereg.write_text(prereg_txt.replace("outcome_if_one_camera: per-camera", "outcome_if_one_camera: both-or-none"))
+        rc, out = quiet(sp.share, share_args("out_gcpfree", "share_p"))
+        check(rc == sp.EXIT_CODES["refused"] and "not the file its run recorded" in out
+              and not (d / "share_p" / "2024-10-23_B_gcpfree.tgz").exists(),
+              "the pre-registration changed after the run: --share REFUSED (B is not the pre-registered procedure's)")
+        repo.prereg.write_text(prereg_txt)
+        # the calibration file there now is not the one the product was built with: never packed with its DEM
+        provp_ = json.loads((d / "out" / "2024-10-23" / "provenance.json").read_text())
+        provp_["cameras"]["c1"]["calibration"]["eo_sha256"] = "0" * 16
+        (d / "out" / "2024-10-23" / "provenance.json").write_text(json.dumps(provp_))
+        rc, out = quiet(sp.share, share_args("out", "share_a2"))
+        check(rc == sp.EXIT_CODES["refused"] and "is not the one this product was built with" in out
+              and not (d / "share_a2").exists(),
+              "A: a calibration file that is not the one the product was built with (its sha256): --share REFUSED")
+        reseal(runs / "20261014T010000Z", "c2", edit_b=shifted("azimuth", 0.4))      # B edited, report resealed
+        rc, out = quiet(sp.share, share_args("out_gcpfree", "share2"))
+        check(rc == sp.EXIT_CODES["refused"] and "NOT the pre-registered procedure's B" in out
+              and "is not the one this product was built with" in out and "changed since its commit" in out
+              and not (d / "share2" / "2024-10-23_B_gcpfree.tgz").exists(),
+              "--share of a B edited after it was built (report and run.json rewritten to agree): REFUSED, no archive")
+    # the runtime guard sees through a link; a step is never handed such a file
     real = d / "held" / "2024-10-23_Marconi_GCP_xyz.csv"
     real.parent.mkdir()
     real.write_text("1,2,3,4\n")
@@ -4487,100 +4675,228 @@ def test_gcpfree_b(d):
             open(str(d / "held" / "data.csv")).read()
             check(False, "a link to a held survey: NOT refused")
         except sp.BlindSurvey:
-            check(True, "... and refuses to open it through the link")
+            check(True, "... and refuses to open it through the link (a Python-level open in this process)")
+        # a photo-named link to it in a photo folder: the photo scan of this process (it runs before any step that
+        # is handed the photo folders) probes its size with PIL, a Python-level open: refused, nothing read
+        from detect_original_view import collect_photos
+        pics = d / "held" / "pics"
+        pics.mkdir()
+        os.symlink(str(real), str(pics / "1729699200.Wed.Oct.23_16_00_00.GMT.2024.CACO03.c1.timex.jpg"))
+        try:
+            collect_photos([str(pics)], "c1", "2024-10-20", "2024-10-26", (0.0, 24.0), station="CACO03",
+                           frame_size=(2448, 2048))
+            check(False, "a photo-named link to a held survey: NOT refused by the photo scan")
+        except sp.BlindSurvey:
+            check(True, "a photo-named link to a held survey in a photo folder: the in-process photo scan is refused "
+                        "(BlindSurvey, before any step is started on the folder)")
+    try:
+        quiet(sp.run_cmd, [sys.executable, str(HERE / "asc_to_geotiff.py"), str(d / "held" / "data.csv")],
+              d / "held" / "x.log")
+        check(False, "a step handed a link to a held survey: NOT refused")
+    except sp.BlindSurvey as exc:
+        check("refused to start asc_to_geotiff.py" in str(exc) and not (d / "held" / "x.log").exists(),
+              "a step (a child process, beyond the hook) is never handed such a file: refused before it starts")
     check(held is sp.BLIND_DATES["2024-10-23"], "BLIND_DATES untouched")
+
+
+def test_gcpfree_where(d):
+    print("a calibration B is the delivered one only from this repository's runs folder, under its pre-registration "
+          "as committed, from the station's folders, the first delivery run, committed once, its lines true")
+    import gcpfree_eo as G
+    d = Path(d) / "gcpfree_where"
+    c2 = (-13.4, -0.5, 0.3)
+
+    def res_nd():
+        return {"c1": gcpfree_res("c1", (0, 0, 0), "NOT DELIVERED"), "c2": gcpfree_res("c2", c2)}
+
+    def why_of(b, *words):
+        pc = sp.procedure_check(b)
+        miss = [w for w in words if not any(w in x for x in pc["why"])]
+        lab = sp.held_check(sp.calibration_origin(b, [str(HERE / "calibration")]), sp.blind_of("2024-10-23"))[0]
+        return (not pc["pinned"] and not miss and lab == "PARTLY-CIRCULAR"), (pc["why"] if miss else "")
+    # (1) a second pre-registration (the other rule), made after the official run's result was seen, in another
+    # folder of the same repository, its run written as a delivery run would be: never the delivered B
+    off = GcpfreeRepo(d / "official", rule="both-or-none")
+    with off:
+        r = off.run("20261014T010000Z", res_nd(), "2026-10-14 01:00:00")
+        check(not r["c2"].exists(), "the official run, both-or-none, c1 not delivered: no B at all (c2 WITHHELD)")
+        sh = G.write_preregistration(off.root / "shadow" / "PREREGISTERED.txt", "per-camera", "someone else", G.ROOTS)
+        off.commit("a shadow pre-registration")
+        sh_info, _ = G.preregistration(sh)
+        rs = off.run("20261014T030000Z", res_nd(), "2026-10-14 03:00:00", folder=sh.parent / "runs" / "20261014T030000Z",
+                     prereg=sh_info)
+        ok, w = why_of(rs["c2"], "is not in this repository's runs folder", "not this repository's")
+        check(rs["c2"].exists() and ok, f"(1) a shadow pre-registration's 'delivery run' (per-camera, c2 B): NOT the "
+                                         f"pre-registered procedure, never INDEPENDENT {w}")
+        nd, bad = sp.not_delivered_cameras(["c1", "c2"], {"c2": str(rs["c2"])})
+        check(not nd and "c1" in bad, "... and its c2-only B may not leave c1 out")
+    # (2) a B of another repository (another clone, any rule): never this repository's
+    other = GcpfreeRepo(d / "other")
+    ro = other.run("20261014T010000Z", res_nd(), "2026-10-14 01:00:00")
+    with off:
+        ok, w = why_of(ro["c2"], "is not in this repository's runs folder", "not this repository's")
+        check(ok, f"(2) a B made in another repository: NOT the pre-registered procedure {w}")
+    # (3) edited after its commit, report and run.json rewritten: 'changed'; committed again: two commits
+    rp = GcpfreeRepo(d / "recommit")
+    with rp:
+        rr = rp.run("20261014T010000Z", res_nd(), "2026-10-14 01:00:00")
+        check(sp.procedure_check(rr["c2"])["pinned"], "(3) the B as the run wrote and committed it: pinned")
+        reseal(rr["c2"].parent, "c2", edit_b=shifted("azimuth", 0.5))
+        ok, w = why_of(rr["c2"], "its B file CACO03_c2_gcpfree-oct2024_EO.yaml is changed since its commit",
+                       "its report CACO03_c2_gcpfree-oct2024_report.json is changed since its commit")
+        check(ok, f"... azimuth +0.5 deg, report and run.json rewritten to agree, not committed: NOT the "
+                  f"pre-registered procedure {w}")
+        rp.commit("B nudged")
+        ok, w = why_of(rr["c2"], "was touched by 2 commits")
+        check(ok, f"... and committed again: two commits of the B file: NOT the pre-registered procedure {w}")
+    # (4) not committed at all; then in another git repository nested inside
+    nc = GcpfreeRepo(d / "nocommit")
+    with nc:
+        rn = nc.run("20261014T010000Z", res_nd(), "2026-10-14 01:00:00", commit=False)
+        ok, w = why_of(rn["c2"], "is NOT committed to git: commit the run folder, in one commit")
+        check(ok, f"(4) a run folder not committed yet: NOT (yet) the pre-registered procedure {w}")
+        git_in(rn["c2"].parent, "init", "-q")
+        git_in(rn["c2"].parent, "add", "-A")
+        git_in(rn["c2"].parent, "commit", "-q", "-m", "inside")
+        ok, w = why_of(rn["c2"], "committed in another git repository than this script's")
+        check(ok, f"... committed in a repository of its own inside this one: NOT the pre-registered procedure {w}")
+    # (5) photo folders other than the station's, and constants changed in the running process
+    ro5 = GcpfreeRepo(d / "roots")
+
+    def other_roots(info):
+        info["roots"] = ["/tmp/rendered/Chelsea_pics"]
+        info["constants"]["ROOTS"] = info["roots"]
+        info["constants_sha256"] = G.constants_sha256(info["constants"])
+    with ro5:
+        r5 = ro5.run("20261014T010000Z", res_nd(), "2026-10-14 01:00:00", edit_info=other_roots)
+        ok, w = why_of(r5["c2"], "its photo folders are not the station's", "constants are not the pinned ones")
+        check(ok, f"(5) photo folders not the station's (ROOTS patched in the running process): a test of the "
+                  f"procedure, never INDEPENDENT {w}")
+    # (6) the camera position, (7) the pan change line, (8) a small tilt: edited BEFORE the first commit, report and
+    # run.json rewritten to agree
+    def report_b(k, delta):
+        def edit(js):
+            js["B"][k] += delta
+        return edit
+
+    def pan_line(t):
+        return re.sub(r"pan change ([+-][0-9.]+) deg", lambda m: f"pan change {float(m.group(1)) + 1:+.3f} deg", t)
+    for name, edit, words in (("position", dict(edit_b=shifted("x", 0.5), edit_report=report_b(0, 0.5)),
+                               "its camera position is 0.500 m from"),
+                              ("pan", dict(edit_b=pan_line), "its 'pan change' line says"),
+                              ("tilt", dict(edit_b=shifted("tilt", 0.05), edit_report=report_b(4, 0.05)), None)):
+        rx = GcpfreeRepo(d / name)
+        with rx:
+            r_ = rx.run("20261014T010000Z", res_nd(), "2026-10-14 01:00:00", commit=False)
+            reseal(r_["c2"].parent, "c2", **edit)
+            rx.commit("run (edited before its commit)")
+            if words:
+                ok, w = why_of(r_["c2"], words)
+                check(ok, f"({name}) edited before the first commit, report and run.json rewritten: '{words}': NOT the "
+                          f"pre-registered procedure {w}")
+            else:
+                check(sp.procedure_check(r_["c2"])["pinned"],
+                      "(tilt) a 0.05 deg tilt edit BEFORE the first commit, report and run.json rewritten: NOT seen "
+                      "here (the 'rotated by' magnitude barely moves): only the B sha256 written down when the run "
+                      "ended shows it (stated in the docs)")
+    # (9) the pre-registration committed again after the run; (10) a second delivery run without Aug photos
+    rq = GcpfreeRepo(d / "prereg_again")
+    with rq:
+        r9 = rq.run("20261014T010000Z", res_nd(), "2026-10-14 01:00:00")
+        r10 = rq.run("20261014T020000Z", res_nd(), "2026-10-14 02:00:00")
+        ok, w = why_of(r10["c2"], "it is the second delivery run of this repository")
+        check(ok and sp.procedure_check(r9["c2"])["pinned"],
+              f"(10) a second delivery run without Aug photos: NOT the delivered B (the first run's is) {w}")
+        rq.prereg.write_text(rq.prereg.read_text() + "# a note added after the run\n")
+        rq.commit("pre-registration: a note")
+        ok, w = why_of(r9["c2"], "not the file its run recorded", "was committed again after the run")
+        check(ok, f"(9) the pre-registration changed and committed again after the run: NOT the pre-registered "
+                  f"procedure {w}")
+    # (11) the first delivery run's record removed (from the working tree, then in a commit), a later run then
+    # passing for the first: never the delivered B
+    rg = GcpfreeRepo(d / "removed")
+    with rg:
+        r11 = rg.run("20261014T010000Z", {"c1": gcpfree_res("c1", (0, 0, 0), "NOT DELIVERED"),
+                                          "c2": gcpfree_res("c2", c2, "NOT DELIVERED")}, "2026-10-14 01:00:00")
+        shutil.rmtree(str(r11["c2"].parent))
+        r12 = rg.run("20261014T020000Z", res_nd(), "2026-10-14 02:00:00", commit=False)
+        git_in(rg.root, "add", "--", str(r12["c2"].parent))         # the new run only: the removal not committed
+        git_in(rg.root, "commit", "-q", "-m", "gcpfree: run 20261014T020000Z")
+        ok, w = why_of(r12["c2"], "the record of run(s) 20261014T010000Z was committed")
+        check(ok, f"(11) the first run's folder deleted, a second run then the only one there: NOT the delivered B {w}")
+        rg.commit("the first run removed")
+        ok2, w2 = why_of(r12["c2"], "the record of run(s) 20261014T010000Z was committed")
+        check(ok2 and sp.gcpfree_run_records(rg.dir / "runs") == {"removed": ["20261014T010000Z"], "changed": []},
+              f"... and with its removal committed: still NOT (git keeps the record) {w2}")
+    # (12) the first delivery run's record rewritten as a trial (so a later run would be the first): never the
+    # delivered B either
+    rh = GcpfreeRepo(d / "rewritten")
+    with rh:
+        r13 = rh.run("20261014T010000Z", {"c1": gcpfree_res("c1", (0, 0, 0), "NOT DELIVERED"),
+                                          "c2": gcpfree_res("c2", c2, "NOT DELIVERED")}, "2026-10-14 01:00:00")
+        rj = r13["c2"].parent / "run.json"
+        rjs = json.loads(rj.read_text())
+        rjs["eligible"] = False
+        rj.write_text(json.dumps(rjs, indent=1) + "\n")
+        rh.commit("run 1 made a trial")
+        r14 = rh.run("20261014T020000Z", res_nd(), "2026-10-14 02:00:00")
+        pc14 = sp.procedure_check(r14["c2"])
+        ok, w = why_of(r14["c2"], "the record (run.json) of run(s) 20261014T010000Z was changed after its commit")
+        check(ok and pc14["delivery_runs_here"] == ["20261014T020000Z"],
+              f"(12) the first run's record rewritten as a trial and committed, a later run then the first delivery run "
+              f"there: NOT the delivered B {w}")
 
 
 def test_gcpfree_turn_line(d):
     print("a pinned B's 'X.yaml rotated by N deg' line: X is its report's reference, here with the content the report "
           "recorded, and N is true of the two files' numbers; else NOT the pre-registered procedure")
-    import hashlib
     import gcpfree_eo as G
-    from georectify import load_extrinsics, load_intrinsics
     d = Path(d) / "gcpfree_turn"
-    runs = d / "calibration" / "gcpfree" / "runs"
-    runs.mkdir(parents=True)
-    (runs.parent / "PREREGISTERED.txt").write_text("outcome_if_one_camera: per-camera\n(a test)\n")
     cal = HERE / "calibration"
-    ref_f, io_f = G.REF_EO_FILE["jan"].format(cam="c2"), G.IO_FILE.format(cam="c2")
-    e, io_ = load_extrinsics(cal / ref_f), load_intrinsics(cal / io_f)
-    B = e.copy()
-    B[3:6] += np.radians((-13.4, -0.5, 0.3))                  # the brief's test size, not a measured turn
-    link = {"label": "direct Jan->Oct", "gate_F": True, "gate_S": True, "has_B": True,
-            "solve": {"inliers": 300, "matches": 2000, "resid_med_px": 0.6, "jackknife_max_px": 0.8,
-                      "inlier_new_days": ["2024-10-21", "2024-10-23", "2024-10-25"], "why": ""},
-            "per_day": {"days": [{"day": "2024-10-21", "inliers": 90, "diff_px": 0.7}], "measured": 3,
-                        "off_days": [], "gate_S": True, "why": ""},
-            "horizon": {"status": "pass", "why": "a test"}, "new_photos": ["oct.jpg"], "ref_photos": ["jan.jpg"]}
-    res = {"camera": "c2", "io": io_f, "io_sha256": sp.file_sha(cal / io_f), "reference_eo": ref_f,
-           "reference_eo_sha256": sp.file_sha(cal / ref_f), "direct": link, "verdict": "DELIVERED",
-           "source": "direct Jan->Oct", "notes": [], "reasons": [], "b_reference_eo": ref_f,
-           "b_reference_eo_sha256": sp.file_sha(cal / ref_f), "B": G.eo_deg(B), "pan_change_deg": -13.4}
-    res["uncertainty"] = G.stated_uncertainty(res, io_)
-    info = {"run_id": "20261014T030000Z", "run_no": 1, "eligible": True, "variant": "gcpfree", "first_run": None,
-            "status": "running", "started_utc": "2026-10-14 03:00:00", "argv": ["gcpfree_eo.py"],
-            "argv_text": "gcpfree_eo.py", "roots": list(G.ROOTS), "camera": "both", "aug_dir": None,
-            "procedure_sha256": G.own_sha256(), "modules_sha256": G.module_sha256(),
-            "preregistration": {"path": "calibration/gcpfree/PREREGISTERED.txt",
-                                "sha256": sp.file_sha(runs.parent / "PREREGISTERED.txt"),
-                                "outcome_if_one_camera": "per-camera", "decided_by": "the owner (a test)",
-                                "commit": "c" * 40, "git_history": [{"commit": "c" * 40, "date": "2026-10-14"}]},
-            "solved": ["c2"], "kept": {}}
-    results = G.apply_outcome({"c2": res}, "per-camera", True)
-    run = runs / info["run_id"]
-    run.mkdir()
-    with contextlib.redirect_stdout(io.StringIO()):
-        G.finish_run(run, info, results, ["a test run"], print)
-    b0 = run / G.OUT_EO.format(cam="c2")
-    m = sp.ROTATED_REF.search(" ".join(sp.eo_comment_lines(b0)))
-    pc = sp.procedure_check(b0, [str(cal)])
-    check(pc["pinned"] and m and m.group(1) == ref_f and 13.0 < float(m.group(2)) < 14.0,
-          f"as gcpfree_eo.py wrote it: '{m.group(0) if m else '?'}', true of the numbers: pinned"
-          + ("" if pc["pinned"] else f" -- NOT: {pc['why']}"))
+    ref_f = G.REF_EO_FILE["jan"].format(cam="c2")
+    repo = GcpfreeRepo(d / "repo")
+    with repo:
+        b0 = repo.run("20261014T030000Z", {"c2": gcpfree_res("c2", (-13.4, -0.5, 0.3))}, "2026-10-14 03:00:00",
+                      edit_info=lambda info: info.update(camera="both"))["c2"]
+        run = b0.parent
+        m = sp.ROTATED_REF.search(" ".join(sp.eo_comment_lines(b0)))
+        pc = sp.procedure_check(b0, [str(cal)])
+        check(pc["pinned"] and m and m.group(1) == ref_f and 13.0 < float(m.group(2)) < 14.0,
+              f"as gcpfree_eo.py wrote it: '{m.group(0) if m else '?'}', true of the numbers: pinned"
+              + ("" if pc["pinned"] else f" -- NOT: {pc['why']}"))
 
-    def forged(name, edit_b=None, ref_beside=None, edit_report=None):
-        """A copy of the run, edited, its report and run.json made to agree with the edited B (a consistent
-        forgery: only the turn line, the reference named, or the reference's content tells)."""
-        f = d / "forged" / name
-        shutil.copytree(str(run), str(f))
-        b = f / b0.name
-        if edit_b:
-            b.write_text(edit_b(b.read_text()))
-        sha = hashlib.sha256(b.read_bytes()).hexdigest()
-        rp = f / (G.OUT_REPORT.format(cam="c2") + ".json")
-        js = json.loads(rp.read_text())
-        js["b_file_sha256"] = sha
-        if edit_report:
-            edit_report(js)
-        rp.write_text(json.dumps(js))
-        rj = json.loads((f / "run.json").read_text())
-        rj["cameras"]["c2"]["b_file_sha256"] = sha
-        (f / "run.json").write_text(json.dumps(rj))
-        if ref_beside:
-            (f / ref_f).write_text(ref_beside)
-        return b
-    turn = m.group(2)
-    other = "CACO03_c2_20240827_EO.yaml"
-    jan_tilted = re.sub(r"^tilt: (\S+)$", lambda t: f"tilt: {float(t.group(1)) + 1.0:.4f}",
-                        (cal / ref_f).read_text(), flags=re.M)
-    cases = [("angle", dict(edit_b=lambda t: t.replace(f"rotated by {turn} deg", f"rotated by {float(turn) + 1:.3f} deg")),
-              "but its numbers are turned"),
-             ("other_ref", dict(edit_b=lambda t: t.replace(f"{ref_f} rotated by", f"{other} rotated by")),
-              f"names {other}, its report's reference is {ref_f}"),
-             ("ref_content", dict(ref_beside=jan_tilted), "is not the one its report says it was turned from (sha256)"),
-             ("ref_missing", dict(edit_b=lambda t: t.replace(f"{ref_f} rotated by", "CACO03_c2_20250199_EO.yaml rotated by"),
-                                  edit_report=lambda js: js.update(b_reference_eo="CACO03_c2_20250199_EO.yaml")),
-              "is not here")]
-    for name, kw, words in cases:
-        b = forged(name, **kw)
-        pcx = sp.procedure_check(b, [str(cal)])
-        lab = sp.held_check(sp.calibration_origin(b, [str(cal)]), sp.blind_of("2024-10-23"))[0]
-        msg = sp.procedure_variant_problem({"cams": {"c2": {"eo_given": str(b), "eo_path": b}}},
-                                           SimpleNamespace(calibration_variant="gcpfree", calibration=str(cal)))
-        check(not pcx["pinned"] and any(words in w for w in pcx["why"]) and lab == "PARTLY-CIRCULAR"
-              and "these are not B files it made" in msg,
-              f"B {name} (report and run.json resealed): '{words}': NOT the pre-registered procedure, never "
-              f"INDEPENDENT, not built as gcpfree")
+        def forged(name, edit_b=None, ref_beside=None, edit_report=None):
+            """A copy of the run, edited, its report and run.json made to agree with the edited B (a consistent
+            forgery: only the turn line, the reference named, or the reference's content tells)."""
+            f = d / "forged" / name
+            shutil.copytree(str(run), str(f))
+            if ref_beside:
+                (f / ref_f).write_text(ref_beside)
+            return reseal(f, "c2", edit_b=edit_b, edit_report=edit_report)
+        turn = m.group(2)
+        other = "CACO03_c2_20240827_EO.yaml"
+        jan_tilted = re.sub(r"^tilt: (\S+)$", lambda t: f"tilt: {float(t.group(1)) + 1.0:.4f}",
+                            (cal / ref_f).read_text(), flags=re.M)
+        cases = [("angle", dict(edit_b=lambda t: t.replace(f"rotated by {turn} deg",
+                                                           f"rotated by {float(turn) + 1:.3f} deg")),
+                  "but its numbers are turned"),
+                 ("other_ref", dict(edit_b=lambda t: t.replace(f"{ref_f} rotated by", f"{other} rotated by")),
+                  f"names {other}, its report's reference is {ref_f}"),
+                 ("ref_content", dict(ref_beside=jan_tilted), "is not the reference its report says it was turned from"),
+                 ("ref_missing", dict(edit_b=lambda t: t.replace(f"{ref_f} rotated by",
+                                                                 "CACO03_c2_20250199_EO.yaml rotated by"),
+                                      edit_report=lambda js: js.update(b_reference_eo="CACO03_c2_20250199_EO.yaml")),
+                  "is not here")]
+        for name, kw, words in cases:
+            b = forged(name, **kw)
+            pcx = sp.procedure_check(b, [str(cal)])
+            lab = sp.held_check(sp.calibration_origin(b, [str(cal)]), sp.blind_of("2024-10-23"))[0]
+            msg = sp.procedure_variant_problem({"cams": {"c2": {"eo_given": str(b), "eo_path": b}}},
+                                               SimpleNamespace(calibration_variant="gcpfree", calibration=str(cal)))
+            check(not pcx["pinned"] and any(words in w for w in pcx["why"]) and lab == "PARTLY-CIRCULAR"
+                  and "these are not (or not yet) the B files it delivered here" in msg,
+                  f"B {name} (report and run.json resealed): '{words}': NOT the pre-registered procedure, never "
+                  f"INDEPENDENT, not built as gcpfree")
 
 
 def test_one_setup_coef():
@@ -4679,6 +4995,7 @@ def main():
         test_c_change(d)
         test_blind_and_calibration(d)
         test_gcpfree_b(d)
+        test_gcpfree_where(d)
         test_gcpfree_turn_line(d)
         test_fit_setup_flat(d)
         with unblinded():            # the GCP path as it runs once Chris has reported

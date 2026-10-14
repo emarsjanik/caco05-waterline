@@ -7,12 +7,15 @@ checks BLIND against his 23 Oct 2024 GCP survey. The station's official
 calibration A (CACO03_<cam>_20241023_EO.yaml) was solved from those same
 GCPs; B must owe nothing to them. This script never opens calibration A, a
 GCP or target file, or calibration_history.csv (guard() refuses them, by
-name and by the name a link points to), and nothing in it was tuned to A:
-the procedure, photo rules and thresholds were fixed on 13-14 Oct 2026 from
-synthetic tests and one real Jan 2025 frame, BEFORE any run on the real Oct
-2024 photos. Do not change a constant after seeing a result; a changed
-procedure is a new, separately labelled product (and survey_products.py,
-which pins this file's sha256, calls it 'not the pre-registered procedure').
+name and by the name a link points to; a photo-named link to one is never
+even probed), and nothing in it was set from A's numbers by intent (what
+its makers had seen of A: EXPOSURE below): the procedure, photo rules and
+thresholds were fixed on 13-14 Oct 2026 from synthetic tests and one real
+Jan 2025 frame, BEFORE any run on the real Oct 2024 photos. Do not change a
+constant after seeing a result; a changed procedure is a new, separately
+labelled product (and survey_products.py, which pins this file's sha256,
+its modules' and its pre-registered constants', calls it 'not the
+pre-registered procedure').
 
 WHAT B IS. The 23 Jan 2025 GCP solution of the same CACO03 mount
 (CACO03_<cam>_20250123_EO.yaml) turned by the rotation measured between Jan
@@ -36,7 +39,13 @@ file's sha256 and its git history (every commit that touched it). Nothing is
 pre-registered or run unless this file and its modules are the version
 survey_products.py pins last (its GCPFREE_PINS, read without importing it):
 a B of any other version would be 'NOT the pre-registered procedure' there,
-and the one delivery run would be spent on it.
+and the one delivery run would be spent on it. Only THIS repository's file
+(calibration/gcpfree/PREREGISTERED.txt next to this script, PREREG) makes
+delivery runs: a run under any other --preregistered file (another folder,
+another repository) is a TRIAL run, reports only, so a second
+pre-registration made after a result was seen can never deliver a B (and
+survey_products.py accepts a B only from runs/ next to this repository's
+file, as the first delivery run there).
 
 STEPS (per camera)
   1. Photos (CACO03 timex, full frame as the lens file, each name once):
@@ -116,13 +125,23 @@ PREREGISTERED.txt, outcome_if_one_camera):
 RUNS AND HISTORY. Every run writes into its own folder runs/<UTC run id>/
 next to PREREGISTERED.txt (never over an earlier one): per camera the B
 file (only when delivered), its report .json/.txt, and run.json (argv, photo
-folders, camera, Aug folder, the pre-registration and every sha256). A
-DELIVERY run uses the station's three photo folders (ROOTS, the default
---roots) and --camera both; any other run is a TRIAL (folder suffix _trial):
-reports only, no B file. A run (trial or delivery) is refused (exit 2) when
-a camera it solves has no Oct 2024 or no Jan 2025 photo, and a delivery run
-when a photo folder is missing (an unmounted disk would change the photos
-used): bad input never becomes a verdict. The first finished delivery run
+folders, camera, Aug folder, the pre-registration and every sha256; the
+pre-registered constants as they were in effect, with their sha256, which
+survey_products.py pins, so a run whose constants were changed in the
+running process is not the pre-registered procedure; and every repository
+module the run had loaded, with its sha256: the five MODULES are pinned,
+the others -- compare_dem_survey.py, asc_to_geotiff.py and
+dem_from_contours.py, imported by detect_original_view.py for its survey
+envelope -- compute nothing of B and are recorded only). A DELIVERY run
+uses this repository's pre-registration (PREREG), the station's three photo
+folders (ROOTS, the default --roots) and --camera both; any other run is a
+TRIAL (folder suffix _trial): reports only, no B file. A run (trial or
+delivery) is refused (exit 2) when a camera it solves has no Oct 2024 or no
+Jan 2025 photo, and a delivery run when a photo folder is missing (an
+unmounted disk would change the photos used): bad input never becomes a
+verdict (--dry-run says beforehand whether a run would be refused). A photo
+whose name, or the name of the file a link points to, is forbidden (guard)
+is never opened, not even for its size. The first finished delivery run
 fixes B. Only ONE more delivery run is ever allowed, and only to bring new
 evidence: with --aug-dir (photos of 25-29 Aug 2024 from Chris) when the
 first run used none and left a camera NOT DELIVERED. It solves only those
@@ -134,11 +153,15 @@ camera at all, the second run's B is "B" instead; otherwise the second
 run's B is a SECOND, separately labelled product (--calibration-variant
 gcpfree-aug, in its own root) and the first B stays the delivered one. The
 B file and its report name the variant; survey_products.py refuses any
-other. Commit each run's folder and write down its B sha256s AT ONCE,
-before the B DEM is built and before anything is compared with the A DEM.
-(The A DEM may be built before this procedure runs: nothing of it, and
-nothing of calibration A, reaches this procedure, whose code is pinned by
-sha256 in survey_products.py and whose outcome rule is pre-registered.)
+other. Commit each run's folder (B file, reports, run.json: ONE commit, never
+amended) and write down its B sha256s AT ONCE, before the B DEM is built and
+before anything is compared with the A DEM: survey_products.py builds and
+shares a B only when its file, report and run.json are committed, unchanged,
+each touched by one commit. (The A DEM may be built before this procedure
+runs: nothing of it, and nothing of calibration A, reaches this procedure,
+whose code is pinned by sha256 in survey_products.py and whose outcome rule
+is pre-registered; when A was built relative to the pin, the
+pre-registration and the run is stated in the B DEM's README.)
 
 STATED UNCERTAINTY (two terms, on every delivered B; NEITHER is a validated
 bound on real photos):
@@ -147,12 +170,17 @@ bound on real photos):
              leave-one-day-out change and its median per-day difference; the
              chain: the sum of its links), at least the chain-direct
              disagreement when that made B WIDER. The 4 px floor covers the
-             true error of every delivered B in the synthetic sets (1.8-3.6 px;
-             their DEM |dz| median 3-7 mm, p90 9-18 mm).
-  position   the inherited camera position: the largest DEM effect of the
+             true error of every delivered B in the synthetic sets (1.8-3.6
+             px), but those errors were almost all roll (tilt 0.008-0.02 deg),
+             which moves the beach little: the same px as TILT moves waterlines
+             metres at 200-400 m. So no DEM figure is given for it here;
+             survey_products.py states the DEM effect of this term taken as a
+             tilt, per range band, from the date's own DEM and calibration.
+  position   the inherited camera position: the largest DEM effect over the
              five synthetic position-inheritance cases (camera height
              +/-0.25 and +/-0.55 m, 0.5 m east and north, and the Aug 2024 -
-             Jan 2025 solution difference): POSITION_TERM below.
+             Jan 2025 solution difference): POSITION_TERM below. The largest
+             of five cases, not a bound.
 
 EXPECTED OUTCOME (stated before the run, from the tests of 13 Oct 2026):
   c1: NOT DELIVERED from Jan photos (its Jan and Oct views share no fixed
@@ -168,25 +196,39 @@ frame (the lens file's size: a reduced copy is never used), 25-29 Aug 2024,
 any folder layout. A folder that yields no such photo for a camera solved is
 refused (exit 2), never run without it.
 
-EXPOSURE (what the people who wrote this had seen). Calibration A's numbers:
-on 13 Oct 2026 15:11 UTC, before the procedure (this file's design) was
-made, a grep printed the 2024-10-23 rows of calibration_history.csv
-(calibration A); the repository's own table notes (until Oct 2026) also
-said the Aug 2024 calibration differs from A by ~2.3-2.5 deg of azimuth,
-and the brief gave the size of the Oct-Jan turn (~12.5-13.4 deg pan), used
-only as synthetic test sizes. On 14 Oct 2026, while this file was finished
-(its gates, thresholds and rules unchanged from the 13 Oct design), its
-implementer read a synthetic test fixture's notes that give A's azimuths to
-0.1 deg. No constant, threshold or rule here was derived from A's numbers,
-and the computation never reads A. The 23 Oct 2024 GCPs were never on this
-side at all.
+EXPOSURE (what the people who made this procedure had seen of calibration
+A, and when; written into every report and B file, see EXPOSURE below).
+  13 Oct 2026, 15:11 UTC, before the procedure was designed: a grep printed
+    the 2024-10-23 rows of calibration_history.csv (calibration A). The
+    repository's table notes then also said the Aug 2024 calibration differs
+    from A by ~2.3-2.5 deg of azimuth.
+  The synthetic test turns that validated the gates (pan -12.5 deg for c1,
+    -13.4 deg for c2) are the sizes the brief gave: A minus the Jan 2025
+    solution.
+  14 Oct 2026: the implementer read a synthetic test fixture's notes that
+    give A's azimuths to 0.1 deg; the same day (the order is not recorded)
+    the horizon pass rule was changed from |d| <= tolerance (the 13 Oct
+    design) to the band [min(0, e) - tol, max(0, e) + tol] (the design's
+    adversarial check asked for it), and its two window parameters were set
+    (HZ_EXPECTED_WINDOW_PX = 60, HZ_EDGE_MARGIN_PX = 25). Later changes of 14
+    Oct 2026 (review) touched texts, records and refusals only: no gate,
+    threshold, window or rule of the computation.
+  No constant, threshold or rule was set from A's numbers by intent (this
+  is a statement, it cannot be proven), and the computation never reads A.
+  The 23 Oct 2024 GCPs were never on this side at all. On the station, the
+  deploy notes have this procedure's sha256 (survey_products.py
+  GCPFREE_PINS) sent to the holder before A's DEM is built; A's DEM may be
+  built and seen before the outcome rule is pre-registered and before B is
+  run: the B DEM's README states the actual order, with dates.
 
 Usage (on the station, from the repo folder):
     python3 gcpfree_eo.py --preregister --outcome-if-one-camera <both-or-none|per-camera> --decided-by "NAME"
         (then commit calibration/gcpfree/PREREGISTERED.txt, before anything else)
-    python3 gcpfree_eo.py --dry-run       # pre-registration, photos, the reference horizon; writes nothing
+    python3 gcpfree_eo.py --dry-run       # pre-registration, photos (would a run be refused?), the
+                                          # reference horizon; writes nothing
     python3 gcpfree_eo.py                 # the delivery run, both cameras (~10-30 min each)
-        (then commit calibration/gcpfree/runs/<run id>/ and write down each B file's sha256)
+        (then commit calibration/gcpfree/runs/<run id>/ in ONE commit, and write down each B file's sha256
+        and send it to Chris)
     python3 gcpfree_eo.py --aug-dir /path/to/aug_2024_photos      # the one allowed second run
 Exit status: 0 B delivered for both cameras, each DELIVERED; 3 B delivered
 in part, or a camera DELIVERED-WIDER; 4 nothing delivered (also a TRIAL
@@ -285,14 +327,35 @@ AUG_TOL_M = 2.0                 # B_aug vs B: median ground distance of beach po
 
 # ---- pre-registered: the stated uncertainty -----------------------------------------------
 ROT_SPREAD_FACTOR = 2.0
-ROT_FLOOR_PX = 4.0              # >= the true error of every delivered B of the synthetic sets (1.84, 2.34, 3.0, 3.6 px)
-ROT_SYNTH_DEM = "in the synthetic sets a rotation error of 1.8-3.6 px gave a DEM |dz| median of 3-7 mm (p90 9-18 mm)"
+ROT_FLOOR_PX = 4.0              # >= the true error of every delivered B of the synthetic sets (1.84, 2.34, 3.0, 3.6 px;
+                                # almost all roll: their tilt errors were 0.008-0.02 deg, so their tiny DEM errors say
+                                # nothing of this term as a tilt: no DEM figure is stated for it here)
 # the largest DEM effect over the five synthetic position-inheritance cases (height +/-0.25, +/-0.55 m; 0.5 m
-# east and north; the Aug 2024 - Jan 2025 solution difference), B re-solved in each (Oct view, m)
+# east and north; the Aug 2024 - Jan 2025 solution difference), B re-solved in each (Oct view, m): the largest of
+# five cases, not a bound
 POSITION_TERM = {"c1": {"dem_abs_median_m": 0.011, "dem_p90_m": 0.026, "horizontal_median_m": 0.29},
                  "c2": {"dem_abs_median_m": 0.018, "dem_p90_m": 0.086, "horizontal_median_m": 0.83}}
 POSITION_SPREAD = {"c1": "0.36 m (0.34 m horizontally, 0.11 m in height)",
                    "c2": "1.23 m (1.08 m horizontally, 0.59 m in height)"}
+UNCERTAINTY_NOT_VALIDATED = ("neither term is a validated bound on real photos: both come from synthetic tests (the "
+                             "DEM effect of the rotation term taken as a tilt, per range band, is stated with the B "
+                             "DEM by survey_products.py, from the date's own geometry)")
+
+# ---- what the people who made the procedure had seen of calibration A (docstring: EXPOSURE) ------------------
+EXPOSURE = (
+    "EXPOSURE (stated by the people who made this procedure; it cannot be proven): on 13 Oct 2026 15:11 UTC, before "
+    "the procedure was designed, a grep printed the 2024-10-23 rows of calibration_history.csv (calibration A, solved "
+    "from the 23 Oct 2024 GCPs), and the repository's table notes said the Aug 2024 calibration differs from A by "
+    "~2.3-2.5 deg of azimuth; the synthetic test turns that validated the gates (pan -12.5 deg for c1, -13.4 deg for "
+    "c2) are the sizes the brief gave, i.e. A minus the Jan 2025 solution; on 14 Oct 2026 the implementer read a test "
+    "fixture's notes giving A's azimuths to 0.1 deg, and the same day (the order is not recorded) the horizon pass "
+    "rule was changed from |d| <= tolerance (the 13 Oct design) to the band [min(0, e) - tol, max(0, e) + tol] (asked "
+    "for by the design's adversarial check) and its two window parameters were set (60 px, 25 px); later changes of "
+    "14 Oct 2026 touched texts, records and refusals only. No constant, threshold or rule was set from A's numbers by "
+    "intent, and the computation never reads A; the 23 Oct 2024 GCPs were never on this side. On the station, the "
+    "deploy notes have this procedure's sha256 sent to the holder before A's DEM is built; A's DEM may be built and seen "
+    "before the outcome rule is pre-registered and before B is run: the B DEM's README states the actual order, with "
+    "dates.")
 
 FORBIDDEN = (re.compile(r"20241023_EO", re.I), re.compile(r"gcp(?!free)", re.I),
              re.compile(r"calibration_history", re.I), re.compile(r"Extrinsic_Targets", re.I),
@@ -343,6 +406,43 @@ def module_sha256():
     return {m: sha256(HERE / m) for m in MODULES}
 
 
+# The pre-registered constants (every number, name, folder and rule the computation and the verdict use), recorded
+# in run.json as they were in effect in the running process, with their sha256, which survey_products.py pins with
+# this file's (GCPFREE_PINS 'constants_sha256'): a run whose constants were changed in its process (other photo
+# folders patched in, a threshold moved) is not the pre-registered procedure there.
+PREREGISTERED_CONSTANTS = (
+    "STATION", "ROOTS", "IO_FILE", "REF_EO_FILE", "OUT_EO", "OUT_REPORT", "B_VARIANT", "B2_VARIANT", "MODULES",
+    "ARCHIVED_SHA256", "OUTCOME_RULES", "FORBIDDEN", "WINDOWS", "ANCHOR_DAY", "TARGET_HOURS", "MAX_DT_H", "GREY_RANGE",
+    "THRESH_PX", "RANSAC_ITERS", "SEED", "MIN_INLIERS", "MIN_NEW_DAYS", "MIN_REF_PHOTOS", "MIN_EXTENT_PX",
+    "MAX_RESID_MED_PX", "JACKKNIFE_MAX_PX", "AMBIGUITY_RATIO", "AMBIGUITY_SEP_DEG", "DAY_MIN_INLIERS", "DAY_TOL_PX",
+    "MIN_DAYS_MEASURED", "REF_DAY_TOL_PX", "REF_HZ_TOL_DEG", "HZ_FIT_OK_PX", "HZ_MIN_CLEAR", "HZ_TILT_TOL",
+    "HZ_ROLL_TOL", "HZ_WINDOW_PX", "HZ_EXPECTED_WINDOW_PX", "HZ_EDGE_MARGIN_PX", "CHAIN_TOL_PX", "SAME_SLOT_PAIRS",
+    "PAN_TOL_DEG", "AUG_TOL_M", "ROT_SPREAD_FACTOR", "ROT_FLOOR_PX", "POSITION_TERM", "POSITION_SPREAD")
+
+
+def constants():
+    """{name: value} of PREREGISTERED_CONSTANTS as they are in effect now (JSON values: tuples as lists, the
+    FORBIDDEN patterns as text)."""
+    g = globals()
+    return {n: json.loads(json.dumps([f.pattern for f in g[n]] if n == "FORBIDDEN" else g[n])) for n in
+            PREREGISTERED_CONSTANTS}
+
+
+def constants_sha256(c=None):
+    return hashlib.sha256(json.dumps(constants() if c is None else c, sort_keys=True).encode()).hexdigest()
+
+
+def loaded_modules():
+    """{file name: sha256} of every repository module loaded in this process (the five MODULES are pinned; the
+    others are recorded: none computes B)."""
+    out = {}
+    for m in list(sys.modules.values()):
+        f = getattr(m, "__file__", None)
+        if f and f.endswith(".py") and Path(f).resolve().parent == HERE:
+            out[Path(f).name] = sha256(Path(f).resolve())
+    return dict(sorted(out.items()))
+
+
 PINS_FILE = HERE / "survey_products.py"     # its GCPFREE_PINS: the versions of this procedure whose B it accepts
 
 
@@ -378,6 +478,19 @@ def pin_problem():
             + f" is not the version survey_products.py pins last (GCPFREE_PINS[-1]: gcpfree_eo.py "
               f"{str(last.get('gcpfree_eo.py'))[:12]}...): a B it made would be 'NOT the pre-registered procedure'. "
               f"Bring the checkout to the committed version (git status; git pull) before anything else")
+
+
+def constants_problem():
+    """'' when the pre-registered constants in effect in this process are the pinned ones (GCPFREE_PINS[-1]
+    'constants_sha256'); else why not. Not a refusal (tests change the photo folders in their process): recorded in
+    run.json, and survey_products.py calls such a run's B 'NOT the pre-registered procedure'."""
+    pins, _ = pinned_versions()
+    want = ((pins or [{}])[-1] or {}).get("constants_sha256")
+    now = constants_sha256()
+    if want == now:
+        return ""
+    return (f"the pre-registered constants in effect (sha256 {now[:12]}...) are not the pinned ones "
+            f"({str(want)[:12]}...): a B of this run would be 'NOT the pre-registered procedure'")
 
 
 def archived(path):
@@ -525,10 +638,24 @@ def epoch_of(p):
 
 
 def select_photos(roots, cam, window, io):
-    """{day: [paths]} -- up to len(TARGET_HOURS) photos per day, the nearest to each target hour."""
-    from detect_original_view import collect_photos
-    found, counts = collect_photos(roots, cam, window[0], window[1], (0.0, 24.0), station=STATION,
-                                   frame_size=(int(io[0]), int(io[1])))
+    """{day: [paths]} -- up to len(TARGET_HOURS) photos per day, the nearest to each target hour. The scan reads
+    each candidate's image header for its size: a photo-named file whose name, or the name of the file a link points
+    to, is forbidden (guard) is never opened for it, and counts as unreadable (counts['forbidden_not_opened'])."""
+    import detect_original_view as DOV
+    real_size, skipped = DOV.jpeg_size, []
+
+    def size_unless_forbidden(path):
+        if forbidden_name(path):
+            skipped.append(Path(path).name)
+            return None
+        return real_size(path)
+    DOV.jpeg_size = size_unless_forbidden
+    try:
+        found, counts = DOV.collect_photos(roots, cam, window[0], window[1], (0.0, 24.0), station=STATION,
+                                           frame_size=(int(io[0]), int(io[1])))
+    finally:
+        DOV.jpeg_size = real_size
+    counts["forbidden_not_opened"] = skipped
     by_day = {}
     for p in found:
         t = datetime.fromtimestamp(epoch_of(p), tz=timezone.utc)
@@ -1163,10 +1290,11 @@ def stated_uncertainty(res, io):
         rot = ch["vs_direct_px"]
         why.append("the chain-direct disagreement")
     out = {"rotation_px": round(rot, 2), "rotation_deg": round(float(np.degrees(rot / io[4])), 3),
-           "spread_px": round(spread, 2), "rotation_rule": " and ".join(why), "rotation_synthetic": ROT_SYNTH_DEM,
+           "spread_px": round(spread, 2), "rotation_rule": " and ".join(why),
            "position": dict(POSITION_TERM[cam], reference_solution_spread=POSITION_SPREAD[cam],
-                            rule="the largest DEM effect of the five synthetic position-inheritance cases"),
-           "not_validated": "neither term is a validated bound on real photos: both come from synthetic tests"}
+                            rule="the largest DEM effect over the five synthetic position-inheritance cases (not a "
+                                 "bound)"),
+           "not_validated": UNCERTAINTY_NOT_VALIDATED}
     aug = res.get("aug") or {}
     for k in ("vs_direct_ground_m", "vs_chain_ground_m"):
         v = aug.get(k)
@@ -1184,11 +1312,12 @@ def uncertainty_text(u, cam):
         return "n/a"
     p = u["position"]
     return (f"rotation +/- {u['rotation_px']} px on the beach part of the frame (~{u['rotation_deg']} deg; "
-            f"{u['rotation_rule']}; {u['rotation_synthetic']})"
+            f"{u['rotation_rule']})"
             + (f", {u['beach_m']} m on the beach" if "beach_m" in u else "") + (f"; {u['note']}" if "note" in u else "")
-            + f"; inherited camera position: DEM |dz| median <= {p['dem_abs_median_m']} m, p90 <= {p['dem_p90_m']} m, "
-              f"horizontal <= {p['horizontal_median_m']} m ({p['rule']}; the {cam} GCP solutions of Aug 2024 and "
-              f"Jan 2025 are {p['reference_solution_spread']} apart); {u['not_validated']}")
+            + f"; inherited camera position: in the largest of five synthetic position-inheritance cases, DEM |dz| "
+              f"median {p['dem_abs_median_m']} m, p90 {p['dem_p90_m']} m, horizontal {p['horizontal_median_m']} m (not "
+              f"a bound; the {cam} GCP solutions of Aug 2024 and Jan 2025 are {p['reference_solution_spread']} apart); "
+              f"{u['not_validated']}")
 
 
 # ------------------------------------------------------------------ runs and outcome
@@ -1362,7 +1491,9 @@ def write_b(run_dir, cam, res, run_info):
                     f"{run_info.get('first_run')} stays the delivered one") + ").")
     notes.append(f"Made by gcpfree_eo.py (sha256 {run_info['procedure_sha256']}) on {run_info['started_utc']} UTC; "
                  f"report {rep}.json; pre-registration {pr.get('path')} sha256 {pr.get('sha256')} "
-                 f"(outcome_if_one_camera: {pr.get('outcome_if_one_camera')}).")
+                 f"(outcome_if_one_camera: {pr.get('outcome_if_one_camera')}); pre-registered constants sha256 "
+                 f"{run_info.get('constants_sha256')}.")
+    notes.append(EXPOSURE)
     yml = run_dir / OUT_EO.format(cam=cam)
     yml.write_text(
         f"x: {B[0]:.4f}\ny: {B[1]:.4f}\nz: {B[2]:.4f}\n"
@@ -1385,11 +1516,13 @@ def new_run_dir(out_dir, eligible):
 
 def finish_run(run_dir, run_info, results, lines, log):
     """Reports for every camera, B files for the delivered ones, run.json. -> exit status."""
+    run_info["loaded_modules"] = loaded_modules()        # every repository module the run had loaded (sha256)
     for cam, r in results.items():
-        r["run"] = {k: run_info.get(k) for k in ("run_id", "run_no", "eligible", "variant", "first_run", "argv", "roots",
-                                                 "aug_dir", "procedure_sha256", "modules_sha256", "preregistration",
-                                                 "started_utc")}
+        r["run"] = {k: run_info.get(k) for k in ("run_id", "run_no", "eligible", "trial_why", "variant", "first_run",
+                                                 "argv", "roots", "aug_dir", "procedure_sha256", "modules_sha256",
+                                                 "constants_sha256", "preregistration", "started_utc")}
         r.setdefault("solved_in_run", run_info["run_id"])
+        r["exposure"] = EXPOSURE
         if r["delivery"] == "DELIVERED":
             r["b_file"] = write_b(run_dir, cam, r, run_info).name
             r["b_file_sha256"] = sha256(run_dir / r["b_file"])
@@ -1460,6 +1593,19 @@ def check_photos(roots, cams, aug_dir, eligible):
     return found
 
 
+def trial_reasons(args, roots):
+    """Why a run is a TRIAL run (reports only), [] for a DELIVERY run: one camera, photo folders other than the
+    station's, or a pre-registration other than this repository's own (PREREG)."""
+    why = []
+    if args.camera != "both":
+        why.append("one camera only")
+    if roots != [str(r) for r in ROOTS]:
+        why.append(f"photo folders other than the station's ({', '.join(ROOTS)})")
+    if os.path.realpath(str(args.preregistered)) != os.path.realpath(str(PREREG)):
+        why.append(f"a pre-registration other than this repository's ({PREREG}): only runs under it can deliver a B")
+    return why
+
+
 def run(args, argv):
     roots = [str(r) for r in (args.roots if args.roots is not None else ROOTS)]
     for p in roots + ([args.aug_dir] if args.aug_dir else []):
@@ -1468,6 +1614,9 @@ def run(args, argv):
         p = write_preregistration(args.preregistered, args.outcome_if_one_camera, args.decided_by, roots)
         print(f"wrote {p}\nNow commit it before any run: git -C {p.parent} add {p.name} && "
               f"git -C {p.parent} commit -m 'gcpfree: pre-registration ({args.outcome_if_one_camera})'")
+        if os.path.realpath(str(p)) != os.path.realpath(str(PREREG)):
+            print(f"NOTE: not this repository's pre-registration ({PREREG}): every run under it is a TRIAL run "
+                  f"(reports only, never a B)")
         return 0
     import cv2
     if not hasattr(cv2, "SIFT_create"):
@@ -1483,7 +1632,8 @@ def run(args, argv):
 
     prereg_info, probs = preregistration(args.preregistered)
     out_dir = Path(args.preregistered).parent            # runs/<run id>/ next to the pre-registration
-    eligible = args.camera == "both" and roots == [str(r) for r in ROOTS]
+    trial_why = trial_reasons(args, roots)
+    eligible = not trial_why
     if args.dry_run:
         return dry_run(args, cams, roots, prereg_info, probs, eligible, out_dir, log)
     if probs:
@@ -1500,11 +1650,13 @@ def run(args, argv):
     photos = check_photos(roots, plan["solve"], args.aug_dir, eligible)
     rid, run_dir = new_run_dir(out_dir, eligible)
     started = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    run_info = {"run_id": rid, "run_no": plan["run_no"], "eligible": eligible, "variant": plan.get("variant"),
-                "first_run": plan.get("first_run"), "status": "running",
+    run_info = {"run_id": rid, "run_no": plan["run_no"], "eligible": eligible, "trial_why": trial_why or None,
+                "variant": plan.get("variant"), "first_run": plan.get("first_run"), "status": "running",
                 "started_utc": started, "argv": argv, "argv_text": " ".join(shlex.quote(a) for a in argv),
                 "roots": roots, "camera": args.camera, "aug_dir": args.aug_dir, "photos_found": photos,
                 "procedure_sha256": own_sha256(), "modules_sha256": module_sha256(), "preregistration": prereg_info,
+                "constants": constants(), "constants_sha256": constants_sha256(),
+                "constants_problem": constants_problem() or None, "exposure": EXPOSURE,
                 "solved": plan["solve"], "kept": {c: v[2] for c, v in plan["keep"].items()}}
     (run_dir / RUN_FILE).write_text(json.dumps(run_info, indent=1, default=str) + "\n")
     log(f"gcpfree_eo.py run {rid} ({'DELIVERY run ' + str(plan['run_no']) if eligible else 'TRIAL run: reports only'}"
@@ -1515,9 +1667,9 @@ def run(args, argv):
             + ("" if plan["variant"] == B_VARIANT else
                f" (a second product: the B of run {plan.get('first_run')} stays the delivered one)"))
     else:
-        log("  TRIAL: " + ("one camera only" if args.camera != "both" else
-                           f"photo folders other than the station's ({', '.join(ROOTS)})")
-            + ": nothing it finds is delivered")
+        log("  TRIAL: " + "; ".join(trial_why) + ": nothing it finds is delivered")
+    if run_info["constants_problem"]:
+        log(f"  NOTE: {run_info['constants_problem']}")
     results = {}
     for cam in cams:
         if cam in plan["keep"]:
@@ -1540,8 +1692,13 @@ def run(args, argv):
             + (f"  B = {r['B'][3]:.4f} / {r['B'][4]:.4f} / {r['B'][5]:.4f} deg (source {r['source']})" if r.get("B") else "")
             + ("" if not r["reasons"] else "  -- " + "; ".join(r["reasons"])))
     rc = finish_run(run_dir, run_info, results, lines, log)
-    log(f"\nrun folder {run_dir}: commit it now (git add {run_dir} && git commit), and write down the sha256 of "
-        f"each B file, BEFORE the B DEM is built and before anything is compared with the A DEM")
+    if eligible:
+        log(f"\nrun folder {run_dir}: commit it now, in ONE commit (git add {run_dir} && git commit), and write down "
+            f"the sha256 of each B file (and send them to Chris), BEFORE the B DEM is built and before anything is "
+            f"compared with the A DEM: survey_products.py builds no B whose file, report or run.json is uncommitted, "
+            f"changed or touched by more than one commit")
+    else:
+        log(f"\nTRIAL run folder {run_dir}: reports only, nothing delivered (commit it too: the record of every run)")
     (run_dir / "run_report.txt").write_text("\n".join(lines) + "\n")
     return rc
 
@@ -1552,12 +1709,14 @@ def dry_run(args, cams, roots, prereg_info, probs, eligible, out_dir, log):
     pp = pin_problem()
     log(f"procedure: gcpfree_eo.py sha256 {own_sha256()}: " + ("the version survey_products.py pins (GCPFREE_PINS)"
                                                                if not pp else "REFUSED: " + pp))
+    cp = constants_problem()
+    log(f"pre-registered constants: sha256 {constants_sha256()}: " + ("the pinned ones" if not cp else "NOT: " + cp))
     log(f"pre-registration {prereg_info.get('path')}: " + ("OK" if not probs else "a run is REFUSED: " + "; ".join(probs)))
     if not probs:
         log(f"  outcome_if_one_camera {prereg_info.get('outcome_if_one_camera')} (decided by "
             f"{prereg_info.get('decided_by')} on {prereg_info.get('decided_on')}); commit {prereg_info.get('commit')}")
     log(f"this run would be a {'DELIVERY' if eligible else 'TRIAL'} run"
-        + ("" if eligible else " (reports only: one camera, or photo folders other than the station's)"))
+        + ("" if eligible else f" (reports only: {'; '.join(trial_reasons(args, roots))})"))
     bad = earlier_preregistration_problem(out_dir, prereg_info) if not probs else ""
     if bad:
         log(f"  REFUSED: {bad}")
@@ -1569,13 +1728,21 @@ def dry_run(args, cams, roots, prereg_info, probs, eligible, out_dir, log):
                 + f"; its B: --calibration-variant {pl['variant']}")
         except Refused as exc:
             log(f"  REFUSED: {exc}")
+    try:                                                 # the photo checks a run makes before it starts
+        check_photos(roots, cams, args.aug_dir, eligible)
+        log(f"photos: every folder there and Oct and Jan photos for {', '.join(cams)}"
+            + (" and Aug photos" if args.aug_dir else "") + ": a run would not be refused for its photos")
+    except Refused as exc:
+        log(f"photos: a {'delivery' if eligible else 'trial'} run would be REFUSED (exit 2): {exc}")
     for cam in cams:
         io = load_intrinsics(archived(CAL / IO_FILE.format(cam=cam)))
         eo_jan = load_extrinsics(archived(CAL / REF_EO_FILE["jan"].format(cam=cam)))
         for k in ("oct", "jan") + (("dec",) if cam == "c2" else ()) + (("aug",) if args.aug_dir else ()):
             days, counts = select_photos([args.aug_dir] if k == "aug" else roots, cam, WINDOWS[k], io)
             log(f"{cam} {k} {WINDOWS[k][0]}..{WINDOWS[k][1]}: {sum(len(v) for v in days.values())} photos on "
-                f"{len(days)} days (missing folders: {counts.get('missing_roots')})")
+                f"{len(days)} days (missing folders: {counts.get('missing_roots')})"
+                + (f"; NOT opened (named like a forbidden file, or a link to one): "
+                   f"{', '.join(counts['forbidden_not_opened'])}" if counts.get("forbidden_not_opened") else ""))
             for d, ps in days.items():
                 log(f"   {d}: " + " ".join(Path(p).name.split('.')[3][-8:] for p in ps))
             if k == "aug" and not days:

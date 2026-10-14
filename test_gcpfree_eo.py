@@ -269,6 +269,33 @@ def test_guard(d):
               "a link named like the Jan EO that points to calibration A: refused (os.path.realpath)")
 
 
+def test_scan_never_opens(d):
+    print("the photo scan: a photo-named link to a forbidden file is never opened (not even for its size)")
+    import detect_original_view as DOV
+    io, _, _ = cal_eos("c1")
+    root = d / "scan" / "pics"
+    root.mkdir(parents=True)
+    target = G.CAL / "2024-10-23_Marconi_Extrinsic_Targets_c1_xyz.csv"          # the test's decoy GCP file
+    link = root / name(epoch("2024-10-23", 16), "c1")
+    os.symlink(str(target), str(link))
+    WATCH["on"] = True
+    try:
+        DOV.jpeg_size(link)                                  # the unguarded probe: the watch sees it
+        probe_seen = list(WATCH["opened"])
+        del WATCH["opened"][:]
+        days, counts = G.select_photos([str(root)], "c1", G.WINDOWS["oct"], io)
+        scan_seen = list(WATCH["opened"])
+        del WATCH["opened"][:]
+    finally:
+        WATCH["on"] = False
+    if hasattr(sys, "addaudithook"):
+        check(probe_seen, "an unguarded size probe of the link opens the decoy (the watch sees it)")
+        check(not scan_seen, "gcpfree_eo's scan never opens it")
+    check(not days and counts["forbidden_not_opened"] == [link.name] and DOV.jpeg_size is not None
+          and DOV.jpeg_size.__name__ == "jpeg_size",
+          f"... it is left out and counted as not opened ({link.name}); the module's own probe is restored")
+
+
 def test_archived(d):
     print("the calibration files read are the archived ones (sha256), else refused before anything is solved")
     for f in G.ARCHIVED_SHA256:
@@ -369,8 +396,12 @@ def test_uncertainty():
           "position: c2 DEM |dz| median 0.018 m, p90 0.086 m; the Aug-Jan solutions 0.36 m (c1) / 1.23 m (c2) apart")
     txt = G.uncertainty_text(u, "c2")
     check("neither term is a validated bound on real photos" in txt and "inherited camera position" in txt
-          and "real-texture" not in txt and "0.001-0.012" not in txt,
-          "the text: both terms, 'neither term is a validated bound on real photos', no real-texture figure")
+          and "in the largest of five synthetic position-inheritance cases" in txt and "<=" not in txt
+          and "3-7 mm" not in txt and "real-texture" not in txt and "0.001-0.012" not in txt
+          and "rotation_synthetic" not in u,
+          "the text: both terms ('neither term is a validated bound on real photos'; the position term the largest of "
+          "five cases, not a bound); no synthetic DEM figure for the rotation (those errors were roll), no "
+          "real-texture figure")
 
 
 def test_outcome_rules():
@@ -549,8 +580,19 @@ def test_pinned_version(d):
           "on a B that would not count)")
     pins, why = G.pinned_versions()
     check(pins and pins[-1]["gcpfree_eo.py"] == G.own_sha256() and pins[-1]["modules"] == G.module_sha256()
-          and G.pin_problem() == "",
-          f"survey_products.py's GCPFREE_PINS[-1] is this gcpfree_eo.py ({G.own_sha256()[:12]}...) and its modules")
+          and pins[-1]["constants_sha256"] == G.constants_sha256() and G.pin_problem() == ""
+          and G.constants_problem() == "",
+          f"survey_products.py's GCPFREE_PINS[-1] is this gcpfree_eo.py ({G.own_sha256()[:12]}...), its modules and "
+          f"its pre-registered constants")
+    real_roots = list(G.ROOTS)
+    G.ROOTS = ["/elsewhere"]
+    try:
+        cp = G.constants_problem()
+    finally:
+        G.ROOTS = real_roots
+    check("not the pinned ones" in cp and G.constants_problem() == "",
+          "a constant changed in the running process (ROOTS): its constants are not the pinned ones (recorded in "
+          "run.json; survey_products.py calls such a B not the pre-registered procedure)")
     other = d / "pins_other" / "survey_products.py"
     other.parent.mkdir()
     other.write_text("GCPFREE_PINS = [\n    {'gcpfree_eo.py': '" + "1" * 64 + "', 'modules': "
@@ -603,6 +645,7 @@ def test_runs(d, canned):
     repo.mkdir()
     git(repo, "init", "-q")
     pr = repo / "calibration" / "gcpfree" / "PREREGISTERED.txt"
+    real_prereg, G.PREREG = G.PREREG, pr                # this test's repository stands for the station's
     base = ["--preregistered", str(pr)]
     try:
         rc, out = main_q(base)
@@ -629,8 +672,37 @@ def test_runs(d, canned):
         check(rc == 2 and "changed after its last commit" in out, "changed after its commit: REFUSED")
         git(repo, "commit", "-q", "-am", "prereg: who decided")
         rc, out = main_q(base + ["--dry-run"])
-        check(rc == 0 and "OK" in out and "DELIVERY" in out and not (pr.parent / "runs").exists(),
-              "--dry-run: the pre-registration OK (2 commits, no run yet), a DELIVERY run, nothing written")
+        check(rc == 0 and "OK" in out and "DELIVERY" in out and not (pr.parent / "runs").exists()
+              and "a run would not be refused for its photos" in out,
+              "--dry-run: the pre-registration OK (2 commits, no run yet), a DELIVERY run, its photos there, nothing "
+              "written")
+        G.ROOTS = roots_of(d / "roots") + [str(d / "not_mounted")]
+        rc, out = main_q(base + ["--dry-run"])
+        G.ROOTS = roots_of(d / "roots")
+        check(rc == 0 and "a delivery run would be REFUSED (exit 2): photo folder(s) missing" in out
+              and not (pr.parent / "runs").exists(),
+              "--dry-run with a station folder missing: says a delivery run would be REFUSED (exit 2)")
+        # a pre-registration other than this repository's (another folder, the other rule): TRIAL runs only
+        sh = repo / "shadow" / "PREREGISTERED.txt"
+        rc, out = main_q(["--preregistered", str(sh), "--preregister", "--outcome-if-one-camera", "both-or-none",
+                          "--decided-by", "someone else"])
+        check(rc == 0 and "every run under it is a TRIAL run" in out, "--preregister elsewhere: said to make TRIAL "
+                                                                     "runs only")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "a second pre-registration")
+        rc, out = main_q(["--preregistered", str(sh), "--dry-run"])
+        check("this run would be a TRIAL run" in out and "a pre-registration other than this repository's" in out,
+              "--dry-run under it: a TRIAL run (a pre-registration other than this repository's)")
+        scen[("c1", False)] = nd_of(canned["c1_aug_only"])
+        scen[("c2", False)] = canned["c2"]
+        rc, out = main_q(["--preregistered", str(sh)])
+        srun = sorted((sh.parent / "runs").iterdir())
+        sj = json.loads((srun[0] / "run.json").read_text())
+        check(rc == 4 and len(srun) == 1 and srun[0].name.endswith("_trial") and not list(srun[0].glob("*_EO.yaml"))
+              and sj["eligible"] is False and "this repository's" in " ".join(sj["trial_why"]),
+              "a run under it (both cameras, the station's folders): a TRIAL run, reports only, never a B")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "the trial under the second pre-registration")
         # a TRIAL run (one camera): reports only
         scen[("c2", False)] = canned["c2"]
         rc, out = main_q(base + ["--camera", "c2"])
@@ -669,11 +741,20 @@ def test_runs(d, canned):
         for words in (f"Made by gcpfree_eo.py (sha256 {G.own_sha256()})", "CACO03_c2_20250123_EO.yaml rotated by",
                       "Reference EO: CACO03_c2_20250123_EO.yaml", "No Oct 2024 GCP used", "acceptance: PASS",
                       "--calibration-variant gcpfree (the delivered B)", "not a validated bound on real photos",
-                      "inherited camera position", "per-camera", "photo folders"):
+                      "inherited camera position", "per-camera", "photo folders",
+                      f"pre-registered constants sha256 {G.constants_sha256()}",
+                      "EXPOSURE (stated by the people who made this procedure", "A minus the Jan 2025 solution",
+                      "the horizon pass rule was changed from |d| <= tolerance"):
             check(words in txt, f"B file: '{words}'")
         rj = json.loads((r1 / "run.json").read_text())
-        check(rj["argv"][1:] == base and rj["roots"] == G.ROOTS and len(rj["preregistration"]["git_history"]) == 4,
-              "run.json: argv, the photo folders, the pre-registration and its git history (4 commits)")
+        check(rj["argv"][1:] == base and rj["roots"] == G.ROOTS and len(rj["preregistration"]["git_history"]) == 4
+              and rj["constants_sha256"] == G.constants_sha256() and rj["constants"]["ROOTS"] == G.ROOTS
+              and "not the pinned ones" in rj["constants_problem"] and rj["exposure"] == G.EXPOSURE
+              and rep["exposure"] == G.EXPOSURE
+              and all(m in rj["loaded_modules"] for m in G.MODULES + ("gcpfree_eo.py",)),
+              "run.json: argv, the photo folders, the pre-registration and its git history (4 commits), the "
+              "constants in effect (this test's photo folders: not the pinned ones, said), the exposure statement, "
+              "every repository module loaded with its sha256")
         # no second run without new evidence; never over an earlier run
         rc, out = main_q(base)
         check(rc == 2 and "B is fixed by it" in out, "a second delivery run without Aug photos: REFUSED")
@@ -713,6 +794,7 @@ def test_runs(d, canned):
         repo2.mkdir()
         git(repo2, "init", "-q")
         pr2 = repo2 / "PREREGISTERED.txt"
+        G.PREREG = pr2
         main_q(["--preregistered", str(pr2), "--preregister", "--outcome-if-one-camera", "both-or-none",
                 "--decided-by", "the owner"])
         git(repo2, "add", "-A")
@@ -729,6 +811,7 @@ def test_runs(d, canned):
         repo3.mkdir()
         git(repo3, "init", "-q")
         pr3 = repo3 / "PREREGISTERED.txt"
+        G.PREREG = pr3
         main_q(["--preregistered", str(pr3), "--preregister", "--outcome-if-one-camera", "per-camera",
                 "--decided-by", "the owner"])
         git(repo3, "add", "-A")
@@ -745,7 +828,7 @@ def test_runs(d, canned):
         jan.unlink()
         os.symlink(str(G.CAL / "CACO03_c2_20241023_EO.yaml"), str(jan))
         try:
-            G.ROOTS = roots_of(d / "roots")
+            G.ROOTS, G.PREREG = roots_of(d / "roots"), pr2
             rc, out = main_q(["--preregistered", str(pr2)])
             check(rc == 2 and "a link to CACO03_c2_20241023_EO.yaml" in out,
                   "the Jan EO replaced by a link to calibration A: REFUSED before anything is solved")
@@ -754,7 +837,7 @@ def test_runs(d, canned):
             jan.write_bytes(keep)
     finally:
         WATCH["on"] = False
-        G.run_camera, G.ROOTS = real_run_camera, real_roots
+        G.run_camera, G.ROOTS, G.PREREG = real_run_camera, real_roots, real_prereg
 
 
 def test_py38():
@@ -790,6 +873,7 @@ def main():
         test_py38()
         test_watch_sees_reads(d)
         test_guard(d)
+        test_scan_never_opens(d)
         test_archived(d)
         test_ransac()
         test_verdict_rules()
