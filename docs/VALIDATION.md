@@ -385,7 +385,13 @@ window, wave filter and rejected camera-days, against the waterline file it read
 caveat names the tail days the DEM grids and, for each day it does not, why; the HIGH WAVES
 caveat counts the frames it gridded and those it left out, before, between, during and after;
 spans less than 48 h apart are one caveat; the note is printed once ([SYNTH]
-`test_survey_products.py`, test_storm_and_wave_caveats, on a copy of that window's layout).
+`test_survey_products.py`, test_storm_and_wave_caveats, on a copy of that window's layout). The
+comparison's FRAMES line counted the frames the DEM left out from its first GRIDDED day on only
+(its photo dates), so on the NUC it said "left out 5" where the DEM's own record says 9 frames with
+Hs > 1.5 m; `survey_compare.py` now looks for them over the DEM's whole window
+(`window_start`..`window_end`), as the DEM and the HIGH WAVES caveat count them, and keeps its
+statistics on the gridded days' frames ([SYNTH] `test_survey_compare.py`,
+test_left_out_frames_window).
 
 ```
 python3 survey_products.py --date 2026-09-29        # ~1-2 min (52-79 s here): no detection, reads the station's contour file
@@ -685,7 +691,12 @@ only if it holds over several weeks of different waves; then change it in all th
     trials); no matched trial under 0.45 deg was called MOVED (0 of 229), every one of 0.55 deg or
     more was (157 of 157). Below 40 the errors grow (20-39 inliers: up to 0.18 deg; 10-19: 0.58;
     under 10: anything). A turn over 0.5 deg is a DIFFERENT POINTING; 0.1 deg or less keeps the
-    day ('matches') whatever the horizon reads, and the why gives both readings. An earlier
+    day ('matches') whatever a horizon reading that is NOT a clear horizon says, and the why gives
+    both readings; against a CLEAR horizon edge that jumps, a zero turn is not enough (window dirt,
+    below): the day is UNCONFIRMED. A turn of 0.1-0.5 deg is the scene (dirt matches at zero): it is
+    a DIFFERENT POINTING only where a clear horizon sees the same change (within 0.3 deg), and a
+    'small change' (kept, the horizon overruled) where the horizon's change is not its own (a
+    review probe: 1500 inliers at +0.15 deg against a clear-looking +2.0 deg jump). An earlier
     proposal to require 60 inliers was not taken: it was chosen to make c1 27 Sep (48 inliers)
     weak, but that day's -1.21 deg of pan is real: tracked dune landmarks and a more sensitive
     match read -1.20 to -1.25 deg on 26-28 Sep, and the camera was back by 29 Sep.
@@ -693,7 +704,17 @@ only if it holds over several weeks of different waves; then change it in all th
     both frames match at zero turn): a near-zero winner with a runner-up consensus of 40+ inliers
     turned more than 0.3 deg from it is 'ambiguous' and decides nothing (planted heavy drops: 17 of
     120 trials read 0.00 deg on 388-1573 inliers, each with a runner-up of 64-561 at the true turn;
-    without dirt the runner-up had <= 35 inliers on 551 trials and the real pairs).
+    without dirt the runner-up had <= 35 inliers on 551 trials and the real pairs). The runner-up
+    shows the dirt only while the scene still matches. With the land fogged the dirt is the only
+    consensus: in a review scenario (the real 7 Oct 16:00 frames with the same synthetic drops on
+    every day, an exact +0.6 deg tilt on a fogged 2 Oct) c1 2 Oct read 68 inliers at 0.00 deg with
+    a runner-up of 6 while its clear horizon read the true +0.60 deg, and the first version of this
+    rule kept the day. A dirt winner can hold 388-1573 inliers, so no count tells it from the
+    scene: a zero turn never overrules a clear horizon jump (that day is now UNCONFIRMED, left out,
+    as the old rule left it out). [SYNTH] `test_survey_products.py`, test_feature_runner_up, runs
+    pointing_check.measure(second=True) on a drawn scene turned 1.0 deg under drawn dirt: the
+    scene wins (runner-up: the dirt at zero), heavier dirt wins ('ambiguous'), or the scene is
+    lost ('ok' at zero turn, runner-up 2) and the verdict against a clear jump is UNCONFIRMED.
   * **A horizon reading counts only on a clear edge**: prominence (its gradient over the median of
     its search) >= 12, the strongest rival edge 20+ px away <= 0.65 of it, sky over sea on >= 2/3
     of the columns, and > 50 px from the end of the search. The six storm frames read 2.2-6.7 /
@@ -702,23 +723,45 @@ only if it holds over several weeks of different waves; then change it in all th
     by up to 2 deg of tilt or roll pass (not clear: c2 tilted -2 deg, whose horizon leaves the top of
     the frame, and +3 deg of tilt on c2 and the Jan c1, where it reaches the end of the search;
     matched features measure such turns). On synthetic weather put on the clear frames, the tests
-    remove 135 of 206 false jumps; a horizon-like fog front can still pass, which is why matched
-    features overrule the horizon. The fit residual (FIT_OK_PX 8 px) is not tightened: the NUC's
+    remove 135 of 206 false jumps; a horizon-like fog front can still pass, which is why each clear
+    reading is checked against the matched features (below). The fit residual (FIT_OK_PX 8 px) is not tightened: the NUC's
     storm days fitted to 1.6-5.0 px against 0.2-0.4 px on its clear days, but single storm frames
     fit to 0.97 px and the fixture's rendered horizon to 1.4 px.
-  * **Misread days are not clear days.** Only clear readings (less any that matched features
-    contradict, while they are a minority) make the window's median tilt/roll, its offset against
-    the calibration and the README's 'N day(s) with a clear horizon'. NUC c1: 4 clear days, +0.93/
-    +0.24 deg, 42.5 px (it was 7 days, +0.96/+0.23, the three storm misreads included); c2: 4 days,
-    +0.54/-0.68 deg, 32.5 px (was 6, +0.56/-0.64). A window with more misread days than clear ones
-    no longer flags its clear days. With no clear day at all the readings are compared with each
-    other only and no offset against the calibration is reported.
-  * **Without matched features** a jump of tilt or roll over 0.3 deg from the window is a
-    DIFFERENT POINTING only on a clear edge that two or more days share (real re-aims persist; the
-    storm misreads changed by 0.6-3.1 deg from day to day); otherwise the day is **UNCONFIRMED**:
-    a change one method reported that nothing could confirm or rule out. UNCONFIRMED days are left
-    out like DIFFERENT POINTING ones (`--keep-moved-days` keeps both); only measured DIFFERENT
-    POINTING days count towards 'most days differ from the reference'.
+  * **Each day is judged against the reference, as the features are.** The anchor is the
+    reference's tilt/roll as the horizon reads it: each clear day with matched features gives its
+    horizon less the tilt/roll its features measured, and the anchor is the median of the largest
+    group of these that agree within 0.3 deg (else the reference day's own clear reading; else the
+    largest group of clear readings, with nothing tying it to the reference; else, no day clear,
+    the fitted readings' median). A day of the first kind outside that group is CONTRADICTED (its
+    horizon and its features disagree about its change): it is no clear day, and a day without
+    features reading the same jump is UNCONFIRMED (a fog front on 26-28 Sep that passes the edge
+    tests, review simulation sB: 27 Sep's 154 matched features measure its real pan and no tilt
+    where the front reads +2.9 deg). The first version judged every day against the window's
+    median, which falls between two pointings when a camera moved on half the clear days: in review
+    scenario E (real frames, an exact +0.6 deg tilt on 30 Sep and 1 Oct with the land fogged) c1
+    read 0.91/1.51/1.51/0.90 deg, median 1.21, and both moved days were 'horizon only', 'tilt and
+    roll agree with the other days'. Against the reference day they are DIFFERENT POINTING.
+  * **Misread days are not clear days.** The window's offset against the calibration and the
+    README's 'N day(s) with a clear horizon' are those of the clear days at the reference's
+    pointing (neither jumping nor contradicted). NUC c1: 4 clear days, +0.93/+0.24 deg, 42.5 px (it
+    was 7 days, +0.96/+0.23, the three storm misreads included); c2: 4 days, +0.54/-0.68 deg,
+    32.5 px (was 6, +0.56/-0.64). A window with more misread days than clear ones no longer flags
+    its clear days. With no clear day at all the readings are compared with each other only and no
+    offset against the calibration is reported.
+  * **Without matched features** a jump of tilt or roll over 0.3 deg from the reference is a
+    DIFFERENT POINTING only on a clear edge that two or more days share, none of them contradicted
+    (real re-aims persist; the storm misreads changed by 0.6-3.1 deg from day to day); otherwise the
+    day is **UNCONFIRMED**: a change one method reported that nothing could confirm or rule out.
+    UNCONFIRMED days are left out like DIFFERENT POINTING ones (`--keep-moved-days` keeps both);
+    only measured DIFFERENT POINTING days count towards 'most days differ from the reference'. When
+    the days left out are more than half of the window's, the step and the README say so with the
+    count, how many of them rest on a horizon reading alone that is not a clear horizon, and
+    `--keep-moved-days` / `--skip-days` (a review probe: a hazy week, one clear day and six hazy
+    readings 0.33-0.55 deg off it, lost six of seven days with no word). Such days are still left
+    out: keeping them when they are most of the window was tried and dropped, because the sandbox
+    build with the six real storm frames (a 4-day window there) then KEPT c1 26-28 Sep, the very
+    days c1 turned -1.2 deg. No saved why says 'left out' (with `--keep-moved-days` the README
+    quoted a why that said so for a day it called KEPT).
   * **The NUC's 2026-09-29 table under the rule** (`test_survey_products.py`,
     test_pointing_verdicts, on the NUC's rows with the edge numbers of the real frames): c1 26 and
     28 Sep UNCONFIRMED (no matched features, a misread horizon), 27 Sep DIFFERENT POINTING (the
@@ -729,7 +772,29 @@ only if it holds over several weeks of different waves; then change it in all th
   * **The six real frames end to end** (a sandbox build of 2026-09-29 with them and a 7 Oct frame
     standing in for 29 Sep as its reference): c1 26-28 Sep UNCONFIRMED (2-9 inliers against 7 Oct; the
     NUC's 29 Sep reference gave 48 on 27 Sep), c2 26 Sep UNCONFIRMED (25 inliers against 7 Oct; 73
-    against the NUC's 29 Sep), c2 27/28 Sep matches (102 / 69 inliers, <= 0.08 deg).
+    against the NUC's 29 Sep), c2 27/28 Sep matches (102 / 69 inliers, <= 0.08 deg, against the
+    7 Oct 16:00 frame itself; a review build that used a gamma and noise copy of it as the
+    reference read 106 / 77: the counts depend on the stand-in). The only real clear 2026 frame in
+    the sandbox is 7 Oct 16:00 (c1 and c2): the 198 stand-in frames named 29 Sep - 5 Oct are byte
+    copies of it (md5), and the lens4 'Oct 5' frames are renders. The same days come out of this
+    build under the final rule (its window holds 4 days, so c1's three left out days are most of it
+    and the step says so).
+  * **Review scenarios, end to end** (`survey_products.py --steps pointing` on the Python 3.8 /
+    numpy 1.17 / OpenCV 4.5 venv; real 7 Oct 16:00 and storm frames, exact ray rotations, fogged
+    land, the same synthetic drops on every day; scratch, outside this repository) [REAL frames,
+    SYNTH changes]: dirt with a fogged, tilted 2 Oct (G): c1 2 Oct UNCONFIRMED, left out (was
+    'matches'); a 0.6 deg tilt on 30 Sep and 1 Oct with the land fogged (E): DIFFERENT POINTING on
+    both cameras (were 'horizon only'), the one-day 1 deg roll UNCONFIRMED; dirt on every day with a
+    pan, a tilt and a fogged tilt (F): all three found on c2 (the fogged one confirmed by the
+    matched tilt of 1 Oct), c1's fogged one UNCONFIRMED. On c1 in E and F only three days are
+    measured (the storm days are not), two of them moved, so the existing 'most days differ from
+    the reference' guard keeps them, with its warning; c2 leaves them out. Scenarios A-D (moves of
+    0.3-1.0 deg on clear and storm days): every clear day moved by more than 0.3 deg of tilt or roll
+    or 0.5 deg of pan is DIFFERENT POINTING, and the 0.3 deg ones are 'small change'; storm days
+    whose features matched are measured (c2 27/28 Sep in A); storm days without matched features
+    are UNCONFIRMED, except a pure 1 deg pan with the horizon unfitted (A, c1 28 Sep: 'unchecked',
+    nothing there can see a pan). The 'most days differ' guard turns on where the scenario moved
+    most measured days (A c2, D c1).
   * [NUC] With c2 26-27 Sep kept, their live rows reach the detection, and the DEM unless its wave
     filter (offshore Hs > 1.5 m) drops them: the 2026-09-29 numbers of section 3.3 may move.
   * [SYNTH] The sandbox fixture's rendered horizon sits near the limits: Jan c1 and Mar c2 pass

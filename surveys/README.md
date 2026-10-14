@@ -415,11 +415,13 @@ measured: docs/VALIDATION.md 4.6):
 
 * features matched against the reference frame on 40 or more points
   (pointing_check.py) are good to ~0.1 deg: a turn over 0.5 deg is a
-  DIFFERENT POINTING, one of 0.1-0.5 deg a small change (DIFFERENT POINTING
-  when a clear horizon jumps too); a turn of 0.1 deg or less keeps the day whatever the
-  horizon reads (the why gives both numbers), unless a second match
-  consensus of 40+ points turned elsewhere (dirt on the housing window
-  matches at zero turn: 'ambiguous');
+  DIFFERENT POINTING; one of 0.1-0.5 deg a small change, DIFFERENT POINTING
+  only when a clear horizon sees the same change (within 0.3 deg); a turn of
+  0.1 deg or less keeps the day against a horizon reading that is not clear
+  (the why gives both numbers), but against a CLEAR horizon edge that jumps
+  the day is UNCONFIRMED: dirt on the housing window matches at zero turn
+  when fog hides the scene. While the scene still matches, a second match
+  consensus of 40+ points turned elsewhere shows the dirt ('ambiguous');
 * a sea-horizon reading counts only on a CLEAR edge: one sharp edge (12x the
   median gradient of its +/-250 px search or more, no rival over 0.65 of it),
   bright sky over darker sea on 2/3 of the columns or more, and more than
@@ -427,12 +429,18 @@ measured: docs/VALIDATION.md 4.6):
   of a foam or fog band (26-27 Sep 2026: 187-233 px below the horizon, fitted
   to 1-7.5 px), and the fit residual cannot tell. A misread never enters the
   window's median, offset or clear-day count;
+* every day is judged against the REFERENCE's tilt/roll as the horizon reads
+  it (the clear days' horizon less the turn their matched features
+  measured), as the features are, not against the window's median, which
+  falls between two pointings when a camera moved on half the days; a clear
+  reading that its own matched features contradict is no clear day;
 * without matched features, a jump of tilt or roll over 0.3 deg from the
-  window's median is a DIFFERENT POINTING only on a clear edge two or more
-  days share; otherwise the day is UNCONFIRMED.
+  reference is a DIFFERENT POINTING only on a clear edge two or more days
+  share; otherwise the day is UNCONFIRMED.
 
 DIFFERENT POINTING and UNCONFIRMED days are both left out of the detection
-(`--keep-moved-days` keeps them); the printed table, the CSV
+(`--keep-moved-days` keeps them); when the days left out are most of the
+window, the step and the README say so with the count. The printed table, the CSV
 (`pointing/pointing_<cam>.csv`: the edge numbers, the inliers, the
 runner-up) and the README give each day's verdict and why. The predicted horizon
 (`estimate_eo_rotation.horizon_rows`) holds the full Earth-curvature dip with
