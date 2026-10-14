@@ -1574,9 +1574,11 @@ def draw_figure(path, ctx):
         if ctx["survey_type"] == "dsm":
             nosurvey = np.isfinite(dem) & ~np.isfinite(ctx["diff"])
             face = np.where(nosurvey, 1.0, np.nan)
-            ax.imshow(face, extent=ext, origin="upper", cmap=ListedColormap([BLANK_FACE]),
-                      interpolation="nearest", zorder=1)
             if nosurvey.any():
+                # drawn only when a cell is there, with its own limits: an all-empty image makes matplotlib 3.3
+                # autoscale over nothing ('converting a masked element to nan')
+                ax.imshow(face, extent=ext, origin="upper", cmap=ListedColormap([BLANK_FACE]), vmin=0.0, vmax=2.0,
+                          interpolation="nearest", zorder=1)
                 k = 4
                 up = np.kron(nosurvey.astype(float), np.ones((k, k)))
                 xs = xll + (np.arange(ncols * k) + 0.5) * cell / k
@@ -2328,8 +2330,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             fs = {"dem_frames": int(len(set(cont["frame"].tolist()))),
                   "left_out_frames": int(len(set(cont_out["frame"].tolist()))) if cont_out is not None else 0,
                   "left_out_why": {k: len(v) for k, v in out_why.items()}, "note": sel_note or None}
-            why_txt = "; ".join(f"{v} {'of' if k.startswith('camera-days') else 'with'} {k}"
-                                for k, v in fs["left_out_why"].items())
+            from dem_figure import frames_left_out_text
+            why_txt = frames_left_out_text(fs["left_out_why"])
             lines.append(f"  FRAMES: the statistics above are on the {fs['dem_frames']} frames the DEM gridded "
                          f"(its own filters, from {info_p.name})"
                          + (f"; it left out {fs['left_out_frames']} frame(s) ({why_txt}), compared apart below"
@@ -2607,8 +2609,9 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             fsx = hw.get("frame_set") or {}
             if fsx.get("left_out_frames"):
                 lo = fsx.get("left_out_on_survey") or {}
+                from dem_figure import frames_left_out_text
                 box.append(f"  {fsx['dem_frames']} frames the DEM gridded; {fsx['left_out_frames']} it left out ("
-                           + ", ".join(f"{v} {k}" for k, v in (fsx.get("left_out_why") or {}).items()) + ")"
+                           + frames_left_out_text(fsx.get("left_out_why")) + ")"
                            + (f": {lo['median']:+.3f} m on the survey (n {lo['n']})" if lo.get("n") else ""))
         box += ["", "\n".join(textwrap.wrap(gap_text, 78))]
         if synthetic:

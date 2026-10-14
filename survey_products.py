@@ -8763,6 +8763,7 @@ def waterline_readme_lines(wl_):
     """The README lines of a comparison's waterlines - survey headline: the statistic (with what it
     rests on), WHERE on the beach it was taken, by survey elevation, by camera, and the C = 0
     sensitivity read on the same frames or points both ways."""
+    from dem_figure import frames_left_out_text
     L = []
     unit = wl_.get("unit")
     L.append("    " + stat_text(wl_, "waterlines - survey")
@@ -8809,8 +8810,7 @@ def waterline_readme_lines(wl_):
                     + (f", {st_['survey_points']} survey points" if st_.get("survey_points") is not None else "")
                     + (f", too few {what}" if k < FEW_N else "") + ")")
         L.append(f"      FRAMES: these are the {fs.get('dem_frames')} frames the DEM gridded"
-                 + (f"; it left out {fs['left_out_frames']} ("
-                    + ", ".join(f"{v} with {k}" for k, v in (fs.get("left_out_why") or {}).items()) + ")"
+                 + (f"; it left out {fs['left_out_frames']} (" + frames_left_out_text(fs.get("left_out_why")) + ")"
                     + (f", which read {one(lo)} on the survey; all frames of the window {one(al)}" if lo.get("n") else
                        ", none of them on the survey") if fs.get("left_out_frames") else "; it left out none")
                  + (f" [{fs['note']}]" if fs.get("note") else ""))

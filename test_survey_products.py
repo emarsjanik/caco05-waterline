@@ -3155,6 +3155,13 @@ def test_fix2(d):
     txt = "\n".join(sp.waterline_readme_lines(wl))
     check("(n 7, too few frames)" in txt and "(n 5, too few frames)" in txt and "TOO FEW" not in txt.split("by camera c1")[0],
           "the C = 0 sensitivity marks each camera's few frames (12 overall: an estimate)")
+    wlf = dict(wl, frame_set={"dem_frames": 40, "left_out_frames": 9,
+                              "left_out_why": {"offshore Hs > 1.5 m": 4, "camera-days off the rest by > 0.15 m": 5}})
+    txt = " ".join("\n".join(sp.waterline_readme_lines(wlf)).split())
+    check("it left out 9 (4 frame(s) with offshore Hs > 1.5 m, 5 frame(s) of camera-days off the rest by > 0.15 m)"
+          in txt and "with camera-days" not in txt,
+          "README FRAMES line: the left-out frames by reason in the comparison's own wording ('N frame(s) of "
+          "camera-days ...', never 'N with camera-days')")
     # -- synthetic inputs: a marker file in a photo root
     root = d / "roots"
     root.mkdir()

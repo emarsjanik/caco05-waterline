@@ -239,6 +239,23 @@ def test_dsm_offset(d):
     check(rc == 0 and (out / "cli_comparison.txt").exists(), "CLI runs (survey type from the extension)")
 
 
+def test_full_cover_figure(d):
+    print("a DSM that covers every DEM cell: the figure draws no empty 'no survey' layer (no matplotlib warning)")
+    import warnings
+    dd = Path(d) / "full_cover"
+    dd.mkdir()
+    dem_p, dem = make_dem(dd)
+    lid = make_lidar(dd, water_below=-99.0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        h, _ = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "synthetic test", name="full",
+                     output_dir=str(dd / "out"), survey_date="2025-01-23", photo_dates=("2025-01-18", "2025-01-23"))
+    masked = [str(w.message) for w in caught if "masked element" in str(w.message)]
+    check(h.get("dem_cells_no_survey") == 0 and (dd / "out" / "full_comparison.png").exists() and not masked,
+          f"every DEM cell compared ({h.get('dem_cells_compared')}): the page is drawn with no 'converting a masked "
+          f"element to nan' warning (matplotlib 3.3 gave three: an all-empty layer autoscaled over nothing)")
+
+
 def test_points(d):
     print("point surveys, DEM = beach + 0.20 m")
     dem_p, dem = make_dem(d)
@@ -613,10 +630,15 @@ def test_fix2(d):
     h4, _ = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "test", name="dt4", output_dir=str(out4),
                   survey_date="2025-01-23", photo_dates=("2025-01-18", "2025-01-23"), contours=str(cp))
     txt4 = (out4 / "dt4_comparison.txt").read_text()
-    check("4 of camera-days within +/-0.15 m of the kept days, left out as taking them back would put a kept day over"
-          in " ".join(txt4.split()) and "4 of camera-days off the rest by > 0.15 m" in " ".join(txt4.split())
-          and set(h4["waterlines"]["frame_set"]["left_out_why"]) == set(why4),
-          "the comparison's FRAMES line and record give each reason with its frame count ('N of camera-days ...')")
+    from dem_figure import frames_left_out_text
+    check("4 frame(s) of camera-days within +/-0.15 m of the kept days, left out as taking them back would put a kept "
+          "day over" in " ".join(txt4.split()) and "4 frame(s) of camera-days off the rest by > 0.15 m"
+          in " ".join(txt4.split()) and set(h4["waterlines"]["frame_set"]["left_out_why"]) == set(why4)
+          and frames_left_out_text({"offshore Hs > 1.5 m": 3, "camera-days off the rest by > 0.15 m": 8})
+          == "3 frame(s) with offshore Hs > 1.5 m, 8 frame(s) of camera-days off the rest by > 0.15 m",
+          "the comparison's FRAMES line and record give each reason with its frame count ('N frame(s) of camera-days "
+          "...', 'N frame(s) with offshore Hs ...': one wording, dem_figure.frames_left_out_text, for the text, the "
+          "page box and the README)")
     Path(str(dem_p).replace("_dem.asc", "_info.json")).unlink()
 
 
@@ -752,7 +774,7 @@ def test_left_out_frames_window(d):
     fs = h["waterlines"]["frame_set"]
     txt = (out / "lowin_comparison.txt").read_text()
     check(fs["dem_frames"] == 16 and fs["left_out_frames"] == 8 and fs["left_out_why"] == {"offshore Hs > 1.5 m": 8}
-          and "it left out 8 frame(s) (8 with offshore Hs > 1.5 m)" in txt,
+          and "it left out 8 frame(s) (8 frame(s) with offshore Hs > 1.5 m)" in txt,
           f"FRAMES: the DEM's 16 gridded frames (20-23 Jan) and the 8 it left out on 18-19 Jan, before its first "
           f"gridded day, as its own record counts them (was 0) ({fs['dem_frames']}, {fs['left_out_frames']})")
     check(abs(h["waterlines"]["median"] + 0.1) < 0.01 and "480 georectified points 2025-01-20 to 2025-01-23" in log
@@ -837,6 +859,7 @@ def main():
         test_block_median(d)
         test_dem_at_points(d)
         test_dsm_offset(d)
+        test_full_cover_figure(d)
         test_points(d)
         test_label_checks(d)
         test_transects(d)

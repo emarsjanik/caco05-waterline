@@ -784,6 +784,14 @@ def day_test_left_out(f, plus_minus="±"):
             f"({plus_minus}{lim} m; {held} within it but at odds with a kept day)")
 
 
+def frames_left_out_text(why):
+    """Frames left out, counted by reason ({reason: frames}), in the one wording every text uses: '8 frame(s) of
+    camera-days off the rest by > 0.15 m', '4 frame(s) with offshore Hs > 1.5 m' (a camera-day reason names days,
+    the count is of their frames). ASCII."""
+    return ", ".join(f"{v} frame(s) {'of' if str(k).startswith('camera-days') else 'with'} {k}"
+                     for k, v in (why or {}).items())
+
+
 def day_test_reason(f, day):
     """Why the DEM's day test left camera-day `day` ('<camera> <YYYY-MM-DD>') out, as a reason that
     starts 'camera-days ...' (texts count frames by it: '8 frame(s) of camera-days ...'), by its
