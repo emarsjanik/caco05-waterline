@@ -663,16 +663,23 @@ Two DEMs are delivered, each in its own root (one calibration per root):
    was made under another version of it.
 2. `python3 test_gcpfree_eo.py` (synthetic, in a temporary folder, ~15 min)
    and `python3 gcpfree_eo.py --dry-run` (the pre-registration, the photos
-   per day, the Jan 2025 EO against the visible horizon on 23 Jan; reads no
-   Oct photo, writes nothing).
+   per day, the Jan 2025 EO against the visible horizon on 23 Jan; of the
+   Oct photos it only lists the names and checks the frame size: nothing is
+   computed from them; writes nothing). Run the dry run early (it needs no
+   pre-registration): a missing photo folder or a camera with no Oct or no
+   18-23 Jan 2025 photo refuses every delivery run, and is better known
+   before anything else.
 3. **The delivery run**: `python3 gcpfree_eo.py` (the station's three photo
    folders, both cameras; ~10-30 min a camera). It writes
    `calibration/gcpfree/runs/<UTC run id>/`: per camera its report
    (`CACO03_<cam>_gcpfree-oct2024_report.json/.txt`), a B file
    (`CACO03_<cam>_gcpfree-oct2024_EO.yaml`) only for a camera DELIVERED
    under the rule, and `run.json`. **Commit that folder at once and write
-   down each B file's sha256, before calibration A is built or compared
-   with anything.** No run ever writes over another; a second delivery run
+   down each B file's sha256, before the B DEM is built and before anything
+   is compared with the A DEM.** (The A DEM is built first, before this
+   run: nothing of it reaches the procedure, whose code is pinned by sha256
+   and whose outcome rule is committed before any run.) No run ever writes
+   over another; a second delivery run
    is refused (B is fixed by the first), except one with `--aug-dir` (below).
    Bad input is refused (exit 2), never turned into a verdict: no Oct or Jan
    photo for a camera, a missing photo folder.
