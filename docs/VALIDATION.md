@@ -37,14 +37,14 @@ python3 dem_figure.py --self-test                # ends "SELF-TEST PASSED"
 python3 daily_elevation_map.py --self-test       # ends "SELF-TEST PASSED"
 python3 test_survey_products.py                  # ends "all survey_products tests passed" (see below)
 python3 test_survey_compare.py                   # ends "all survey_compare tests passed"
-python3 test_historical_forcing.py               # ends "100/100 checks passed"
+python3 test_historical_forcing.py               # ends "101/101 checks passed"
 python3 test_dem_day_test.py                     # ends "all DEM day-test tests passed" (section 2.3a)
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
 What a survey-date build reruns after this pull: a step reruns when a script in its signature
 changes, and everything after it with it. This PR changes `historical_forcing.py` (forcing),
-`pointing_check.py` and the pointing rule (`POINTING_VERSION` 10: pointing), `dem_from_contours.py`,
+`pointing_check.py` and the pointing rule (`POINTING_VERSION` 11: pointing), `dem_from_contours.py`,
 `dem_figure.py` and `asc_to_geotiff.py` (DEM) and `survey_compare.py` (plan-view map, compare).
 So the next build of a 2025 date reruns every step once, its forcing first and so its detection
 too: here, under load, a full rebuild took ~38 min for 2025-01-23 (two cameras, a week) and ~20 min
@@ -58,18 +58,27 @@ the plan-view map and the comparisons, was checked on a 2026-09-29 build then.)
 `view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file
 is unchanged by this PR, and the survey products use only its `ground_to_pixel`, which
 does not need scipy. **Do not run `pointing_check.py --self-test` on the NUC**: it rotates a frame
-with `view_reproject.reproject_image`, which needs scipy; without scipy it now says `SKIPPED
-(nothing checked)` and exits 0 (it needs `--image <a c2 frame>` too). The survey products'
+with `view_reproject.reproject_image`, which needs scipy; without a scipy that imports (none, or
+one installed but broken) it now says `SKIPPED (nothing checked)` and exits 0 (it needs `--image
+<a c2 frame>` too). The survey products'
 pointing step does not use it. Here, with scipy, on the real 7 Oct 2026 16:00 c2 frame: four
 planted turns (up to 2.5 deg of pan) recovered to 0.000 deg, PASS.
 
 The self-tests give the same result on the NUC as in a clean checkout: they run on fixtures
 and folders of their own, with the station's search folders and archive files switched off
 (`test_historical_forcing.py`'s last check confirms that no build named a station file). The
-three `test_*.py` files run in a temporary folder that is also their current folder; the three
-`--self-test` runs write only into temporary folders of their own and look for nothing in the
-current folder but matplotlib's own `matplotlibrc` (checked with strace). What they read of
-the station is said.
+four `test_*.py` files above run in a temporary folder that is also their current folder; the
+three `--self-test` runs write only into temporary folders of their own and look for nothing in
+the current folder but matplotlib's own `matplotlibrc` (checked with strace). What they read of
+the station is said. What `test_survey_products.py` reads of the station, all of it: the tables
+`surveys/survey_dates.csv` and `surveys/surveys.csv` and the live cron `waterline_timex_cron.sh`
+(below), the real 2026-09-29 RTK file where `surveys/surveys.csv` says (below), and the
+repository's own files as COMMITTED (git): its fixtures copy the calibration folder from `git
+ls-files calibration`, never a file the station keeps there untracked and never a file named like
+the held 23 Oct 2024 survey (review round 1 of the integration: a copy of the whole folder had
+opened every untracked file there). A test run stopped with Ctrl-C, SIGTERM or SIGHUP removes its
+temporary folder (with the synthetic canary files, named like the held survey, that the blind
+tests put there); only a SIGKILL leaves it in `/tmp`.
 
 `test_survey_products.py` checks `surveys/survey_dates.csv` and `surveys/surveys.csv` as the
 owner has them now last of all, so a table problem cannot hide the results of the code's
@@ -126,6 +135,17 @@ other line endings) is named as such. The commit a build stamp records, and the 
 shipped, are checked when git can read the code's checkout; otherwise `skipped: commit check:
 git cannot read a checkout at ...` and `skipped: shipped-tables checks: git cannot read a
 checkout at ...` (a copy that is not a checkout, or a user git refuses: "dubious ownership").
+
+**Expect the station status to read WARN after the pull, with nothing wrong at the station.** The
+DEM's day test now warns (`WARNING` in `logs/timex_cron.log`, counted by `station_status.py`) when a
+camera's camera-day offsets run one way with time (section 2.3a): the replay of the real 5-11 Oct
+2026 week gives that warning for c1, so the 7-day DEM will read WARN while such a run lasts. On the
+whole-archive DEM a sustained change of the beach (a 0.5 m drift over 13 weeks, simulated) makes it
+warn on every run, three times a day, for as long as the change lasts; a 0.2-0.3 m drift or a
+seasonal swing does not (the real archive now: no whole-archive warning). Each such warning is true
+(that DEM mixes surfaces), and is expected, not a station fault. The day-test text says what the
+method alone gives on a static synthetic beach (the same warning at rho -0.96 and 0.165 m over 7
+days), so a camera fault or a beach change needs more than the warning.
 
 After the next cron run (12:30, 19:25 or 20:55 local):
 
@@ -271,6 +291,12 @@ How it decides (`dem_from_contours.day_consistency`; the rule as printed is
   at +0.6 m on the same cells), the first day left out decides which group stays, whichever
   the noise puts further out (one pass rejected both). Nothing warns of this: read a day left
   out at little over the limit, or a camera's days left out together, with care.
+* **More days left out than one pass, on long archives.** It leaves out fewer days than one pass
+  on 7-day windows (real-week samples: 2.29 vs 2.65 per window at a day scatter of 0.08 m, 3.00
+  vs 3.50 at 0.10 m) and in the planted cases above, but on a long archive whose day scatter is
+  near the limit it can leave out MORE (26 weeks: 91 vs 76 over the limit in the first pass at
+  0.10 m, 55 vs 48 at 0.08 m), because it trims the ends of the scatter as it goes [SYNTH,
+  integration review round 1].
 * **Trend WARNING.** A camera whose final day offsets run one way with time gets `WARNING:
   <cam>'s camera-day offsets run one way with time ...`: real beach change through the window,
   or an error that drifts with time (pointing, lens, a detection bias that follows the tides
@@ -279,7 +305,14 @@ How it decides (`dem_from_contours.day_consistency`; the rule as printed is
   limit, |Spearman rho| of offset against date above 0.8 and, up to 8 days, a rho that days in
   random order reach in that direction at most 2 % of the time (exact over every order, for
   the offsets' own ties; `DAY_TREND_ALPHA` 0.02). That asks rho 1.00 over 5 days and 0.89 over
-  6; from 7 days on it is |rho| > 0.8 itself (0.82 over 7, 0.81 over 8).
+  6; from 7 days on it is |rho| > 0.8 itself (0.82 over 7, 0.81 over 8). The 2 % is one-sided:
+  as the rule fires for either direction, its false-alarm chance per camera is up to twice that
+  (1.7-3.4 % at the thresholds), and the WARNING gives both chances ('1 time in 720 (either way
+  1 in 360)'). Its range is over all the camera's days, with the lowest and highest day, from
+  the unrounded offsets. **The method alone can give it**: on a static synthetic beach with a
+  fixed pointing (the Mar 2025 replica) c2's offsets give rho -0.96 and 0.165 m over 7 days, the
+  same warning, so the WARNING says so, and only a drift clearly larger than that, or one the
+  pointing check or a survey confirms, points at the camera or the beach.
 * **The end-day rule.** One bad day at an end ranks first or last and lifts rho, so when exactly
   one of a camera's days was left out and it is its first or last, the camera's other days
   must still run the same way, |rho| > 0.8 in that direction (not the chance part, which the 4
@@ -303,8 +336,8 @@ each camera-day left out, how, its offsets and why; KNOWN CAVEATS: the WARNINGs,
 | Lone partner, unjudged days, untested days, a day judged later, every day disagreeing | [SYNTH] test | a fringe day 0.57 m LOW whose cells one other day reaches is left out (the low beach -0.497 / -0.283 m, truth -0.50 / -0.30; kept, it read -1.07 / -0.86); two days that only see each other keep the first pass's verdict with the WARNING; four days that all disagree: every day rejected, exit 4, `dem_failure_reason` "rejected every camera-day" | same | the cron log |
 | The station's 7-day offsets of 5-11 Oct 2026, replayed | [REAL offsets, SYNTH samples] | within 5.4 mm of the station's; 5 Oct c1 and 8 Oct c2 left out (as one pass), 11 Oct kept, the c1 trend WARNING; without 7 or 9 Oct (5 days, the low end trimmed): the WARNING, resting on 5 Oct | same (`test_nuc_7day`, `test_trend_end`) | `grep -n "Day consistency\|WARNING" logs/timex_cron.log` after a run |
 | Trend WARNING rates, simulated full-pipeline windows (limit 0.15 m, fixed seeds, 1000 of each kind) | [SYNTH] | 7-day two-camera windows: no trend 2-6 %, one bad day (0.4 m) at an end 3-6 %, a trend of 0.03-0.06 m/day 67-87 %; a camera on 5 of 7 days: trend of 0.04-0.08 m/day 31-68 %, bad end day 4-6 %, no trend 1 %; on 6 days: trend 62-94 %, bad end day 6 %, no trend 1 % | the scratch simulation (numbers quoted in `dem_from_contours.py` above `DAY_TREND_MIN_DAYS`); the exact rule values in `test_dem_day_test.py` (`test_trend_rule`) | - |
-| Survey-date fixture builds 2025-01-23 and 2025-03-06 with the first iterative version (daytest-fix d28b5ec; not rebuilt since with the lone-partner rule and the first-pass fallback, which can change which days a DEM leaves out) | [SYNTH] | DEM grids byte-identical to the one-pass builds, comparisons unchanged; Mar gets the trend WARNING (c2 +0.066 to -0.093 m over 3-9 Mar, rho -0.96, the fixture's known detector drift) | `survey_products.py --date ... --output-root <fixture root>` | the README's WHAT WAS USED and KNOWN CAVEATS |
-| Run time | [SYNTH] | a synthetic year (730 camera-days, 668k samples, 167 left out) 68 s on Python 3.8 / numpy 1.17 (23 min for the first iterative version, 175 s CPU for the one pass); ~2.5 min of CPU at the station's density (1.5M samples) | `python3 test_dem_day_test.py --year` | the cron's run time |
+| Survey-date fixture builds 2025-01-23 and 2025-03-06 with the first iterative version (daytest-fix d28b5ec); 2025-03-06 rebuilt at the integrated code (651dffb, floor venv) | [SYNTH] | DEM grids byte-identical to the one-pass builds, comparisons unchanged; at the integrated code 2025-03-06's grids identical again (Mar lidar median -0.034 m, NMAD 0.057 m, n 1263; waterlines -0.026 m, n 119643); Mar gets the trend WARNING (c2 +0.066 to -0.093 m over 3-9 Mar, range 0.165 m with 4 Mar's +0.072, rho -0.96, the fixture's known detector drift) | `survey_products.py --date ... --output-root <fixture root>` | the README's WHAT WAS USED and KNOWN CAVEATS |
+| Run time | [SYNTH] | a synthetic year (730 camera-days, 668k samples, 167 left out) 68 s on Python 3.8 / numpy 1.17 (23 min for the first iterative version; 175 s CPU for the pre-PR one-pass code, 1-8 s for this PR's one pass); ~2.5 min of CPU at the station's density (1.5M samples). On the cron's whole-archive DEM the cost grows about as samples x days left out: seconds now; 52 weeks of real-week samples 25-163 s, 104 weeks with a seasonal +/-0.3 m swing 765 s (the old one pass ~370 s) [SYNTH, integration review round 1]. Before the archive is ~2 years old, cap the whole-archive DEM (e.g. its last N months) | `python3 test_dem_day_test.py --year` | the cron's run time |
 | What goes to Chris says each day's reason | [SYNTH] test | a refused take-back reads "within +/-0.15 m of the kept days, left out as taking them back would put a kept day over", never "off the rest"; README lines per day (how, offsets, why); WARNINGs among the caveats; a trend 'rests on' its trimmed end day only when `without.alone` is false | `python3 test_survey_products.py` (`test_day_test_record`), `python3 test_survey_compare.py` (`test_fix2`) | a built README |
 
 ### 2.4 Week-to-week change map
@@ -853,7 +886,7 @@ only if it holds over several weeks of different waves; then change it in all th
     trust threshold measured): on real pairs with a known answer the rotation erred by <= 0.063 deg
     (69 results at >= 40 inliers); on 402 planted 0.05-2.5 deg rotations by <= 0.053 deg (a frame
     against itself) and <= 0.101 deg (against another day; 40-59 inliers: <= 0.10 deg on 45
-    trials); no matched trial under 0.45 deg was called MOVED (0 of 229), every one of 0.55 deg or
+    trials, 29 of them against another day); no matched trial under 0.45 deg was called MOVED (0 of 229), every one of 0.55 deg or
     more was (157 of 157). Below 40 the errors grow (20-39 inliers: up to 0.18 deg; 10-19: 0.58;
     under 10: anything). A turn of more than 0.1 deg is the scene (dirt matches at zero) and
     measures the day's change from the reference directly: a change of tilt or roll over 0.3 deg
@@ -861,8 +894,9 @@ only if it holds over several weeks of different waves; then change it in all th
     is a DIFFERENT POINTING whatever the horizon reads; a smaller turn is a 'small change', kept (a
     review probe: 1500 inliers at +0.15 deg against a clear-looking +2.0 deg jump). A match reads
     tilt and roll to ~0.1 deg (MATCH_ERR_DEG; the same planted rotations against another day: <= 0.101
-    deg at 40-59 inliers, 28 trials; <= 0.093 at 60-99, 35; <= 0.060 at 100-199, 10; this last bound
-    rests on 10 trials only), and a clear horizon scatters about as much from day to day at rest (the
+    deg at 40-59 inliers, 29 trials; <= 0.094 at 60-99, 41; <= 0.060 at 100-199, 11, over every run
+    of that study -- its first summary, without one run, read 28 / 35 / 10; this last bound rests on
+    11 trials only), and a clear horizon scatters about as much from day to day at rest (the
     NUC's clear days of 29 Sep - 2 Oct, their features within 0.02 deg: c1 +0.90 to +0.96 deg of tilt,
     +0.16 to +0.26 of roll): a CLEAR horizon that reads a change over 0.3 deg and agrees with the
     features within 0.1 deg in tilt and in roll makes the day DIFFERENT POINTING too, at any inlier
@@ -894,6 +928,19 @@ only if it holds over several weeks of different waves; then change it in all th
     proposal to require 60 inliers was not taken: it was chosen to make c1 27 Sep (48 inliers)
     weak, but that day's -1.21 deg of pan is real: tracked dune landmarks and a more sensitive
     match read -1.20 to -1.25 deg on 26-28 Sep, and the camera was back by 29 Sep.
+  * **What the ~0.1 deg rests on** (integration review round 1). The planted rotations against
+    another day are of CACO05 c2 2026 only; the matches of a frame against itself add CACO05 c1 2026
+    and CACO03 c1 Jan 2025; no CACO04 view (2025-03-06) and no CACO03 c2 view was tried. Every match
+    against another day had its inliers spread 180-292 px along the minor axis of their scatter
+    (292-618 px along the major one). A match whose inliers are bunched reads roll, and tilt, less
+    well: a review model (pointing_check.solve_rotation, the real CACO05 c2 lens, 50 rays, 0.015 deg
+    noise, kept at >= 40 inliers) read roll to <= 0.022 deg with the inliers over the whole frame,
+    but up to 0.17 deg (p90 0.09) in a 300 px patch and 0.12 deg in a 500 px one [SYNTH, SCRATCH].
+    So the step now writes each match's spread (`inlier_spread_px` in pointing_<cam>.csv,
+    `pointing_check.inlier_spread`), and a deciding match spread under 180 px says so in its why and
+    in the README (the days kept on such a match); the verdict is not changed, as there is no
+    real-photo evidence to set a threshold by. The whys read 'a match of 40 or more features spread
+    over the frame is good to ~0.1 deg on the views tested'.
   * **Window dirt** is the one known way a confident match is wrong (drops at the same pixels in
     both frames match at zero turn): a near-zero winner with a runner-up consensus of 40+ inliers
     turned more than 0.3 deg from it is 'ambiguous' and decides nothing (planted heavy drops: 17 of
@@ -1059,7 +1106,22 @@ only if it holds over several weeks of different waves; then change it in all th
     nearest the survey in it the reference (review 4, REF_T06: 29 Sep, the survey day and the
     reference, tilted 0.6 deg; every other day measured -0.60 deg and left out, the product resting
     on the one moved day: `--window 2026-09-30 2026-10-02`). Refusing to grid such a window until the
-    owner chooses is not done (an owner's ruling). When the days left out are more than half of the
+    owner chooses is not done (an owner's ruling). Since the integration's review round 1
+    (POINTING_VERSION 11) two things more: (1) the days at the reference's pointing are the days
+    measured there AND the days that read nothing else whose 40 or more features matched the
+    reference at zero turn within their own noise (`zero_turn_days`: no reading of a turn, but what
+    the reference's pointing gives, or dirt): on the synthetic Oct 2024 fixture c2's two planted
+    +1.0 deg pan days (20-21 Oct) outnumbered the reference day alone, while 22 and 24-26 Oct matched
+    it at 0.00 deg on 222-263 features, and the build was PARTIAL, its README saying 'the
+    reference's is the smaller group'; (2) when the reference is the calibration's own solve day
+    (`reference_is_calibration_day`: the date in the calibration's file name, which the step takes
+    as the reference whenever it has photos), its pointing is the calibration's: the warning says
+    the product rests on the calibration's pointing, gives no rebuild without that day (for A on
+    2024-10-23 that would put the 23-Oct calibration on the other pointing's days, a pan error no
+    horizon sees), and it is a partial reason only while the detection has not run with these
+    results or keeps both pointings (`--keep-moved-days`). A day that read nothing but a blind
+    zero-turn match next to a measured pan (22 Oct there) stays UNCONFIRMED and left out: a day
+    lost, not a wrong one [SYNTH] (`test_survey_products.py` test_oct_pointing_pattern). When the days left out are more than half of the
     window's, the step and the README say so with the count, how many of them rest on a horizon
     reading alone that is not a clear horizon, how many are left out only for the day next to them,
     and the options there are: `--keep-moved-days` keeps every such day, and there is no per-day option
@@ -1394,6 +1456,19 @@ copy of today's pictures made before the pull (section 1).
   shift in the printed Chatham formula, and wrong or untraceable numbers and tags in this file;
   they were fixed in the commit after `b54c255`. That last fix round was checked by its own
   tests, the full check list and re-runs on the real data, not by a further independent review.
+  (That is PR #87's history.) THIS PR: three branches, each built and adversarially verified on
+  its own before they were integrated: pointing-verdict-fix (four review rounds of the pointing
+  rule, reviews 1-4 in section 4.6), oct-blind (two review rounds of the blind 23 Oct 2024 A/B
+  path and the GCP-free procedure) and daytest-fix (the iterative day test; its last commit,
+  `846a2be` -- the lone-end-day rule and the exact tie chances -- had NO independent review of its
+  own). The integration commits that write the day test's record into what Chris reads, the
+  frame counts and the B protocol texts (`6096fe1` .. `651dffb`) were then reviewed in one
+  integration review round (runner on a simulated NUC, real-data and fixture builds, blind,
+  science, station and merge lenses), whose findings were fixed in the commits after `123224b`
+  (the `--summary` crash, the Oct fixture's partial A, the pushed pre-registration and its
+  re-pin, the share archive, the error budget, the trend warning, the inlier spread). Those
+  fixes were checked by their own tests, the full test list on Python 3.11 and the station floor
+  and an Oct fixture rebuild, not yet by a further independent review.
 
 ## References
 

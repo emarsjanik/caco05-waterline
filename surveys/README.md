@@ -452,8 +452,11 @@ pointing leave days out, decided per day from two measurements
 (`survey_products.py` pointing_verdicts; the thresholds and where they were
 measured: docs/VALIDATION.md 4.6):
 
-* features matched against the reference frame on 40 or more points
-  (pointing_check.py) are good to ~0.1 deg, and a turned match is the scene
+* features matched against the reference frame on 40 or more points spread
+  over the frame (pointing_check.py) are good to ~0.1 deg on the views tested
+  (CACO05 c2 2026 against another day; a match bunched in a small part of the
+  frame reads roll less well: its spread is in `inlier_spread_px`, and the
+  README says when a deciding match is bunched), and a turned match is the scene
   (dirt matches at zero turn): a change of tilt or roll over 0.3 deg (the
   step's tilt/roll tolerance; 0.1 deg of tilt is ~0.13-0.17 m of DEM) or of
   pan over 0.5 deg is a DIFFERENT POINTING, whatever the horizon reads; a
