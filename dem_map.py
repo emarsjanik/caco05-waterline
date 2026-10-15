@@ -59,6 +59,15 @@ def draw(stem, title=None, output=None):
     sel = lambda g: crop(g, x0, yt, cell)[0] if g is not None else None   # noqa: E731
     d, s = sel(dem), sel(spread)
     n = int(np.isfinite(dem).sum())
+    if not title:                         # the window from the DEM's own record, when there is one
+        try:
+            import json
+            info = json.loads(Path(f"{stem}_info.json").read_text())
+            a, b = info.get("first_date") or info.get("window_start"), info.get("last_date") or info.get("window_end")
+            if a and b:
+                title = f"Marconi Beach: {a} to {b}" + (f" (last {info['last_days']} days)" if info.get("last_days") else "")
+        except (OSError, ValueError):
+            pass
     fig, axes = plt.subplots(1, 2 if s is not None else 1, figsize=(12, 8.5), squeeze=False)
     ax = axes[0][0]
     im = ax.imshow(d, extent=box, origin="upper", cmap="terrain", interpolation="nearest")
