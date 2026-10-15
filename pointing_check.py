@@ -166,10 +166,72 @@ class Reference:
         self.R = cirn_angles_to_R(*self.eo[3:6])
 
 
-def measure(img, refs, io, min_inliers=40):
-    """-> dict with the best reference's result."""
+def rotation_angle_deg(R1, R2):
+    """Angle (deg) of the rotation that takes R1 to R2."""
+    c = (np.trace(R2 @ R1.T) - 1.0) / 2.0
+    return float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
+
+
+def runner_up(world, cam, inl):
+    """The second-largest consensus of the matches: the same RANSAC again on the matches outside
+    the first one's inliers. Dirt or drops on the housing window that sit at the same pixels in the
+    reference and the new frame match at ZERO rotation whatever the camera did, and can outnumber
+    the scene: they then win, and the scene's true rotation is the runner-up (Oct 2026, planted
+    0.3-2 deg turns of real frames under heavy soft drops: 17 of 120 read ~0.00 deg on 388-1573
+    inliers, each with a runner-up of 64-561 inliers at the true turn; without dirt, on 551 matched
+    trials and on the real CACO05 pairs, the runner-up had at most 35 inliers).
+    -> (inliers, R), or (0, None) with fewer than 8 matches left."""
+    rest = ~inl
+    if rest.sum() < 8:
+        return 0, None
+    R2, inl2 = solve_rotation(world[rest], cam[rest])
+    return int(inl2.sum()), R2
+
+
+def turn_sigma(world, cam, inl, R, R_ref):
+    """How far the fitted rotation R is from the reference's R_ref (no turn), in units of its own
+    standard error: sqrt(w' N w) / s, w the rotation vector of R R_ref^T, N = sum(I - p p') over the
+    inliers' predicted rays p (the least-squares normal matrix of a small rotation) and s the
+    inliers' residual scatter per ray component. Dirt or drops on the housing window move with the
+    camera and match at EXACTLY zero turn, so their consensus reads this much from zero by noise
+    alone (a chi of 3 degrees of freedom: <= ~3); a match of the scene between two days reads more,
+    the camera's own small day-to-day turns (Oct 2026: synthetic drops on real frames, consensus of
+    the drops alone 0.5-2.7; the real 26-28 Sep storm frames against 7 Oct, the camera at rest:
+    see survey_products TURN_SIGMA_MIN). -> float, or None with fewer than 8 inliers."""
+    n = int(inl.sum())
+    if n < 8:
+        return None
+    p = world[inl] @ R.T
+    e = cam[inl] - p
+    s2 = float(np.sum(e * e)) / (2 * n - 3)
+    if not s2 > 0:
+        return None
+    N = n * np.eye(3) - p.T @ p
+    dR = R @ R_ref.T
+    w = np.array([dR[2, 1] - dR[1, 2], dR[0, 2] - dR[2, 0], dR[1, 0] - dR[0, 1]]) / 2.0
+    return float(np.sqrt(max(float(w @ N @ w), 0.0) / s2))
+
+
+def inlier_spread(px):
+    """How widely matched points spread over the frame: the standard deviations (px) of their pixel positions along
+    the minor and major axes of their scatter (sqrt of the eigenvalues of its covariance), [minor, major]. A rotation
+    fitted to points bunched in a small part of the frame reads roll (and tilt) less well. None under 3 points."""
+    px = np.asarray(px, float)
+    if len(px) < 3:
+        return None
+    ev = np.linalg.eigvalsh(np.cov(px.T))
+    return [float(np.sqrt(max(ev.min(), 0.0))), float(np.sqrt(max(ev.max(), 0.0)))]
+
+
+def measure(img, refs, io, min_inliers=40, second=False):
+    """-> dict with the best reference's result. second=True adds the runner-up consensus of the
+    best reference's matches (runner_up()): 'runner_up_inliers', 'runner_up_deg' (its angle from
+    the best rotation) and 'runner_up_d' (its azimuth/tilt/roll change from the reference, deg,
+    as d_*). The best result itself is unchanged (the same RANSAC, the same seed). 'turn_sigma': the
+    best rotation's distance from no turn in units of its standard error (turn_sigma()); 'inlier_spread_px':
+    how widely its inliers spread over the new frame (inlier_spread())."""
     f = features(img)
-    best = None
+    best, geom = None, None
     for ref in refs:
         p_ref, p_new = match(ref.feat, f)
         if len(p_ref) < 8:
@@ -185,7 +247,19 @@ def measure(img, refs, io, min_inliers=40):
             best = {"reference": ref.path.name, "matches": len(p_ref), "inliers": n_in,
                     "residual_deg": float(np.median(ang_err(R, world[inl], cam[inl]))) if n_in else np.nan,
                     "d_azimuth": d[0], "d_tilt": d[1], "d_roll": d[2],
-                    "eo": np.r_[ref.eo[:3], az, tilt, roll], "eo_ref": ref.eo_name}
+                    "eo": np.r_[ref.eo[:3], az, tilt, roll], "eo_ref": ref.eo_name,
+                    "turn_sigma": turn_sigma(world, cam, inl, R, ref.R),
+                    "inlier_spread_px": inlier_spread(p_new[inl])}
+            geom = (world, cam, inl, R, ref)
+    if second and best is not None:
+        world, cam, inl, R, ref = geom
+        n2, R2 = runner_up(world, cam, inl)
+        best["runner_up_inliers"] = n2
+        if R2 is not None:
+            d2 = np.degrees(np.array(R_to_angles(R2)) - ref.eo[3:6])
+            d2[0] = (d2[0] + 180) % 360 - 180
+            best["runner_up_deg"] = rotation_angle_deg(R, R2)
+            best["runner_up_d"] = [float(x) for x in d2]
     if best is None or best["inliers"] < min_inliers:
         return {"status": "unmatched", **(best or {"matches": 0, "inliers": 0})}
     return best
@@ -194,7 +268,19 @@ def measure(img, refs, io, min_inliers=40):
 # ------------------------------------------------------------- commands
 
 def self_test(image=None):
-    """Rotate a frame by known angles (exact for a camera that only rotates) and recover them."""
+    """Rotate a frame by known angles (exact for a camera that only rotates) and recover them. The rotated frames
+    are made by view_reproject.reproject_image, which needs scipy (its edge fill): on the station's Python 3.8
+    (no scipy) the self-test says so and stops cleanly, exit 0 and the word SKIPPED, with nothing checked. The
+    survey products' pointing step never calls it."""
+    import importlib
+    try:                                   # what reproject_image itself imports: a scipy that is installed but
+        getattr(importlib.import_module("scipy.ndimage"), "distance_transform_edt")    # broken counts as none
+    except Exception as exc:
+        print("pointing_check.py --self-test SKIPPED (nothing checked): it rotates the frame with "
+              "view_reproject.reproject_image, which needs scipy.ndimage, which does not import here "
+              f"({exc.__class__.__name__}; the station's Python 3.8 has none); run it on a computer with scipy. The "
+              "pointing step of survey_products.py does not need it.")
+        return 0
     from view_reproject import reproject_image
     io = load_intrinsics(CAL / "CACO05_c2_20240801_IO.yaml")
     eo = load_extrinsics(CAL / "CACO05_c2_20251113_EO-CV.yaml")

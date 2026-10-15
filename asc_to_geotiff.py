@@ -16,9 +16,12 @@ frames per cell, _source 1 = measured, 2 = interpolated. Nodata = -9999.
 The _dem GeoTIFF also carries the vertical GeoKeys (EPSG:5703, NAVD88
 height, metres), so GIS software reads it as NAVD88 without being told.
 
-COORDINATE SYSTEM. Default EPSG:32619 (WGS 84 / UTM zone 19N), as the
-project's existing .prj file. If the camera survey was in NAD83(2011) use
---epsg 6348 (NAD83(2011) / UTM zone 19N); the two differ by about a metre.
+COORDINATE SYSTEM. Default EPSG:6348 (NAD83(2011) / UTM zone 19N): the grids
+are in the frame of the calibration's GCPs, which is that of the surveys (the
+2025 lidar DSMs and the 2026 RTK are NAD83(2011) / UTM 19N), as
+survey_products.py GEOTIFF_EPSG. Until Oct 2026 the default was 32619 (WGS 84
+/ UTM zone 19N), a NOMINAL tag taken from an old .prj file, which a GIS places
+~1-1.5 m off the surveys; --epsg 32619 still writes it.
 
 Usage:
     python3 asc_to_geotiff.py /mnt/I2Rgus_Data/Chelsea_calibration/dem
@@ -63,7 +66,7 @@ def write_geotiff(path, data, xll, yll, cell, epsg, description="", vertical_eps
     def add(tag, typ, values):
         fmt = {SHORT: "H", LONG: "I", DOUBLE: "d"}.get(typ)
         if typ == ASCII:
-            raw = values.encode("ascii") + b"\0"
+            raw = values.encode("ascii", "replace") + b"\0"
             entries.append((tag, typ, len(raw), raw))
         else:
             values = list(values)
@@ -142,8 +145,12 @@ DESCRIPTIONS = {
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("paths", nargs="+", help="folders (every *.asc in them) or .asc files")
-    ap.add_argument("--epsg", type=int, default=32619,
-                    help="projected CRS (default 32619 = WGS 84 / UTM 19N; 6348 = NAD83(2011) / UTM 19N)")
+    ap.add_argument("--epsg", type=int, default=6348,
+                    help="projected CRS (default 6348 = NAD83(2011) / UTM 19N, the frame of the surveys and the "
+                         "grids; 32619 = WGS 84 / UTM 19N, the default until Oct 2026, a nominal tag)")
+    ap.add_argument("--note", default="",
+                    help="text added to every GeoTIFF's description (ImageDescription tag), e.g. which calibration "
+                         "built the grid, so a file separated from its folder still says (survey_products.py)")
     args = ap.parse_args()
 
     files = []
@@ -157,7 +164,8 @@ def main():
         tif = asc.with_suffix(".tif")
         vert = NAVD88_EPSG if asc.stem.endswith(ELEVATION_LAYERS) else None
         write_geotiff(tif, data, h["xllcorner"], h["yllcorner"], h["cellsize"], args.epsg,
-                      f"{asc.stem}: {desc}; EPSG:{args.epsg}" + ("+5703 (NAVD88 height)" if vert else ""),
+                      f"{asc.stem}: {desc}; EPSG:{args.epsg}" + ("+5703 (NAVD88 height)" if vert else "")
+                      + (f"; {args.note}" if args.note else ""),
                       vertical_epsg=vert)
         print(f"wrote {tif}  ({data.shape[1]} x {data.shape[0]} cells at {h['cellsize']:g} m, "
               f"{int(np.isfinite(data).sum())} with data)")

@@ -197,7 +197,10 @@ TOWER_EN = (420085.05, 4638322.39)
 SEAM_NORTHING = 4638415.0
 DISTANCE_BINS = (0, 100, 150, 200, 250, 300, 400, 600, 1e9)
 BAND = 0.5                       # elevation band width, m
-NOMINAL_EPSG = 32619             # as asc_to_geotiff.py writes the DEM
+# The horizontal EPSG of the difference GeoTIFF when this script runs on its own: NAD83(2011) / UTM 19N, the frame
+# of the surveys and of our grids (survey_products.py always passes its DEM's, GEOTIFF_EPSG = 6348). Until Oct 2026
+# it was 32619 (WGS 84 / UTM 19N), a NOMINAL tag from an old .prj; --epsg 32619 still writes it (labelled nominal).
+DEFAULT_EPSG = 6348
 MIN_BAND_N = 10                  # fewer values than this in a group: flagged as few
 MIN_SPREAD_N = 3                 # fewer than this: no NMAD / p5 / p95 (one value has NMAD 0)
 TIME_GAP_WARN_DAYS = 3
@@ -339,8 +342,9 @@ def _num(s):
 def read_points(path):
     """
     Point survey -> dict(E, N, Z, name, code, desc, format, crs, skipped).
-    Emlid Flow CSV, CIRN 'num,E,N,Z' (no header) or a CSV with E/N/Z,
-    x/y/z or Easting/Northing/Elevation headers.
+    Emlid Flow CSV, CIRN 'num,E,N,Z' (no header; the target name in the first
+    column may be any text, e.g. T1 or GCP-3) or a CSV with E/N/Z, x/y/z or
+    Easting/Northing/Elevation headers.
     """
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = [r for r in csv.reader(f) if any(c.strip() for c in r)]
@@ -349,7 +353,9 @@ def read_points(path):
     out = {"E": [], "N": [], "Z": [], "name": [], "code": [], "desc": [], "crs": [],
            "skipped": 0}
     first = rows[0]
-    if len(first) >= 4 and all(_num(c) is not None for c in first[:4]):
+    # CIRN when the first row's E, N, Z are numbers: only the coordinates must be (a target named
+    # 'T1' took the file for a header and failed); a header row has words there
+    if len(first) >= 4 and all(_num(c) is not None for c in first[1:4]):
         out["format"] = "CIRN targets (num,E,N,Z; no header)"
         for r in rows:
             v = [_num(c) for c in r[:4]]
@@ -463,12 +469,14 @@ def subset_contours(c, m):
     return out
 
 
-def dem_frame_selection(cont, info):
+def dem_frame_selection(cont, info, inside=None):
     """
     Which waterline points belong to frames the DEM gridded, from the DEM's own STEM_info.json
     (dem_from_contours.py): its wave filter (a frame with offshore Hs > max_hs is left out; one
     with no wave record is kept, as there) and the camera-days its day-consistency check rejected
     (local days, as it counts them). Its date window is applied when the lines are read.
+    inside: the points that are compared (the photo dates; None: all), over which the frames kept
+    are counted against the DEM's own count.
     -> (mask over the points or None, {reason: [frames left out]}, note).
     """
     if not info:
@@ -492,16 +500,20 @@ def dem_frame_selection(cont, info):
                 key_of[f_] = f"{c_} {local_day(e_)}" if np.isfinite(e_) else None
         bad = np.array([key_of[f_] in rej for f_ in cont["frame"].tolist()], bool) & keep
         if bad.any():
-            why[f"camera-days off the rest by > {filt.get('max_day_offset')} m"] = \
-                sorted(set(cont["frame"][bad].tolist()))
+            # each day by its own reason (the iterative test's record: a day left out within the
+            # limit of the kept days is not 'off the rest'), worded as the DEM page words it
+            from dem_figure import day_test_reason
+            for f_ in sorted(set(cont["frame"][bad].tolist())):
+                why.setdefault(day_test_reason(filt, key_of[f_]), []).append(f_)
         keep &= ~bad
     notes = []
     other = int(filt.get("excluded_frames") or 0) + int(filt.get("frames_rejected") or 0)
     if other:
         notes.append(f"the DEM also left out {other} frame(s) by name or by a frame-offset test: not "
-                     f"reproduced here, so they are still compared")
+                     f"reproduced here, so any of them inside the photo dates is still compared")
     kept = {}
-    for f_, c_ in set(zip(cont["frame"][keep].tolist(), cont["cam"][keep].tolist())):
+    cmp_ = keep if inside is None else keep & inside
+    for f_, c_ in set(zip(cont["frame"][cmp_].tolist(), cont["cam"][cmp_].tolist())):
         kept[c_] = kept.get(c_, 0) + 1
     dem_n = {k: int(v) for k, v in (info.get("frames") or {}).items()}
     if dem_n and kept != dem_n:
@@ -1030,11 +1042,14 @@ def dem_setup(dem_path, dem_info=None):
     return None, None, "no provenance.json or info file next to the DEM says which C built it"
 
 
-def setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info=None):
+def setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info=None, dirs=()):
     """
     A survey that a setup coefficient was fitted to (survey_products.SETUP_FITS, matched as
     survey_products.py does: by content, file name, the shots' coordinates, then type and date)
     cannot test a DEM built with that C: CIRCULAR, unless the DEM says it carries no setup.
+    The fit's own shots (for the coordinates) are looked for in the survey's folder, `dirs` and the
+    station's survey folders (survey_products.DEFAULT_SURVEY_DIRS), as survey_products.py looks:
+    never in the current folder, so the label does not depend on where the command is run.
     -> findings as audit_label's.
     """
     try:
@@ -1044,8 +1059,9 @@ def setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info
     found = []
     built, has_setup, src = dem_setup(dem_path, dem_info)
     # where the fit's own shots may be, for the coordinate match (a re-export changes the bytes)
-    look = argparse.Namespace(survey_dirs=[str(Path(survey_path).resolve().parent), str(HERE / "surveys"),
-                                           str(HERE / "calibration")])
+    look = argparse.Namespace(survey_dirs=list(dict.fromkeys(
+        [str(Path(survey_path).resolve().parent)] + [str(d) for d in dirs]
+        + [str(d) for d in sp.DEFAULT_SURVEY_DIRS])))
     for coef, fit in sorted(sp.SETUP_FITS.items()):
         try:
             how, why = sp.survey_matches_fit(dict(fit, kind="known"),
@@ -1166,7 +1182,7 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
                     f"{k} = {v}" for k, v in env[:3]), "note"))
         break
     if setup_fits:
-        found += setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info)
+        found += setup_fit_findings(survey_path, survey_type, survey_date, dem_path, dem_info, dirs=dirs)
     return found
 
 
@@ -1558,9 +1574,11 @@ def draw_figure(path, ctx):
         if ctx["survey_type"] == "dsm":
             nosurvey = np.isfinite(dem) & ~np.isfinite(ctx["diff"])
             face = np.where(nosurvey, 1.0, np.nan)
-            ax.imshow(face, extent=ext, origin="upper", cmap=ListedColormap([BLANK_FACE]),
-                      interpolation="nearest", zorder=1)
             if nosurvey.any():
+                # drawn only when a cell is there, with its own limits: an all-empty image makes matplotlib 3.3
+                # autoscale over nothing ('converting a masked element to nan')
+                ax.imshow(face, extent=ext, origin="upper", cmap=ListedColormap([BLANK_FACE]), vmin=0.0, vmax=2.0,
+                          interpolation="nearest", zorder=1)
                 k = 4
                 up = np.kron(nosurvey.astype(float), np.ones((k, k)))
                 xs = xll + (np.arange(ncols * k) + 0.5) * cell / k
@@ -1731,7 +1749,7 @@ def draw_figure(path, ctx):
 def compare(dem_path, survey_path, survey_type, label, why, name=None, output_dir=".",
             survey_date=None, photo_dates=None, contours=None, camera_eo=None, camera_io=None,
             spread=None, count=None, envelope_source=None, min_cover=0.5, tolerance=1.0,
-            epsg=NOMINAL_EPSG, plot=True, transect_tolerance=TRANSECT_TOLERANCE,
+            epsg=DEFAULT_EPSG, plot=True, transect_tolerance=TRANSECT_TOLERANCE,
             transect_split=TRANSECT_SPLIT, transect_min_points=TRANSECT_MIN_POINTS, eo_dirs=None,
             synthetic=None):
     """
@@ -1792,18 +1810,33 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     cont_out, out_why, sel_note = None, {}, ""
     if contours:
         print(f"waterlines        : reading {contours} ...")
-        cont = read_contours(contours, *(photo_dates or (None, None)))
-        print(f"waterlines        : {len(cont['E'])} georectified points"
+        lo_, hi_ = photo_dates or (None, None)
+        w0, w1 = (dem_info or {}).get("window_start"), (dem_info or {}).get("window_end")
+        # the frames the DEM left out are looked for over its whole window: the photo dates are its
+        # first and last GRIDDED days, and a frame it left out before or after them is still one it
+        # left out (the DEM's own count of them covers the window)
+        rlo = min(lo_, w0) if (lo_ and w0) else (None if w0 else lo_)
+        rhi = max(hi_, w1) if (hi_ and w1) else (None if w1 else hi_)
+        cont = read_contours(contours, rlo, rhi)
+        inside = np.ones(len(cont["E"]), bool)
+        if lo_:
+            inside &= cont["day"] >= lo_
+        if hi_:
+            inside &= cont["day"] <= hi_
+        print(f"waterlines        : {int(inside.sum())} georectified points"
               + (f" {photo_dates[0]} to {photo_dates[1]}" if photo_dates else ""))
         # the statistics are those of the frames the DEM gridded; the frames it left out (high waves,
         # rejected camera-days: the largest setups, where C and the still water err most) are
         # reported apart, so the lines and the DEM are judged on the same frames
-        sel, out_why, sel_note = dem_frame_selection(cont, dem_info)
+        sel, out_why, sel_note = dem_frame_selection(cont, dem_info, inside)
         if sel is not None and not sel.all():
             cont_out = subset_contours(cont, ~sel)
-            cont = subset_contours(cont, sel)
+            cont = subset_contours(cont, sel & inside)
             print(f"waterlines        : {len(set(cont_out['frame'].tolist()))} frame(s) the DEM left out are "
                   f"compared apart (" + "; ".join(f"{k}: {len(v)}" for k, v in out_why.items()) + ")")
+        elif not inside.all():
+            # nothing the DEM left out: only the lines outside the photo dates (read for that search) go
+            cont = subset_contours(cont, inside)
         if sel_note:
             print(f"NOTE: {sel_note}")
     cell_cam = cell_majority_camera(cont, xll, ytop, cell, nrows, ncols) \
@@ -2297,7 +2330,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             fs = {"dem_frames": int(len(set(cont["frame"].tolist()))),
                   "left_out_frames": int(len(set(cont_out["frame"].tolist()))) if cont_out is not None else 0,
                   "left_out_why": {k: len(v) for k, v in out_why.items()}, "note": sel_note or None}
-            why_txt = "; ".join(f"{v} with {k}" for k, v in fs["left_out_why"].items())
+            from dem_figure import frames_left_out_text
+            why_txt = frames_left_out_text(fs["left_out_why"])
             lines.append(f"  FRAMES: the statistics above are on the {fs['dem_frames']} frames the DEM gridded "
                          f"(its own filters, from {info_p.name})"
                          + (f"; it left out {fs['left_out_frames']} frame(s) ({why_txt}), compared apart below"
@@ -2575,8 +2609,9 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             fsx = hw.get("frame_set") or {}
             if fsx.get("left_out_frames"):
                 lo = fsx.get("left_out_on_survey") or {}
+                from dem_figure import frames_left_out_text
                 box.append(f"  {fsx['dem_frames']} frames the DEM gridded; {fsx['left_out_frames']} it left out ("
-                           + ", ".join(f"{v} {k}" for k, v in (fsx.get("left_out_why") or {}).items()) + ")"
+                           + frames_left_out_text(fsx.get("left_out_why")) + ")"
                            + (f": {lo['median']:+.3f} m on the survey (n {lo['n']})" if lo.get("n") else ""))
         box += ["", "\n".join(textwrap.wrap(gap_text, 78))]
         if synthetic:
@@ -2645,9 +2680,12 @@ def main():
                          f"(default {TRANSECT_MIN_POINTS})")
     ap.add_argument("--eo-dirs", nargs="+", default=None,
                     help="folders where the files an EO's notes name are looked for (the fit a carried "
-                         "*_corr_EO.yaml came from); default: the EO's own folder and calibration/")
-    ap.add_argument("--epsg", type=int, default=NOMINAL_EPSG,
-                    help="horizontal EPSG written into the difference GeoTIFF (default 32619)")
+                         "*_corr_EO.yaml came from), and the shots a setup coefficient was fitted to; default: "
+                         "the EO's own folder and calibration/ (the shots: the survey's folder and the station's "
+                         "survey folders)")
+    ap.add_argument("--epsg", type=int, default=DEFAULT_EPSG,
+                    help="horizontal EPSG written into the difference GeoTIFF (default 6348 = NAD83(2011) / UTM 19N; "
+                         "32619, WGS 84, the default until Oct 2026, is written as a nominal tag)")
     ap.add_argument("--synthetic", default=None, metavar="NOTE",
                     help="the DEM was built from SYNTHETIC test photos (e.g. the test fixture): every output "
                          "says so ('SYNTHETIC FIXTURE: tests the pipeline, not the beach') with this note")

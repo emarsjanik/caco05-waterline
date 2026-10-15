@@ -46,9 +46,17 @@ HOW: WATER LEVEL
     The transfer with the lower extrapolation RMS is used; each statistic
     is also given for daytime hours only (13.5-18 UTC, the hours whose
     photos are used). sigma_m of a transferred reading is the chosen
-    method's extrapolation RMS (the larger of all-hours and daytime);
-    sigma_m of an ADCP reading is its white-noise level. Neither includes
-    the datum (shared by every row; see the report).
+    method's extrapolation RMS (the larger of all-hours and daytime): of
+    the test predicting on the period's side of the fit window when the
+    period lies wholly before or after it (October: the backward test,
+    RMS 0.095 m, bias +0.037 m, reaching 23 days, while October lies 44-51
+    days out: FURTHER THAN TESTED, flagged in forcing.json and the report),
+    else of both tests pooled. sigma_m of an ADCP reading is its white-
+    noise level. Neither includes the datum (shared by every row; see the
+    report). The transfer error is not white: the mean error of a whole
+    left-out week (13.5-18 UTC) spans about -0.09..+0.10 m (RMS 0.05 m),
+    and a week-long survey window carries one such mean in every frame
+    (forcing.json water_level.week_mean_error).
 
 HOW: WAVES, AND THE "CURRENCY" OF THE SETUP COEFFICIENT
   C = 0.037 (waterline_timex_cron.sh, fitted 8 Oct 2026 on 29 Sep - 5 Oct
@@ -100,7 +108,8 @@ MEASURED ON THE REAL RECORDS (Oct 2024 - Mar 2025 files, Oct 2026):
            0.139), extrapolation RMS 0.174 m (daytime 0.143)
   harmonic M2 ratio 1.48, Marconi 70 min ahead, residual x 0.85: CV RMS
            0.076 m (daytime 0.074), extrapolation RMS 0.085 m (daytime 0.081)
-  -> harmonic, sigma_m 0.085 m. Waves: ADCP Tp / WIS Tp 1.06 (r 0.67), so
+  -> harmonic, sigma_m 0.085 m (0.095 m before the ADCP record: the
+  backward test alone, bias +0.037 m). Waves: ADCP Tp / WIS Tp 1.06 (r 0.67), so
   setup from the ADCP's own period sits +0.02 m (median) above setup from
   an open-ocean period. WIS ends 2024-12-31, so its conversion rests on
   534 h of December overlap only.
@@ -133,6 +142,7 @@ Library:
     info = build_forcing("2025-01-16", "2025-01-24", out_dir)   # forcing.json + file paths
 """
 
+import re
 import sys
 import json
 import time
@@ -349,16 +359,183 @@ def daytime(ep):
     return (h >= DAYTIME_UTC[0]) & (h <= DAYTIME_UTC[1])
 
 
+def beyond_record_days(t0, t1, a_ep):
+    """(nearest, farthest) days of [t0, t1) outside the ADCP record, or None when it overlaps it."""
+    if not len(a_ep):
+        return None
+    if t1 <= a_ep[0]:
+        return ((a_ep[0] - t1) / 86400.0, (a_ep[0] - t0) / 86400.0)
+    if t0 > a_ep[-1]:
+        return ((t0 - a_ep[-1]) / 86400.0, (t1 - a_ep[-1]) / 86400.0)
+    return None
+
+
+TEST_LABEL = re.compile(r"fit (\S+)\.\.(\S+) -> predict (\S+)\.\.(\S+)")
+
+
+def test_reach(label):
+    """('before' or 'after', nearest, farthest) days an extrapolation test predicts beyond its own
+    fit window, from its label ('fit A..B -> predict C..D', as forcing.json records it); None when
+    the label is not one or the test predicts inside its fit window."""
+    m = TEST_LABEL.search(str(label or ""))
+    if not m:
+        return None
+    f0, f1, s0, s1 = (float(to_epoch([x])[0]) for x in m.groups())
+    # whole days as int: round() of a numpy float stays a float on numpy 1.17 (the station's), '0.0-23.0'
+    if s1 <= f0:
+        return ("before", int(round((f0 - s1) / 86400.0)), int(round((f0 - s0) / 86400.0)))
+    if s0 >= f1:
+        return ("after", int(round((s0 - f1) / 86400.0)), int(round((s1 - f1) / 86400.0)))
+    return None
+
+
+def extrapolation_reach_days():
+    """How far beyond its own fit window each fixed extrapolation test predicts, in days:
+    [(nearest, farthest), ...] (EXTRAPOLATION_TESTS: 0-23 days before and 0-29 days after). The
+    extrapolation RMS is measured over that reach only."""
+    out = []
+    for fs, fe, ts, te in EXTRAPOLATION_TESTS:
+        r = test_reach(f"fit {fs}..{fe} -> predict {ts}..{te}")
+        out.append((r[1], r[2]) if r else (0, 0))
+    return out
+
+
+def fmt3(v):
+    """0.123 for a number, 'n/a' for None (a test with no daytime hours has no daytime RMS)."""
+    return "n/a" if v is None else f"{float(v):.3f}"
+
+
+def transfer_reach(wl, t0, t1):
+    """What the extrapolation tests say about the transferred levels of the period [t0, t1) (epochs or
+    UTC strings), from forcing.json's water_level ALONE (fit_window, method, methods.<m>.
+    extrapolation_tests), so survey_products.py words a README right from a forcing.json written by an
+    older historical_forcing.py too. A period on one side of the fit window is judged by the tests
+    that predict on THAT side: the pooled RMS mixed in the other side's test (October, before the
+    record, was given the forward test's smaller error, and no bias), and the farthest reach of
+    either test was taken as the bound (the backward test reaches 23 days, not 29). -> dict:
+      side          'before' / 'after' the transfer's fit window; None when the period overlaps it
+                    (a hole inside the record: the pooled RMS stands) or there is no fit window
+      beyond_days   (nearest, farthest) days of the period beyond the fit window
+      tests         the chosen method's tests predicting on that side: [{test, reach_days, n, rms_m,
+                    rms_daytime_m, bias_m}] (bias = transfer - ADCP: + reads high)
+      reach_days    the farthest those tests predict beyond their own fit windows (None: none ran)
+      beyond_tested the period lies further out than that: its error is not measured
+      sigma_m       the larger of the all-hours and daytime RMS of those tests (None: none ran)
+      basis         where sigma_m comes from, in words"""
+    out = {"side": None, "beyond_days": None, "tests": [], "reach_days": None, "beyond_tested": False,
+           "sigma_m": None, "basis": None}
+    fw = (wl or {}).get("fit_window") or []
+    if len(fw) != 2:
+        return out
+    t0, t1 = (to_epoch([x])[0] if isinstance(x, str) else float(x) for x in (t0, t1))
+    f0, f1 = to_epoch(list(fw))
+    if t1 <= f0:
+        side, near, far = "before", (f0 - t1) / 86400.0, (f0 - t0) / 86400.0
+    elif t0 > f1:
+        side, near, far = "after", (t0 - f1) / 86400.0, (t1 - f1) / 86400.0
+    else:
+        return out
+    out.update(side=side, beyond_days=(round(near, 1), round(far, 1)))
+    m = ((wl.get("methods") or {}).get(wl.get("method")) or {})
+    for t in m.get("extrapolation_tests") or []:
+        r = test_reach(t.get("test"))
+        if r is None or r[0] != side or "skipped" in t or t.get("rms_m") is None:
+            continue
+        out["tests"].append({"test": t["test"], "reach_days": [r[1], r[2]], "n": t.get("n"),
+                             "rms_m": t.get("rms_m"), "rms_daytime_m": t.get("rms_daytime_m"),
+                             "bias_m": t.get("bias_m")})
+    if not out["tests"]:
+        out["basis"] = (f"no extrapolation test predicting {side} its fit window ran: the pooled RMS of the "
+                        "tests that did")
+        return out
+    out["reach_days"] = max(t["reach_days"][1] for t in out["tests"])
+    out["beyond_tested"] = far > out["reach_days"] + 0.5
+    out["sigma_m"] = max(v for t in out["tests"] for v in (t["rms_m"], t["rms_daytime_m"]) if v is not None)
+    word = "backward" if side == "before" else "forward"
+    out["basis"] = (f"the {word} extrapolation test" + ("s" if len(out["tests"]) > 1 else "") + " ("
+                    + "; ".join(f"{t['test']}, {t['reach_days'][0]}-{t['reach_days'][1]} days {side} its fit "
+                                f"window: RMS {t['rms_m']:.3f} m, daytime {fmt3(t['rms_daytime_m'])}, bias "
+                                f"{t['bias_m']:+.3f}" for t in out["tests"])
+                    + "), the larger RMS: the period lies " + side + " the fit window"
+                    + (f", {near:.0f}-{far:.0f} days out, FURTHER THAN TESTED (the error there is not measured)"
+                       if out["beyond_tested"] else ""))
+    return out
+
+
+def beyond_tested_text(rch):
+    """The FURTHER THAN TESTED sentence of a transfer_reach() result (report, forcing.json, README)."""
+    side, (near, far), t = rch["side"], rch["beyond_days"], rch["tests"]
+    word = "backward" if side == "before" else "forward"
+    return (f"this period lies {near:.0f}-{far:.0f} days {side} the transfer's fit window, further than the "
+            f"{word} extrapolation test reaches ("
+            + ", ".join(f"{x['reach_days'][0]}-{x['reach_days'][1]}" for x in t)
+            + f" days {side} its fit window, where it scored RMS {rch['sigma_m']:.3f} m, bias "
+            + ", ".join(f"{x['bias_m']:+.3f}" for x in t)
+            + " m): the transfer's error here is not measured and may exceed that RMS")
+
+
+def week_mean_error(t, r, min_hours=48, min_day_hours=10):
+    """The error a whole week of transferred levels shares: the mean residual of each ISO week with at
+    least min_hours hours, over its daytime hours (13.5-18 UTC, the hours whose photos are used), of
+    the leave-one-week-out predictions (each week predicted from the others). A survey window's DEM
+    carries ONE such mean in every frame: it is not averaged away by the number of frames.
+    -> {weeks, rms_m, min_m, max_m} or None."""
+    t, r = np.asarray(t, float), np.asarray(r, float)
+    ok = np.isfinite(r)
+    if not ok.any():
+        return None
+    wk = iso_week(t)
+    day = daytime(t)
+    means = []
+    for w in np.unique(wk[ok]):
+        k = ok & (wk == w)
+        kd = k & day
+        if k.sum() >= min_hours and kd.sum() >= min_day_hours:
+            means.append(float(np.mean(r[kd])))
+    if not means:
+        return None
+    a = np.array(means)
+    return {"weeks": len(a), "rms_m": round(float(np.sqrt(np.mean(a ** 2))), 4),
+            "min_m": round(float(a.min()), 4), "max_m": round(float(a.max()), 4)}
+
+
+def reach_note_lines(wl_info):
+    """The report's NOTE on how far the transfer's error was measured, and whether this period lies
+    further out (an earlier text said 'measured 0-9 weeks from its fit window': the tests reach 0-23
+    days before and 0-29 days after theirs)."""
+    reach = wl_info.get("extrapolation_reach_days") or [list(r) for r in extrapolation_reach_days()]
+    sides = []
+    for (fs, fe, ts, te), (a, b) in zip(EXTRAPOLATION_TESTS, reach):
+        r = test_reach(f"fit {fs}..{fe} -> predict {ts}..{te}")
+        sides.append(f"{a}-{b} days {r[0] if r else 'beyond'}")
+    lines = ["NOTE              : the 2026 GNSS-R fit was a 1.24, lag -48 min, b -0.10 (marconi_water_level.py",
+             "                    DEFAULT_FIT): the transfer changes with time (inlet and harbour change),",
+             "                    so the error for a date months from the overlap can exceed the",
+             "                    extrapolation RMS, which is measured on predictions " + " and ".join(sides),
+             "                    their fit windows."]
+    wm = wl_info.get("week_mean_error")
+    if wm:
+        lines += ["WEEK-MEAN ERROR   : one week's mean transfer error (each week left out and predicted from",
+                  f"                    the rest, 13.5-18 UTC): {wm['min_m']:+.3f} .. {wm['max_m']:+.3f} m, RMS "
+                  f"{wm['rms_m']:.3f} m over {wm['weeks']} weeks.",
+                  "                    A survey window's DEM carries one such mean in every frame (not averaged away)."]
+    if wl_info.get("beyond_tested"):
+        lines.append(f"FURTHER THAN TESTED: {wl_info['beyond_tested']}.")
+    return lines
+
+
 def relation(t0, t1, a_ep, max_gap_s):
     """Where [t0, t1) lies relative to the ADCP record, in words (from its coverage, so a
     hole inside the record counts as not measured)."""
     frac = float(covered(a_ep, np.arange(t0, t1, 360.0), max_gap_s).mean())
     if frac >= 1.0:
         return "inside the ADCP record (water level measured)"
+    # both ends of the period: its first day lies further out than its last (or the other way)
+    b = beyond_record_days(t0, t1, a_ep)
     if t1 <= a_ep[0]:
-        return f"{(a_ep[0] - t1) / 86400.0:.0f} days BEFORE the ADCP record (transfer extrapolated)"
+        return f"{b[0]:.0f}-{b[1]:.0f} days BEFORE the ADCP record (transfer extrapolated)"
     if t0 > a_ep[-1]:
-        return f"{(t0 - a_ep[-1]) / 86400.0:.0f} days AFTER the ADCP record (transfer extrapolated)"
+        return f"{b[0]:.0f}-{b[1]:.0f} days AFTER the ADCP record (transfer extrapolated)"
     return (f"{100 * frac:.0f}% covered by the ADCP (measured there, transferred elsewhere)" if frac > 0
             else "inside a hole in the ADCP record (transfer used)")
 
@@ -706,11 +883,24 @@ def water_level(t0, t1, a_ep, a_lv, gauge, fit_window, max_gap_s, method_choice,
         ex = m["extrapolation_pooled"]
         cand = [v for v in (ex.get("rms_m"), ex.get("rms_daytime_m")) if v is not None]
         sigma = max(cand) if cand else m["cv"]["rms_m"]
+        basis = "the pooled extrapolation tests, the larger of all hours and daytime RMS"
         info.update(method=chosen, why=why, params=m["params"], cv_rms_m=m["cv"]["rms_m"],
                     cv_rms_daytime_m=m["cv"]["rms_daytime_m"], extrapolation_rms_m=ex.get("rms_m"),
                     extrapolation_rms_daytime_m=ex.get("rms_daytime_m"),
-                    extrapolation_bias_m=ex.get("bias_m"), transfer_sigma_m=sigma)
-        say("transfer used", f"{chosen} ({why}); sigma {sigma:.3f} m per transferred reading")
+                    extrapolation_bias_m=ex.get("bias_m"))
+        # a period on one side of the fit window gets the error of the test(s) predicting on that side
+        # (October, before the record: the backward test, RMS 0.095 m, bias +0.037), not the pooled one
+        rch = transfer_reach(info, t0, t1)
+        if rch["sigma_m"] is not None:
+            sigma, basis = rch["sigma_m"], rch["basis"]
+        info.update(transfer_sigma_m=sigma, transfer_sigma_basis=basis,
+                    transfer_sigma_measured=not rch["beyond_tested"],
+                    week_mean_error=week_mean_error(*plot["cv_resid"][chosen]))
+        say("transfer used", f"{chosen} ({why}); sigma {sigma:.3f} m per transferred reading ({basis})")
+        if info["week_mean_error"]:
+            wm = info["week_mean_error"]
+            say("week-mean error", f"{wm['min_m']:+.3f} .. {wm['max_m']:+.3f} m, RMS {wm['rms_m']:.3f} over "
+                f"{wm['weeks']} weeks (left out, 13.5-18 UTC): shared by every frame of a week-long window")
     elif gauge is not None:
         say("transfer fit", f"only {fw.sum()} ADCP hours overlap Chatham in the fit window: "
                             f"no transfer fitted")
@@ -1090,7 +1280,7 @@ def currency_note(fits, coef, swr=None):
     else:
         lines = [
             f"Setup coefficient C = {coef} was given by the caller: where and in which wave currency it",
-            f"was fitted is not known here. The statements below assume it was fitted like the live",
+            "was fitted is not known here. The statements below assume it was fitted like the live",
             f"C = {SETUP_COEF} (ADCP-currency Hs, NDBC 44008 peak periods, lines at the GNSS-R level).",
             "The WIS hindcast stands in for 44008:",
         ]
@@ -1104,8 +1294,9 @@ def currency_note(fits, coef, swr=None):
         bias = w.get("_setup_bias")
         if bias is not None:
             lines.append(f"  => setup from the ADCP period is {bias:+.3f} m (median) relative to setup "
-                         f"from an open-ocean peak period; historical products are expected to sit")
-            lines.append("     that much higher than the live currency would put them (not corrected).")
+                         f"from an open-ocean peak period; historical products' lines are expected to sit")
+            lines.append("     that much higher than the live currency would put them, their DEM about 0.6-0.8 x that")
+            lines.append("     once re-projected (not corrected).")
     else:
         lines.append("  (no WIS overlap given: the Tp currency bias could not be estimated)")
     return lines + [""] + lines_ref, bias
@@ -1261,12 +1452,13 @@ def write_report(path, args_echo, wl_info, wv_info, fits, wl_df, wv_df, cur_line
         P(f"USED              : {wl_info.get('method')} -- {wl_info.get('why')}")
         if wl_info.get("period_vs_adcp"):
             P(f"This period       : {wl_info['period_vs_adcp']}")
-        P(f"sigma_m transfer  : {wl_info.get('transfer_sigma_m')} m (larger of the pooled extrapolation "
-          f"RMS, all hours and daytime)")
-        P("NOTE              : the 2026 GNSS-R fit was a 1.24, lag -48 min, b -0.10 (marconi_water_level.py")
-        P("                    DEFAULT_FIT): the transfer changes with time (inlet and harbour change),")
-        P("                    so the error for a date months from the overlap can exceed the")
-        P("                    extrapolation RMS, which is measured 0-9 weeks from its fit window.")
+        P(f"sigma_m transfer  : {wl_info.get('transfer_sigma_m')} m"
+          + (" -- NOT MEASURED this far out (see FURTHER THAN TESTED)"
+             if wl_info.get("transfer_sigma_measured") is False else ""))
+        if wl_info.get("transfer_sigma_basis"):
+            P(f"                    from {wl_info['transfer_sigma_basis']}")
+        for line in reach_note_lines(wl_info):
+            P(line)
     P("")
     if wl_info.get("chatham_downloaded"):
         P("Chatham record    : downloaded from NOAA CO-OPS for this run (inputs.chatham in forcing.json)")
@@ -1300,7 +1492,8 @@ def write_report(path, args_echo, wl_info, wv_info, fits, wl_df, wv_df, cur_line
         if rw:
             P(f"   unconverted (own Hs and Tp): setup bias {rw['bias_median_m']:+.3f} m (median), RMS "
               f"{rw['rms_m']:.3f} m against the ADCP's setup")
-        P(f"   -> uses Hs {f['hs_best']}, Tp {f['tp_best']}: setup (C={wv_info['setup_coef']}) CV RMS "
+        P(f"   -> uses Hs {f['hs_best']}, Tp {f['tp_best']}: setup "
+          f"(C={wv_info.get('conversions_judged_with_c', wv_info['setup_coef'])}) CV RMS "
           f"{sc['rms_m']:.3f} m, bias {sc['bias_m']:+.3f} m (ADCP setup median {f['setup_median_adcp_m']:.3f} m)")
     c = wv_info.get("combination", {})
     if c.get("sources"):
@@ -1621,6 +1814,18 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
     if len(a_ep):
         wl_info["period_vs_adcp"] = relation(t0, t1, a_ep, max_gap_s)
         say("period vs ADCP", wl_info["period_vs_adcp"])
+        # how far the extrapolation tests reach, and whether this period lies further out
+        reach = extrapolation_reach_days()
+        wl_info["extrapolation_reach_days"] = [list(r) for r in reach]
+        bd = beyond_record_days(t0, t1, a_ep)
+        if bd is not None:
+            wl_info["beyond_record_days"] = [round(bd[0], 1), round(bd[1], 1)]
+        # judged by the test(s) predicting on the period's side of the fit window (for a period before
+        # the record the backward test, reaching 23 days; not the farthest reach of either test)
+        rch = transfer_reach(wl_info, t0, t1)
+        if rch["beyond_tested"]:
+            wl_info["beyond_tested"] = beyond_tested_text(rch)
+            say("extrapolation", wl_info["beyond_tested"])
     if needs_transfer and gauge is None:
         say("WARNING", "the period is not all inside the ADCP record and there is no Chatham record")
     if len(wl_df) == 0 or not (wl_df["ep"] < t1).any() or not (wl_df["ep"] >= t0).any():
@@ -1650,7 +1855,12 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
     if adcp_w is None and sources:
         say("WARNING", "no ADCP wave record (sig1000_waves_ALL.csv): the hindcast/buoy cannot be "
                        "converted to the setup coefficient's Hs currency, so they are not used")
-    fits = fit_wave_sources(adcp_w, sources, setup_coef) if adcp_w is not None else {}
+    # The conversions are chosen by the setup error they cause. With C = 0 there is no setup and so nothing to
+    # choose by (every model scored 0): they are judged with the station's C instead, so a C = 0 build (a
+    # sensitivity, or the lines a C is refitted on) is in the same wave currency as the C build it is compared
+    # with (until Oct 2026 it took the first model listed: Hs linear, Tp raw, WIS Tp bias -0.35 s)
+    judge_c = setup_coef if setup_coef else SETUP_COEF
+    fits = fit_wave_sources(adcp_w, sources, judge_c) if adcp_w is not None else {}
     for n, f in fits.items():
         if "setup_cv" in f:
             say(f"  {n}", f"Hs {f['hs_best']} CV RMS {f['hs_models'][f['hs_best']]['rms_m']:.3f} m, Tp "
@@ -1661,7 +1871,7 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
         s, a = align(sources["wis"], adcp_w)
         fits["wis"]["_setup_bias"] = float(np.nanmedian(setup_m(a["hs"], a["tp"], setup_coef)
                                                         - setup_m(a["hs"], s["tp"], setup_coef)))
-    combo = combine_sources(fits, setup_coef)
+    combo = combine_sources(fits, judge_c)
     wv_df, wv_uncov = waves(t0, t1, adcp_w, sources, fits, combo, max_gap_s)
     swr = gnssr_setup_share(setup_coef, gnssr_spline, gauge_archive, waves_archive) if setup_coef else None
     if swr and swr.get("quantified"):
@@ -1675,7 +1885,8 @@ def build_forcing(start, end, out_dir, adcp=None, adcp_navd88=None, chatham=None
         say("  combined", f"Hs {'+'.join(combo['sources'])} CV RMS {combo['hs_blend_cv']['rms_m']:.3f} m, "
             f"Tp from {combo['tp_order'][0]} -> setup CV RMS {combo['setup_blend_cv']['rms_m']:.3f} m, bias "
             f"{combo['setup_blend_cv']['bias_m']:+.3f} m ({combo['common_hours']} h shared)")
-    wv_info = {"setup_coef": setup_coef, "sources_used": {k: int(v) for k, v in wv_df["source"].value_counts().items()},
+    wv_info = {"setup_coef": setup_coef, "conversions_judged_with_c": judge_c,
+               "sources_used": {k: int(v) for k, v in wv_df["source"].value_counts().items()},
                "daytime_rows_by_source": count_daytime(wv_df, t0, t1),
                "source_labels": {k: readable_source(k) for k in dict.fromkeys(wv_df["source"])},
                "uncovered_spans": wv_uncov, "combination": combo,

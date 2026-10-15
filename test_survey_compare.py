@@ -18,8 +18,15 @@ fitted to the survey, an envelope placed with it, a GCP calibration
 dated the survey day and a long time gap.
 
 HOW. Every test writes into a temporary folder (--keep DIR to look at
-the outputs, figures included) and asserts on the returned headline and
-on the files.
+the outputs, figures included: a new folder inside DIR) and asserts on the
+returned headline and on the files.
+
+STATION FILES. None are read: the temporary folder is the current folder
+for the run, the station's survey folders (where survey_compare.py looks
+for the shots a setup coefficient was fitted to) are pointed at folders
+of the test's own, and every calibration file a test uses is copied next
+to its EO. The outcome is the same on the station NUC as in a clean
+checkout.
 """
 
 import os
@@ -163,14 +170,16 @@ def test_dsm_offset(d):
     # cells the lidar covers completely: exactly +0.20 (a part-covered cell at the water edge
     # takes the median of its dry part, biased up the slope by up to slope x cell / 4)
     g_d, _ = read_asc(out / "synth_dsm_dem_minus_survey.asc")
-    full_cells = np.isfinite(g_d) & ((dem - OFFSET) > 1.0 + 0.05 + 1e-6)
+    with np.errstate(invalid="ignore"):              # NaN cells are never full (numpy < 1.18 warns)
+        full_cells = np.isfinite(g_d) & ((dem - OFFSET) > 1.0 + 0.05 + 1e-6)
     check(full_cells.sum() > 500 and np.allclose(g_d[full_cells], OFFSET, atol=2e-4),
           f"{int(full_cells.sum())} fully covered cells: exactly +0.200")
     check(h["nmad"] < 0.01 and abs(h["mean"] - OFFSET) < 0.01, "NMAD ~ 0, mean +0.20")
     check(h["within_0.10"] == 0.0 and h["within_0.50"] == 1.0, "shares within +/-0.10 / 0.50")
     # coverage: the lidar is masked below 1.0 m, the DEM goes below that
     zdem = dem - OFFSET
-    full = np.isfinite(zdem) & (zdem > 1.0 + 0.05)
+    with np.errstate(invalid="ignore"):
+        full = np.isfinite(zdem) & (zdem > 1.0 + 0.05)
     check(h["dem_cells_compared"] >= full.sum() and h["dem_cells_compared"] < np.isfinite(dem).sum(),
           f"water-masked cells not compared ({h['dem_cells_compared']} of {h['dem_cells']})")
     check(h["dem_cells_no_survey"] > 0, "cells without survey counted")
@@ -228,6 +237,23 @@ def test_dsm_offset(d):
                    f"--name cli --output-dir {out} --label CROSS-VALIDATED --why 'cli test' "
                    f"--no-plot > {out / 'cli.log'} 2>&1")
     check(rc == 0 and (out / "cli_comparison.txt").exists(), "CLI runs (survey type from the extension)")
+
+
+def test_full_cover_figure(d):
+    print("a DSM that covers every DEM cell: the figure draws no empty 'no survey' layer (no matplotlib warning)")
+    import warnings
+    dd = Path(d) / "full_cover"
+    dd.mkdir()
+    dem_p, dem = make_dem(dd)
+    lid = make_lidar(dd, water_below=-99.0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        h, _ = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "synthetic test", name="full",
+                     output_dir=str(dd / "out"), survey_date="2025-01-23", photo_dates=("2025-01-18", "2025-01-23"))
+    masked = [str(w.message) for w in caught if "masked element" in str(w.message)]
+    check(h.get("dem_cells_no_survey") == 0 and (dd / "out" / "full_comparison.png").exists() and not masked,
+          f"every DEM cell compared ({h.get('dem_cells_compared')}): the page is drawn with no 'converting a masked "
+          f"element to nan' warning (matplotlib 3.3 gave three: an all-empty layer autoscaled over nothing)")
 
 
 def test_points(d):
@@ -296,6 +322,7 @@ def test_points(d):
     # the GCPs the calibration was solved from: PARTLY-CIRCULAR
     eo = Path(d) / "CACO03_c1_20250123_EO.yaml"
     shutil.copy(HERE / "calibration" / "CACO03_c1_20250123_EO.yaml", eo)
+    shutil.copy(HERE / "calibration" / "CACO03_c1_20240801_IO.yaml", Path(d) / "CACO03_c1_20240801_IO.yaml")
     h4, _ = quiet(sc.compare, str(dem_p), str(cirn), "points", "INDEPENDENT", "gcp test",
                   name="synth_gcp", output_dir=str(out), plot=False, camera_eo={"c1": eo})
     check(h4["suggested_label"] == "PARTLY-CIRCULAR" and h4["downgrade_warning"],
@@ -314,7 +341,11 @@ def test_label_checks(d):
     cal = Path(d) / "cal"
     cal.mkdir(exist_ok=True)
     shutil.copy(io_src, cal / "CACO05_c1_20240801_IO.yaml")
-    fit = cal / "CACO05_c1_2025-01-18_to_2025-01-23_lidar_EO.yaml"
+    # a lidar fit of the test's own, under a name fit_eo_to_survey.py never writes: the carried correction below
+    # names it, and its lineage is also looked for in the repository's calibration/, where the NUC keeps its
+    # real CACO05_c1_2025-01-18_to_2025-01-23_lidar_EO.yaml (found next to the EO first, but no station file
+    # can stand in for this one whatever the order)
+    fit = cal / "CACO05_c1_selftest_2025-01-18_to_2025-01-23_lidar_EO.yaml"
     fit.write_text("x: 420088.0\ny: 4638319.0\nz: 20.8\nazimuth: 72.0\ntilt: 71.6\nroll: -6.6\n"
                    f"# fit_eo_to_survey.py: CACO03_c1_20250123_EO.yaml with azimuth +1.0 fitted to "
                    f"{lid.name} using 40 waterline frames 2025-01-18 to 2025-01-23; position kept.\n")
@@ -336,11 +367,15 @@ def test_label_checks(d):
     check(h["suggested_label"] == "CIRCULAR" and f_ and f_[0]["kind"] == "chain" and "carries" in f_[0]["text"],
           "a pointing carried from a fit to this survey (*_corr_EO.yaml) -> CIRCULAR, a chain fact")
     lost = cal / "CACO05_c2_20250219_corr_EO.yaml"
-    lost.write_text(corr.read_text().replace(fit.name, "CACO05_c2_gone_lidar_EO.yaml"))
+    # the fit it names: a name unique to this run, as the label also looks in the repository's calibration/,
+    # where the station keeps its own fits
+    gone = f"CACO05_c2_gone_{Path(d).name}_lidar_EO.yaml"
+    lost.write_text(corr.read_text().replace(fit.name, gone))
     shutil.copy(HERE / "calibration" / "CACO05_c2_20240801_IO.yaml", cal / "CACO05_c2_20240801_IO.yaml")
     sh = sc.audit_label("INDEPENDENT", str(lid), "dsm", "2025-01-23", sc.load_cameras({"c2": lost}, {}), None,
                         str(dem_p))
-    check(any(x[0] == "CIRCULAR" and x[2] == "rule" and "cannot be" in x[1] for x in sh),
+    check(any(x[0] == "CIRCULAR" and x[2] == "rule" and "cannot be" in x[1] for x in sh)
+          and not (HERE / "calibration" / gone).exists(),
           "its fit not on this computer: CIRCULAR as a rule that can misfire")
     other = cal / "CACO05_c1_2025-03-01_to_2025-03-06_lidar_EO.yaml"
     other.write_text(fit.read_text().replace(lid.name, "2025005FA_Marconi_Mar_YSMP_Lidar_DSM_25cm.tif"))
@@ -572,6 +607,38 @@ def test_fix2(d):
     k3 = [k for k in why3 if k.startswith("camera-days")]
     check(k3 and why3[k3[0]] == ["f07", "f13", "f19", "f25"] and int((~sel3).sum()) == 10 * 40,
           "a rejected camera-day (c1 2025-01-19 local) leaves out its 4 frames (the rough one counted once)")
+    # the iterative day test's record (dem_from_contours day_test.rejected): a day left out within the limit
+    # of the kept days (taking it back would put a kept day over) is not 'off the rest by > 0.15 m'
+    dt4 = {"rejected": [{"day": "c1 2025-01-19", "how": "refused take-back", "offset_m": 0.08,
+                         "offset_at_step_m": 0.21, "why": "left out 1st; within the limit of the kept days, but "
+                                                          "taking it back would put c2 2025-01-20 over the limit"},
+                        {"day": "c2 2025-01-20", "how": "left out", "offset_m": -0.3, "offset_at_step_m": -0.3,
+                         "why": "left out 2nd: off the DEM of the other kept days by more than the limit"}],
+           "refused_take_back": [{"day": "c1 2025-01-19", "offset_m": 0.08, "would_push": ["c2 2025-01-20"]}]}
+    info4 = dict(info, filters=dict(info["filters"], camera_days_rejected=["c1 2025-01-19", "c2 2025-01-20"],
+                                    day_test=dt4))
+    sel4, why4, _ = sc.dem_frame_selection(c, info4)
+    held = [k for k in why4 if k.startswith("camera-days within")]
+    off = [k for k in why4 if k.startswith("camera-days off the rest")]
+    check(held == ["camera-days within +/-0.15 m of the kept days, left out as taking them back would put a kept day "
+                   "over"] and why4[held[0]] == ["f07", "f13", "f19", "f25"]
+          and off == ["camera-days off the rest by > 0.15 m"] and len(why4[off[0]]) == 4,
+          f"each rejected camera-day by its own reason: c1 19 Jan (refused take-back) is NOT 'off the rest', c2 20 Jan "
+          f"(left out) is, as the DEM page words them ({sorted(why4)})")
+    Path(str(dem_p).replace("_dem.asc", "_info.json")).write_text(json.dumps(info4))
+    out4 = Path(d) / "out_dt4"
+    h4, _ = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "test", name="dt4", output_dir=str(out4),
+                  survey_date="2025-01-23", photo_dates=("2025-01-18", "2025-01-23"), contours=str(cp))
+    txt4 = (out4 / "dt4_comparison.txt").read_text()
+    from dem_figure import frames_left_out_text
+    check("4 frame(s) of camera-days within +/-0.15 m of the kept days, left out as taking them back would put a kept "
+          "day over" in " ".join(txt4.split()) and "4 frame(s) of camera-days off the rest by > 0.15 m"
+          in " ".join(txt4.split()) and set(h4["waterlines"]["frame_set"]["left_out_why"]) == set(why4)
+          and frames_left_out_text({"offshore Hs > 1.5 m": 3, "camera-days off the rest by > 0.15 m": 8})
+          == "3 frame(s) with offshore Hs > 1.5 m, 8 frame(s) of camera-days off the rest by > 0.15 m",
+          "the comparison's FRAMES line and record give each reason with its frame count ('N frame(s) of camera-days "
+          "...', 'N frame(s) with offshore Hs ...': one wording, dem_figure.frames_left_out_text, for the text, the "
+          "page box and the README)")
     Path(str(dem_p).replace("_dem.asc", "_info.json")).unlink()
 
 
@@ -623,10 +690,43 @@ def test_setup_fit_label(d):
         check(f and f[0][0] == "CIRCULAR" and "carries one" in f[0][1], "... and one that does: CIRCULAR")
         other = shots(d / "other_day.csv", 9)
         check(not mine(dem_p, survey=other, date_="2026-10-15"), "other shots of another day: nothing")
+        # a re-export of the fitted shots (+4 mm east, another name, no date anywhere) is recognised by its
+        # coordinates when the fitted shots are in a station survey folder (here the test's own), and only then:
+        # never through a copy in the current folder, and the same from wherever the command is run
+        lines = rtk.read_text().splitlines()
+        def reexport(folder):
+            folder.mkdir(parents=True)
+            out = folder / "reexport.csv"
+            rows_ = list(csv.reader(lines))
+            for r in rows_[1:]:
+                r[3] = f"{float(r[3]) + 0.004:.3f}"
+            with open(out, "w", newline="") as f:
+                csv.writer(f).writerows(rows_)
+            return out
+        start = os.getcwd()
+        os.chdir(str(d / "bare"))
+        try:
+            shutil.copy(str(rtk), "fitted_shots.csv")        # a copy in the current folder: not the station's
+            f = mine(dem_p, survey=reexport(d / "rex_cwd"), date_=None)
+        finally:
+            os.chdir(start)
+        check(not f, "a re-export of the fitted shots, those shots only in the current folder: not recognised")
+        shutil.copy(str(rtk), str(Path(sp.DEFAULT_SURVEY_DIRS[0]) / "fitted_shots.csv"))
+        f = mine(dem_p, survey=reexport(d / "rex_here"), date_=None)
+        check(f and f[0][0] == "CIRCULAR" and "re-exported" in f[0][1],
+              "... the fitted shots in a station survey folder: CIRCULAR by the re-export's coordinates")
+        os.chdir(str(d / "rex_cwd"))
+        try:
+            f = mine(dem_p, survey=reexport(d / "rex_elsewhere"), date_=None)
+        finally:
+            os.chdir(start)
+        check(f and f[0][0] == "CIRCULAR" and "re-exported" in f[0][1], "... and the same run from another folder")
         h, _ = quiet(sc.compare, str(dem_p), str(rtk), "points", "INDEPENDENT", "claimed", name="sf",
                      output_dir=str(d / "out"), survey_date="2026-09-29", plot=False)
-        check(h["suggested_label"] == "CIRCULAR" and h["downgrade_warning"],
-              "survey_compare.py itself: INDEPENDENT passed for the fitted shots -> DOWNGRADE WARNING, CIRCULAR")
+        mine_ = [x for x in h["findings"] if x["suggested"] == "CIRCULAR" and "C = 0.0123" in x["text"]]
+        check(h["suggested_label"] == "CIRCULAR" and h["downgrade_warning"] and mine_,
+              "survey_compare.py itself: INDEPENDENT passed for the fitted shots -> DOWNGRADE WARNING, CIRCULAR "
+              "(by the test's fit C = 0.0123)")
     finally:
         del sp.SETUP_FITS[fake]
     check("--label CIRCULAR" in sc.__doc__ and "2026-09-27_rtk" not in sc.__doc__
@@ -634,11 +734,103 @@ def test_setup_fit_label(d):
           "the docstring's RTK example is labelled CIRCULAR (C = 0.037 was fitted to those shots)")
 
 
+def test_left_out_frames_window(d):
+    print("the frames the DEM left out are counted over its whole window, not only its gridded days")
+    dem_p, dem = make_dem(d)
+    lid = make_lidar(d, water_below=1.0)
+    out = Path(d) / "out_lowin"
+    cp = Path(d) / "contours_lowin.csv"
+    rng = np.random.default_rng(5)
+    head = ["source_file", "camera", "capture_time_utc", "capture_epoch", "tide_elevation_navd88",
+            "offshore_hs_m", "offshore_tp_s", "setup_correction_m", "beach_elevation_navd88",
+            "easting_utm19", "northing_utm19"]
+    with open(cp, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(head)
+        for k in range(24):
+            cam = "c1" if k % 2 else "c2"
+            day = 18 + k % 6
+            ep = 1737158400 + (day - 18) * 86400 + 54000 + k * 60
+            hs = 2.2 if day < 20 else 0.8             # 18-19 Jan: a storm; the DEM leaves every frame out
+            E = rng.uniform(X0 + 5, X0 + 35, 30)
+            N = rng.uniform(Y0 + 10, Y0 + 110, 30)
+            for e, n in zip(E, N):
+                z = beach(e, n) - 0.1
+                w.writerow([f"g{k:02d}", cam, f"2025-01-{day:02d}T15:00:00+00:00", ep, f"{z:.4f}", hs, 8.0, "0.0",
+                            f"{z:.4f}", f"{e:.3f}", f"{n:.3f}"])
+    # the DEM gridded 20-23 Jan (first_date, last_date: what survey_products passes as the photo dates) and
+    # left out the 8 rough frames of 18-19 Jan, inside its window 18-23 Jan
+    info = {"window_start": "2025-01-18", "window_end": "2025-01-23", "first_date": "2025-01-20",
+            "last_date": "2025-01-23", "frames": {"c1": 8, "c2": 8},
+            "filters": {"max_hs": 1.5, "rough_frames": 8, "excluded_frames": 0, "frames_rejected": 0,
+                        "max_day_offset": 0.15, "camera_days_rejected": []}}
+    Path(str(dem_p).replace("_dem.asc", "_info.json")).write_text(json.dumps(info))
+    try:
+        h, log = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "test", name="lowin",
+                       output_dir=str(out), survey_date="2025-01-23", photo_dates=("2025-01-20", "2025-01-23"),
+                       contours=str(cp))
+    finally:
+        Path(str(dem_p).replace("_dem.asc", "_info.json")).unlink()
+    fs = h["waterlines"]["frame_set"]
+    txt = (out / "lowin_comparison.txt").read_text()
+    check(fs["dem_frames"] == 16 and fs["left_out_frames"] == 8 and fs["left_out_why"] == {"offshore Hs > 1.5 m": 8}
+          and "it left out 8 frame(s) (8 frame(s) with offshore Hs > 1.5 m)" in txt,
+          f"FRAMES: the DEM's 16 gridded frames (20-23 Jan) and the 8 it left out on 18-19 Jan, before its first "
+          f"gridded day, as its own record counts them (was 0) ({fs['dem_frames']}, {fs['left_out_frames']})")
+    check(abs(h["waterlines"]["median"] + 0.1) < 0.01 and "480 georectified points 2025-01-20 to 2025-01-23" in log
+          and "8 frame(s) the DEM left out are compared apart (offshore Hs > 1.5 m: 8)" in log,
+          "the statistics stay those of the gridded days' frames, and the log names the frames compared apart")
+    # -- a calm week (nothing over the wave filter) whose DEM window is wider than its gridded days (a DEM
+    # built with a frame-offset test or --exclude, or --photo-dates narrower than its window): the lines
+    # outside the photo dates are read for that search, then dropped; nothing is 'left out' here (review 2:
+    # this crashed, TypeError on cont_out)
+    rows = list(csv.reader(open(cp)))
+    with open(cp, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(rows[0])
+        for r_ in rows[1:]:
+            w.writerow(r_[:5] + ["0.8"] + r_[6:])
+    info["filters"].update(rough_frames=0, frames_rejected=8)
+    Path(str(dem_p).replace("_dem.asc", "_info.json")).write_text(json.dumps(info))
+    out2 = Path(d) / "out_calm"
+    try:
+        h, log = quiet(sc.compare, str(dem_p), str(lid), "dsm", "INDEPENDENT", "test", name="calm",
+                       output_dir=str(out2), survey_date="2025-01-23", photo_dates=("2025-01-20", "2025-01-23"),
+                       contours=str(cp))
+    finally:
+        Path(str(dem_p).replace("_dem.asc", "_info.json")).unlink()
+    fs = h["waterlines"]["frame_set"]
+    check(fs["dem_frames"] == 16 and fs["left_out_frames"] == 0 and h["waterlines"].get("frames") == 16
+          and abs(h["waterlines"]["median"] + 0.1) < 0.01 and "compared apart" not in log
+          and "480 georectified points 2025-01-20 to 2025-01-23" in log and "not the same set" not in log,
+          f"a calm week, lines outside the photo dates and nothing over the wave filter: no crash, the 16 frames of "
+          f"20-23 Jan compared (as many per camera as the DEM gridded), none compared apart ({fs})")
+
+
+def test_cirn_target_names(d):
+    print("CIRN target files whose target names are not numbers")
+    d = Path(d) / "cirn_names"
+    d.mkdir()
+    f = d / "targets_c1_xyz.csv"
+    f.write_bytes(b"T1,420134.298,4638335.154,2.274\r\nGCP-2,420140.100,4638380.200,1.105\r\n"
+                  b"bad,420141.0,,1.0\r\n")
+    p = sc.read_points(f)
+    check(p["format"].startswith("CIRN") and list(p["name"]) == ["T1", "GCP-2"] and p["skipped"] == 1
+          and abs(p["E"][0] - 420134.298) < 1e-9 and abs(p["Z"][1] - 1.105) < 1e-9,
+          "names T1 and GCP-2 read as CIRN targets (the file was taken for a header and the run exited); "
+          "a row without coordinates skipped")
+    h = d / "headed.csv"
+    h.write_text("num,E,N,Z\n1,420100.0,4638400.0,1.20\n")
+    p = sc.read_points(h)
+    check(not p["format"].startswith("CIRN") and list(p["name"]) == ["1"] and abs(p["Z"][0] - 1.2) < 1e-9,
+          "a 'num,E,N,Z' header row is still a header")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
     for f in ("survey_compare.py", "test_survey_compare.py"):
-        src = (HERE / f).read_text()
+        src = (HERE / f).read_text(encoding="utf-8")
         try:
             ast.parse(src, feature_version=(3, 8))
         except TypeError:                        # Python 3.7 has no feature_version
@@ -648,14 +840,26 @@ def test_py38():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--keep", default=None, help="write the outputs here and keep them")
+    ap.add_argument("--keep", default=None, help="keep the outputs, in a new folder inside this one")
     args = ap.parse_args()
-    d = args.keep or tempfile.mkdtemp(prefix="survey_compare_test_")
-    Path(d).mkdir(parents=True, exist_ok=True)
+    if args.keep:                       # a new folder each run: never the files an earlier run left
+        Path(args.keep).mkdir(parents=True, exist_ok=True)
+    d = os.path.realpath(tempfile.mkdtemp(prefix="survey_compare_test_", dir=args.keep))
+    # the station's folders, where the setup fit's shots are looked for: the test's own, for the run
+    import survey_products as sp
+    station = (sp.CHELSEA, sp.WATERLINE, sp.DEFAULT_SURVEY_DIRS)
+    sp.CHELSEA, sp.WATERLINE = Path(d) / "station_chelsea", Path(d) / "station_waterline"
+    sp.DEFAULT_SURVEY_DIRS = [str(sp.CHELSEA), str(sp.WATERLINE)]
+    for x in sp.DEFAULT_SURVEY_DIRS:
+        Path(x).mkdir()
+    start = os.getcwd()
+    os.chdir(d)                         # a file name never finds a file of the folder the test was started from
+    print(f"test folder: {d} (the current folder during the run)")
     try:
         test_block_median(d)
         test_dem_at_points(d)
         test_dsm_offset(d)
+        test_full_cover_figure(d)
         test_points(d)
         test_label_checks(d)
         test_transects(d)
@@ -663,8 +867,12 @@ def main():
         test_no_overlap(d)
         test_fix2(d)
         test_setup_fit_label(d)
+        test_left_out_frames_window(d)
+        test_cirn_target_names(d)
         test_py38()
     finally:
+        os.chdir(start)
+        sp.CHELSEA, sp.WATERLINE, sp.DEFAULT_SURVEY_DIRS = station
         if not args.keep:
             shutil.rmtree(d, ignore_errors=True)
     print("all survey_compare tests passed")

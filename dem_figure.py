@@ -699,6 +699,14 @@ def minus(x, fmt="{:.1f}"):
     return s.replace("-", "−")
 
 
+def title_size(text, max_px, width_px, size=16.0, smallest=11.0):
+    """The heading's font size: 16 pt, smaller (down to 11 pt) when a long station or calibration label would run
+    off the page's right edge."""
+    while size > smallest and width_px(text, size, "bold") > max_px:
+        size -= 0.5
+    return size
+
+
 def title_lines(info, cells, station, cutoff, min_points, cell):
     """
     The heading. Line 1 says what and when; then two lists of short
@@ -745,14 +753,117 @@ def title_lines(info, cells, station, cutoff, min_points, cell):
         left_out.append(f"{f.get('frames_rejected', 0):,} frames off the rest by > "
                         f"{f['max_frame_offset']:g} m")
     if f.get("max_day_offset") is not None:
-        n = len(f.get("camera_days_rejected") or [])
-        left_out.append(f"{n} camera-day{'' if n == 1 else 's'} off the rest by > "
-                        f"{f['max_day_offset']:g} m")
+        left_out.append(day_test_left_out(f))
+        nw = len(day_test_warnings(f))
+        if nw:                       # the WARNINGs themselves: the build's log, its _info.json
+            left_out.append(f"day test: {nw} WARNING{'' if nw == 1 else 'S'} (the build's log; "
+                            f"_info.json day_test)")
     if f.get("excluded_frames"):
         left_out.append(f"{f['excluded_frames']:,} frames by name (--exclude)")
     if left_out:
         left_out[0] = "Left out before gridding: " + left_out[0]
     return line1, facts, left_out
+
+
+# --- the day test's record (<stem>_info.json filters, dem_from_contours.day_test_record), as the
+# DEM page and every text that quotes it (survey_products' README, survey_compare's frame counts)
+# say it. One wording, here: the iterative test leaves a day out for one of three reasons
+# (day_test.rejected 'how'), and only 'left out' is 'off the rest by > the limit' of the final DEM.
+
+def day_test_left_out(f, plus_minus="±"):
+    """The phrase for the camera-days a DEM's day test left out (f: its record's filters):
+    'N camera-days off the rest by > X m', or, when one of them was left out within the limit of
+    the kept days (taking it back would put a kept day over: day_test.refused_take_back), 'N
+    camera-days left out by the day test (±X m; H within it but at odds with a kept day)'."""
+    n = len(f.get("camera_days_rejected") or [])
+    held = len((f.get("day_test") or {}).get("refused_take_back") or [])
+    lim = f.get("max_day_offset")
+    lim = f"{float(lim):g}" if lim is not None else "?"
+    return (f"{n} camera-day{'' if n == 1 else 's'} off the rest by > {lim} m" if not held else
+            f"{n} camera-day{'' if n == 1 else 's'} left out by the day test "
+            f"({plus_minus}{lim} m; {held} within it but at odds with a kept day)")
+
+
+def frames_left_out_text(why):
+    """Frames left out, counted by reason ({reason: frames}), in the one wording every text uses: '8 frame(s) of
+    camera-days off the rest by > 0.15 m', '4 frame(s) with offshore Hs > 1.5 m' (a camera-day reason names days,
+    the count is of their frames). ASCII."""
+    return ", ".join(f"{v} frame(s) {'of' if str(k).startswith('camera-days') else 'with'} {k}"
+                     for k, v in (why or {}).items())
+
+
+def day_test_reason(f, day):
+    """Why the DEM's day test left camera-day `day` ('<camera> <YYYY-MM-DD>') out, as a reason that
+    starts 'camera-days ...' (texts count frames by it: '8 frame(s) of camera-days ...'), by its
+    record's day_test.rejected 'how': 'left out' -- off the rest by > X m (the DEM of the other
+    kept days); 'not judged' -- off the other days by > X m in the first pass, which the test could
+    not judge; 'refused take-back' -- within X m of the kept days, left out as taking it back would
+    put a kept day over. A record without the rows (a DEM of the one-pass test) gives 'off the rest'.
+    ASCII only (it goes into text files: READMEs, comparison reports)."""
+    lim = f.get("max_day_offset")
+    lim = f"{float(lim):g}" if lim is not None else "?"
+    rows = {r.get("day"): r for r in ((f.get("day_test") or {}).get("rejected") or [])}
+    how = (rows.get(day) or {}).get("how")
+    if how == "refused take-back":
+        return (f"camera-days within +/-{lim} m of the kept days, left out as taking them back would put a "
+                f"kept day over")
+    if how == "not judged":
+        return f"camera-days the day test could not judge, off the other days by > {lim} m in its first pass"
+    return f"camera-days off the rest by > {lim} m"
+
+
+def day_test_rejected_lines(f):
+    """One line per camera-day the day test left out, from its record (day_test.rejected): the day,
+    how ('left out', 'not judged', 'refused take-back'), its offset from the DEM of the kept days
+    (offset_m; None where no kept day is comparable with it), the offset it was left out at
+    (offset_at_step_m) and why. [] without the rows (a DEM of the one-pass test: its camera-days
+    are named with their offsets, camera_days_rejected_offsets_m)."""
+    def m(x):
+        return f"{x:+.3f} m" if isinstance(x, (int, float)) else "not comparable"
+    rows = (f.get("day_test") or {}).get("rejected")
+    if rows is None:
+        offs = f.get("camera_days_rejected_offsets_m") or {}
+        return [f"{k}: off the rest by {m(offs.get(k))}" for k in f.get("camera_days_rejected") or []]
+    out = []
+    for r in rows:
+        at = r.get("offset_at_step_m")
+        out.append(f"{r.get('day')}: {r.get('how')}, {m(r.get('offset_m'))} from the DEM of the kept days"
+                   + (f" ({m(at)} when it was left out)" if at is not None and at != r.get("offset_m") else "")
+                   + f"; why: {r.get('why')}")
+    return out
+
+
+def day_test_warnings(f):
+    """The WARNINGs of the DEM's day test, as its record keeps them: day_test.warning (days it could
+    not judge, kept untested) and one per day_test.trend_warnings (a camera whose day offsets run one
+    way with time; when the trend holds only with the one day left out at an end -- without.alone
+    false -- it 'rests on' that day). [] when there is none."""
+    dt = f.get("day_test") or {}
+    lim = dt.get("limit_m", f.get("max_day_offset"))
+    out = [dt["warning"]] if dt.get("warning") else []
+    from dem_from_contours import trend_chance_text as chance, trend_span_text, TREND_METHOD_DRIFT
+    for t in dt.get("trend_warnings") or []:
+        w = t.get("without") or None
+        rest = ""
+        if w and w.get("alone", True):
+            rest = (f"; without {w['day']}, the one day left out, at an end, the other {w['days']} days give rho "
+                    f"{w['spearman_rho']:+.2f}{chance(w.get('chance'))}: they pass the rule on their own")
+        elif w:
+            rest = (f"; it rests on {w['day']}, the one day left out, at an end: the other {w['days']} days give "
+                    f"rho {w['spearman_rho']:+.2f}{chance(w.get('chance'))}, not enough to pass the rule alone, "
+                    f"so {w['day']} may be the end of the trend or one bad day beyond it")
+        fo, lo = t.get("first_offset_m"), t.get("last_offset_m")
+        mm = ({"min": (t["min_day"], t["min_offset_m"]), "max": (t["max_day"], t["max_offset_m"])}
+              if t.get("min_day") and t.get("min_offset_m") is not None and t.get("max_offset_m") is not None else {})
+        out.append(f"WARNING: {t['camera']}'s camera-day offsets run one way with time over {t['days']} days "
+                   f"(Spearman rho {t['spearman_rho']:+.2f}{chance(t.get('chance'))}; "
+                   + (f"{fo:+.3f}" if fo is not None else "--") + f" m on {t.get('first_day')} to "
+                   + (f"{lo:+.3f}" if lo is not None else "--") + f" m on {t.get('last_day')}"
+                   + trend_span_text(dict(t, **mm), lim) + f"{rest}): real beach change or an error that "
+                   f"drifts with time (pointing, lens, a detection bias with the tides or waves); check "
+                   f"{t['camera']}'s pointing and the beach change before reading this DEM as one surface. "
+                   + TREND_METHOD_DRIFT)
+    return out
 
 
 def wrap_facts(facts, max_px, width_px, sep="  ·  "):
@@ -889,7 +1000,7 @@ def draw_message_page(stem, output, info, station, message, detail, cells=None, 
         y_msg = y[-1] + 0.75
         H = y_msg + 0.32 * len(msg_lines) + sum(0.22 * len(p) + 0.12 for p in det_paras) + 0.3
         fig = plt.figure(figsize=(W, H), dpi=dpi, facecolor="white")
-        fig.text(left / W, 1 - y[0] / H, l1, fontsize=16, fontweight="bold", color=INK)
+        fig.text(left / W, 1 - y[0] / H, l1, fontsize=title_size(l1, max_px, width_px), fontweight="bold", color=INK)
         for i, t in enumerate(fact_lines):
             fig.text(left / W, 1 - y[1 + i] / H, t, fontsize=11, color=INK2)
         for i, t in enumerate(out_lines):
@@ -1169,7 +1280,8 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
 
     fig = plt.figure(figsize=(W, H), dpi=dpi, facecolor="white")
 
-    fig.text(left / W, 1 - y_text[0] / H, l1, fontsize=16, fontweight="bold", color=INK)
+    fig.text(left / W, 1 - y_text[0] / H, l1, fontsize=title_size(l1, max_px, width_px), fontweight="bold",
+             color=INK)
     for i, t in enumerate(fact_lines):
         fig.text(left / W, 1 - y_text[1 + i] / H, t, fontsize=11, color=INK2)
     for i, t in enumerate(out_lines):
