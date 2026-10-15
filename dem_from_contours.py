@@ -115,6 +115,7 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     exclude = [re.compile(x) for x in (exclude or [])]
     excluded = set()
     E, N, Z, cams, dates, frames = [], [], [], [], [], []
+    ucol = []                     # pixel column: the order of a line's points (cross-shore rule)
     missing_ground = 0
     rough_frames, unknown_hs_frames = set(), set()
     with_setup = 0
@@ -162,6 +163,10 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             cams.append(r["camera"])
             dates.append(day)
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
+            try:
+                ucol.append(float(r.get("pixel_column") or "nan"))
+            except ValueError:
+                ucol.append(float("nan"))
     if exclude:
         print(f"Excluded by name  : {len(excluded)} frame(s) (--exclude)")
     if max_hs is not None:
@@ -169,7 +174,8 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
               f"{max_hs} m; {len(unknown_hs_frames)} frame(s) with no wave record kept")
     if stats is not None:
         stats.update(excluded_frames=len(excluded), rough_frames=len(rough_frames),
-                     setup_share=with_setup / len(Z) if Z else 0.0)
+                     setup_share=with_setup / len(Z) if Z else 0.0,
+                     pixel_column=np.array(ucol, float))
     return (np.array(E), np.array(N), np.array(Z),
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
 
@@ -1590,6 +1596,10 @@ def main():
                          "station fault. The record in <stem>_info.json is the same; the day test's other "
                          "WARNING (a day it could not judge) stays a WARNING. Survey-date builds do not "
                          "pass it.")
+    ap.add_argument("--no-track-filter", action="store_true",
+                    help="Keep the runs of a line that cross the shore on the ground (by default "
+                         "dropped: a line's track running more than 45 deg from the shore over 10 m is "
+                         "the line tracer carrying on out over the water; waterline_track.py).")
     ap.add_argument("--max-day-offset", type=float, default=None,
                     help="Leave out camera-days whose samples sit, on median, more than this "
                          "many metres from the DEM built without that day (e.g. 0.15). "
@@ -1734,6 +1744,43 @@ def main():
     print(f"elevation range   : {Z.min():+.2f} to {Z.max():+.2f} m NAVD88")
     print(f"extent            : {E.max()-E.min():.1f} m E-W by {N.max()-N.min():.1f} m N-S")
     print()
+
+    # Runs of a line across the shore (waterline_track.py): the line tracer carrying on along
+    # one pixel row out over the water. The survey-date builds' consistency filter drops them
+    # already (their files carry the ground); the live cron's filter runs on the photo rows
+    # alone, so its DEMs get them dropped here.
+    track_record = {"lines": 0, "points": 0, "by_camera": {}}
+    if not args.no_track_filter:
+        from waterline_track import cross_shore_drops, axis_bearing
+        ucol = load_stats.get("pixel_column")
+        if ucol is None or ucol.size != E.size:
+            ucol = np.arange(E.size, dtype=float)
+        ucol = np.where(np.isfinite(ucol), ucol, np.arange(E.size, dtype=float))
+        drop_cs = np.zeros(E.size, bool)
+        msgs = []
+        for c in sorted(set(cams)):
+            m = np.flatnonzero(cams == c)
+            fid = np.unique(frames[m], return_inverse=True)[1]
+            d, per_line, axis, ratio = cross_shore_drops(fid, ucol[m], E[m], N[m])
+            if axis is None:
+                msgs.append(f"{c} not judged (no clear shore axis, spread ratio {ratio:.1f})")
+                continue
+            if d.sum() > 0.5 * m.size:
+                msgs.append(f"{c} NOT applied: would drop {100.0 * d.mean():.0f}% of its points "
+                            f"(shore axis {axis_bearing(axis):.0f} deg wrong for this view?)")
+                continue
+            drop_cs[m[d]] = True
+            track_record["by_camera"][c] = {"lines": len(per_line), "points": int(d.sum()),
+                                            "shore_axis_deg": round(axis_bearing(axis), 1)}
+            msgs.append(f"{c} {len(per_line)} line(s), {int(d.sum())} point(s)")
+        track_record["lines"] = sum(v["lines"] for v in track_record["by_camera"].values())
+        track_record["points"] = int(drop_cs.sum())
+        print(f"Cross-shore runs  : {'; '.join(msgs)} dropped (a line's track running more than 45 deg "
+              f"from the shore over 10 m: a trace out over the water, not a waterline; waterline_track.py)")
+        if drop_cs.any():
+            k = ~drop_cs
+            E, N, Z, cams, dates, frames = E[k], N[k], Z[k], cams[k], dates[k], frames[k]
+        print()
 
     if args.fit_setup or args.max_day_offset or args.max_frame_offset:
         info = load_frame_info(args.contour_csv)
@@ -1959,6 +2006,7 @@ def main():
         "filters": {
             "max_hs": args.max_hs, "rough_frames": load_stats.get("rough_frames", 0),
             "excluded_frames": load_stats.get("excluded_frames", 0),
+            "cross_shore_runs": track_record,
             "max_frame_offset": args.max_frame_offset,
             "frames_rejected": len(rejected_frames),
             "max_day_offset": args.max_day_offset,

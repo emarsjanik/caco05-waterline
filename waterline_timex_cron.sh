@@ -77,6 +77,12 @@ CONTOURS="$BASE/contour_points_timex.csv"
 # -- the detector wrong for most lines there, e.g. a search-envelope
 # floor above the high-tide waterline -- are named in a WARNING in this
 # log, and the lines there are judged against the lower-water lines.
+# Before that, a camera-day whose lines all sit a metre or more off where
+# the other days put the same water level (snow or a wrack line on the
+# beach, a camera that moved: 22 Jan 2025) is left out whole, with a
+# WARNING naming it -- the station status reads WARN while that day is in
+# the window. (The DEM step also drops runs of a line that cross the shore
+# on the ground: dem_from_contours.py, waterline_track.py.)
 # The unfiltered file is kept as it is; the filtered copy is
 # CONTOURS_QC, the report of every line affected is CONSISTENCY_REPORT,
 # and waterline_consistency_<cam>.png shows the last week's rejections on

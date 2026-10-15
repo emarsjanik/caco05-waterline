@@ -199,6 +199,42 @@ the others, so a stray out on the water cannot become the end of the fit.
 | Real 29 Sep - 5 Oct 2026 contours (393,668 points, 198 lines), setup C = 0.037 added as the cron adds it, before (main `af8e1bd`) and after (this PR) | [REAL] | **main**: c1 22 lines dropped, 19 trimmed, 44,768 of 269,694 points (16.6%); c2 2 dropped, 24 trimmed, 7,122 of 123,974 (5.7%). **this PR**: c1 20 dropped, 17 trimmed, 41,738 (15.5%), 12 lines kept as beach change; c2 2 dropped, 28 trimmed, 8,163 (6.6%), 6 kept as beach change | `python3 waterline_consistency.py <contours with the setup columns, section 5> --output qc.csv --report rep.csv --plot wc --image-dir <photos> --plot-days 7` | the cron log line `waterline consistency: c1: ... ; c2: ...` |
 | Station log before this PR | [REAL] station log, 8-9 Oct 2026, reported by the owner | c1 drops ~10.8% of its points, mostly high-tide frames placed out on the water (residual +1.4 to +4 m) | - | compare with the log line after the pull |
 
+**Two checks before the per-line pass** (Oct 2026, after the first survey-date builds on the
+station's real photos). What they drop is not in the per-line pass's reference.
+
+* **The day check** (`judge_days`, `--max-day-residual 1.0`): a camera-day whose lines sit, on
+  median, more than 1.0 m of water level from where the OTHER days' lines (within 3 days) put
+  their level is left out whole, with a WARNING naming the camera and the day. On 22 Jan 2025
+  snow lay on the upper beach and both cameras drew every low-tide line of the day along the
+  snow's edge, ~250 px landward of where 18-21 Jan put the same level: the lines read 1.7-1.9 m
+  low against the 23 Jan lidar, the DEM's c1 cells -1.80 m. The per-line pass kept them: the
+  day's own ten lines were each other's reference (weighted by closeness in time), and on the
+  window's last day no later line said otherwise; the DEM's day test could not compare them
+  (no cell shared with another day). A line landward of every other day's line and LOWER than
+  the highest of them is out of order; the beach is taken to keep rising landward at half the
+  rate of the other days' curve (as seaward, step 4), so a day of such lines reads about what
+  it is off by, not the 0.2 m the bound alone gives.
+* **Cross-shore runs** (`waterline_track.py`; here only when the file carries the ground, as
+  the survey-date products' files do; `dem_from_contours.py` applies the same rule to every
+  DEM, the live cron's included): a line's track that runs more than 45 deg from the shore
+  over 10 m on the ground, and the rest of the line beyond it, is dropped. Where the edge it
+  follows fades out, c2's line tracer carries on along one pixel row out over the water.
+
+| what | data | number | reproduce here | check on the NUC |
+|---|---|---|---|---|
+| Snow edge: every c1 line of one day along the +1.8 m contour, on the window's last day and mid-window | [SYNTH] self-test | 14,568 of 14,568 points dropped both times, WARNING given; honest lines 0 of ~188,800 | `python3 waterline_consistency.py --self-test` | same command |
+| Cross-shore tails: every 3 h a c2 line runs flat from column 1300 to the right edge | [SYNTH] self-test, on the ground | 4,327 of 4,327 points more than 20 px off dropped; honest 176 of 48,610 (0.36%) | same | same |
+| Every earlier case of this table with both checks on | [SYNTH] self-test | unchanged (the storm cuts: 0 honest points dropped) | same | same |
+| 2025-01-23 (18-23 Jan), the survey-date build's lines | [REAL] owner's files, 15 Oct 2026 | day check: c1 22 Jan (10 lines, -1.91 m) and c2 22 Jan (2 lines, -2.34 m) left out, nothing else; cross-shore: c2 4 lines, 3,643 points | `python3 waterline_consistency.py <date>/waterlines/contour_points_ground.csv --output f.csv --report r.csv` | `survey_products.py --date 2025-01-23 --steps filter,dem,maps,compare` |
+| 2025-03-06, 2024-10-23, 2026-09-29 (the same) | [REAL] | no day left out on any; cross-shore: Mar c2 2 lines (891 points), Oct c2 15 of 47 lines (7,793 points), Sep 2026 c1 4 lines (1,605), c2 19 of 42 (5,560); no Oct c1 line | same | same |
+| What it did to the 2025-01-23 DEM against the Jan lidar (measured AFTER the rules were set, from the photos and the contours alone) | [REAL] | DEM - lidar: median +0.023 -> +0.044 m, NMAD 0.271 -> 0.218, RMSE 1.005 -> 0.207 m, within +/-0.20 m 51% -> 64%; by camera c1 -1.799 -> -0.218 (52 cells), c2 +0.117 -> +0.131 (106); lines c1 -1.826 -> -0.180 (16 frames), c2 +0.099 -> +0.135 (21) | `dem_from_contours.py` + `survey_compare.py` as the build runs them, on the filtered file | the rebuilt README |
+
+The snow failure was found BY the Jan lidar comparison, so the Jan numbers after the fix are
+not a blind test of these two rules; the rules were set from the photos (the snow is plain in
+c1's photo map and in the detector's overlays of 22 Jan) and the contours, before the lidar
+comparison of the filtered lines was run, and they change no line of the 2025-03-06 build but
+4 cross-shore runs (DEM - Mar lidar -0.293 -> -0.288 m).
+
 What changes in the log: the summary line now also counts `N line(s) out of order with one
 side in time only, kept as beach change` and the column bins judged. A column whose rows run
 against the water level gets one `consistency filter: ... REVERSED ...` WARNING line.
