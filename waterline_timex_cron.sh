@@ -538,6 +538,13 @@ else
                         --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1
                     win_rc=$?
                     if [ $win_rc -eq 0 ] || [ $win_rc -eq 3 ]; then
+                        # The plain north-up map of the same DEM (dem_map.py): the picture
+                        # for the daily email, easier to read than the page.
+                        if python3 "$BASE/dem_map.py" "${DEM_STEM}_${DEM_WINDOW_DAYS}day" >> "$LOG" 2>&1; then
+                            log "window DEM map written: $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_map.png"
+                        else
+                            log "WARNING: window DEM map NOT drawn (dem_map.py, see above); the grids and page are fine"
+                        fi
                         if [ $win_rc -eq 0 ]; then
                             log "window DEM written: $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_dem.asc (+ dated copy in $DEM_SERIES)"
                         else
