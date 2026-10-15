@@ -498,7 +498,12 @@ else
 
                 hs_arg=""
                 [ -n "$waves_arg" ] && [ -n "$DEM_MAX_HS" ] && hs_arg="--max-hs $DEM_MAX_HS"
-                [ -n "$DEM_MAX_DAY_OFFSET" ] && hs_arg="$hs_arg --max-day-offset $DEM_MAX_DAY_OFFSET"
+                # --trend-note: a camera's offsets running one way with time is printed as a
+                # NOTE, not a WARNING. On the whole-archive DEM (beach change pooled by design)
+                # and the 7-day DEM (a bias that follows the spring-neap tides gives the same
+                # pattern) it is expected, and as a WARNING it would hold the station status at
+                # WARN on every run, hiding a real WARN. info.json keeps the full record.
+                [ -n "$DEM_MAX_DAY_OFFSET" ] && hs_arg="$hs_arg --max-day-offset $DEM_MAX_DAY_OFFSET --trend-note"
                 # dem_from_contours.py exit: 0 built, 4 no points in the window or
                 # every camera-day rejected by the day test (a short page says
                 # so), 3 grids written but NO page, 1 other failure. The old page

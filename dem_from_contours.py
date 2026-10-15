@@ -1581,6 +1581,15 @@ def main():
                          "metres (default 0.5). A cell where repeat crossings disagree by more "
                          "than half a metre is not measuring one surface.")
     ap.add_argument("--camera", default="both", choices=["c1", "c2", "both"])
+    ap.add_argument("--trend-note", action="store_true",
+                    help="With --max-day-offset: print the trend warning (a camera's offsets running one "
+                         "way with time) as a NOTE line, not a WARNING. For the station's cron DEMs: "
+                         "station_status.py counts WARNING lines, and on the whole-archive DEM (months of "
+                         "beach pooled by design) or a 7-day DEM (a detection or setup bias that follows "
+                         "the spring-neap tidal range gives the same pattern) the trend is expected, not a "
+                         "station fault. The record in <stem>_info.json is the same; the day test's other "
+                         "WARNING (a day it could not judge) stays a WARNING. Survey-date builds do not "
+                         "pass it.")
     ap.add_argument("--max-day-offset", type=float, default=None,
                     help="Leave out camera-days whose samples sit, on median, more than this "
                          "many metres from the DEM built without that day (e.g. 0.15). "
@@ -1832,6 +1841,8 @@ def main():
                             left_out=dt["rejected"])
         for t in trends:
             for line in day_trend_warning(t, args.max_day_offset, dt["rejected"]):
+                if args.trend_note and line.startswith("WARNING: "):
+                    line = "NOTE: " + line[len("WARNING: "):]   # the cron's DEMs: said, not counted
                 print(line)
         day_record = day_test_record(dt, args.max_day_offset, trends)
         rejected_days = set(rejected)

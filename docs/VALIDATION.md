@@ -136,16 +136,21 @@ shipped, are checked when git can read the code's checkout; otherwise `skipped: 
 git cannot read a checkout at ...` and `skipped: shipped-tables checks: git cannot read a
 checkout at ...` (a copy that is not a checkout, or a user git refuses: "dubious ownership").
 
-**Expect the station status to read WARN after the pull, with nothing wrong at the station.** The
-DEM's day test now warns (`WARNING` in `logs/timex_cron.log`, counted by `station_status.py`) when a
-camera's camera-day offsets run one way with time (section 2.3a): the replay of the real 5-11 Oct
-2026 week gives that warning for c1, so the 7-day DEM will read WARN while such a run lasts. On the
-whole-archive DEM a sustained change of the beach (a 0.5 m drift over 13 weeks, simulated) makes it
-warn on every run, three times a day, for as long as the change lasts; a 0.2-0.3 m drift or a
-seasonal swing does not (the real archive now: no whole-archive warning). Each such warning is true
-(that DEM mixes surfaces), and is expected, not a station fault. The day-test text says what the
-method alone gives on a static synthetic beach (the same warning at rho -0.96 and 0.165 m over 7
-days), so a camera fault or a beach change needs more than the warning.
+**The DEM day test's trend message on the station's DEMs is a NOTE, not a WARNING.** The day test
+reports when a camera's camera-day offsets run one way with time (section 2.3a). The cron passes
+`--trend-note`, so on the whole-archive and 7-day DEMs this is printed as `NOTE: ...` in
+`logs/timex_cron.log`, which `station_status.py` does not count; the same record is in each DEM's
+`_info.json` (`filters.day_test.trend_warnings`). Why not a WARNING there: the replay of the real
+5-11 Oct 2026 week gives the message for c1, and the review of this PR found it would recur on
+roughly half of all 7-day windows, following the spring-neap tidal range (the real c1 5-11 Oct and
+the static Mar 2025 replica both track it: a detection or setup bias that grows with the tidal range
+gives this pattern; not yet tested against the tide record). On the whole-archive DEM a sustained
+beach change (a 0.5 m drift over 13 weeks, simulated) gives it on every run for as long as the change
+lasts. As WARNINGs these would hold the station status at WARN on every run and hide a real WARN.
+The day test's other message (a day it could not judge) stays a WARNING, and survey-date builds
+(`survey_products.py`) keep the trend as a WARNING among their caveats. The day-test text says what
+the method alone gives on a static synthetic beach (the same pattern at rho -0.96 and 0.165 m over 7
+days), so a camera fault or a beach change needs more than the message.
 
 After the next cron run (12:30, 19:25 or 20:55 local):
 

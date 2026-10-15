@@ -977,6 +977,17 @@ def test_cli(d):
           and t5["rejected"][0]["day"] == "c1 2026-10-05",
           "5 days rising, 5 Oct (-0.35 m) left out: one WARNING line, resting on 5 Oct; info.json "
           "trend_warnings[].without gives the other 4 days (rho +1.00, alone false)")
+    # the cron's DEMs pass --trend-note: the same trend said as a NOTE, which station_status.py does not count
+    rn = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(Path(d) / "ground5.csv"),
+                         str(Path(d) / "five_note"), "--max-day-offset", str(LIMIT), "--no-plot", "--trend-note"],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(d))
+    notes = [ln for ln in rn.stdout.splitlines() if ln.startswith("NOTE: ")]
+    tn = json.loads((Path(d) / "five_note_info.json").read_text())["filters"]["day_test"]
+    check(rn.returncode == 0 and not any("WARNING" in ln for ln in rn.stdout.splitlines())
+          and len(notes) == 1 and notes[0][len("NOTE: "):] == warn[0][len("WARNING: "):]
+          and tn["trend_warnings"] == tw,
+          "--trend-note (the cron): the same trend as one NOTE line, no WARNING line; info.json's "
+          "trend_warnings identical")
     # no test: the info file says so
     r = subprocess.run([sys.executable, str(HERE / "dem_from_contours.py"), str(g), str(Path(d) / "plain"),
                         "--no-plot"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
