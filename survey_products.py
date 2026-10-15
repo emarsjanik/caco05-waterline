@@ -617,8 +617,8 @@ STEP_SCRIPTS = {
                "georectify.py", "view_reproject.py", "compare_dem_survey.py"],
     "detect_live": ["georectify.py", "extract_elevation_contours.py"],
     "merge": [],
-    "filter": ["waterline_consistency.py"],
-    "dem": ["dem_from_contours.py", "asc_to_geotiff.py", "dem_figure.py"],
+    "filter": ["waterline_consistency.py", "waterline_track.py"],
+    "dem": ["dem_from_contours.py", "waterline_track.py", "asc_to_geotiff.py", "dem_figure.py"],
     "map": ["daily_elevation_map.py"],
     "map_plan": ["compare_dem_survey.py", "survey_compare.py"],
     "compare": ["survey_compare.py", "compare_dem_survey.py", "compare_rtk.py", "asc_to_geotiff.py"],
@@ -3867,7 +3867,10 @@ def dem_cmds(plan, args, day_test=True):
     if args.dem_max_hs:
         cmd += ["--max-hs", args.dem_max_hs]
     if args.dem_max_day_offset and day_test:
-        cmd += ["--max-day-offset", args.dem_max_day_offset]
+        # anchored on the survey date: on a camera whose days drift through the window the days kept
+        # are those around the survey, not whichever end weighs more (dem_from_contours.py
+        # --anchor-date; 23 Oct 2024, c2: 24 and 26 Oct kept, the survey's own day left out, without it)
+        cmd += ["--max-day-offset", args.dem_max_day_offset, "--anchor-date", plan["date"]]
     tif = [sys.executable, HERE / "asc_to_geotiff.py"] + [f"{stem}_{k}.asc" for k in ("dem", "spread", "count")] + \
           ["--epsg", args.geotiff_epsg, "--note", calibration_identity(plan, args)]
     station = "/".join(sorted({c["station"] for c in plan["cams"].values()}))

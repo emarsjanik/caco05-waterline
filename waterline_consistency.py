@@ -45,7 +45,18 @@ high-tide lines seaward of the low-tide ones -- and the filter drops
 about what it did before (22 lines and 18 trimmed in c1, against 21
 and 17). Physics does not take a vote either way.
 
-HOW, per camera:
+HOW, per camera. Two checks come first, and what they drop is not in the
+reference of the per-line pass after them:
+  0a. CROSS-SHORE RUNS (only when the file carries easting_utm19 /
+     northing_utm19, as the survey-date products' files do): the stretch of
+     a line that runs across the shore on the ground -- the line tracer
+     carrying on along one pixel row out over the water -- and the rest of
+     the line beyond it (waterline_track.py).
+  0b. THE DAY CHECK: a camera-day whose lines sit, on median, more than
+     --max-day-residual (1.0 m) of water level from where the OTHER days'
+     lines put their level is left out whole, with a WARNING -- a day of
+     lines on snow, a wrack or wet/dry line, or after a camera move, which
+     agree with each other and so vouch for each other below (judge_days()).
   1. Column bins. Each line is reduced to one row per 32-px column bin
      (a least-squares line through its points in the bin, read at the
      bin centre), so lines that cover different parts of a bin are
@@ -342,6 +353,8 @@ from pathlib import Path
 
 import numpy as np
 
+from waterline_track import cross_shore_drops, axis_bearing, TRACK_WINDOW_M, TRACK_MAX_ANGLE_DEG
+
 csv.field_size_limit(10 ** 7)
 
 DAY = 86400.0
@@ -392,10 +405,13 @@ def read_points(path):
         i_beach = col.get("beach_elevation_navd88")
         i_setup = col.get("setup_correction_m")
         i_ep, i_cap = col.get("capture_epoch"), col.get("capture_time_utc")
+        i_e, i_n = col.get("easting_utm19"), col.get("northing_utm19")
+        ground = i_e is not None and i_n is not None
 
         frame_of = {}
         names, cams, captures, epochs, elevs, beach_used, setup_used = [], [], [], [], [], [], []
         fid, us, vs = array("i"), array("f"), array("f")
+        es, ns = array("d"), array("d")                # ground (survey-date files): float64
         for r in reader:
             key = r[i_src]
             k = frame_of.get(key)
@@ -438,13 +454,21 @@ def read_points(path):
             except ValueError:
                 u_ = v_ = np.nan
             us.append(u_); vs.append(v_)
+            if ground:
+                try:
+                    e_, n_ = float(r[i_e]), float(r[i_n])
+                except (ValueError, IndexError):
+                    e_ = n_ = np.nan
+                es.append(e_); ns.append(n_)
     elev_col = "beach_elevation_navd88" if i_beach is not None else "tide_elevation_navd88"
     return dict(header=header, frame=np.frombuffer(fid, dtype=np.int32),
                 col=np.frombuffer(us, dtype=np.float32), row=np.frombuffer(vs, dtype=np.float32),
                 names=names, cams=np.array(cams), captures=captures,
                 epochs=np.array(epochs, float), elevs=np.array(elevs, float),
                 beach_used=np.array(beach_used, bool), setup_used=np.array(setup_used, bool),
-                elev_col=elev_col)
+                elev_col=elev_col,
+                east=np.frombuffer(es, dtype=np.float64) if ground else None,
+                north=np.frombuffer(ns, dtype=np.float64) if ground else None)
 
 
 # ---------------------------------------------------------------------
@@ -1297,6 +1321,141 @@ def decide(resid, thresh, p, excused=None):
     return fail, whole, n_judged, n_fail
 
 
+def judge_days(epochs, elevs, R, p):
+    """
+    The day check (--max-day-residual): each camera-day's lines against the
+    lines of the OTHER days within --window-days, column bin by column bin.
+
+    WHY: on 22 Jan 2025 snow lay on the upper beach and both cameras drew
+    every low-tide line of the day along the edge of the snow, ~250 px
+    (~20 m) landward of where the other days put the same water level and
+    landward of the +1.26 m lines of 18 Jan: the lines read 1.7-1.9 m low
+    against the lidar of the next day. The per-line pass below did not drop
+    them: weighted by closeness in time, the day's own ten lines were each
+    other's reference, and on the window's last day no later lines could
+    say otherwise. Leaving the whole day out of its own reference takes
+    that away: a day of lines that agree with each other but not with the
+    other days is judged by the other days.
+
+    HOW: in each column bin the other days' lines give the monotone curve
+    of row against water level (fit_column, as in step 3); the day's line
+    gets the elevation that curve puts at its row, and its residual is its
+    water level minus that. Beyond the other lines' ends: a line landward
+    of all of them whose water is LOWER than the curve's highest level is
+    out of order, and the beach is taken to keep rising landward at half
+    the curve's average rate per row (--extrapolate-flatten, as seaward in
+    step 4; the curve's rate from all of the camera's lines in the bin when
+    the other days' levels span less than --min-z-range); one whose water
+    is higher is where it may be, residual 0. Seaward likewise. (On
+    22 Jan 2025 the other days in reach had only low-tide lines in most
+    columns: the bound alone, the line's level minus theirs, said 0.2 m.)
+    The day's offset is the median over its (line, bin) residuals, judged
+    when it has --day-min-values of them against at least two other
+    days. Over --max-day-residual (default 1.0 m) the whole
+    camera-day is dropped: the day furthest over first, then the others are
+    judged again without it, until none is over; each day dropped is then
+    tried again against the days kept and taken back if within the limit
+    (and puts no kept day over it).
+
+    The limit is loose on purpose. A storm can lower the upper beach by
+    0.8 m in hours (the self-test's storm cases) and the days after it then
+    sit landward of the days before; the per-line pass and the DEM's own
+    day test (0.15 m, where days share cells) deal with that. This check is
+    for a day whose lines are on something else than the water's edge --
+    snow, a wrack or wet/dry line, a camera that moved -- which puts them a
+    metre or more off.
+
+    Returns (rejected days in order, {day: (offset, values, reference days)}
+    at the end, [(day, offset when dropped)], [days taken back]).
+    """
+    days = np.floor(epochs / DAY)
+    good = np.isfinite(epochs) & np.isfinite(elevs) & np.isfinite(R).any(axis=1)
+    all_days = [float(d) for d in np.unique(days[good])]
+    limit = p.max_day_residual
+    if not limit or limit <= 0 or len(all_days) < 3:
+        return [], {}, [], []
+
+    # Each bin's rows per metre of water level over all the camera's lines, for a reference
+    # whose own levels span too little to give one (a calm stretch of low tides).
+    rate_all = np.full(R.shape[1], np.nan)
+    for b in range(R.shape[1]):
+        ri = np.flatnonzero(good & np.isfinite(R[:, b]))
+        if ri.size >= 3:
+            fit = fit_column(elevs[ri], R[ri, b], np.ones(ri.size))
+            if fit is not None and fit[2][-1] - fit[2][0] >= p.min_z_range:
+                rate_all[b] = (fit[1][-1] - fit[1][0]) / (fit[2][-1] - fit[2][0])
+
+    def offset(d, active):
+        mine = np.flatnonzero(good & (days == d))
+        ref = active & (days != d) & (np.abs(days - d) <= p.window_days)
+        n_ref_days = int(np.unique(days[ref]).size)
+        if n_ref_days < 2 or mine.size == 0:
+            return np.nan, 0, n_ref_days
+        vals = []
+        for b in np.flatnonzero(np.isfinite(R[mine]).any(axis=0)):
+            ri = np.flatnonzero(ref & np.isfinite(R[:, b]))
+            if ri.size < 3 or np.unique(days[ri]).size < 2:
+                continue
+            fit = fit_column(elevs[ri], R[ri, b], np.ones(ri.size))
+            if fit is None:
+                continue
+            sgn, ky, kz = fit
+            rate = ((ky[-1] - ky[0]) / (kz[-1] - kz[0]) if kz[-1] - kz[0] >= p.min_z_range
+                    else rate_all[b])
+            per_row = 1.0 / (rate * p.extrapolate_flatten) if np.isfinite(rate) and rate > 0 else 0.0
+            for f in mine:
+                if not np.isfinite(R[f, b]):
+                    continue
+                y = sgn * R[f, b]
+                if y > ky[-1]:                     # landward of every other day's line
+                    # out of order only if its water is lower than theirs; then the beach is
+                    # taken to keep rising landward at half its rate (as seaward, step 4)
+                    v = elevs[f] - kz[-1]
+                    vals.append(v - (y - ky[-1]) * per_row if v < 0 else 0.0)
+                elif y < ky[0]:                    # seaward of every other day's line
+                    v = elevs[f] - kz[0]
+                    vals.append(v + (ky[0] - y) * per_row if v > 0 else 0.0)
+                else:
+                    vals.append(elevs[f] - float(np.interp(y, ky, kz)))
+        if len(vals) < p.day_min_values:
+            return np.nan, len(vals), n_ref_days
+        return float(np.median(vals)), len(vals), n_ref_days
+
+    def over(o):
+        return np.isfinite(o) and abs(o) > limit
+
+    active = good.copy()
+    offs = {d: offset(d, active) for d in all_days}
+    rejected, order = [], []
+    while True:
+        cand = [(abs(offs[d][0]), -d, d) for d in all_days if d not in rejected and over(offs[d][0])]
+        if not cand:
+            break
+        _, _, worst = max(cand)
+        rejected.append(worst)
+        order.append((worst, offs[worst][0]))
+        active &= days != worst
+        for d in all_days:                         # only days that had it in their reference
+            if d not in rejected and abs(d - worst) <= p.window_days:
+                offs[d] = offset(d, active)
+    taken = []
+    for d in sorted(rejected, key=lambda q: (abs(offset(q, active)[0])
+                                             if np.isfinite(offset(q, active)[0]) else np.inf, q)):
+        o = offset(d, active)
+        if not np.isfinite(o[0]) or abs(o[0]) > limit:
+            continue
+        trial = active | (good & (days == d))
+        kept = [k for k in all_days if k not in rejected and abs(k - d) <= p.window_days]
+        if any(over(offset(k, trial)[0]) for k in kept):
+            continue
+        active = trial
+        rejected.remove(d)
+        taken.append(d)
+    # every day against the days kept (a day left out is not in them anyway)
+    final = {d: offset(d, active) for d in all_days}
+    return rejected, final, order, taken
+
+
 def point_drops(fl, col, row, fail, whole, days, elevs, fits, p, excused=None, R=None):
     """
     Which points to drop. Whole frames: all of them. Otherwise each point
@@ -1481,6 +1640,59 @@ def run(args):
         fl = local[data["frame"][pts]]
         col, row = data["col"][pts], data["row"][pts]
         epochs, elevs = data["epochs"][frames], data["elevs"][frames]
+        fl_all, col_all, row_all = fl, col, row
+        pts_per_frame = np.bincount(fl_all, minlength=frames.size)
+        fday = np.floor(epochs / DAY)
+
+        # Before the per-line pass, what it cannot see: runs of a line across the shore
+        # (waterline_track.py) and whole camera-days off the other days (judge_days). Both
+        # leave the per-line pass's reference, so they cannot vouch for anything there.
+        pre = np.zeros(pts.size, bool)
+        pre_msg = []
+        cs_lines = {}
+        if data["east"] is not None and not args.no_track_filter:
+            cs_drop, cs_lines, axis, ratio = cross_shore_drops(fl, col.astype(float), data["east"][pts],
+                                                               data["north"][pts])
+            if axis is None:
+                pre_msg.append(f"cross-shore runs not judged (the points lie along no clear shore "
+                               f"axis: spread ratio {ratio:.1f})")
+            elif cs_drop.sum() > args.max_drop_fraction * pts.size:
+                print(f"WARNING: camera {cam}: the cross-shore rule would drop {100.0 * cs_drop.mean():.0f}% "
+                      f"of its points: NOT applied (is the shore axis, bearing {axis_bearing(axis):.0f} deg, "
+                      f"right for this view?).")
+                cs_lines = {}
+            else:
+                pre |= cs_drop
+                pre_msg.append(f"cross-shore runs: {len(cs_lines)} line(s) trimmed, {int(cs_drop.sum()):,} "
+                               f"points (shore axis {axis_bearing(axis):.0f} deg)")
+        R0, _ = bin_rows(fl[~pre], col[~pre], row[~pre], frames.size, args.column_bin)
+        day_rej, day_off, day_order, day_taken = judge_days(epochs, elevs, R0, args)
+        n_day_judged = sum(np.isfinite(o) for o, _, _ in day_off.values())
+        day_applied = len(day_rej) <= args.max_drop_fraction * max(n_day_judged, 1)
+        if day_rej and not day_applied:
+            print(f"WARNING: camera {cam}: the day check would leave out {len(day_rej)} of its "
+                  f"{n_day_judged} judged days: NOT applied (no majority of days to judge by: camera "
+                  f"moved? detector failing?). Look at the photo maps.")
+        day_frames = np.isin(fday, day_rej) if (day_rej and day_applied) else np.zeros(frames.size, bool)
+        for d, o in day_order:
+            if not day_applied or d not in day_rej:
+                continue
+            when = datetime.fromtimestamp(d * DAY, tz=timezone.utc).strftime("%Y-%m-%d")
+            n_lines = int(((fday == d) & (pts_per_frame > 0)).sum())
+            _, nv, nref = day_off[d]
+            what = (f"landward of their level: snow or another edge on the beach, a wrack or wet/dry "
+                    f"line, or the camera moved" if o < 0 else
+                    f"seaward of their level: on the water (glare, foam), or the camera moved")
+            print(f"WARNING: camera {cam}: {when} left out whole by the day check: its {n_lines} line(s) sit "
+                  f"where the other days put water {abs(o):.2f} m {'higher' if o < 0 else 'lower'} "
+                  f"({what}; limit {args.max_day_residual:g} m, {nv} column-bin values against {nref} "
+                  f"other days). Look at the photo map.")
+        if day_taken:
+            pre_msg.append("day check took back " + ", ".join(
+                datetime.fromtimestamp(d * DAY, tz=timezone.utc).strftime("%Y-%m-%d") for d in day_taken))
+        pre |= day_frames[fl]
+        sub = np.flatnonzero(~pre)
+        fl, col, row = fl_all[sub], col_all[sub], row_all[sub]
         resid, thresh, R, fits, status, excused = judge_camera(epochs, elevs, fl, col, row,
                                                                frames.size, args)
         fail, whole, n_judged, n_fail = decide(resid, thresh, args, excused)
@@ -1498,13 +1710,13 @@ def run(args):
 
         drop = point_drops(fl, col, row, fail, whole, np.floor(epochs / DAY), elevs, fits, args,
                            excused, R)
-        n_cam_pts = pts.size
+        n_cam_pts = sub.size
         n_drop = int(drop.sum())
         applied = n_drop <= args.max_drop_fraction * n_cam_pts
         if applied:
-            keep[pts[drop]] = False
+            keep[pts[sub[drop]]] = False
+        keep[pts[pre]] = False
 
-        pts_per_frame = np.bincount(fl, minlength=frames.size)
         drop_per_frame = np.bincount(fl[drop], minlength=frames.size)
         affected = np.where(drop_per_frame > 0)[0]
         n_whole = int(whole[affected].sum()) if affected.size else 0
@@ -1573,11 +1785,64 @@ def run(args):
                   f"through UNFILTERED (camera moved? detector failing?).")
             print("         That is not a few bad detections; the reference itself is suspect.")
             print("         Look at the report.")
+        # what the two checks before the per-line pass dropped: a report row per line
+        for f in np.flatnonzero(day_frames & (pts_per_frame > 0)):
+            o, nv, nref = day_off[fday[f]]
+            when = datetime.fromtimestamp(fday[f] * DAY, tz=timezone.utc).strftime("%Y-%m-%d")
+            cf = col_all[fl_all == f]
+            report.append(dict(
+                source_file=data["names"][frames[f]], camera=cam,
+                capture_time_utc=data["captures"][frames[f]],
+                elevation_navd88=round(float(elevs[f]), 4),
+                elevation_column=("beach_elevation_navd88" if data["beach_used"][frames[f]]
+                                  else "tide_elevation_navd88"),
+                action="day", points_in_frame=int(pts_per_frame[f]), points_dropped=int(pts_per_frame[f]),
+                bins_judged="", bins_failed="", bins_reversed="",
+                pixel_column_from=round(float(np.nanmin(cf)), 1) if np.isfinite(cf).any() else "",
+                pixel_column_to=round(float(np.nanmax(cf)), 1) if np.isfinite(cf).any() else "",
+                median_residual_m=round(float(o), 3) if np.isfinite(o) else "", max_residual_m="",
+                threshold_m=args.max_day_residual,
+                reason=(f"day check: the {when} lines of {cam} sit where the other days' lines put water "
+                        f"{abs(o):.2f} m {'higher' if o < 0 else 'lower'} ({nv} column-bin values against "
+                        f"{nref} other days; limit {args.max_day_residual:g} m): the whole camera-day left "
+                        f"out")))
+        for f, (n_d, across_m) in sorted(cs_lines.items()):
+            if day_frames[f]:
+                continue
+            m = (fl_all == f) & pre
+            cf = col_all[m]
+            report.append(dict(
+                source_file=data["names"][frames[f]], camera=cam,
+                capture_time_utc=data["captures"][frames[f]],
+                elevation_navd88=round(float(elevs[f]), 4),
+                elevation_column=("beach_elevation_navd88" if data["beach_used"][frames[f]]
+                                  else "tide_elevation_navd88"),
+                action="cross-shore", points_in_frame=int(pts_per_frame[f]), points_dropped=int(m.sum()),
+                bins_judged="", bins_failed="", bins_reversed="",
+                pixel_column_from=round(float(np.nanmin(cf)), 1) if cf.size else "",
+                pixel_column_to=round(float(np.nanmax(cf)), 1) if cf.size else "",
+                median_residual_m="", max_residual_m="", threshold_m="",
+                reason=(f"the line runs across the shore for {across_m:.0f} m (more than "
+                        f"{TRACK_MAX_ANGLE_DEG:g} deg from it over {TRACK_WINDOW_M:g} m of track): a trace "
+                        f"out over the water or the sand, not a waterline; dropped from where it leaves "
+                        f"the shore to the line's end")))
+        n_day_lines = int((day_frames & (pts_per_frame > 0)).sum())
+        if day_rej and day_applied:
+            pre_msg.insert(0, f"day check: {len(day_rej)} camera-day(s) left out ("
+                           + ", ".join(datetime.fromtimestamp(d * DAY, tz=timezone.utc).strftime("%Y-%m-%d")
+                                       for d in day_rej) + f"), {n_day_lines} line(s)")
+        if pre_msg:
+            msg += "; " + "; ".join(pre_msg)
         print(f"  {msg}")
         summary.append(msg)
-        plot_info[cam] = dict(frames=frames, fl=fl, col=col, row=row, drop=drop, whole=whole,
-                              resid=resid, thresh=thresh, fail=fail, R=R, fits=fits, excused=excused,
-                              status=status, epochs=epochs, elevs=elevs, applied=applied)
+        # the plot shows everything dropped: the per-line pass's, and the two checks' before it
+        drop_all = pre.copy()
+        if applied:
+            drop_all[sub[drop]] = True
+        whole_all = whole | day_frames
+        plot_info[cam] = dict(frames=frames, fl=fl_all, col=col_all, row=row_all, drop=drop_all,
+                              whole=whole_all, resid=resid, thresh=thresh, fail=fail, R=R, fits=fits,
+                              excused=excused, status=status, epochs=epochs, elevs=elevs, applied=applied)
     return data, keep, report, summary, plot_info
 
 
@@ -2039,19 +2304,25 @@ def self_test(cal_dir, keep_dir=None):
     tmp = Path(keep_dir) if keep_dir else Path(tempfile.mkdtemp(prefix="wc_selftest_"))
     tmp.mkdir(parents=True, exist_ok=True)
 
-    def run_case(name, frames, extra=()):
+    def run_case(name, frames, extra=(), ground=False):
         """Write the frames [(name, cam, ep, z_file, cols, rows, flags, tide), ...]
         as a contour file, run the filter (options `extra`), return
-        {name: dropped mask}, the run's stdout, summary, plot info and args."""
+        {name: dropped mask}, the run's stdout, summary, plot info and args.
+        ground: each point also on the ground at its level (easting/northing
+        columns, as the survey-date products' files carry)."""
         src = tmp / f"contour_points_{name}.csv"
         with open(src, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["source_file", "camera", "capture_time_utc", "capture_epoch", "pixel_column",
-                        "pixel_row", "tide_elevation_navd88", "beach_elevation_navd88"])
+                        "pixel_row", "tide_elevation_navd88", "beach_elevation_navd88"]
+                       + (["easting_utm19", "northing_utm19"] if ground else []))
             for fname, cam, ep, z, c, r, _, h in frames:
                 cap = datetime.fromtimestamp(ep, tz=timezone.utc).isoformat()
-                for cc, rr in zip(c, r):
-                    w.writerow([fname, cam, cap, int(ep), int(cc), f"{rr:.1f}", f"{h:.4f}", f"{z:.4f}"])
+                if ground:
+                    Eg, Ng = pixel_to_ground(np.asarray(c, float), np.asarray(r, float), z, io[cam], eo[cam])
+                for i, (cc, rr) in enumerate(zip(c, r)):
+                    w.writerow([fname, cam, cap, int(ep), int(cc), f"{rr:.1f}", f"{h:.4f}", f"{z:.4f}"]
+                               + ([f"{Eg[i]:.3f}", f"{Ng[i]:.3f}"] if ground else []))
         args = build_parser().parse_args([str(src)] + list(extra))
         buf = _io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -2454,6 +2725,97 @@ def self_test(cal_dir, keep_dir=None):
             failures.append(f"{what}: {fa:.2%} of the honest points after the cut dropped "
                             f"(limit 1%)")
 
+    # 9. SNOW EDGE (the station's photos of 22 Jan 2025): on one day every c1
+    #    line is drawn along the edge of snow on the upper beach -- the +1.8 m
+    #    contour here -- whatever the water level, each line given its own
+    #    level. The day check must leave that whole camera-day out (at least
+    #    95% of its points), with a WARNING naming it, on the window's LAST day
+    #    (no later lines to say otherwise) and in its middle; honest lines lose
+    #    less than 0.5%.
+    for snow_day in (7, 3):
+        rng = np.random.default_rng(21 + snow_day)
+        frames = []
+        for d in range(8):
+            for k in range(24):
+                ep = t0 + d * DAY + 11 * 3600 + k * 1800
+                h = tide(ep)
+                for cam in ("c1", "c2"):
+                    snow = cam == "c1" and d == snow_day
+                    r = line(cam, 1.8 if snow else h + rng.normal(0, 0.05), ep, {}) \
+                        + rng.normal(0, 1.2, cols.size) + rng.normal(0, 1.5)
+                    c, rr, k_ = keep_rows(cam, r, cols)
+                    if c.size >= 20:
+                        frames.append((f"{int(ep)}.{cam}.snow", cam, ep, h, c, rr,
+                                       np.full(c.size, snow), h))
+        dropped, out, summary, plot_info, args = run_case(f"snow{snow_day}", frames)
+        n_s = d_s = n_h = d_h = 0
+        for fname, cam, ep, z, c, r, wr, h in frames:
+            dr = dropped[fname]
+            n_s += int(wr.sum()); d_s += int((dr & wr).sum())
+            n_h += int((~wr).sum()); d_h += int((dr & ~wr).sum())
+        day_name = datetime.fromtimestamp(t0 + snow_day * DAY, tz=timezone.utc).strftime("%Y-%m-%d")
+        warned = any(l.startswith("WARNING: camera c1: " + day_name) and "day check" in l
+                     for l in out.splitlines())
+        print(f"  snow edge, c1 on {day_name} ({'the last day' if snow_day == 7 else 'mid-window'}): "
+              f"{d_s:,} of {n_s:,} points dropped ({d_s / max(n_s, 1):.1%}), WARNING "
+              f"{'given' if warned else 'MISSING'}; honest lines {d_h:,} of {n_h:,} "
+              f"({d_h / max(n_h, 1):.2%})")
+        for line_ in summary:
+            print(f"  CONSISTENCY {line_}")
+        if d_s < 0.95 * n_s:
+            failures.append(f"snow edge on {day_name}: only {d_s / max(n_s, 1):.0%} of its points dropped "
+                            f"(need 95%)")
+        if not warned:
+            failures.append(f"snow edge on {day_name}: no day-check WARNING naming c1 and the day")
+        if d_h >= 0.005 * n_h:
+            failures.append(f"snow edge on {day_name}: {d_h / max(n_h, 1):.2%} of honest points dropped "
+                            f"(limit 0.5%)")
+
+    # 10. CROSS-SHORE TAILS (the station's photos, c2, Oct 2024 to Oct 2026):
+    #     where the edge fades out the tracer carries on along one pixel row,
+    #     out over the water. Every 3 h a c2 line does so from column 1300 to
+    #     the right edge. With the lines on the ground (as the survey-date
+    #     files carry them) at least 90% of the points more than 20 px off the
+    #     waterline must go, and honest points (those lines before the run,
+    #     and every other line) lose less than 0.5%. The start of a run, still
+    #     within 20 px of the waterline, is the tracer's too: counted apart.
+    rng = np.random.default_rng(31)
+    frames = []
+    for d in range(4):
+        for k in range(24):
+            ep = t0 + d * DAY + 11 * 3600 + k * 1800
+            h = tide(ep)
+            r = line("c2", h + rng.normal(0, 0.05), ep, {}) + rng.normal(0, 1.2, cols.size) + rng.normal(0, 1.5)
+            off = np.zeros(cols.size, np.int8)   # 1: the tracer's run (2: more than 20 px off the line)
+            j0 = int(np.searchsorted(cols, 1300))
+            if k % 6 == 0 and j0 < cols.size and np.isfinite(r[j0]):
+                flat = np.where(cols >= 1300, r[j0] + rng.normal(0, 0.5, cols.size), r)
+                off[cols >= 1300] = 1
+                with np.errstate(invalid="ignore"):
+                    off[(cols >= 1300) & ~(np.abs(flat - r) <= 20)] = 2
+                r = flat
+            c, rr, k_ = keep_rows("c2", r, cols)
+            if c.size >= 20:
+                frames.append((f"{int(ep)}.c2.tail", "c2", ep, h, c, rr, off[k_], h))
+    dropped, out, summary, plot_info, args = run_case("tails", frames, ground=True)
+    n_t = d_t = n_h = d_h = n_r = d_r = 0
+    for fname, cam, ep, z, c, r, wr, h in frames:
+        dr = dropped[fname]
+        n_t += int((wr == 2).sum()); d_t += int((dr & (wr == 2)).sum())
+        n_r += int((wr == 1).sum()); d_r += int((dr & (wr == 1)).sum())
+        n_h += int((wr == 0).sum()); d_h += int((dr & (wr == 0)).sum())
+    print(f"  cross-shore tails, c2: {d_t:,} of {n_t:,} points more than 20 px off the waterline dropped "
+          f"({d_t / max(n_t, 1):.1%}), {d_r:,} of {n_r:,} of the runs' start within 20 px; honest "
+          f"{d_h:,} of {n_h:,} ({d_h / max(n_h, 1):.2%})")
+    for line_ in summary:
+        print(f"  CONSISTENCY {line_}")
+    if n_t == 0:
+        failures.append("cross-shore tails: the case planted no tail (generator)")
+    elif d_t < 0.9 * n_t:
+        failures.append(f"cross-shore tails: only {d_t / n_t:.0%} of the tail points dropped (need 90%)")
+    if d_h >= 0.005 * n_h:
+        failures.append(f"cross-shore tails: {d_h / max(n_h, 1):.2%} of honest points dropped (limit 0.5%)")
+
     if not keep_dir:
         for p_ in tmp.iterdir():
             p_.unlink()
@@ -2524,6 +2886,18 @@ def build_parser():
     ap.add_argument("--max-drop-fraction", type=float, default=0.5,
                     help="If a camera would lose more than this share of its points, pass it "
                          "through unfiltered and warn (default 0.5).")
+    ap.add_argument("--max-day-residual", type=float, default=1.0,
+                    help="The day check: leave out a camera-day whose lines sit, on median, more than "
+                         "this many metres of water level from where the OTHER days' lines put their "
+                         "level, column bin by column bin (default 1.0; 0 = off). Catches a day of "
+                         "lines on something else than the water's edge (snow, a wrack or wet/dry "
+                         "line, a camera that moved), whose lines agree with each other. See "
+                         "judge_days().")
+    ap.add_argument("--day-min-values", type=int, default=8,
+                    help="(line, column bin) values a camera-day needs for the day check (default 8).")
+    ap.add_argument("--no-track-filter", action="store_true",
+                    help="Do not drop the runs of a line that cross the shore on the ground "
+                         "(waterline_track.py; only when the input has easting_utm19/northing_utm19).")
     return ap
 
 

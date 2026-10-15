@@ -115,6 +115,7 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     exclude = [re.compile(x) for x in (exclude or [])]
     excluded = set()
     E, N, Z, cams, dates, frames = [], [], [], [], [], []
+    ucol = []                     # pixel column: the order of a line's points (cross-shore rule)
     missing_ground = 0
     rough_frames, unknown_hs_frames = set(), set()
     with_setup = 0
@@ -162,6 +163,10 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             cams.append(r["camera"])
             dates.append(day)
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
+            try:
+                ucol.append(float(r.get("pixel_column") or "nan"))
+            except ValueError:
+                ucol.append(float("nan"))
     if exclude:
         print(f"Excluded by name  : {len(excluded)} frame(s) (--exclude)")
     if max_hs is not None:
@@ -169,7 +174,8 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
               f"{max_hs} m; {len(unknown_hs_frames)} frame(s) with no wave record kept")
     if stats is not None:
         stats.update(excluded_frames=len(excluded), rough_frames=len(rough_frames),
-                     setup_share=with_setup / len(Z) if Z else 0.0)
+                     setup_share=with_setup / len(Z) if Z else 0.0,
+                     pixel_column=np.array(ucol, float))
     return (np.array(E), np.array(N), np.array(Z),
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
 
@@ -643,6 +649,13 @@ def day_offsets(pair_cell, pair_vals, pair_key, min_frames, min_pairs=30):
 # (survey_products.py, DEM_DAY_TEST_MIN, does not ask for the test then); later on, the days it
 # cannot judge keep the first pass's verdict and a WARNING names them (day_consistency, step 2).
 DAY_TEST_MIN_DAYS = 3
+# --anchor-date (the survey-date builds, survey_products.py): each camera's testable day nearest the
+# survey date, within this many days of it, is never left out. Without it, on a camera whose days
+# drift through the week (real change, or a bias that follows the tides), the test keeps whichever
+# end of the drift weighs more: c2 of the 23 Oct 2024 build (+0.33, +0.26, +0.11, +0.09, -0.13,
+# -0.26 m over 20-26 Oct) kept 24 and 26 Oct only and left out the survey's own day. With the
+# anchor the days kept are those that agree with the survey's.
+DAY_ANCHOR_REACH = 1
 # A camera whose day offsets (final, below) run one way with time gets a WARNING: real beach change
 # through the window, or an error that drifts with time (pointing, lens, a detection bias that
 # follows the tides or waves), gives that pattern, and the day test then trims whichever end lies
@@ -840,10 +853,37 @@ def day_trends(offsets, limit, min_days=DAY_TREND_MIN_DAYS, min_rho=DAY_TREND_MI
     return out
 
 
+def anchor_days(first, anchor, reach=DAY_ANCHOR_REACH):
+    """The survey-date anchor of the day test (--anchor-date): (kept, reference). reference:
+    every camera's testable days within `reach` days of the anchor date -- the DEM the other days
+    are measured against first; kept: for each camera, its reference day(s) nearest the date
+    (ties: every day at that distance), never left out. first: {"<camera> <day>": (offset,
+    samples)}."""
+    from datetime import date
+    a = date.fromisoformat(anchor)
+    best, ref = {}, []
+    for k, (off, _) in first.items():
+        if not np.isfinite(off):
+            continue
+        cam, day = k.split(" ", 1)
+        dist = abs((date.fromisoformat(day) - a).days)
+        if dist > reach:
+            continue
+        ref.append(k)
+        if cam not in best or dist < best[cam][0]:
+            best[cam] = (dist, [k])
+        elif dist == best[cam][0]:
+            best[cam][1].append(k)
+    return sorted(k for _, ks in best.values() for k in ks), sorted(ref)
+
+
 def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs=30,
-                    min_days=DAY_TEST_MIN_DAYS):
+                    min_days=DAY_TEST_MIN_DAYS, anchor=None):
     """
     The --max-day-offset test. pair_key names each sample's camera-day ("<camera> <day>").
+    anchor: a survey date (--anchor-date); each camera's testable day nearest it, within
+    DAY_ANCHOR_REACH days (anchor_days), is never left out, so the days the test keeps are
+    those that agree with the survey's own days.
 
     1. First pass: every camera-day against the DEM of all the other days (day_offsets). With
        fewer than `min_days` testable days (offset not NaN) every day is kept (too_few).
@@ -901,9 +941,12 @@ def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs
     idx = loo.index
     first = loo.offsets()
     testable = [k for k in names if np.isfinite(first[k][0])]
+    anchored, anchor_ref = anchor_days(first, anchor) if anchor else ([], [])
+    anchored = set(anchored)
     out = {"first": first, "final": dict(first), "steps": [], "not_judged": [], "judged_later": [], "retests": [],
            "refused": [], "taken_back": [], "rejected": [], "untested": [], "over_kept": [],
-           "too_few": len(testable) < min_days, "testable": len(testable)}
+           "too_few": len(testable) < min_days, "testable": len(testable),
+           "anchor": anchor, "anchored": sorted(anchored), "anchor_reference": anchor_ref}
     if out["too_few"]:
         return out
 
@@ -914,11 +957,26 @@ def day_consistency(pair_cell, pair_vals, pair_key, limit, min_frames, min_pairs
         return (-abs(off), idx[k])
 
     kept = np.ones(len(names), bool)
-    cur = dict(first)                       # kept days: offset from the DEM of the other kept days
+    out["vs_anchor"], out["anchor_left"] = {}, []
+    if anchored:
+        # The days around the survey date (within DAY_ANCHOR_REACH) are the reference: every other
+        # day against their DEM, and over the limit, left out (furthest first) before the iterative
+        # test, which then goes on with the rest (the reference days among them, but the one(s)
+        # nearest the date). A day that shares too few cells with them is left to the iterative test.
+        A = np.zeros(len(names), bool)
+        A[[idx[k] for k in anchor_ref]] = True
+        vs = loo.offsets(A, ~A)
+        out["vs_anchor"] = vs
+        for k in sorted((k for k in vs if over(vs[k][0])), key=lambda k: rank(k, vs[k][0])):
+            out["steps"].append((k,) + tuple(vs[k]))
+            out["anchor_left"].append(k)
+            kept[idx[k]] = False
+    cur = loo.offsets(kept, kept) if out["anchor_left"] else dict(first)
     settled = set()                         # over the limit, not judged, kept by the first pass
     while True:
         test = [k for k in names if kept[idx[k]] and np.isfinite(cur[k][0])]
-        bad = sorted((k for k in test if over(cur[k][0])), key=lambda k: rank(k, cur[k][0]))
+        bad = sorted((k for k in test if over(cur[k][0]) and k not in anchored),
+                     key=lambda k: rank(k, cur[k][0]))
         if not bad:
             break
         worst, why = None, {}
@@ -1060,6 +1118,12 @@ def day_test_report(dt, limit, n_left_points=None):
                 note = f"  (off by more than the limit -- kept: fewer than {DAY_TEST_MIN_DAYS} testable days)"
             else:
                 note = ""
+        elif k in rej and k in dt.get("anchor_left", ()):
+            note = (f"  <-- REJECTED (off the days around the survey date by {_off(dt['vs_anchor'][k][0]).strip()}, "
+                    f"left out {ordinal(order[k])})")
+        elif k in dt.get("anchored", ()):
+            note = ("  (nearest the survey date: kept whatever its offset" +
+                    (", over the limit of the kept days" if np.isfinite(fo) and abs(fo) > limit else "") + ")")
         elif k in rej and k in nj and nj[k].get("judged_in_end"):
             note = ("  <-- REJECTED (left out unjudged, as the first pass had it; the kept days judge it "
                     "over the limit in the end)")
@@ -1100,6 +1164,20 @@ def day_test_report(dt, limit, n_left_points=None):
         return lines
     if n_left_points is not None and rej:
         lines.append(f"   left out {len(rej)} camera-day(s), {n_left_points} point(s)")
+    if dt.get("anchor"):
+        lines += _wrap(f"anchored on the survey date {dt['anchor']} (--anchor-date): "
+                       + (f"{', '.join(dt['anchored'])} (each camera's testable day nearest it) never left "
+                          f"out; every day further than {DAY_ANCHOR_REACH} day from it measured first against "
+                          f"the DEM of the days within {DAY_ANCHOR_REACH} day ({', '.join(dt['anchor_reference'])}), "
+                          f"and left out over the limit, then the test below on the rest"
+                          + (": " + ", ".join(_unit(f"{k} ({_off(dt['vs_anchor'][k][0]).strip()})")
+                                              for k in sorted(dt["vs_anchor"])
+                                              if np.isfinite(dt["vs_anchor"][k][0]))
+                             if any(np.isfinite(v[0]) for v in (dt.get("vs_anchor") or {}).values()) else
+                             ": no other day comparable with them")
+                          if dt["anchored"] else
+                          f"no camera has a testable day within {DAY_ANCHOR_REACH} day of it: nothing "
+                          f"anchored"))
     if not moved:
         return lines
     lines += _wrap(f"({DAY_TEST_METHOD}. First column: each day against the DEM of every other day, "
@@ -1290,6 +1368,10 @@ def day_test_record(dt, limit, trends):
                    f"other day); the test could not judge it, so the first pass's verdict stands"
                    + (f"; within the limit of the kept days now, but taking it back would put "
                       f"{', '.join(refused[k])} over the limit" if k in refused else ""))
+        elif k in dt.get("anchor_left", ()):
+            how = "off the days around the survey date"
+            why = (f"off the DEM of the days around the survey date ({', '.join(dt['anchor_reference'])}) by "
+                   f"{_off(dt['vs_anchor'][k][0]).strip()}, more than the limit (--anchor-date)")
         elif k in refused:
             how = "refused take-back"
             why = (f"left out {ordinal(order[k])}; within the limit of the kept days, but taking it back "
@@ -1310,6 +1392,11 @@ def day_test_record(dt, limit, trends):
             "method": DAY_TEST_METHOD if not dt["too_few"] else
             f"not applied: fewer than {DAY_TEST_MIN_DAYS} testable camera-days, every day kept",
             "limit_m": limit,
+            # --anchor-date: the survey date, and the days kept whatever their offset (anchor_days)
+            "anchor_date": dt.get("anchor"),
+            "anchored_days": list(dt.get("anchored", [])),
+            "anchor_reference_days": list(dt.get("anchor_reference", [])),
+            "offsets_from_anchored_days_m": {k: r(v[0]) for k, v in (dt.get("vs_anchor") or {}).items()},
             "first_pass_offsets_m": {k: r(v[0]) for k, v in dt["first"].items()},
             "final_offsets_m": {k: r(v[0]) for k, v in dt["final"].items()},
             "samples": {k: int(v[1]) for k, v in dt["first"].items()},
@@ -1590,6 +1677,15 @@ def main():
                          "station fault. The record in <stem>_info.json is the same; the day test's other "
                          "WARNING (a day it could not judge) stays a WARNING. Survey-date builds do not "
                          "pass it.")
+    ap.add_argument("--anchor-date", default=None,
+                    help="With --max-day-offset: a survey date (YYYY-MM-DD). Each camera's testable day "
+                         "nearest it (within 1 day) is never left out, so the days kept are those that "
+                         "agree with the survey's own days, not whichever end of a drift weighs more. "
+                         "The survey-date builds (survey_products.py) pass it; the station's cron does not.")
+    ap.add_argument("--no-track-filter", action="store_true",
+                    help="Keep the runs of a line that cross the shore on the ground (by default "
+                         "dropped: a line's track running more than 45 deg from the shore over 10 m is "
+                         "the line tracer carrying on out over the water; waterline_track.py).")
     ap.add_argument("--max-day-offset", type=float, default=None,
                     help="Leave out camera-days whose samples sit, on median, more than this "
                          "many metres from the DEM built without that day (e.g. 0.15). "
@@ -1735,6 +1831,43 @@ def main():
     print(f"extent            : {E.max()-E.min():.1f} m E-W by {N.max()-N.min():.1f} m N-S")
     print()
 
+    # Runs of a line across the shore (waterline_track.py): the line tracer carrying on along
+    # one pixel row out over the water. The survey-date builds' consistency filter drops them
+    # already (their files carry the ground); the live cron's filter runs on the photo rows
+    # alone, so its DEMs get them dropped here.
+    track_record = {"lines": 0, "points": 0, "by_camera": {}}
+    if not args.no_track_filter:
+        from waterline_track import cross_shore_drops, axis_bearing
+        ucol = load_stats.get("pixel_column")
+        if ucol is None or ucol.size != E.size:
+            ucol = np.arange(E.size, dtype=float)
+        ucol = np.where(np.isfinite(ucol), ucol, np.arange(E.size, dtype=float))
+        drop_cs = np.zeros(E.size, bool)
+        msgs = []
+        for c in sorted(set(cams)):
+            m = np.flatnonzero(cams == c)
+            fid = np.unique(frames[m], return_inverse=True)[1]
+            d, per_line, axis, ratio = cross_shore_drops(fid, ucol[m], E[m], N[m])
+            if axis is None:
+                msgs.append(f"{c} not judged (no clear shore axis, spread ratio {ratio:.1f})")
+                continue
+            if d.sum() > 0.5 * m.size:
+                msgs.append(f"{c} NOT applied: would drop {100.0 * d.mean():.0f}% of its points "
+                            f"(shore axis {axis_bearing(axis):.0f} deg wrong for this view?)")
+                continue
+            drop_cs[m[d]] = True
+            track_record["by_camera"][c] = {"lines": len(per_line), "points": int(d.sum()),
+                                            "shore_axis_deg": round(axis_bearing(axis), 1)}
+            msgs.append(f"{c} {len(per_line)} line(s), {int(d.sum())} point(s)")
+        track_record["lines"] = sum(v["lines"] for v in track_record["by_camera"].values())
+        track_record["points"] = int(drop_cs.sum())
+        print(f"Cross-shore runs  : {'; '.join(msgs)} dropped (a line's track running more than 45 deg "
+              f"from the shore over 10 m: a trace out over the water, not a waterline; waterline_track.py)")
+        if drop_cs.any():
+            k = ~drop_cs
+            E, N, Z, cams, dates, frames = E[k], N[k], Z[k], cams[k], dates[k], frames[k]
+        print()
+
     if args.fit_setup or args.max_day_offset or args.max_frame_offset:
         info = load_frame_info(args.contour_csv)
         pair_cell, pair_frame = frame_pairs(E, N, frames, args.cell)
@@ -1823,7 +1956,8 @@ def main():
         # are taken back. With fewer than 3 testable camera-days "the DEM without that day"
         # is the other day alone: the test cannot tell which day is off, and keeps them all.
         # Days it cannot judge later on keep the first pass's verdict, with a WARNING.
-        dt = day_consistency(pair_cell, pair_vals, pair_key, args.max_day_offset, args.min_points)
+        dt = day_consistency(pair_cell, pair_vals, pair_key, args.max_day_offset, args.min_points,
+                             anchor=args.anchor_date)
         rejected = set(dt["rejected"])
         keep = None
         if rejected:
@@ -1959,6 +2093,7 @@ def main():
         "filters": {
             "max_hs": args.max_hs, "rough_frames": load_stats.get("rough_frames", 0),
             "excluded_frames": load_stats.get("excluded_frames", 0),
+            "cross_shore_runs": track_record,
             "max_frame_offset": args.max_frame_offset,
             "frames_rejected": len(rejected_frames),
             "max_day_offset": args.max_day_offset,
