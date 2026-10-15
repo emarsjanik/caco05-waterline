@@ -618,7 +618,7 @@ STEP_SCRIPTS = {
     "detect_live": ["georectify.py", "extract_elevation_contours.py"],
     "merge": [],
     "filter": ["waterline_consistency.py", "waterline_track.py"],
-    "dem": ["dem_from_contours.py", "waterline_track.py", "asc_to_geotiff.py", "dem_figure.py"],
+    "dem": ["dem_from_contours.py", "waterline_track.py", "asc_to_geotiff.py", "dem_figure.py", "dem_map.py"],
     "map": ["daily_elevation_map.py"],
     "map_plan": ["compare_dem_survey.py", "survey_compare.py"],
     "compare": ["survey_compare.py", "compare_dem_survey.py", "compare_rtk.py", "asc_to_geotiff.py"],
@@ -3909,7 +3909,7 @@ def step_dem(plan, args, state):
     say("dem", f"dem_from_contours.py over {plan['first']} .. {plan['last']} ({why}); ~10-40 s on the NUC")
     drop_stamp(out, "dem")
     (out / "dem").mkdir(parents=True, exist_ok=True)
-    for o in outs + [Path(f"{stem}_info.json")]:        # no stale grid or page from an earlier build
+    for o in outs + [Path(f"{stem}_info.json"), Path(f"{stem}_map.png")]:   # no stale grid or page from an earlier build
         if o.exists():
             o.unlink()
     clear_comparisons(plan, "the DEM is being rebuilt")
@@ -3924,6 +3924,11 @@ def step_dem(plan, args, state):
     if rc != 0:
         raise StepFailed(f"asc_to_geotiff.py failed (exit {rc}); see {log}")
     view_calibration(plan)
+    # the plain north-up map (dem_map.py, <stem>_map.png): what Dr Sherwood found easier to read than the
+    # page below; a failure is said, never fatal (the grids are the product)
+    if run_cmd([sys.executable, HERE / "dem_map.py", stem, "--title", f"{plan['date']}: {plan['first']} .. "
+                f"{plan['last']}, cameras {', '.join(sorted(plan['cams']))}"], log) != 0:
+        warn(f"the plain DEM map (dem_map.py) failed; the grids are fine. See {log}")
     rc = run_cmd(page, log)
     extra = {"cells": cells, "source": str(src),
              "settings": dict(dem_settings_requested(args), day_test_off=no_day_test or None)}
@@ -11074,7 +11079,7 @@ def share(args):
     stem = next(iter(sorted((out / "dem").glob("*_dem.asc"))), None) if (out / "dem").is_dir() else None
     if stem is not None:
         st = str(stem)[:-len("_dem.asc")]
-        for suf in ("_dem.tif", "_spread.tif", "_count.tif", "_dem.png", "_info.json"):
+        for suf in ("_dem.tif", "_spread.tif", "_count.tif", "_dem.png", "_map.png", "_info.json"):
             if Path(st + suf).is_file():
                 files.append((Path(st + suf), f"dem/{Path(st + suf).name}"))
     for f in sorted((out / "maps").glob("*.png")) if (out / "maps").is_dir() else []:
