@@ -361,6 +361,22 @@ How it decides (`dem_from_contours.day_consistency`; the rule as printed is
   WARNING says the trend **rests on** that day ("it rests on <day>, the one day left out, at an
   end: ... the end of the trend or one bad day beyond it").
 
+* **Survey-date anchor (`--anchor-date`, the survey-date builds only; Oct 2026).** On a camera
+  whose days drift through the window the test keeps whichever end weighs more: c2 of the
+  2024-10-23 build (first pass +0.33, +0.26, +0.11, +0.09, -0.13, -0.26 m over 20-26 Oct) kept
+  24 and 26 Oct only and left out the survey's own day. `survey_products.py` now passes the
+  survey date: each camera's testable days within 1 day of it are the reference -- every other
+  day is measured first against their DEM and left out over the limit -- and the day(s)
+  nearest the date are never left out; the iterative test then goes on with the rest. On the
+  owner's real 2024-10-23 lines (after the Oct 2026 filter): c2 keeps 22, 23 and 24 Oct, leaves
+  out 20 (+0.32 m), 21 (+0.29) and 26 Oct (-0.18 m from 22-24 Oct); 22 Oct stays +0.21 m off
+  23-24 Oct, unjudged (only two c2 days left to judge it by), with the WARNING; 471 DEM cells
+  (349 without the anchor). 2025-01-23, 2025-03-06 (no testable day within a day of the
+  survey) and 2026-09-29 (no day over the limit): unchanged. Chosen by the owner, 15 Oct 2026,
+  before DEM A went to Dr Sherwood; nothing of his survey is read (`test_anchor`: the days
+  around the survey kept when the other days outweigh them; a date with no testable day near
+  it: the test as without).
+
 Where it shows: the log's `Day consistency` block (first-pass and final offsets, order left
 out, not judged, taken back, refused) and its WARNING lines (`station_status.py` counts them,
 one per warning); `<stem>_info.json` `filters.day_test` (`rejected`: each day left out with

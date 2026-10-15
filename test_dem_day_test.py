@@ -39,6 +39,9 @@ one way with time. These checks plant the answer and ask for it back:
     rare; the chance of a rho exact for tied offsets;
   * the station's 7-day c1/c2 pattern of 5-11 Oct 2026, replayed;
   * fewer than 3 days: none left out;
+  * a survey-date DEM (--anchor-date) whose days around the survey are
+    outweighed by the others: they are kept and the others, off them, left
+    out; no day near the date: as without;
   * the offsets equal the one-pass code's, whatever the order of the
     samples, ties are broken by name, and random scenarios (stretches of
     beach, and two-camera tidal windows) keep the test's bookkeeping;
@@ -860,6 +863,44 @@ def test_set_aside_retried():
               f"({dt['final']['c2 2026-10-06'][0]:+.3f} m); no day is kept over the limit")
 
 
+def scenario_survey_minority():
+    """A week (20-26 Oct) whose three days around the survey date (22-24 Oct) read 0.25-0.30 m higher
+    than the four others, all on one stretch of beach: in the test without an anchor the four
+    outweigh them, and the survey's own days are the ones left out."""
+    bias = {"20": 0.0, "21": 0.0, "22": 0.25, "23": 0.30, "24": 0.28, "25": 0.0, "26": 0.0}
+    return [(f"c2 2024-10-{d}", b, range(150), 3) for d, b in bias.items()]
+
+
+def test_anchor():
+    print("survey-date anchor (--anchor-date): the days kept are those around the survey")
+    pc, pv, pk = pairs(scenario_survey_minority(), sigma=0.05)
+    free = dfc.day_consistency(pc, pv, pk, LIMIT, MIN_FRAMES)
+    around = {"c2 2024-10-22", "c2 2024-10-23", "c2 2024-10-24"}
+    check(around <= set(free["rejected"]),
+          f"without the anchor the days around the survey are the ones left out ({free['rejected']})")
+    dt = dfc.day_consistency(pc, pv, pk, LIMIT, MIN_FRAMES, anchor="2024-10-23")
+    check(dt["anchored"] == ["c2 2024-10-23"], f"the survey's own day is the anchor ({dt['anchored']})")
+    check(dt["anchor_reference"] == sorted(around),
+          f"the days within 1 day of it are the reference ({dt['anchor_reference']})")
+    check(not (around & set(dt["rejected"])), f"the days around the survey are kept (left out {dt['rejected']})")
+    check(set(dt["rejected"]) == {"c2 2024-10-20", "c2 2024-10-21", "c2 2024-10-25", "c2 2024-10-26"}
+          and set(dt["anchor_left"]) == set(dt["rejected"]),
+          f"the others, off the days around the survey, are left out against them ({dt['anchor_left']})")
+    lines = dfc.day_test_report(dt, LIMIT, 0)
+    check(any("anchored on the survey date 2024-10-23" in ln for ln in lines)
+          and any("nearest the survey date: kept" in ln for ln in lines)
+          and any("off the days around the survey date" in ln for ln in lines)
+          and not any("WARNING" in ln for ln in lines),
+          "the log says what was anchored, why the anchor day is kept and why the others went")
+    rec = dfc.day_test_record(dt, LIMIT, [])["day_test"]
+    check(rec["anchor_date"] == "2024-10-23" and rec["anchored_days"] == ["c2 2024-10-23"]
+          and all(r["how"] == "off the days around the survey date" for r in rec["rejected"]),
+          "<stem>_info.json keeps the anchor, and why each day went")
+    far = dfc.day_consistency(pc, pv, pk, LIMIT, MIN_FRAMES, anchor="2024-11-15")
+    check(far["anchored"] == [] and far["rejected"] == free["rejected"],
+          "no testable day within 1 day of the date: nothing anchored, the test as without it")
+
+
 def test_deterministic():
     print("deterministic: sample order and ties")
     pc, pv, pk = pairs(scenario_masking(), seed=2)
@@ -1342,6 +1383,7 @@ def main():
         test_cannot_judge()
         test_unjudged_fate()
         test_set_aside_retried()
+        test_anchor()
         test_deterministic()
         test_random()
         test_timing(args.year)

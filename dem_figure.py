@@ -809,6 +809,8 @@ def day_test_reason(f, day):
                 f"kept day over")
     if how == "not judged":
         return f"camera-days the day test could not judge, off the other days by > {lim} m in its first pass"
+    if how == "off the days around the survey date":
+        return f"camera-days off the days around the survey date by > {lim} m"
     return f"camera-days off the rest by > {lim} m"
 
 

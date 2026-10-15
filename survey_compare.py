@@ -202,6 +202,10 @@ BAND = 0.5                       # elevation band width, m
 # it was 32619 (WGS 84 / UTM 19N), a NOMINAL tag from an old .prj; --epsg 32619 still writes it (labelled nominal).
 DEFAULT_EPSG = 6348
 MIN_BAND_N = 10                  # fewer values than this in a group: flagged as few
+# Cameras whose medians (each on MIN_BAND_N or more values) are further apart than this: the report
+# gives them right under the HEADLINE, which pools both (survey_products.py CAMERA_SPLIT_M, the same).
+# The 2025-01-23 build of 15 Oct 2026 led with +0.023 m while c1 read -1.80 m (snow) and c2 +0.12.
+CAMERA_SPLIT_M = 0.10
 MIN_SPREAD_N = 3                 # fewer than this: no NMAD / p5 / p95 (one value has NMAD 0)
 TIME_GAP_WARN_DAYS = 3
 SYNTHETIC_NOTE = "tests the pipeline, not the beach"
@@ -825,6 +829,12 @@ def stats(d):
 
 def band_name(lo):
     return f"{lo:+.1f} to {lo + BAND:+.1f}"
+
+
+def _wrap_text(text, width, indent):
+    """text in lines of at most `width` characters, the later ones indented."""
+    import textwrap
+    return textwrap.wrap(text, width, subsequent_indent=indent, break_long_words=False) or [text]
 
 
 def group_rows(d, groups):
@@ -2130,8 +2140,21 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     else:
         hl = f"no {what} to compare -- the DEM and the survey do not overlap"
         print(f"HEADLINE          : {hl}")
+    cams_ok = [r for r in rows if r["group_type"] == "camera" and str(r["group"]).startswith("c")
+               and r["n"] >= MIN_BAND_N]
+    by_cam = []
+    if len(cams_ok) >= 2:
+        meds = [r["median"] for r in cams_ok]
+        if max(meds) - min(meds) > CAMERA_SPLIT_M:
+            head["camera_split_m"] = round(max(meds) - min(meds), 4)
+            by_cam = _wrap_text("BY CAMERA  : " + ", ".join(f"{r['group']} {r['median']:+.3f} m (n {r['n']})"
+                                                            for r in cams_ok)
+                                + f": {max(meds) - min(meds):.2f} m apart -- the cameras disagree, and the "
+                                  f"HEADLINE pools two errors: read each camera's own numbers (BY CAMERA "
+                                  f"below)", 100, "             ")
+            print(by_cam[0])
     k_hl = 5 if synthetic else 4
-    lines[k_hl:k_hl] = ["", f"HEADLINE   : DEM - survey {hl}",
+    lines[k_hl:k_hl] = ["", f"HEADLINE   : DEM - survey {hl}"] + by_cam + [
                   "             positive = DEM too HIGH; NMAD = 1.4826 x median |d - median| "
                   "(robust sd)", ""]
     table(lines, "OVERALL", [r for r in rows if r["group_type"] == "overall"], what)
