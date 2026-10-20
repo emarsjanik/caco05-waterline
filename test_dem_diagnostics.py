@@ -12,6 +12,12 @@ WHAT. The additions that report on a DEM without changing any value in it:
     which kind of file tagged the frames, and a WARNING when that is not
     the currency the setup coefficient was fitted in (the raw buoy archive
     the cron falls back to when waves_marconi.csv is missing);
+  * the residuals against the tide's stage and the waves (the DEM's log
+    and <stem>_info.json diagnostics.residuals): a planted water-level
+    timing error (each line given an elevation 0.1 m per m/h of dz/dt too
+    high, the line 6 min older than its level) comes back as that slope,
+    flood frames high and ebb frames low; a planted wave dependence comes
+    back against Hs; none planted, none found;
   * the DEM's grids are the same with them as without: the elevations,
     spread and count grids do not depend on the new columns.
 
@@ -145,24 +151,26 @@ HEADER = ("source_file,camera,capture_time_utc,capture_epoch,pixel_column,eastin
 
 def ground_rows(frames, wave_source=None):
     """frames: [(camera, epoch, tide, hs, dz)]: each frame a line of 20 points along the beach row
-    whose elevation is its level (tide + 0.05 setup + dz); the beach rises 0.2 m per 2 m row."""
+    where the beach is at the frame's true level (tide + 0.05 m setup; the beach rises 0.05 m per
+    2 m row), given the elevation true level + dz -- dz is the error in the elevation the line is
+    given, as a timing error or a camera bias would make it."""
     head = HEADER + (",wave_source" if wave_source is not None else "")
     rows = [head]
     for cam, ep, tide, hs, dz in frames:
         t = datetime.fromtimestamp(ep, tz=timezone.utc)
         f = f"{ep}.{cam}.timex"
-        z = tide + 0.05 + dz
-        x = int(round((z + 0.5) / 0.2))                    # the row whose beach is at z
+        true = tide + 0.05
+        x = int(round((true + 1.0) / 0.05))                # the row whose beach is at the true level
         x0 = 420001.0 if cam == "c1" else 420021.0         # c1 columns 0-19, c2 10-29: 10 shared
         for col in range(20):
             rows.append(f"{f},{cam},{t:%Y-%m-%dT%H:%M:%S}+00:00,{ep},{col},{x0 + 2 * col:.2f},"
-                        f"{4638001.0 + 2 * x:.2f},{tide:.4f},{hs:.2f},8.0,0.05,{z:.4f}"
+                        f"{4638001.0 + 2 * x:.2f},{tide + dz:.4f},{hs:.2f},8.0,0.05,{true + dz:.4f}"
                         + (f",{wave_source}" if wave_source is not None else ""))
     return rows
 
 
-def tidal_frames(days=5, seed=3, c2_offset=0.0, lag_m_per_mph=0.0, hs_slope=0.0):
-    """Both cameras every 30 min, 13-21 UTC, on `days` days from 1 Oct 2026, under a 12.42 h tide of
+def tidal_frames(days=5, seed=3, c2_offset=0.0, lag_m_per_mph=0.0, hs_slope=0.0, first_hour=11, n=25):
+    """Both cameras every 30 min, `n` frames from `first_hour` UTC (default 11-23 UTC), on `days` days from 1 Oct 2026, under a 12.42 h tide of
     1.2 m amplitude. Each frame's line sits at its level + noise + lag x dz/dt (m/h) + hs_slope x
     (Hs - 1) (+ c2_offset on c2): the planted water-level timing error and wave dependence."""
     rng = np.random.RandomState(seed)
@@ -170,8 +178,8 @@ def tidal_frames(days=5, seed=3, c2_offset=0.0, lag_m_per_mph=0.0, hs_slope=0.0)
     w = 2 * np.pi / (12.42 * 3600)
     for day in range(days):
         hs = 0.6 + 0.2 * day
-        for k in range(17):
-            ep = int(datetime(2026, 10, 1 + day, 13, 0, tzinfo=timezone.utc).timestamp()) + 1800 * k
+        for k in range(n):
+            ep = int(datetime(2026, 10, 1 + day, first_hour, 0, tzinfo=timezone.utc).timestamp()) + 1800 * k
             tide = 0.6 + 1.2 * np.sin(w * ep)
             rate = 1.2 * w * np.cos(w * ep) * 3600                 # m/h
             for cam in ("c1", "c2"):
@@ -217,6 +225,78 @@ def test_dem_wave_currency(d):
           "the dem, spread and count grids are identical with and without the column")
 
 
+def build(d, name, frames, extra=()):
+    g = Path(d) / f"{name}.csv"
+    g.write_text("\n".join(ground_rows(frames, "marconi:hs_best/tp_s")) + "\n")
+    rc, log = run([HERE / "dem_from_contours.py", g, Path(d) / name, "--no-plot"] + list(extra), d)
+    (Path(d) / f"{name}.log").write_text(log)
+    info = json.loads((Path(d) / f"{name}_info.json").read_text()) if rc == 0 else {}
+    return rc, log, info
+
+
+def test_water_level_rates():
+    print("dem_from_contours.water_level_rates: dz/dt from the frames either side")
+    import dem_from_contours as dfc
+    t0 = 1790000000
+    info = {f"f{i}": {"epoch": float(t0 + 1800 * i), "tide": 0.1 * i, "hs": 1.0, "tp": 8.0, "setup": 0.0}
+            for i in range(4)}
+    info["c2_twin"] = dict(info["f1"])                                 # the other camera, same capture
+    info["alone"] = {"epoch": float(t0 + 1800 * 3 + 4 * 3600), "tide": 0.0, "hs": 1.0, "tp": 8.0, "setup": 0.0}
+    r = dfc.water_level_rates(info)
+    check(abs(r["f1"] - 0.2) < 1e-9 and abs(r["f0"] - 0.2) < 1e-9 and abs(r["f3"] - 0.2) < 1e-9
+          and r["c2_twin"] == r["f1"] and np.isnan(r["alone"]),
+          "0.1 m per 30 min = 0.2 m/h: centred inside, one-sided at the ends, the same for both cameras of "
+          "a capture, none for a frame 4 h from any other")
+
+
+def test_residuals(d):
+    print("dem_from_contours.py: residuals vs dz/dt and Hs (the water-level timing test)")
+    d = Path(d) / "residuals"
+    d.mkdir(parents=True, exist_ok=True)
+    # a planted timing error: every line given an elevation 0.1 m per m/h of dz/dt too high (the line
+    # 6 min older than its level)
+    rc, log, info = build(d, "lag", tidal_frames(days=10, lag_m_per_mph=0.1))
+    rd = info.get("diagnostics", {}).get("residuals", {}).get("by_camera", {})
+    b = rd.get("both", {})
+    v = b.get("vs_dzdt") or {}
+    st = b.get("by_stage", {})
+    check(rc == 0 and v and abs(v["slope"] - 0.1) < 0.03 and v["r"] > 0.6 and abs(b["lag_min"] - 6) < 2
+          and st["flood"]["median_residual_m"] > 0.03 and st["ebb"]["median_residual_m"] < -0.03,
+          f"planted +0.1 m per m/h: slope {v.get('slope')}, r {v.get('r')}, lag {b.get('lag_min')} min; flood "
+          f"{st.get('flood', {}).get('median_residual_m')} m, ebb {st.get('ebb', {}).get('median_residual_m')} m")
+    vd = b.get("day_offset_vs_mean_dzdt")
+    check(vd is not None and vd["n"] == 20 and len(b["days"]) == 20
+          and all(set(x) == {"offset_m", "mean_dzdt_m_per_h"} for x in b["days"].values()),
+          "camera-days: each with its offset and the mean dz/dt of its frames, and the regression over the 20")
+    # days whose frames fall mostly on the flood or mostly on the ebb (6 h of daylight a day, the
+    # tide 50 min later each day): with the timing error the flood days read high
+    rcs, logs, infos = build(d, "lag_short", tidal_frames(days=14, lag_m_per_mph=0.1, first_hour=13, n=13))
+    vs = infos["diagnostics"]["residuals"]["by_camera"]["both"]["day_offset_vs_mean_dzdt"]
+    check(rcs == 0 and vs and vs["slope"] > 0.03 and vs["r"] > 0.5,
+          f"6-h days, mostly flood or mostly ebb: day offset vs mean dz/dt slope {vs['slope']:+.3f} m per m/h, "
+          f"r {vs['r']:+.2f} (flood days read high)")
+    check("Residuals vs tide stage and waves" in log and "lag +" in log and "WARNING" not in log,
+          "printed in the DEM log (no WARNING: reporting only)")
+    rc0, log0, info0 = build(d, "none", tidal_frames(days=10))
+    v0 = info0["diagnostics"]["residuals"]["by_camera"]["both"]["vs_dzdt"]
+    check(rc0 == 0 and abs(v0["slope"]) < 0.02 and abs(v0["r"]) < 0.3,
+          f"no timing error: slope {v0['slope']:+.3f}, r {v0['r']:+.2f}")
+    rch, logh, infoh = build(d, "hs", tidal_frames(days=10, hs_slope=0.1))
+    vh = infoh["diagnostics"]["residuals"]["by_camera"]["both"]["vs_hs"]
+    check(rch == 0 and abs(vh["slope"] - 0.1) < 0.03 and vh["r"] > 0.6,
+          f"planted +0.1 m per m of Hs: vs_hs slope {vh['slope']:+.3f}, r {vh['r']:+.2f}")
+    # the DEM itself does not depend on the diagnostics
+    rcn, logn, infon = build(d, "lag_nodiag", tidal_frames(days=10, lag_m_per_mph=0.1), ["--no-diagnostics"])
+    same = all(np.array_equal(np.loadtxt(d / f"lag_{k}.asc", skiprows=6),
+                              np.loadtxt(d / f"lag_nodiag_{k}.asc", skiprows=6)) for k in ("dem", "spread", "count"))
+    check(rcn == 0 and same and infon["diagnostics"] == {} and "Residuals vs" not in logn,
+          "--no-diagnostics: identical grids, diagnostics {} and nothing printed")
+    rcd, logd, infod = build(d, "lag_daytest", tidal_frames(days=10, lag_m_per_mph=0.1), ["--max-day-offset", "0.15"])
+    check(rcd == 0 and "before it left any day out" in infod["diagnostics"]["residuals"]["on"]
+          and logd.index("Residuals vs") < logd.index("Day consistency"),
+          "with the day test: computed on the frames it judged, printed before its block")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
@@ -241,6 +321,8 @@ def main():
         test_wave_columns()
         test_extract_wave_source(d)
         test_dem_wave_currency(d)
+        test_water_level_rates()
+        test_residuals(d)
         test_py38()
     finally:
         if not args.keep:

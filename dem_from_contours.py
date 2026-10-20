@@ -1487,6 +1487,161 @@ def day_test_record(dt, limit, trends):
     }
 
 
+# ---------------------------------------------------------------------
+# Reporting only: what the DEM's residuals say about the water-level
+# timing and the waves. No value of the DEM depends on any of this.
+# ---------------------------------------------------------------------
+
+# The water level's rate of change at a frame, from the levels of the frames either side (both
+# cameras share each capture time): centred when there is a frame within RATE_MAX_GAP_S on both
+# sides, one-sided when on one only, none otherwise (a frame alone at dawn or dusk). Frames come
+# every 30 min, so 75 min allows one missing capture.
+RATE_MAX_GAP_S = 75 * 60
+# A frame (key) needs this many (cell, frame) samples compared to have a residual, as in
+# --max-frame-offset; a camera-day 30, as in the day test.
+DIAG_FRAME_MIN_PAIRS = 10
+DIAG_DAY_MIN_PAIRS = 30
+# Fewest frames, or camera-days, a regression is reported on.
+DIAG_MIN_FRAMES = 10
+DIAG_MIN_DAYS = 4
+# |dz/dt| beyond which a frame counts as flood (rising) or ebb (falling), m/h; between: slack.
+DIAG_STAGE_RATE = 0.1
+
+
+def water_level_rates(info):
+    """{frame: dz/dt of its water level (tide_elevation_navd88), m/h, NaN if no neighbour} from the
+    levels of every frame of the contour file (load_frame_info), not only those in the DEM."""
+    ep = np.array([v["epoch"] for v in info.values()], float)
+    z = np.array([v["tide"] for v in info.values()], float)
+    ok = np.isfinite(ep) & np.isfinite(z)
+    ue, inv = np.unique(ep[ok], return_inverse=True)
+    uz = np.bincount(inv, weights=z[ok]) / np.bincount(inv)      # one level per capture time
+    rate_at = np.full(len(ue), np.nan)
+    if len(ue) >= 2:
+        prev_ok = np.r_[False, np.diff(ue) <= RATE_MAX_GAP_S]
+        next_ok = np.r_[prev_ok[1:], False]
+        i = np.arange(len(ue))
+        lo = np.where(prev_ok, i - 1, i)
+        hi = np.where(next_ok, i + 1, i)
+        dt = ue[hi] - ue[lo]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rate_at = np.where(dt > 0, (uz[hi] - uz[lo]) / dt * 3600.0, np.nan)
+    at = dict(zip(ue.tolist(), rate_at.tolist()))
+    return {f: (at.get(float(v["epoch"]), np.nan) if np.isfinite(v["epoch"]) else np.nan)
+            for f, v in info.items()}
+
+
+def _fit(x, y, min_n):
+    """Least-squares slope of y on x, and Pearson's r, over the finite pairs. -> dict or None."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    if len(x) < min_n or np.ptp(x) == 0:
+        return None
+    slope, icpt = np.polyfit(x, y, 1)
+    r = float(np.corrcoef(x, y)[0, 1]) if np.ptp(y) > 0 else 0.0
+    return {"n": int(len(x)), "slope": round(float(slope), 4), "intercept_m": round(float(icpt), 4),
+            "r": round(r, 3)}
+
+
+def residual_diagnostic(pair_cell, pair_frame, pair_vals, info, cam_of, min_frames):
+    """
+    Do the DEM's residuals follow the tide's stage or the waves? A test of
+    the water-level timing (review B1): each frame's level is the GNSS-R
+    level at the photo's file-name epoch, the START of the ~10-min timex,
+    while the line is the mean over the exposure and the detector blends
+    30% of the previous frame into it. If the line is older (or younger)
+    than its level by L minutes, every frame sits off by L x dz/dt: high on
+    the flood and low on the ebb for an older line. The day test's
+    camera-day drift that follows the spring-neap range would be the same
+    error seen day by day, as the daylight frames fall more on the flood or
+    the ebb.
+
+    Per frame: its residual, the median over its (cell, frame) samples of
+    (sample - the median of the OTHER frames in that cell), against the
+    water level's dz/dt at the frame (water_level_rates) and its offshore
+    Hs: least-squares slope, Pearson r and n, per camera and both; and the
+    median residual of flood, ebb and slack frames. A slope against dz/dt
+    in m per (m/h), times 60, is the lag in minutes (positive: the line is
+    older than its level). Per camera-day (local day, as the day test):
+    its offset from the DEM of the other days against the mean signed
+    dz/dt of its frames.
+
+    HOW FAR TO TRUST THE NUMBERS. A frame is measured against the other
+    crossings of the same cells; where those share its stage of the tide
+    its residual, and the slope, come out smaller, and where lines fall in
+    a cell adds noise (synthetic fixtures with a planted 6 min lag gave
+    about 5.5-8 min). The sign, r and the flood/ebb contrast are the test;
+    the minutes are indicative. A camera-day whose frames span a whole
+    tidal cycle has a mean dz/dt near 0, so the day regression says
+    something only where days differ in their flood/ebb mix (what the
+    hypothesis says happens through a week). Nothing is corrected: the numbers are for deciding
+    whether the timing fix (which needs the timex exposure confirmed on the
+    NUC) is worth making. -> (record for <stem>_info.json, lines to print)
+    """
+    rates = water_level_rates(info)
+    fo = LeaveOneOut(pair_cell, pair_vals, pair_frame, min_frames, DIAG_FRAME_MIN_PAIRS).offsets()
+    day_of = {f: f"{cam_of[f]} {local_day(info[f]['epoch'])}" for f in set(pair_frame.tolist())
+              if f in info and np.isfinite(info[f]["epoch"])}
+    have = np.array([f in day_of for f in pair_frame])
+    keys = np.array([day_of.get(f, "") for f in pair_frame])
+    do = LeaveOneOut(pair_cell[have], pair_vals[have], keys[have], min_frames,
+                     DIAG_DAY_MIN_PAIRS).offsets() if have.any() else {}
+    names = sorted(f for f, (o, n) in fo.items() if np.isfinite(o))
+    res = np.array([fo[f][0] for f in names])
+    rate = np.array([rates.get(f, np.nan) for f in names])
+    hs = np.array([info[f]["hs"] if f in info else np.nan for f in names])
+    cam = np.array([cam_of[f] for f in names])
+    day_rates = {}
+    for f, k in day_of.items():
+        if np.isfinite(rates.get(f, np.nan)):
+            day_rates.setdefault(k, []).append(rates[f])
+    rec = {"method": "per frame: median of (frame sample - the other frames' median in the cell) against the "
+                     "water level's dz/dt (m/h, from the levels of the frames either side) and offshore Hs; per "
+                     "camera-day: its offset from the DEM of the other days against the mean signed dz/dt of its "
+                     "frames. Least-squares slope, Pearson r. Slope vs dz/dt x 60 = minutes the line is older than "
+                     "its level. Reporting only: no value of the DEM depends on it",
+           "stage_rate_m_per_h": DIAG_STAGE_RATE, "by_camera": {}}
+    lines = ["Residuals vs tide stage and waves (reporting only; the review's water-level timing test):",
+             "   per frame: median offset from the other frames' cell medians; per camera-day: the day's offset",
+             "   from the other days. Slope vs dz/dt in m per m/h; x 60 = minutes the line lags its level"]
+    for c in sorted(set(cam.tolist())) + ["both"]:
+        m = np.ones(len(names), bool) if c == "both" else cam == c
+        if c == "both" and len(set(cam.tolist())) < 2:
+            continue
+        rr, ra, hh = res[m], rate[m], hs[m]
+        vs_rate, vs_hs = _fit(ra, rr, DIAG_MIN_FRAMES), _fit(hh, rr, DIAG_MIN_FRAMES)
+        with np.errstate(invalid="ignore"):
+            stage = {"flood": ra > DIAG_STAGE_RATE, "ebb": ra < -DIAG_STAGE_RATE,
+                     "slack": np.abs(ra) <= DIAG_STAGE_RATE}
+        by_stage = {k: {"frames": int(v.sum()),
+                        "median_residual_m": round(float(np.median(rr[v])), 4) if v.any() else None}
+                    for k, v in stage.items()}
+        dk = sorted(k for k, (o, n) in do.items() if np.isfinite(o) and (c == "both" or k.split(" ")[0] == c))
+        day_rate = [float(np.mean(day_rates[k])) if k in day_rates else np.nan for k in dk]
+        day_off = [do[k][0] for k in dk]
+        vs_day = _fit(day_rate, day_off, DIAG_MIN_DAYS)
+        rec["by_camera"][c] = {
+            "frames": int(m.sum()), "vs_dzdt": vs_rate, "vs_hs": vs_hs, "by_stage": by_stage,
+            "lag_min": None if vs_rate is None else round(vs_rate["slope"] * 60.0, 1),
+            "days": {k: {"offset_m": round(o, 4), "mean_dzdt_m_per_h": None if not np.isfinite(r) else round(r, 3)}
+                     for k, o, r in zip(dk, day_off, day_rate)},
+            "day_offset_vs_mean_dzdt": vs_day}
+        fl, eb = by_stage["flood"]["median_residual_m"], by_stage["ebb"]["median_residual_m"]
+        txt = f"   {c:<4} {int(m.sum())} frame(s): "
+        txt += (f"vs dz/dt slope {vs_rate['slope']:+.3f} m per m/h (lag {vs_rate['slope'] * 60:+.1f} min), "
+                f"r {vs_rate['r']:+.2f}" if vs_rate else "vs dz/dt: too few frames with a rate")
+        txt += (f"; vs Hs slope {vs_hs['slope']:+.3f} m/m, r {vs_hs['r']:+.2f}" if vs_hs else "; vs Hs: too few frames, or one Hs")
+        lines.append(txt)
+        lines.append(f"        flood {by_stage['flood']['frames']} median "
+                     + ("--" if fl is None else f"{fl:+.3f} m")
+                     + f", ebb {by_stage['ebb']['frames']} median " + ("--" if eb is None else f"{eb:+.3f} m")
+                     + f", slack {by_stage['slack']['frames']}; camera-days: "
+                     + (f"{vs_day['n']}, offset vs mean dz/dt slope {vs_day['slope']:+.3f} m per m/h, "
+                        f"r {vs_day['r']:+.2f}" if vs_day else f"{len(dk)} (too few to fit)"))
+    return rec, lines
+
+
 def interpolate_between_contours(E, N, Z, frames, cell, max_spread, dem, max_edge):
     """
     Fill cells between waterlines by linear interpolation.
@@ -1798,6 +1953,10 @@ def main():
                     help="Leave out frames whose file name matches this regular expression "
                          "(repeatable), e.g. 'Jan.22.*[.]c2[.]' -- for frames shown by their "
                          "overlays to have followed something other than the water's edge.")
+    ap.add_argument("--no-diagnostics", action="store_true",
+                    help="Skip the reporting-only diagnostics (residuals against the tide's stage and Hs, "
+                         "the c1 - c2 offset in shared cells). They change no value of the DEM; they are "
+                         "printed and kept in <stem>_info.json (diagnostics).")
     ap.add_argument("--no-plot", action="store_true",
                     help="Skip the page (<stem>_dem.png). The grids and <stem>_info.json are "
                          "still written; 'python3 dem_figure.py <stem>' draws the page later.")
@@ -1908,7 +2067,7 @@ def main():
             E, N, Z, cams, dates, frames = E[k], N[k], Z[k], cams[k], dates[k], frames[k]
         print()
 
-    if args.fit_setup or args.max_day_offset or args.max_frame_offset:
+    if args.fit_setup or args.max_day_offset or args.max_frame_offset or not args.no_diagnostics:
         info = load_frame_info(args.contour_csv)
         pair_cell, pair_frame = frame_pairs(E, N, frames, args.cell)
 
@@ -1981,6 +2140,22 @@ def main():
             # says little about C
             for line in setup_fit_verdict(valid, spread_at, c_use or None, use_from):
                 print(line)
+        print()
+
+    # Residuals against the tide's stage and the waves, on the frames the day test judges (before it
+    # leaves any day out: the days it would leave out are what the timing hypothesis explains)
+    diagnostics = {}
+    if not args.no_diagnostics:
+        z_of = {}
+        for f, z in zip(frames, Z):
+            z_of.setdefault(f, z)
+        diag, lines = residual_diagnostic(pair_cell, pair_frame, np.array([z_of[f] for f in pair_frame]),
+                                          info, dict(zip(frames, cams)), args.min_points)
+        diag["on"] = "the frames the day test judged (before it left any day out)" if args.max_day_offset \
+            else "the frames of this DEM"
+        diagnostics["residuals"] = diag
+        for line in lines:
+            print(line)
         print()
 
     if args.max_day_offset:
@@ -2137,6 +2312,9 @@ def main():
         # which wave record tagged the frames (extract_elevation_contours.py wave_source), against
         # the currency the setup coefficient was fitted in: wave_currency_record()
         "wave_currency": wave_record,
+        # reporting only (residual_diagnostic): residuals against the tide's stage and Hs; {} with
+        # --no-diagnostics
+        "diagnostics": diagnostics,
         # True: this build wrote <stem>_source.asc (and the page may trust
         # it); False: any _source.asc beside the grids is an older run's.
         "interpolated": source is not None,
