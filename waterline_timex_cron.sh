@@ -52,7 +52,9 @@ BACKDROP_PATTERN="all"
 # job reads them back: they are for looking at a frame that went wrong. At
 # ~60 daylight frames a day they grow ~0.5 GB a day without limit (the
 # detector only clears its input and output folders). Each run removes the
-# frame folders last changed DEBUG_KEEP_DAYS or more days ago. Detection
+# frame folders last changed DEBUG_KEEP_DAYS or more days ago (only folders
+# named like a photo, so anything else kept in DEBUG_DIR stays; DEBUG_DIR
+# may be a link to another disk: prune_debug_images below). Detection
 # is unaffected: the detector never reads debug/ (its temporal blend uses
 # the previous frame's CSV). Set to "" to keep every debug image.
 DEBUG_DIR="$BASE/debug"
@@ -264,6 +266,47 @@ mkdir -p "$SCRATCH" "$SCRATCH_INPUT" "$ARCHIVE_CSV" "$ARCHIVE_IMG" "$ARCHIVE_RAS
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
 
+# The detector's debug images (see DEBUG_KEEP_DAYS): removes the frame
+# folders directly in folder $1 last changed $2 or more days ago, by their
+# modification time (find -mtime +N matches N+1 or more whole days old,
+# hence $2 - 1), and logs how many went -- and, with a WARNING, how many
+# could not (counted again afterwards, not assumed gone).
+#   * Only folders named as the detector names them (debug_directory(): the
+#     photo's name without its extension, an Argus epoch of 10 digits and a
+#     dot first, e.g. 1727712000.Mon.Sep.30_16_00_00.GMT.2024.CACO05.c1.timex),
+#     so a folder kept there by hand, or the wrong folder in DEBUG_DIR, is
+#     never removed.
+#   * find -H: $1 may itself be a link (the debug images on another disk);
+#     without -H find looked at the link, not the folder, and pruned nothing.
+#     Links inside it are never followed (-type d does not match a link).
+#   * A days value that is not a whole number is a WARNING in the log (the
+#     arithmetic on it failed with a message on the job's stderr only, and
+#     nothing was pruned, run after run, with no word in the log). A whole
+#     number is read in base 10: bash reads 08 or 09 as a bad octal number.
+prune_debug_images() {
+    local dir="$1" keep="$2" age n_old n_left
+    local frame='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].*'
+    if [ -z "$keep" ] || [ ! -d "$dir" ]; then
+        return 0
+    fi
+    if ! [[ "$keep" =~ ^[0-9]+$ ]]; then
+        log "WARNING: DEBUG_KEEP_DAYS='$keep' is not a whole number of days: debug images NOT pruned"
+        return 0
+    fi
+    age=$((10#$keep - 1))
+    n_old=$(find -H "$dir" -mindepth 1 -maxdepth 1 -type d -name "$frame" -mtime +$age 2>/dev/null | wc -l)
+    if [ "$n_old" -eq 0 ]; then
+        return 0
+    fi
+    find -H "$dir" -mindepth 1 -maxdepth 1 -type d -name "$frame" -mtime +$age -exec rm -rf {} + 2>/dev/null
+    n_left=$(find -H "$dir" -mindepth 1 -maxdepth 1 -type d -name "$frame" -mtime +$age 2>/dev/null | wc -l)
+    log "debug images: removed $((n_old - n_left)) frame folder(s) $keep or more days old"
+    if [ "$n_left" -gt 0 ]; then
+        log "WARNING: debug images: $n_left frame folder(s) $keep or more days old could not be removed (permissions?)"
+    fi
+    return 0
+}
+
 # One run at a time. The detector clears its scratch folders on start,
 # so an overlapping run (a slow run meeting the next cron slot, or a
 # manual run) would delete the files the first run is still working on.
@@ -289,14 +332,9 @@ status=$?
 if [ $status -ne 0 ]; then
     log "WARNING: detector exited $status (continuing to archive whatever it produced)"
 fi
-# 1b. Prune old debug images (see DEBUG_KEEP_DAYS). Only the frame folders
-#     directly inside DEBUG_DIR, by their modification time: find -mtime +N
-#     matches N+1 or more whole days old, hence DEBUG_KEEP_DAYS - 1.
-if [ -n "$DEBUG_KEEP_DAYS" ] && [ -d "$DEBUG_DIR" ]; then
-    pruned=$(find "$DEBUG_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +$((DEBUG_KEEP_DAYS - 1)) \
-        -print -exec rm -rf {} + 2>/dev/null | wc -l)
-    [ "$pruned" -gt 0 ] && log "debug images: removed $pruned frame folder(s) $DEBUG_KEEP_DAYS or more days old"
-fi
+# 1b. Prune old debug images (see DEBUG_KEEP_DAYS and prune_debug_images):
+#     only the detector's frame folders directly inside DEBUG_DIR.
+prune_debug_images "$DEBUG_DIR" "$DEBUG_KEEP_DAYS"
 
 # 2. Accumulate. -n never overwrites, so re-running is safe and a
 #    filename already archived is left alone.
