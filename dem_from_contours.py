@@ -119,6 +119,7 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     missing_ground = 0
     rough_frames, unknown_hs_frames = set(), set()
     with_setup = 0
+    wave_source_of = {}           # frame -> its wave_source (extract_elevation_contours.py)
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
         if "easting_utm19" not in (reader.fieldnames or []):
@@ -163,6 +164,7 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             cams.append(r["camera"])
             dates.append(day)
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
+            wave_source_of.setdefault(frames[-1], r.get("wave_source") or "")
             try:
                 ucol.append(float(r.get("pixel_column") or "nan"))
             except ValueError:
@@ -175,9 +177,47 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     if stats is not None:
         stats.update(excluded_frames=len(excluded), rough_frames=len(rough_frames),
                      setup_share=with_setup / len(Z) if Z else 0.0,
-                     pixel_column=np.array(ucol, float))
+                     pixel_column=np.array(ucol, float), wave_source=wave_source_of)
     return (np.array(E), np.array(N), np.array(Z),
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
+
+
+def wave_currency_record(frames_used, wave_source_of, setup_share):
+    """
+    Which wave record tagged the frames this DEM is built from, against the
+    currency the setup coefficient C was fitted in (hs_best of
+    waves_marconi.csv; extract_elevation_contours.WAVE_CURRENCY_FITTED).
+    The station cron falls back to the raw NDBC 44008 archive whenever
+    waves_marconi.csv is missing, and the same C on raw-buoy Hs/Tp is
+    another setup (~0.06 m of DEM per 0.01 of effective C) with another
+    --max-hs filter, so the DEM's log and <stem>_info.json say which one it
+    is. Frames from contours older than the wave_source column count as
+    'unrecorded'. -> (record for _info.json, lines to print): a WARNING
+    when any frame was tagged from the raw buoy and the elevations carry
+    the setup, a NOTE when they do not (only --max-hs used those heights).
+    """
+    from extract_elevation_contours import WAVE_CURRENCY_FITTED, wave_currency_note
+    tags = {}
+    for f in set(frames_used.tolist()):
+        t = wave_source_of.get(f, "") or "unrecorded"
+        tags[t] = tags.get(t, 0) + 1
+    rec = {"fitted_currency": WAVE_CURRENCY_FITTED, "frames": dict(sorted(tags.items())),
+           "all_fitted_currency": set(tags) == {WAVE_CURRENCY_FITTED}}
+    lines = ["Wave currency     : " + ", ".join(f"{t} {n} frame(s)" for t, n in sorted(tags.items()))
+             + f" (C was fitted in {WAVE_CURRENCY_FITTED})"]
+    raw = sum(n for t, n in tags.items() if t.startswith("buoy:"))
+    if raw and setup_share > 0:
+        lines.append(f"WARNING: {raw} frame(s) were tagged with the raw buoy waves, not the currency the "
+                     f"setup coefficient was fitted in ({WAVE_CURRENCY_FITTED}): their setup, and the "
+                     f"--max-hs filter, are not the calibrated ones. Was archive/waves_marconi.csv missing "
+                     f"when the contours were extracted?")
+    elif raw:
+        lines.append(f"NOTE: {raw} frame(s) tagged with the raw buoy waves (no setup in these elevations; "
+                     f"--max-hs, if used, judged their buoy Hs)")
+    for t in sorted(tags):
+        if t.startswith("adcp_equiv:"):
+            lines.append("NOTE: " + wave_currency_note(t)[1])
+    return rec, lines
 
 
 def latest_date(path, camera=None):
@@ -1989,6 +2029,13 @@ def main():
             no_points_page("The day-consistency test rejected every camera-day: nothing to map.", load_stats)
             sys.exit(4)
 
+    # Which wave record tagged the frames (log and _info.json only, not the page)
+    wave_record, wave_lines = wave_currency_record(frames, load_stats.get("wave_source", {}),
+                                                   load_stats.get("setup_share", 0.0))
+    for line in wave_lines:
+        print(line)
+    print()
+
     dem, count, spread, e0, n0, ncols, nrows = build_grid(
         E, N, Z, args.cell, args.min_points, args.max_spread, frames)
 
@@ -2087,6 +2134,9 @@ def main():
         # share of the points whose elevation includes the wave setup
         # (beach_elevation_navd88, extract_elevation_contours.py --setup-coef)
         "setup_share": round(load_stats.get("setup_share", 0.0), 4),
+        # which wave record tagged the frames (extract_elevation_contours.py wave_source), against
+        # the currency the setup coefficient was fitted in: wave_currency_record()
+        "wave_currency": wave_record,
         # True: this build wrote <stem>_source.asc (and the page may trust
         # it); False: any _source.asc beside the grids is an older run's.
         "interpolated": source is not None,

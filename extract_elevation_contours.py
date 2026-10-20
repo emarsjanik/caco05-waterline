@@ -204,16 +204,67 @@ def looks_like_gnssr_spline(path):
     return False
 
 
+# THE WAVE "CURRENCY" OF THE SETUP COEFFICIENT. C (waterline_timex_cron.sh
+# SETUP_COEF = 0.037) was fitted on contours tagged from
+# archive/waves_marconi.csv (marconi_waves.py, USE_MARCONI_WAVES=1):
+# offshore_hs_m = hs_best, which is ADCP wh_4061 currency (camera wave
+# models trained on that ADCP, buoys converted to it), offshore_tp_s = tp_s
+# (NDBC 44008 peak period). The same formula on another Hs is another
+# setup: the raw 44008 wvht_m overstates sheltered south-west seas, and the
+# DEM moves ~0.06 m per 0.01 of effective C. The cron falls back to the raw
+# buoy archive whenever waves_marconi.csv is missing (owg.sh stopped, or a
+# copy of the repository without it), and nothing said so; every contour
+# row now names its wave columns (wave_source) and a WARNING is printed
+# when they are not this currency. The kinds, told apart by the columns:
+#   marconi     hs_best / tp_s             -- the currency C was fitted in
+#   adcp_equiv  wvht_m / dpd_s + hs_sigma_m -- historical_forcing.py's
+#               waves.csv: ADCP-equivalent Hs (C's Hs currency); its Tp is
+#               ADCP-equivalent, not 44008's (historical_forcing.py's report
+#               gives the setup bias that implies)
+#   buoy        wvht_m / dpd_s              -- fetch_buoy_waves.py, the raw
+#               offshore buoy: NOT the currency C was fitted in
+WAVE_CURRENCY_FITTED = "marconi:hs_best/tp_s"
+
+
+def wave_columns(columns):
+    """
+    The (height, period) columns load_wave_archive reads from a wave file
+    with these column names, and the file's currency tag
+    ('<kind>:<height>/<period>', see WAVE_CURRENCY_FITTED).
+    """
+    columns = set(columns)
+    if "hs_best" in columns:          # marconi_waves.py's local best estimate
+        return "hs_best", "tp_s", "marconi:hs_best/tp_s"
+    kind = "adcp_equiv" if "hs_sigma_m" in columns else "buoy"
+    return "wvht_m", "dpd_s", f"{kind}:wvht_m/dpd_s"
+
+
+def wave_currency_note(tag):
+    """One line on a wave_source tag against the currency C was fitted in:
+    (is_fitted_currency, text)."""
+    if tag == WAVE_CURRENCY_FITTED:
+        return True, (f"{tag} -- the currency the setup coefficient was fitted in "
+                      f"(hs_best: ADCP wh_4061 Hs; tp_s: NDBC 44008 peak period)")
+    if tag.startswith("adcp_equiv:"):
+        return False, (f"{tag} -- ADCP-equivalent Hs (the setup coefficient's Hs currency) but "
+                       f"ADCP-equivalent Tp, not the NDBC 44008 peak period C was fitted with "
+                       f"(historical_forcing.py's report gives the setup bias that implies)")
+    return False, (f"{tag} -- NOT the currency the setup coefficient was fitted in "
+                   f"({WAVE_CURRENCY_FITTED}): raw offshore buoy Hs/Tp overstate sheltered "
+                   f"south-west seas, so the setup (and the --max-hs filter) differ")
+
+
 def load_wave_archive(path):
     """
     Reads the offshore wave archive written by fetch_buoy_waves.py, or the
     hourly Marconi best estimate written by marconi_waves.py.
     Returns (epochs_hs, hs, epochs_tp, tp), each sorted by time, with
     rows lacking a value dropped separately for height and period.
+    Which columns are read: wave_columns().
     """
     df = pd.read_csv(path)
     # marconi_waves.py's local best estimate (hs_best, tp_s) or the raw buoy
-    hcol, tcol = ("hs_best", "tp_s") if "hs_best" in df else ("wvht_m", "dpd_s")
+    hcol, tcol, _tag = wave_columns(df.columns)
     hs = df.dropna(subset=[hcol]).sort_values("epoch")
     tp = df.dropna(subset=[tcol]).sort_values("epoch")
     return (hs["epoch"].to_numpy(float), hs[hcol].to_numpy(float),
@@ -735,10 +786,14 @@ def main():
                              "materially affects that camera. Pre-v6.7 output has no flag and "
                              "is treated as signal-bearing either way.")
     parser.add_argument("--waves", default=None,
-                        help="Offshore wave archive from fetch_buoy_waves.py. Adds "
+                        help="Offshore wave archive from fetch_buoy_waves.py (or "
+                             "marconi_waves.py's waves_marconi.csv). Adds "
                              "offshore_hs_m and offshore_tp_s to every point, so rough-water "
                              "frames (whose waterline sits above still water by the wave "
-                             "setup) can be left out of the DEM.")
+                             "setup) can be left out of the DEM, and wave_source: which "
+                             "columns of which kind of file tagged them (a WARNING when it "
+                             "is not the currency the setup coefficient was fitted in; see "
+                             "WAVE_CURRENCY_FITTED).")
     parser.add_argument("--wave-max-gap-minutes", type=float, default=90.0,
                         help="Largest gap to the nearest wave record before a frame's wave "
                              "columns are left blank (default 90; the buoy reports every "
@@ -991,6 +1046,19 @@ def main():
     # positional index used above (r[1], r[2], ...) is unchanged.
     if args.waves:
         ep_hs, hs, ep_tp, tp = load_wave_archive(args.waves)
+        hcol, tcol, wave_tag = wave_columns(pd.read_csv(args.waves, nrows=0).columns)
+        fitted, note = wave_currency_note(wave_tag)
+        print(f"Wave file                : {args.waves} (columns {hcol}, {tcol})")
+        print(f"Wave currency            : {note}")
+        if not fitted and wave_tag.startswith("buoy:"):
+            print(f"WARNING: the frames are tagged with the raw buoy waves ({wave_tag}), not the "
+                  f"currency the setup coefficient was fitted in ({WAVE_CURRENCY_FITTED})"
+                  + (f": the setup with C = {args.setup_coef} is NOT the station's calibrated setup"
+                     if args.setup_coef else "")
+                  + ". Was archive/waves_marconi.csv (owg.sh / marconi_waves.py) missing?")
+        elif not fitted:
+            print(f"NOTE: wave period currency differs from the one C was fitted in "
+                  f"({WAVE_CURRENCY_FITTED}); see the line above.")
         gap_s = args.wave_max_gap_minutes * 60.0
         per_frame = {}
         for r in output_rows:
@@ -1021,6 +1089,16 @@ def main():
                   + (f"{min(setups):.3f}-{max(setups):.3f} m" if setups else "none applied")
                   + (f"; {len(no_waves)} frame(s) without wave height+period left uncorrected"
                      if no_waves else ""))
+        # Which wave columns tagged the frames, on every row (as
+        # water_level_source names the level): the last column, so every
+        # positional index above is unchanged. A '#' header line is not an
+        # option -- georectify.py and the other readers take the first line
+        # as the column names -- and the rows carry it on through the
+        # consistency filter and georectify.py to dem_from_contours.py,
+        # which records it in <stem>_info.json.
+        for r in output_rows:
+            r.append(wave_tag)
+        header += ["wave_source"]
         tagged = [v[0] for v in per_frame.values() if v[0] != ""]
         print(f"Offshore waves           : {len(tagged)}/{len(per_frame)} frame(s) tagged"
               + (f", Hs {min(tagged):.2f}-{max(tagged):.2f} m, "
