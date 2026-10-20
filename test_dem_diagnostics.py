@@ -18,6 +18,9 @@ WHAT. The additions that report on a DEM without changing any value in it:
     high, the line 6 min older than its level) comes back as that slope,
     flood frames high and ebb frames low; a planted wave dependence comes
     back against Hs; none planted, none found;
+  * <stem>_sigma.asc: 1.25 x (spread/2) / sqrt(frames) on every cell
+    with a value, NaN elsewhere, in the series copy too, convertible to
+    GeoTIFF;
   * the DEM's grids are the same with them as without: the elevations,
     spread and count grids do not depend on the new columns.
 
@@ -297,6 +300,42 @@ def test_residuals(d):
           "with the day test: computed on the frames it judged, printed before its block")
 
 
+def read_asc(path):
+    a = np.loadtxt(path, skiprows=6)
+    return np.where(a == -9999, np.nan, a)
+
+
+def test_sigma(d):
+    print("dem_from_contours.py: <stem>_sigma.asc, the standard error of each cell")
+    d = Path(d) / "sigma"
+    d.mkdir(parents=True, exist_ok=True)
+    g = d / "g.csv"
+    g.write_text("\n".join(ground_rows(tidal_frames(days=8), "marconi:hs_best/tp_s")) + "\n")
+    rc, log = run([HERE / "dem_from_contours.py", g, d / "w", "--no-plot", "--last-days", "7",
+                   "--series-dir", d / "series"], d)
+    (d / "w.log").write_text(log)
+    dem, spread, count, sig = (read_asc(d / f"w_{k}.asc") for k in ("dem", "spread", "count", "sigma"))
+    count = np.nan_to_num(np.loadtxt(d / "w_count.asc", skiprows=6))
+    want = np.where(np.isfinite(dem), 1.25 * (spread / 2) / np.sqrt(np.maximum(count, 1)), np.nan)
+    check(rc == 0 and sig.shape == dem.shape and np.isfinite(sig).sum() == np.isfinite(dem).sum() > 0
+          and np.allclose(sig[np.isfinite(dem)], want[np.isfinite(dem)], atol=1e-4),
+          f"SE = 1.25 (spread/2)/sqrt(n) on every cell with a value ({int(np.isfinite(sig).sum())}; to the "
+          f"grids' 4 decimals), NaN elsewhere")
+    info = json.loads((d / "w_info.json").read_text())
+    series = sorted((d / "series").glob("*_sigma.asc"))
+    check(info["sigma"]["file"] == "_sigma.asc" and abs(info["sigma"]["median_m"] - float(np.nanmedian(sig))) < 1e-4
+          and "not accuracy" in info["sigma"]["definition"],
+          f"info.json sigma: the definition, median {info['sigma']['median_m']} m")
+    check(len(series) == 1 and np.array_equal(read_asc(series[0]), sig, equal_nan=True)
+          and "wrote " in log and "_sigma.asc" in log and "WARNING" not in log,
+          "the dated series copy too; logged")
+    rc2, _ = run([HERE / "asc_to_geotiff.py", d / "w_sigma.asc"], d)
+    check(rc2 == 0 and (d / "w_sigma.tif").exists(), "asc_to_geotiff.py converts it (as survey_products.py does)")
+    import dem_change
+    check(not any("sigma" in p.name for p in dem_change.Path(d / "series").glob("dem_*_*d_dem.asc")),
+          "dem_change.py's series glob (dem_*_*d_dem.asc) does not pick it up")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
@@ -323,6 +362,7 @@ def main():
         test_dem_wave_currency(d)
         test_water_level_rates()
         test_residuals(d)
+        test_sigma(d)
         test_py38()
     finally:
         if not args.keep:

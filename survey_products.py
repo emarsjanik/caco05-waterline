@@ -3871,7 +3871,7 @@ def dem_cmds(plan, args, day_test=True):
         # are those around the survey, not whichever end weighs more (dem_from_contours.py
         # --anchor-date; 23 Oct 2024, c2: 24 and 26 Oct kept, the survey's own day left out, without it)
         cmd += ["--max-day-offset", args.dem_max_day_offset, "--anchor-date", plan["date"]]
-    tif = [sys.executable, HERE / "asc_to_geotiff.py"] + [f"{stem}_{k}.asc" for k in ("dem", "spread", "count")] + \
+    tif = [sys.executable, HERE / "asc_to_geotiff.py"] + [f"{stem}_{k}.asc" for k in ("dem", "spread", "count", "sigma")] + \
           ["--epsg", args.geotiff_epsg, "--note", calibration_identity(plan, args)]
     station = "/".join(sorted({c["station"] for c in plan["cams"].values()}))
     cal = calibration_label(plan, args)
@@ -3897,7 +3897,7 @@ def step_dem(plan, args, state):
     if no_day_test:
         warn(f"DEM day test NOT run: {no_day_test}")
     stem, cmd, tif, page = dem_cmds(plan, args, day_test=not no_day_test)
-    outs = [Path(f"{stem}_{k}.{e}") for k in ("dem", "spread", "count") for e in ("asc", "tif")] + \
+    outs = [Path(f"{stem}_{k}.{e}") for k in ("dem", "spread", "count", "sigma") for e in ("asc", "tif")] + \
            [Path(f"{stem}_dem.png")]
     src_key = "filter" if src.name.endswith("_filtered.csv") else "merge"
     sig = {"cmd": cmd_text(cmd), "tif": cmd_text(tif), "page": cmd_text(page),
@@ -8787,7 +8787,7 @@ def write_provenance(plan, args, state, final=True):
                              + "; the grid coordinates are in the GCP frame, assumed NAD83(2011) / UTM zone 19N "
                                "as the surveys (the GCP files state no CRS) "
                                "(EPSG:6348), untransformed; only the _dem GeoTIFF carries vertical keys (NAVD88, "
-                               "EPSG:5703); spread, count and difference grids are not heights")),
+                               "EPSG:5703); spread, count, sigma and difference grids are not heights")),
         "chain": {"current": chain_ok, "why": chain_why or None},
         "blind": blind,
         "comparisons": comps,
@@ -11079,7 +11079,7 @@ def share(args):
     stem = next(iter(sorted((out / "dem").glob("*_dem.asc"))), None) if (out / "dem").is_dir() else None
     if stem is not None:
         st = str(stem)[:-len("_dem.asc")]
-        for suf in ("_dem.tif", "_spread.tif", "_count.tif", "_dem.png", "_map.png", "_info.json"):
+        for suf in ("_dem.tif", "_spread.tif", "_count.tif", "_sigma.tif", "_dem.png", "_map.png", "_info.json"):
             if Path(st + suf).is_file():
                 files.append((Path(st + suf), f"dem/{Path(st + suf).name}"))
     for f in sorted((out / "maps").glob("*.png")) if (out / "maps").is_dir() else []:

@@ -3,7 +3,7 @@
 ASCII Grids To GeoTIFF
 =========================
 Converts the ESRI ASCII grids written by dem_from_contours.py (<stem>_dem.asc,
-_spread.asc, _count.asc, _source.asc) into GeoTIFFs that open directly in
+_spread.asc, _count.asc, _sigma.asc, _source.asc) into GeoTIFFs that open directly in
 ArcGIS, QGIS, GDAL and rasterio, georeferenced in UTM zone 19N.
 
 Pure numpy: no GDAL, rasterio or scipy needed (the station's scipy does not
@@ -12,7 +12,9 @@ GeoKeys for the projected coordinate system (EPSG code), the pixel size and
 upper-left corner, and the GDAL nodata tag.
 
 Values: _dem and _spread in metres (elevation NAVD88 for _dem), _count in
-frames per cell, _source 1 = measured, 2 = interpolated. Nodata = -9999.
+frames per cell, _sigma in metres (the standard error of the cell median,
+repeatability only: dem_from_contours.sigma_grid), _source 1 = measured,
+2 = interpolated. Nodata = -9999.
 The _dem GeoTIFF also carries the vertical GeoKeys (EPSG:5703, NAVD88
 height, metres), so GIS software reads it as NAVD88 without being told.
 

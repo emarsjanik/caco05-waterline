@@ -45,7 +45,8 @@ Usage:
         [--cell 2.0] [--min-points 3] [--camera c1|c2|both]
         [--max-spread 0.5] [--fill-gaps] [--start-date ...] [--end-date ...]
 
-Writes dem_out_{dem,spread,count}.asc (and _source.asc with
+Writes dem_out_{dem,spread,count,sigma}.asc (_sigma: the standard error of
+each cell's median, sigma_grid; and _source.asc with
 --interpolate-edge), dem_out_info.json (dates, frames per camera and
 what the filters left out -- what the page needs and the grids do not
 hold; with --max-day-offset also each camera-day left out with its
@@ -1832,6 +1833,35 @@ def fill_small_gaps(dem, max_iterations=3):
     return out
 
 
+def sigma_grid(dem, spread, count):
+    """
+    The standard error of each cell's elevation (<stem>_sigma.asc), m:
+    SE = 1.25 x (spread / 2) / sqrt(n). The 16-84 percentile spread of a
+    cell's n frame samples is about 2 sigma of one crossing, and the median
+    of n samples has a standard error of about 1.25 sigma / sqrt(n) (1.2533
+    for normal errors) -- the same SE dem_change.py uses for its level of
+    detection. Only cells with a value that rests on their own crossings
+    (finite DEM and spread, n >= 1); NaN elsewhere, including cells
+    --interpolate-edge or --fill-gaps filled.
+
+    WHAT IT IS NOT. It is the sampling error of the median from the
+    scatter of repeat crossings only: the REPEATABILITY of the cell, not its
+    accuracy. It leaves out every error the crossings of a cell share, which
+    do not average down with n: the water-level datum (the GNSS-R antenna
+    height, +/-0.061 m), the setup coefficient C (~0.06 m of DEM per 0.01
+    of C), the georectification (0.33-0.42 m horizontal in-sample, times
+    the beach slope) and a detector bias. No observation term is added
+    because the inputs are not there: the live rows carry no per-frame
+    water-level sigma (tide_model_spread is 0 for GNSS-R) and there is no
+    per-pixel horizontal sigma yet; adding a guessed constant would make the
+    grid look like an accuracy it is not. It also treats the crossings as
+    independent, so it is optimistic where a day's frames share an error.
+    """
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ok = np.isfinite(dem) & np.isfinite(spread) & (count > 0)
+        return np.where(ok, 1.25 * (spread / 2.0) / np.sqrt(np.maximum(count, 1)), np.nan)
+
+
 def write_ascii_grid(path, grid, e0, n0, cell, nodata=-9999.0):
     """ESRI ASCII grid -- readable by QGIS, ArcGIS, GDAL, MATLAB."""
     flipped = np.flipud(grid)  # ASCII grids run north to south
@@ -2237,6 +2267,12 @@ def main():
         print("                    (repeat crossings of the same cell; this is the DEM's")
         print("                     own repeatability, not its accuracy)")
 
+    # The standard error of each measured cell (sigma_grid), before any cell is interpolated
+    sigma = sigma_grid(dem, spread, count)
+    if np.isfinite(sigma).any():
+        print(f"standard error    : median {np.nanmedian(sigma):.3f} m, p90 {np.nanpercentile(sigma, 90):.3f} m"
+              f"  (1.25 x spread/2 / sqrt(frames): repeatability of the median, not accuracy)")
+
     source = None
     if args.interpolate_edge:
         dem, source = interpolate_between_contours(E, N, Z, frames, args.cell, args.max_spread,
@@ -2272,6 +2308,7 @@ def main():
     write_ascii_grid(str(stem) + "_spread.asc", spread, e0, n0, args.cell)
     write_ascii_grid(str(stem) + "_count.asc",
                      count.astype(float), e0, n0, args.cell, nodata=0.0)
+    write_ascii_grid(str(stem) + "_sigma.asc", sigma, e0, n0, args.cell)
     if source is not None:
         write_ascii_grid(str(stem) + "_source.asc", source.astype(float), e0, n0, args.cell,
                          nodata=0.0)
@@ -2279,6 +2316,7 @@ def main():
     print(f"wrote {stem}_dem.asc     (elevation, m NAVD88)")
     print(f"wrote {stem}_spread.asc  (16-84 percentile range, m)")
     print(f"wrote {stem}_count.asc   (samples per cell)")
+    print(f"wrote {stem}_sigma.asc   (standard error of the cell median, m: repeatability only)")
 
     sstem = None
     if args.series_dir:
@@ -2292,7 +2330,8 @@ def main():
             write_ascii_grid(str(sstem) + "_spread.asc", spread, e0, n0, args.cell)
             write_ascii_grid(str(sstem) + "_count.asc", count.astype(float), e0, n0,
                              args.cell, nodata=0.0)
-            print(f"series            : {sstem}_{{dem,spread,count}}.asc (+ _info.json)")
+            write_ascii_grid(str(sstem) + "_sigma.asc", sigma, e0, n0, args.cell)
+            print(f"series            : {sstem}_{{dem,spread,count,sigma}}.asc (+ _info.json)")
 
     # What the page needs and the grids do not hold: dates, frames, filters.
     # Written always, so 'python3 dem_figure.py <stem>' can redraw the page
@@ -2312,6 +2351,14 @@ def main():
         # which wave record tagged the frames (extract_elevation_contours.py wave_source), against
         # the currency the setup coefficient was fitted in: wave_currency_record()
         "wave_currency": wave_record,
+        # <stem>_sigma.asc: what it is (sigma_grid) and its median / p90 over the cells with one
+        "sigma": {"file": "_sigma.asc",
+                  "definition": "1.25 x (16-84 percentile spread / 2) / sqrt(frames): the standard error of "
+                                "the cell median from repeat crossings (repeatability, not accuracy); no "
+                                "observation term (water level, setup, georectification), whose inputs the "
+                                "rows do not carry",
+                  "median_m": round(float(np.nanmedian(sigma)), 4) if np.isfinite(sigma).any() else None,
+                  "p90_m": round(float(np.nanpercentile(sigma, 90)), 4) if np.isfinite(sigma).any() else None},
         # reporting only (residual_diagnostic): residuals against the tide's stage and Hs; {} with
         # --no-diagnostics
         "diagnostics": diagnostics,
