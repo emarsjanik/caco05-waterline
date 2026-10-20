@@ -22,3 +22,11 @@ For historical processing (process_chelsea.py), point the rows of
 position fixed, so after a move it absorbs the move into the angles
 (the Jan 2025 lidar fit wanted ~22 deg of pan where the calibration has
 ~15 deg and a 5.8 m move); use it only where no calibration exists.
+
+Timex bias corrections of the detector, one file per water-level timing mode
+(`timex_timing.py`, `TIMING_MODE`; docs/VALIDATION.md section 2.7):
+
+| File | Mode | What |
+|---|---|---|
+| `timex_bias_legacy.json` | `legacy` (the default) | The detector's built-in v6.8 values (c1 constant -11.03 px, c2 a 10-point curve), fitted with the temporal blend on. Never edited: the legacy products are the v6.8 ones, and `test_timing_mode.py` fails on any change. |
+| `timex_bias_mid.json` | `mid` | Not shipped. Written only by `recalibrate_timing.py --steps derive` on the NUC, from the hand-clicked ground truth detected with the blend off; a previous one is kept as `.bak`. Without it a mid timex run is refused. |

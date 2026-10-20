@@ -121,6 +121,7 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     rough_frames, unknown_hs_frames = set(), set()
     with_setup = 0
     wave_source_of = {}           # frame -> its wave_source (extract_elevation_contours.py)
+    level_offset_of = {}          # frame -> its level_time_offset_s (None: a legacy row, none)
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
         if "easting_utm19" not in (reader.fieldnames or []):
@@ -166,6 +167,7 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             dates.append(day)
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
             wave_source_of.setdefault(frames[-1], r.get("wave_source") or "")
+            level_offset_of.setdefault(frames[-1], r.get("level_time_offset_s"))
             try:
                 ucol.append(float(r.get("pixel_column") or "nan"))
             except ValueError:
@@ -178,7 +180,8 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     if stats is not None:
         stats.update(excluded_frames=len(excluded), rough_frames=len(rough_frames),
                      setup_share=with_setup / len(Z) if Z else 0.0,
-                     pixel_column=np.array(ucol, float), wave_source=wave_source_of)
+                     pixel_column=np.array(ucol, float), wave_source=wave_source_of,
+                     level_time_offset=level_offset_of)
     return (np.array(E), np.array(N), np.array(Z),
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
 
@@ -218,6 +221,36 @@ def wave_currency_record(frames_used, wave_source_of, setup_share):
     for t in sorted(tags):
         if t.startswith("adcp_equiv:"):
             lines.append("NOTE: " + wave_currency_note(t)[1])
+    return rec, lines
+
+
+def water_level_timing_record(frames_used, level_offset_of):
+    """
+    When the frames' water levels were taken (extract_elevation_contours.py
+    --timing-mode; timex_timing.py), from their level_time_offset_s column:
+    None when no frame has one -- every legacy contour file, so a legacy
+    DEM's log and <stem>_info.json are as before. Otherwise the frames per
+    offset from the file-name epoch ('legacy' for a frame without one) and
+    a WARNING when the DEM mixes the two: a legacy line is blended and 4-8
+    min older than its level, a mid one is not, so a DEM of both pools two
+    timings. -> (record for _info.json or None, lines to print)
+    """
+    from timex_timing import TIMEX_MID_OFFSET_S
+    tags = {}
+    for f in set(frames_used.tolist()):
+        v = level_offset_of.get(f)
+        t = "legacy" if v in (None, "") else f"+{int(float(v))} s"
+        tags[t] = tags.get(t, 0) + 1
+    if set(tags) == {"legacy"} or not tags:
+        return None, []
+    rec = {"frames": dict(sorted(tags.items())), "mixed": "legacy" in tags,
+           "timex_mid_offset_s": TIMEX_MID_OFFSET_S}
+    lines = ["Water-level time  : " + ", ".join(f"{t} {n} frame(s)" for t, n in sorted(tags.items()))
+             + " after the file-name epoch (extract_elevation_contours.py --timing-mode)"]
+    if rec["mixed"]:
+        lines.append(f"WARNING: {tags['legacy']} frame(s) have their level at the file-name epoch (legacy timing, "
+                     f"temporal blend on) beside frames with it at mid-exposure: this DEM mixes two water-level "
+                     f"timings. Build it from contours of one timing mode.")
     return rec, lines
 
 
@@ -1556,7 +1589,10 @@ def residual_diagnostic(pair_cell, pair_frame, pair_vals, info, cam_of, min_fram
     the flood and low on the ebb for an older line. The day test's
     camera-day drift that follows the spring-neap range would be the same
     error seen day by day, as the daylight frames fall more on the flood or
-    the ebb.
+    the ebb. That is the default, legacy, timing; in timing mode mid
+    (timex_timing.py) the level is taken at mid-exposure and the blend is
+    off, so the slope should come out near 0. recalibrate_timing.py
+    compares the two on one window with this diagnostic.
 
     Per frame: its residual, the median over its (cell, frame) samples of
     (sample - the median of the OTHER frames in that cell), against the
@@ -1578,7 +1614,9 @@ def residual_diagnostic(pair_cell, pair_frame, pair_vals, info, cam_of, min_fram
     something only where days differ in their flood/ebb mix (what the
     hypothesis says happens through a week). Nothing is corrected: the numbers are for deciding
     whether the timing fix (which needs the timex exposure confirmed on the
-    NUC) is worth making. -> (record for <stem>_info.json, lines to print)
+    NUC) is worth making: recalibrate_timing.py's pass rule is that both the
+    |slope| and the flood - ebb contrast shrink from legacy to mid.
+    -> (record for <stem>_info.json, lines to print)
     """
     rates = water_level_rates(info)
     fo = LeaveOneOut(pair_cell, pair_vals, pair_frame, min_frames, DIAG_FRAME_MIN_PAIRS).offsets()
@@ -2300,6 +2338,10 @@ def main():
                                                    load_stats.get("setup_share", 0.0))
     for line in wave_lines:
         print(line)
+    # When the levels were taken (log and _info.json only; nothing for legacy contours)
+    timing_record, timing_lines = water_level_timing_record(frames, load_stats.get("level_time_offset", {}))
+    for line in timing_lines:
+        print(line)
     print()
 
     dem, count, spread, e0, n0, ncols, nrows = build_grid(
@@ -2412,6 +2454,9 @@ def main():
         # which wave record tagged the frames (extract_elevation_contours.py wave_source), against
         # the currency the setup coefficient was fitted in: wave_currency_record()
         "wave_currency": wave_record,
+        # when the levels were taken (water_level_timing_record): only for contours made with
+        # extract_elevation_contours.py --timing-mode other than legacy
+        **({"water_level_timing": timing_record} if timing_record else {}),
         # <stem>_sigma.asc: what it is (sigma_grid) and its median / p90 over the cells with one
         "sigma": {"file": "_sigma.asc",
                   "definition": "1.25 x (16-84 percentile spread / 2) / sqrt(frames): the standard error of "

@@ -32,6 +32,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from timex_timing import TIMEX_MID_OFFSET_S
+
 
 def load_adcp(path, hcol, tcol):
     w = pd.read_csv(path)
@@ -68,7 +70,7 @@ def main():
     ap.add_argument("--adcp", default=str(Path(__file__).resolve().parent / "sig1000_waves_ALL.csv"))
     ap.add_argument("--height-col", default="wh_4061")
     ap.add_argument("--period-col", default="wp_peak")
-    ap.add_argument("--offset", type=float, default=300.0,
+    ap.add_argument("--offset", type=float, default=float(TIMEX_MID_OFFSET_S),
                     help="seconds after the filename epoch to label at (default 300: middle of 10 min)")
     ap.add_argument("--max-bracket", type=float, default=2.0, help="hours between bracketing records")
     ap.add_argument("--in-place", action="store_true")

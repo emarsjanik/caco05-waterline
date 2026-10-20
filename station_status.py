@@ -13,6 +13,7 @@ Each check below catches one of those.
 CHECKS (OK / WARN / ALERT):
   timex images      newest archived image          WARN > 26 h, ALERT > 72 h
   detections        newest archived waterline CSV  WARN > 48 h, ALERT > 5 d
+                    (of the cron's TIMING_MODE: processed_timex or _mid)
   GNSS-R            newest water level             WARN > 3 d,  ALERT > 5 d
                     (gnssrefl normally runs ~2 days behind)
   GNSS-R QC         failed share, last 7 days      WARN > 10 %, ALERT > 30 %
@@ -29,6 +30,7 @@ Usage:
         --gnssr /home/argus_user/GNSS/.../usgs_spline_out.txt
 """
 
+import os
 import csv
 import shutil
 import argparse
@@ -97,9 +99,18 @@ def main():
     h = age_hours(t) if t else None
     add("timex images", grade(h, 26, 72), f"newest archived {fmt_age(h)}")
 
+    # The detections of the cron's timing mode (waterline_timex_cron.sh
+    # TIMING_MODE, which it exports): archive/processed_timex (legacy) or
+    # archive/processed_timex_mid (mid). Run by hand, without TIMING_MODE,
+    # whichever holds the newest line; with no mid archive, the legacy one.
     t = newest_mtime(base / "archive/processed_timex", "*.csv")
+    t_mid = newest_mtime(base / "archive/processed_timex_mid", "*.csv")
+    mode = os.environ.get("TIMING_MODE", "")
+    newest_mid = mode == "mid" or (mode != "legacy" and t_mid is not None and (t is None or t_mid > t))
+    t = t_mid if newest_mid else t
     h = age_hours(t) if t else None
-    add("detections", grade(h, 48, 120), f"newest waterline {fmt_age(h)}")
+    add("detections", grade(h, 48, 120), f"newest waterline {fmt_age(h)}"
+        + (" (timing mode mid, archive/processed_timex_mid)" if newest_mid else ""))
 
     if args.gnssr:
         try:

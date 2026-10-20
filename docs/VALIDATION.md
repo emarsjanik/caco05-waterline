@@ -39,6 +39,7 @@ python3 test_survey_products.py                  # ends "all survey_products tes
 python3 test_survey_compare.py                   # ends "all survey_compare tests passed"
 python3 test_historical_forcing.py               # ends "101/101 checks passed"
 python3 test_dem_day_test.py                     # ends "all DEM day-test tests passed" (section 2.3a)
+python3 test_timing_mode.py                      # ends "all timing-mode tests passed" (section 2.7)
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
@@ -447,6 +448,168 @@ The station's record started on 2026-07-09 when this was written (start file "20
 | Shell syntax | `bash -n` passes on both `.sh` files | `bash -n waterline_timex_cron.sh` |
 | Self-tests on three Python setups (section "How to read this file") | all pass, except `view_reproject.py` on the two 3.8 venvs (no scipy; file unchanged) | section 1 |
 | Whole cron on the station-floor venv, synthetic station | rc 0 in 381 s, every processing stage rc 0 (the network fetch stubs exit 1 and station_status exits 2, as expected offline) | scratch harness |
+
+### 2.7 Water-level timing (`TIMING_MODE`): the fix, switched OFF, and how to switch it on
+
+**Claim.** A timex waterline is given the water level at its file-name epoch, the START of its
+10-min exposure (`extract_elevation_contours.py`), while the detector blends 30% of the previous
+saved frame (30 min older) into every line (`waterline_detector_v5.py`, `temporal_filter`). The
+blend is recursive: the stored previous line is itself blended, so a line trails mid-exposure by
+0, 9, 11.7, ... up to 12.9 min along a chain of frames. Net, a line is 4 to 7.9 min OLDER than the
+level it is given: high on the flood, low on the ebb (review finding C-B1, reproduced twice). The fix
+is three changes that work only together (any one alone leaves an error or makes it worse):
+
+* the level, the waves and the stale-gap check at mid-exposure, the file-name epoch +
+  `TIMEX_MID_OFFSET_S` (300 s) for a timex, + 0 s for a snap; `capture_time_utc` and
+  `capture_epoch` stay the file-name time, so nothing that joins on them changes;
+* the detector's blend off (a causal blend cannot be made lag-free);
+* timex bias corrections re-derived with the blend off. The v6.8 values were fitted with the
+  blend on, on 11 Sep 2026 frames that were all on the flood, and absorbed ~2.8 px (c1) / ~2.6 px
+  (c2) of blend lag: with the blend off they would over-correct.
+
+All three sit behind ONE switch, `TIMING_MODE` (`timex_timing.py`), and the default is NOT
+changed:
+
+| mode | level time | blend | timex bias | detections archived in |
+|---|---|---|---|---|
+| `legacy` (default) | file-name epoch | on | `calibration/timex_bias_legacy.json` (the built-in v6.8 values) | `archive/processed_timex` |
+| `mid` | epoch + 300 s (timex), + 0 s (snap) | off | `calibration/timex_bias_mid.json`, written only by `recalibrate_timing.py` on the NUC | `archive/processed_timex_mid` |
+
+The cron sets it in one line (`TIMING_MODE=legacy` in `waterline_timex_cron.sh`) and passes it to
+the detector and the contour step together, and exports it. `process_historical.py` and
+`process_chelsea.py` take `--timing-mode` (default: the `TIMING_MODE` environment variable, else
+legacy) and pass the same mode to both steps. `detect_original_view.py` is not edited (it is one of
+the modules the GCP-free pre-registration pins by sha256, `survey_products.py` `GCPFREE_PINS`): its
+detector and contour step are subprocesses that inherit the environment, so both read the same
+`TIMING_MODE`; `survey_products.py` passes the environment on to it and makes a mode other than
+legacy part of the detection's signature. A mid detection CSV says so on every row
+(`Timing_Mode`), and the contour step gives a line a level only in the mode it was detected in:
+a blended line given a mid-exposure level is 11.5 min behind it, worse than either mode, so such
+files are left out with a WARNING and counted. A mid detector run without its timex bias file is
+refused. A DEM built from mid contours records it in `<stem>_info.json` (`water_level_timing`) and
+WARNs on a mix; a legacy DEM's log and info.json are as before. `TIMEX_MID_OFFSET_S` is the one
+definition of the 300 s: `runup_from_timestack.py`, `timestack_wave_period.py`,
+`relabel_manifests.py` and `reaim_figure.py` read it and keep their 300.0 s.
+
+After the pull, in legacy: the scripts of a survey-date build's detection step changed
+(`waterline_detector_v5.py`, `extract_elevation_contours.py`, the new `timex_timing.py`), so its
+next build reruns the detection and everything after it once. In
+legacy the detector, contour and DEM steps give byte-identical files (`test_timing_mode.py`), so
+those builds and the cron's products come out as before; a whole survey-date build was not
+re-run here to compare.
+
+No plot changes format. After a switch to mid the numbers drawn change (the per-frame
+`tide_elevation_navd88` by up to about +/-0.05 m at peak rates, the DEM and map elevations by a few
+cm), nothing else.
+
+| what | data | number | reproduce here | check on the NUC |
+|---|---|---|---|---|
+| Legacy is the code before the switch, bit for bit | [SYNTH] test (8 synthetic photos; 43 detection files; a 5-day ground file) | detector: 16/16 CSVs and overlays byte-identical to commit `42e3e86`, also with `TIMING_MODE=legacy`, `--timing-mode legacy`, no calibration folder (the built-in values) and an unreadable legacy file (a WARNING, the built-in values); contour file byte-identical; DEM grids, `_sigma.asc`, `_info.json` and log byte-identical | `python3 test_timing_mode.py` | after the pull the cron's products are as before (section 1) |
+| `timex_bias_legacy.json` is the built-in v6.8 timex bias | [SYNTH] test | every float equal (c1 constant -11.03 px; c2's 10 points, the last three -17.22) | same | - |
+| Mid does all three, together | [SYNTH] test | detector: blend off, the mid file's corrections, `Timing_Mode=mid` on every row; refused without its file (unless that camera's bias is off, as in `detect_original_view.py`); contour step: level, waves and stale-gap check at +300 s (timex) / +0 s (snap), capture time unchanged, `level_time_offset_s` last; the other mode's detections left out, both ways | same | - |
+| The pass rule finds a planted lag | [SYNTH] test: synthetic lines shaped like a real 11 Sep 2026 hand-clicked line, georectified with the real CACO05 calibration, 4 days, a 7.9 min lag planted in the legacy lines and none in the mid ones | legacy lag 5.6 (c1) / 6.7 (c2) min, flood minus ebb +0.083 / +0.099 m; mid 0.1 / 0.8 min, +0.010 / +0.024 m: PASS | same | `recalibrate_timing.py --steps compare` |
+| The derive step's rules give back the v6.8 corrections from the v6.8 numbers | [SYNTH] test | c1 spread/SEM 2.7: constant -11.03; c2 spread/SEM 12.0: the 10-point curve, its far two segments clamped to -17.22 | same | `--steps derive` prints control (blend on) beside the v6.8 values |
+| Size of the error today | [SCRATCH] the review's reproduction: the real `process_image` chain and contour step, a harmonic tide fitted to the real Marconi ADCP, 29 Sep - 5 Oct 2026, 322 daylight frames | live: c1 -0.065 m + 6.46 min x dz/dt, c2 -0.098 m + 6.46 min x dz/dt (flood -0.007 / -0.040 m, ebb -0.117 / -0.150 m); blend off alone: -0.070 m - 5.00 min x dz/dt; level at epoch + 300 s alone: +11.45 min x dz/dt (worse); all three: RMS 3 mm, largest 5 mm (the linear interpolation of the 30-min spline) | not in the repository | `--steps compare` |
+| Blend lag in the v6.8 timex bias | [SCRATCH] same reproduction, the real 11 Sep ground-truth rows | -2.78 px of c1's -11.03 px; -2.58 px of c2's mean -8.41 px | not in the repository | `--steps derive`: "blend lag the v6.8 values absorbed" |
+| What reaches the DEM | [SCRATCH] the real IO and EO at the ground-truth pixels (beta 0.106) | share of a level error: c1 0.62, c2 0.26; on switching, c1 cells rise ~+0.04 m on average (to ~+0.07 m where built on the ebb), c2 ~+0.02 m | not in the repository | `--steps compare`: "DEM: mid minus legacy" |
+
+**Not known yet, and what the NUC must confirm.** The 10-min exposure and "the name is the start"
+are the repository's assumption (the four scripts above, the :00/:30 names, 1200-row 2 Hz
+timestacks), not read off the arguseyes collection settings. If the exposure is not 600 s named by
+its start, `TIMEX_MID_OFFSET_S` in `timex_timing.py` is the one number to change (half the
+exposure; -300 if the name were the END of a 10-min exposure).
+
+**On the NUC, step by step.** Nothing below changes a station product until step 6. Each step
+prints what it found; `recalibrate_timing.py` writes into `timing_recalibration/` (its work
+folder), `calibration/timex_bias_mid.json` (derive) and `archive/processed_timex_mid` (backfill),
+never `calibration/timex_bias_legacy.json`. It runs at lower priority (`--nice 10`), and its
+detections take the detector's rate per photo (printed as it goes), twice for compare.
+
+```
+cd /mnt/I2Rgus_Data/waterline
+python3 test_timing_mode.py                      # ends "all timing-mode tests passed"
+```
+
+1. **The exposure.** `python3 recalibrate_timing.py --steps exposure` reads when the newest
+   archived timex were written (their modification time, kept by the cron's `cp -p`, minus the time
+   in their names) and how long the c2 timestacks last (rows at 2 Hz). Expect `EXPOSURE:
+   CONSISTENT`: written ~600-700 s after their names, stacks 600 s. A collection named by its START
+   can only be written after it ends, so files written sooner than 600 s after their names give
+   `MISMATCH` (exit 4), and the later steps refuse to run until the constant is right
+   (`--ignore-exposure` overrides). The same by hand, and in the collection settings:
+
+   ```
+   for f in $(ls archive/images_timex/*.c2.timex.jpg | tail -5); do
+       e=$(basename "$f" | cut -d. -f1); echo "$(basename "$f"): written $(( $(stat -c %Y "$f") - e )) s after its name"
+   done
+   ```
+
+   The write-time test cannot tell a 10-min exposure from a shorter one written late, and the
+   timestacks are their own collection: read the timex's collection length once in the arguseyes
+   collection settings (under `/home/argus_user/arguseyes/`). A different exposure means changing
+   `TIMEX_MID_OFFSET_S`, which also moves the time `runup_from_timestack.py`,
+   `timestack_wave_period.py`, `relabel_manifests.py` and `reaim_figure.py` take their levels and
+   waves at (they assume the same collection), and the 300 s that `test_timing_mode.py` pins.
+
+2. **Ground truth (optional).** `derive` uses every `ground_truth/*.timex.csv` whose photo it can
+   find (`--image-dirs`; by default `archive/images_timex`, `input`, `input_timex` and
+   `/mnt/I2Rgus_Data/ImageProducts`), at least 6 per camera (`--min-frames`). With the blend off
+   the fit compares a detection with the hand-clicked line ON THE SAME PHOTO, so the tide's stage
+   no longer enters it; more frames and more days still make it sturdier (v6.8 had one day, 12 c1
+   and 13 c2 frames). `collect_all_ground_truth.py --filter <epoch prefix>` adds some, ideally on
+   an ebb.
+
+3. **Derive.** `python3 recalibrate_timing.py --steps derive` detects the ground-truth photos twice
+   with the bias off, blend ON (the CONTROL, as when the v6.8 values were fitted) and blend OFF,
+   runs `derive_bias_correction.py --suffix .timex. --uncorrected` on both, and writes the blend-off
+   result to `calibration/timex_bias_mid.json` by the v6.8 rules (a constant unless spread/SEM > 3;
+   far-field segments clamped where the error bar exceeds the value). Read its table: mid minus
+   control is the blend lag the v6.8 values absorbed (expect about +2.8 px c1, +2.6 px c2); control
+   minus the v6.8 values says whether the old fit is reproducible (a NOTE above 3 px: the detector
+   or the ground truth changed since; mid is still a like-for-like fit). `--dry-run` writes
+   nothing. Keep the file with the station's other calibrations (a previous one is kept as `.bak`).
+
+4. **Compare.** `python3 recalibrate_timing.py --steps compare --start-date 2026-09-29 --end-date
+   2026-10-05 --fit-setup` (any window of `archive/images_timex`; a week of mixed waves is best)
+   detects the window in BOTH modes and runs each through the cron's own chain, with the cron's
+   settings read from `waterline_timex_cron.sh` (contours with GNSS-R QC, waves and setup C, the
+   consistency filter, georectify, the DEM with `--max-hs`, `--max-day-offset`). Then, per camera,
+   the DEM's residual diagnostic (`dem_from_contours.py`, `diagnostics.residuals`: each frame's
+   median offset from the other frames' cell medians against dz/dt) for legacy and mid, the
+   verdict, and mid minus legacy over the shared DEM cells. **The pass rule:** a camera PASSes when,
+   from legacy to mid, BOTH the |slope| of the residual on dz/dt AND |flood - ebb| (the median
+   residual of frames with dz/dt above +0.1 m/h minus that below -0.1 m/h) shrink; overall PASS when
+   every camera that could be judged passes (exit 0; FAIL exit 2; NOT JUDGED, too few flood or ebb
+   frames, exit 3: take a longer window). Expected if the timing error is real: legacy lag about +4
+   to +8 min with flood above ebb, mid near 0. The minutes are indicative (a planted 6 min comes back
+   as 5.5-8 min); the sign, the contrast and which mode is smaller are the test. The report is in
+   `timing_recalibration/compare/<window>/report.txt` and `.json`.
+
+5. **Backfill** (after a PASS). `python3 recalibrate_timing.py --steps backfill` re-detects every
+   photo of `archive/images_timex` in mode mid into `archive/processed_timex_mid`, one UTC day at a
+   time, never overwriting a file there; a stopped run resumes (days done are listed in
+   `timing_recalibration/backfill/done_days.txt`). Hours for a few months of photos.
+
+6. **Switch.** In `waterline_timex_cron.sh` change `TIMING_MODE=legacy` to `TIMING_MODE=mid`. The
+   next run logs `timing mode: mid (...)` and WARNs while `archive/processed_timex_mid` holds fewer
+   than 90% of the legacy archive's detections (the backfill not finished). The 7-day DEM's
+   `_info.json` then has `water_level_timing` (`+300 s`, not mixed), and its residual diagnostic
+   should show a slope near 0. Survey-date builds follow with `TIMING_MODE=mid python3
+   survey_products.py ...`, historical runs with `--timing-mode mid`.
+
+7. **Setup C.** C = 0.037 was fitted on legacy lines and may have absorbed a little of their timing
+   error (~0.004-0.008, review C-B1). `--fit-setup` in step 4 prints the refit for both modes on
+   contours built with C = 0. Change `SETUP_COEF` (and its copies, section 4.1) only by the rule
+   of section 4.1: when it holds over several weeks of different waves.
+
+8. **Going back.** `TIMING_MODE=legacy` again. The legacy archive was never changed, so the
+   products are again exactly those of before.
+
+**If compare FAILs.** Keep `TIMING_MODE=legacy`. Look at: the exposure (step 1: a wrong
+`TIMEX_MID_OFFSET_S` moves the mid lines' level by that error x dz/dt); the mid file's table (a
+camera whose fit rests on few frames); whether legacy showed a lag at all (a legacy slope near 0 with
+no flood/ebb contrast means the timing error is not what moves the residuals of that window: try
+another window before concluding).
 
 ---
 
@@ -1503,6 +1666,11 @@ copy of today's pictures made before the pull (section 1).
   days' neighbours whatever the waves, is the owner's call; the 1.5 m threshold is the DEM's own,
   not measured as a storm signal for camera turns (the one storm seen: 1.95 / 3.71 / 2.11 m at its
   peak on 26 / 27 / 28 Sep 2026).
+* **The water-level timing fix (section 2.7).** The 10-min timex exposure named by its start is the
+  repository's assumption, not read off the arguseyes settings; the mid-mode timex bias needs the
+  ground-truth photos, and the test of the fix a window of photos, both on the NUC. Until
+  `recalibrate_timing.py` has PASSed there, the station stays on `TIMING_MODE=legacy`, whose lines
+  are 4-8 min older than their levels (up to ~0.1 m a frame at spring rates).
 * **The detector's rate on the NUC10i3.** Measured here at 20-25 s per photo on a 2.8 GHz
   Xeon; the NUC prints its own rate.
 * **Reviews.** The waterline work had three review rounds (the last: all lenses "ship"), the
