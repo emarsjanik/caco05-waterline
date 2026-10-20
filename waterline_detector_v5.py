@@ -15,11 +15,17 @@
 #      Sep 13 is the day whose C1 detections correlate with tide at
 #      -0.01 against Sep 11's +0.97.
 #    - C1 floor set to 8.0 (rejects 8 of 25 Sep 13 frames, 1 of 25
-#      from Sep 12, none of the other 58). C2 left at 0.0/disabled:
-#      at the same threshold it rejects nothing at all, which is
-#      consistent EITHER with its crop genuinely holding contrast in
-#      fog OR with 8.0 being wrong for that crop. No fogged C2 frame
-#      has been identified to calibrate against, so no value is set.
+#      from Sep 12, none of the other 58). C2 floor set to 6.0, NOT
+#      calibrated: at C1's 8.0 it rejects nothing at all (so 6.0
+#      rejects none of those frames either), which is consistent
+#      EITHER with its crop genuinely holding contrast in fog OR with
+#      8.0 being wrong for that crop. No fogged C2 frame has been
+#      identified to calibrate against. (This note used to say C2 was
+#      left at 0.0/disabled; the value in the profile is 6.0.)
+#    - The whole-crop IMAGE_CONTRAST_FLOOR (6 since v6.8) set to 0.0,
+#      i.e. OFF. It measured the same cropped greyscale as the
+#      per-camera floors, so at 6 it rejected nothing that C1's 8.0
+#      and C2's 6.0 do not reject already.
 #    - This is a PARTIAL fix. The surviving Sep 13 frames sit just
 #      above the threshold and are likely degraded too, so expect C1's
 #      pooled tide correlation to improve from +0.38 rather than reach
@@ -42,6 +48,7 @@
 #      20 -> 45 (three dusk frames at 13.5/19.0/32.9 were passing while
 #      the next-brightest usable frame was 74.0), IMAGE_CONTRAST_FLOOR
 #      12 -> 6 (C1 legitimately runs 9.3-38.6 and was being rejected).
+#      (v6.9 then turned it off, 6 -> 0, for the per-camera floors.)
 #
 #  CHANGES IN V6.7:
 #    - ABSOLUTE SIGNAL FLOOR. The confidence metric is computed per
@@ -385,6 +392,10 @@ MIN_SIGNAL_COLUMN_FRACTION = 0.60
 #     is absolute, cheap, and low for fog/flat/washed-out scenes while
 #     high for a beach with water, foam and sand. A featureless grey
 #     test frame scores ~3; a normal beach frame scores ~50+.
+#
+#     0.0 = OFF (since v6.9; it was 6). The same measure is applied
+#     per camera instead (CameraProfile.band_contrast_floor: C1 8.0,
+#     C2 6.0), so this global floor would reject nothing more.
 IMAGE_CONTRAST_FLOOR = 0.0
 
 SAVE_DEBUG_IMAGES = True
@@ -576,9 +587,9 @@ class CameraProfile:
     #
     # The value is PER CAMERA and does not transfer: each crop covers a
     # different region with different content. C1 is set from data
-    # (see below); C2 is left disabled because no fogged C2 frame has
-    # yet been identified to calibrate against, and guessing a
-    # threshold risks discarding good data.
+    # (see below); C2 is set to 6.0 but NOT calibrated, because no
+    # fogged C2 frame has yet been identified to calibrate against.
+    # 0.0 (this default) disables the test for a camera.
     band_contrast_floor: float = 0.0
 
 
@@ -750,13 +761,15 @@ CAMERAS = {
             (0.848, -102.88),
             (0.949, -143.00),
         ),
-        # Disabled deliberately. At C1's threshold of 8.0 this camera
-        # rejects ZERO frames across all 108, including on Sep 13 when
-        # C2 was also hazy -- so either C2's crop genuinely holds more
-        # contrast in fog (more water and dune texture in view), or 8.0
-        # is simply not calibrated for this crop. Both are consistent
-        # with the data, so no value is set until a fogged C2 frame
-        # exists to calibrate against.
+        # 6.0, NOT calibrated (this comment used to say the floor was
+        # disabled and no value set; 6.0 is what runs). At C1's
+        # threshold of 8.0 this camera rejects ZERO frames across all
+        # 108, including on Sep 13 when C2 was also hazy, so 6.0
+        # rejects none of them either -- so either C2's crop genuinely
+        # holds more contrast in fog (more water and dune texture in
+        # view), or 8.0 is simply not calibrated for this crop. Both
+        # are consistent with the data; recalibrate once a fogged C2
+        # frame exists to calibrate against.
         band_contrast_floor=6.0,
         bias_correction_points_timex=(
             # TIMEX correction, from 13 ground-truth frames (Sep 11)
