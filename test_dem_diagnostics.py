@@ -329,7 +329,7 @@ def test_sigma(d):
     check(info["sigma"]["file"] == "_sigma.asc" and abs(info["sigma"]["median_m"] - float(np.nanmedian(sig))) < 1e-4
           and "not accuracy" in info["sigma"]["definition"],
           f"info.json sigma: the definition, median {info['sigma']['median_m']} m")
-    check(len(series) == 1 and np.array_equal(read_asc(series[0]), sig, equal_nan=True)
+    check(len(series) == 1 and np.array_equal(*(np.where(np.isnan(x), -1.0, x) for x in (read_asc(series[0]), sig)))
           and "wrote " in log and "_sigma.asc" in log and "WARNING" not in log,
           "the dated series copy too; logged")
     rc2, _ = run([HERE / "asc_to_geotiff.py", d / "w_sigma.asc"], d)
