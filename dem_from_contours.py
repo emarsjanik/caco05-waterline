@@ -1897,8 +1897,18 @@ def sigma_grid(dem, spread, count):
     of n samples has a standard error of about 1.25 sigma / sqrt(n) (1.2533
     for normal errors) -- the same SE dem_change.py uses for its level of
     detection. Only cells with a value that rests on their own crossings
-    (finite DEM and spread, n >= 1); NaN elsewhere, including cells
-    --interpolate-edge or --fill-gaps filled.
+    (finite DEM and spread) and on two or more of them; NaN elsewhere,
+    including cells --interpolate-edge or --fill-gaps filled. One crossing
+    has no scatter to measure: build_grid gives it a spread of 0, and the
+    grid read 0 m there (a perfect cell) when --min-points 1 let such a cell
+    have a value.
+
+    THIN CELLS. The 16-84 spread of a few samples falls short of 2 sigma,
+    so the SE does too: for normal errors (simulated) about 0.6-0.8 of the
+    true standard error of the median at 3-5 frames, 0.9 at 10 and 0.96 at
+    30. dem_change.py, which uses the same SE, compares only cells with 5
+    or more crossings for that reason; here every cell with a value gets
+    one, so read the SE of a cell with few frames (_count) as a lower bound.
 
     WHAT IT IS NOT. It is the sampling error of the median from the
     scatter of repeat crossings only: the REPEATABILITY of the cell, not its
@@ -1914,7 +1924,7 @@ def sigma_grid(dem, spread, count):
     independent, so it is optimistic where a day's frames share an error.
     """
     with np.errstate(invalid="ignore", divide="ignore"):
-        ok = np.isfinite(dem) & np.isfinite(spread) & (count > 0)
+        ok = np.isfinite(dem) & np.isfinite(spread) & (count >= 2)
         return np.where(ok, 1.25 * (spread / 2.0) / np.sqrt(np.maximum(count, 1)), np.nan)
 
 
@@ -2417,7 +2427,9 @@ def main():
         # <stem>_sigma.asc: what it is (sigma_grid) and its median / p90 over the cells with one
         "sigma": {"file": "_sigma.asc",
                   "definition": "1.25 x (16-84 percentile spread / 2) / sqrt(frames): the standard error of "
-                                "the cell median from repeat crossings (repeatability, not accuracy); no "
+                                "the cell median from repeat crossings (repeatability, not accuracy), on cells "
+                                "with a value and 2 or more frames; short of the true SE on thin cells (about "
+                                "0.6-0.8 of it at 3-5 frames, for normal errors); no "
                                 "observation term (water level, setup, georectification), whose inputs the "
                                 "rows do not carry",
                   "median_m": round(float(np.nanmedian(sigma)), 4) if np.isfinite(sigma).any() else None,

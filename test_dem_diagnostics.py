@@ -21,8 +21,9 @@ WHAT. The additions that report on a DEM without changing any value in it:
     flood frames high and ebb frames low; a planted wave dependence comes
     back against Hs; none planted, none found;
   * <stem>_sigma.asc: 1.25 x (spread/2) / sqrt(frames) on every cell
-    with a value, NaN elsewhere, in the series copy too, convertible to
-    GeoTIFF;
+    with a value, NaN elsewhere (and on a cell of one frame, which has no
+    scatter to measure), in the series copy too, convertible to a GeoTIFF
+    whose description says what it is;
   * the c1 - c2 offset in the cells both cameras cross (the DEM's log and
     diagnostics.camera_offset): a planted 0.10 m comes back; none, none;
     one camera, None;
@@ -368,6 +369,21 @@ def test_sigma(d):
           "the dated series copy too; logged")
     rc2, _ = run([HERE / "asc_to_geotiff.py", d / "w_sigma.asc"], d)
     check(rc2 == 0 and (d / "w_sigma.tif").exists(), "asc_to_geotiff.py converts it (as survey_products.py does)")
+    # its GeoTIFF says what it is, as the other grids' do (the description was the bare file name)
+    check(rc2 == 0 and b"w_sigma: standard error of the cell median" in (d / "w_sigma.tif").read_bytes(),
+          "the _sigma GeoTIFF's description names it (standard error of the cell median, m)")
+    # one crossing has no scatter: with --min-points 1 a cell of one frame has a value and a spread of
+    # 0 (build_grid), and its SE read 0 m -- a perfect cell
+    rc1, log1 = run([HERE / "dem_from_contours.py", g, d / "one", "--no-plot", "--min-points", "1",
+                     "--start-date", "2026-10-01", "--end-date", "2026-10-01"], d)
+    dem1, sig1 = read_asc(d / "one_dem.asc"), read_asc(d / "one_sigma.asc")
+    cnt1 = np.nan_to_num(np.loadtxt(d / "one_count.asc", skiprows=6))
+    single = np.isfinite(dem1) & (cnt1 == 1)
+    multi = np.isfinite(dem1) & (cnt1 >= 2)
+    check(rc1 == 0 and single.sum() > 0 and multi.sum() > 0 and np.isnan(sig1[single]).all()
+          and np.isfinite(sig1[multi]).all(),
+          f"--min-points 1: the {int(single.sum())} cell(s) of one frame get no SE (NaN, not 0 m); the "
+          f"{int(multi.sum())} of 2 or more frames get one")
     import dem_change
     check(not any("sigma" in p.name for p in dem_change.Path(d / "series").glob("dem_*_*d_dem.asc")),
           "dem_change.py's series glob (dem_*_*d_dem.asc) does not pick it up")

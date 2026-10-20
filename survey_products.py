@@ -9179,7 +9179,7 @@ def write_readme(plan, args, prov):
       "consistency_<cam>.png (what the filter dropped, this build's cameras only), "
       "no_setup_frames.csv (frames left out: no wave record)")
     ds = dem_stem(plan).name
-    w(f"  dem/          {ds}_dem/_spread/_count .asc and .tif, {ds}_dem.png (the DEM page)"
+    w(f"  dem/          {ds}_dem/_spread/_count/_sigma .asc and .tif, {ds}_dem.png (the DEM page)"
       + (f" (the calibration variant in the file names: {plan_variant(plan)})" if plan_variant(plan) else ""))
     w(f"  maps/         {map_png(plan, '<cam>').name}: waterlines drawn on the photos, per camera "
       f"(daily_elevation_map.py, as the station's own maps: its colour bar says which elevation colours the lines); "

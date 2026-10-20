@@ -135,6 +135,7 @@ DESCRIPTIONS = {
     "_dem": "intertidal elevation, m NAVD88",
     "_spread": "16-84 percentile elevation range of repeat crossings, m",
     "_count": "frames (waterline crossings) per cell",
+    "_sigma": "standard error of the cell median from repeat crossings (repeatability, not accuracy), m",
     "_source": "1 = measured, 2 = interpolated between waterlines",
     "_diff": "elevation change, m",
     "_sig": "significant elevation change, m",
