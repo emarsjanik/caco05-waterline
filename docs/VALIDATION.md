@@ -39,6 +39,7 @@ python3 test_survey_products.py                  # ends "all survey_products tes
 python3 test_survey_compare.py                   # ends "all survey_compare tests passed"
 python3 test_historical_forcing.py               # ends "101/101 checks passed"
 python3 test_dem_day_test.py                     # ends "all DEM day-test tests passed" (section 2.3a)
+python3 test_georectify.py                       # ends "all georectify tests passed" (section 3.5, re-pin)
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
@@ -55,9 +56,10 @@ on disk did; then its DEM, plan view and comparisons. The GeoTIFFs are then tagg
 (section 4.8), and a further run skips every step. (PR #87's own note, that its pull reran only
 the plan-view map and the comparisons, was checked on a 2026-09-29 build then.)
 
-`view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file
-is unchanged by this PR, and the survey products use only its `ground_to_pixel`, which
-does not need scipy. **Do not run `pointing_check.py --self-test` on the NUC**: it rotates a frame
+`view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file's
+only change since this PR is the in-front-of-camera test of 20 Oct 2026 (section 3.5, re-pin;
+`test_georectify.py` checks it without scipy), and the survey products use only its
+`ground_to_pixel`, which does not need scipy. **Do not run `pointing_check.py --self-test` on the NUC**: it rotates a frame
 with `view_reproject.reproject_image`, which needs scipy; without a scipy that imports (none, or
 one installed but broken) it now says `SKIPPED (nothing checked)` and exits 0 (it needs `--image
 <a c2 frame>` too). The survey products'
@@ -445,7 +447,7 @@ The station's record started on 2026-07-09 when this was written (start file "20
 |---|---|---|
 | Python 3.8 syntax of every `.py` changed since `af8e1bd` | vermin: minimum 3.8, no violations; `py_compile` passes on the station-floor venv | `pip install vermin && vermin -t=3.8- --no-tips $(git diff --name-only af8e1bd -- '*.py')` |
 | Shell syntax | `bash -n` passes on both `.sh` files | `bash -n waterline_timex_cron.sh` |
-| Self-tests on three Python setups (section "How to read this file") | all pass, except `view_reproject.py` on the two 3.8 venvs (no scipy; file unchanged) | section 1 |
+| Self-tests on three Python setups (section "How to read this file") | all pass, except `view_reproject.py` on the two 3.8 venvs (no scipy) | section 1 |
 | Whole cron on the station-floor venv, synthetic station | rc 0 in 381 s, every processing stage rc 0 (the network fetch stubs exit 1 and station_status exits 2, as expected offline) | scratch harness |
 
 ---
@@ -636,6 +638,34 @@ and the share MANIFEST say this plainly -- WHAT THE CODE ENFORCES, WHAT RESTS ON
 FOLLOWING THE PROCEDURE, and the PRE-REGISTRATION COMMIT with whether a remote branch this
 computer has fetched holds it (`surveys/README.md`, "What the code enforces, and what rests on
 the owner").
+
+**Re-pin of 20 Oct 2026: two modules corrected, no number changed.** Two of the procedure's
+pinned modules were corrected. The single pin in `GCPFREE_PINS` was replaced in the same commit,
+as its comment allows while nothing has run on the station:
+* `georectify.pixel_to_ground` and `view_reproject.ground_to_pixel` judged "in front of the
+  camera" by the sign of the projective scale. `build_P` divides by `P[2,3] = -R[2].C`, so that
+  sign depends on the camera's absolute UTM position. At this site every in-view point was lost
+  for a camera aimed at about 95-275 deg, and some points behind the camera were taken as in
+  view (review finding C-B3). Both now use the point's depth along the optical axis,
+  `R[2].(X - C) > 0` (`georectify.camera_depth`; Hartley & Zisserman 2003, section 6.2.3).
+* `georectify.undistort_uv` gives NaN, not a finite wrong pixel, where its 20 passes do not
+  converge (forward residual > 0.01 px) or beyond the radius where the lens polynomial folds
+  back (C-B7), in the style of CIRN's `distortUV` flag (Bruder & Brodie 2020).
+
+Neither change moves a number on this station. Over every pixel of the 2448 x 2048 frame, each
+of the 8 IO files in `calibration/` was paired with each of the 20 EO files of its camera (80
+pairs), at z = -1, 0.5 and 2.5 m. Every output hashed bit-identical before and after:
+`pixel_to_ground`'s X and Y, and `ground_to_pixel`'s U, V and valid flag, on those points and on
+points all round the camera out to 3 km. The two files of calibration A (`CACO03_<cam>_20241023_EO`)
+were not opened: the NUC check in `surveys/README.md` ("Deploying on the station") says whether
+they agree too. The 20 EOs are aimed at 11.9-79.7 deg. Every lens inverts to 1e-12 px, reaching
+0.01 px in 4-5 passes. Each folds at 1.33 x the radius of the frame's corners or further out, or
+never folds. `gcpfree_eo.py` and its pre-registered constants are the same files (sha256
+`e97c24f045c5...`, the one the deploy notes send to Chris).
+The pin was replaced, not appended: `gcpfree_pin_of` takes the first pin with a given
+`gcpfree_eo.py` sha256, so a second pin of the same file would never be read. B's ORDER line
+dates the pin by `gcpfree_eo.py`'s sha256, so it still gives that file's first pinned commit
+(14 Oct 2026), not this re-pin of its modules.
 
 | what | data | number | reproduce |
 |---|---|---|---|
