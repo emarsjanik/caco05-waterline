@@ -195,7 +195,9 @@ def wave_currency_record(frames_used, wave_source_of, setup_share):
     is. Frames from contours older than the wave_source column count as
     'unrecorded'. -> (record for _info.json, lines to print): a WARNING
     when any frame was tagged from the raw buoy and the elevations carry
-    the setup, a NOTE when they do not (only --max-hs used those heights).
+    the setup, a NOTE when they do not (only --max-hs used those heights);
+    a NOTE for ADCP-equivalent waves and for a wave file whose kind its
+    columns do not tell ('unknown', e.g. process_chelsea.py's ADCP record).
     """
     from extract_elevation_contours import WAVE_CURRENCY_FITTED, wave_currency_note
     tags = {}
@@ -216,7 +218,7 @@ def wave_currency_record(frames_used, wave_source_of, setup_share):
         lines.append(f"NOTE: {raw} frame(s) tagged with the raw buoy waves (no setup in these elevations; "
                      f"--max-hs, if used, judged their buoy Hs)")
     for t in sorted(tags):
-        if t.startswith("adcp_equiv:"):
+        if t.startswith(("adcp_equiv:", "unknown:")):
             lines.append("NOTE: " + wave_currency_note(t)[1])
     return rec, lines
 

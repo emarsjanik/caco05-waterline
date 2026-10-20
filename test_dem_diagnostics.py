@@ -9,9 +9,11 @@ Plain python3 (no pytest needed on the station):
 WHAT. The additions that report on a DEM without changing any value in it:
   * the wave currency (extract_elevation_contours.py wave_source, and the
     DEM's log and <stem>_info.json wave_currency): which wave columns of
-    which kind of file tagged the frames, and a WARNING when that is not
-    the currency the setup coefficient was fitted in (the raw buoy archive
-    the cron falls back to when waves_marconi.csv is missing);
+    which kind of file tagged the frames, and a WARNING when that is the
+    raw buoy archive the cron falls back to when waves_marconi.csv is
+    missing (in the DEM's log only when its elevations carry a setup, a
+    NOTE otherwise); a NOTE, not the raw buoy, for a file whose kind its
+    columns do not tell, such as process_chelsea.py's ADCP record;
   * the residuals against the tide's stage and the waves (the DEM's log
     and <stem>_info.json diagnostics.residuals): a planted water-level
     timing error (each line given an elevation 0.1 m per m/h of dz/dt too
@@ -80,10 +82,17 @@ def test_wave_columns():
     check(eec.wave_columns(["time_utc", "epoch", "wvht_m", "dpd_s", "mwd_deg", "source", "hs_sigma_m",
                             "tp_sigma_s"]) == ("wvht_m", "dpd_s", "adcp_equiv:wvht_m/dpd_s"),
           "historical_forcing.py's waves.csv (wvht_m, dpd_s, hs_sigma_m): ADCP-equivalent")
+    # process_chelsea.py's adcp_waves.csv (the ADCP's own wh_4061 and peak period) has wvht_m / dpd_s
+    # but neither apd_s nor hs_sigma_m: it was called the raw buoy, with a WARNING in its logs
+    check(eec.wave_columns(["time_utc", "epoch", "wvht_m", "dpd_s", "mwd_deg"])
+          == ("wvht_m", "dpd_s", "unknown:wvht_m/dpd_s"),
+          "process_chelsea.py's adcp_waves.csv (wvht_m, dpd_s, no apd_s): unknown, not the raw buoy")
     ok, _ = eec.wave_currency_note(eec.WAVE_CURRENCY_FITTED)
     nb, tb = eec.wave_currency_note("buoy:wvht_m/dpd_s")
     na, ta = eec.wave_currency_note("adcp_equiv:wvht_m/dpd_s")
-    check(ok and not nb and not na and "NOT the currency" in tb and "ADCP-equivalent Tp" in ta,
+    nu, tu = eec.wave_currency_note("unknown:wvht_m/dpd_s")
+    check(ok and not nb and not na and not nu and "NOT the currency" in tb and "ADCP-equivalent Tp" in ta
+          and "do not name" in tu and "process_chelsea.py" in tu,
           "wave_currency_note: only marconi:hs_best/tp_s is the fitted currency")
 
 
@@ -120,15 +129,21 @@ def test_extract_wave_source(d):
     (d / "waves_44008.csv").write_text(
         "time_utc,epoch,wvht_m,dpd_s,apd_s,mwd_deg\n"
         + "".join(f"x,{e},1.60,9.0,6.0,120\n" for e in hours))
+    # process_chelsea.py's adcp_waves.csv, as it writes it (the ADCP's own record)
+    (d / "adcp_waves.csv").write_text(
+        "time_utc,epoch,wvht_m,dpd_s,mwd_deg\n"
+        + "".join(f"x,{e},1.10,8.5,120\n" for e in hours))
     out = {}
-    for name in ("waves_marconi.csv", "waves_44008.csv"):
-        dst = d / f"contours_{name}"
+    import csv
+    for name, setup in (("waves_marconi.csv", True), ("waves_44008.csv", True), ("adcp_waves.csv", True),
+                        ("waves_44008.csv", False)):
+        dst = d / f"contours_{name}_{setup}"
         rc, log = run([HERE / "extract_elevation_contours.py", d / "tide.csv", "--processed-dir",
-                       d / "processed", "--waves", d / name, "--setup-coef", "0.037", "--output", dst], d)
-        (d / f"{name}.log").write_text(log)
-        import csv
+                       d / "processed", "--waves", d / name] + (["--setup-coef", "0.037"] if setup else [])
+                      + ["--output", dst], d)
+        (d / f"{name}_{setup}.log").write_text(log)
         rows = list(csv.DictReader(open(dst))) if dst.exists() else []
-        out[name] = (rc, log, rows)
+        out[name if setup else name + " (no setup)"] = (rc, log, rows)
     rc, log, rows = out["waves_marconi.csv"]
     check(rc == 0 and rows and all(r["wave_source"] == "marconi:hs_best/tp_s" for r in rows)
           and list(rows[0])[-1] == "wave_source" and list(rows[0])[-3:-1] == ["setup_correction_m",
@@ -143,6 +158,19 @@ def test_extract_wave_source(d):
     check(rc == 0 and rows and all(r["wave_source"] == "buoy:wvht_m/dpd_s" for r in rows)
           and len(warn) == 1 and "raw buoy" in warn[0] and "C = 0.037" in warn[0],
           "the raw 44008 archive: wave_source buoy:wvht_m/dpd_s and one WARNING line naming C")
+    rc, log, rows = out["adcp_waves.csv"]
+    check(rc == 0 and rows and all(r["wave_source"] == "unknown:wvht_m/dpd_s" for r in rows)
+          and not wave_warn(log) and "NOTE: the wave file's kind is not known" in log,
+          "process_chelsea.py's ADCP record: wave_source unknown:wvht_m/dpd_s, a NOTE, no WARNING (it was "
+          "tagged as the raw buoy, with the WARNING that waves_marconi.csv was missing)")
+    # without a setup the fallback is still the alarm (the cron says nothing else when waves_marconi.csv
+    # is missing); the DEM, whose elevations then carry no setup, says it as a NOTE
+    rc, log, rows = out["waves_44008.csv (no setup)"]
+    warn = wave_warn(log)
+    check(rc == 0 and rows and all(r["wave_source"] == "buoy:wvht_m/dpd_s" for r in rows)
+          and "setup_correction_m" not in rows[0] and len(warn) == 1 and "raw buoy" in warn[0]
+          and "C = " not in warn[0] and "waves_marconi.csv" in warn[0],
+          "the raw 44008 archive with no setup: still one WARNING (the fallback), naming no C")
     # the setup itself is unchanged by the tag: C*sqrt(Hs*g*Tp^2/2pi) from the row's own Hs, Tp
     r = out["waves_marconi.csv"][2][0]
     want = 0.037 * np.sqrt(1.0 * 9.81 * 8.0 ** 2 / (2 * np.pi))
@@ -201,7 +229,7 @@ def test_dem_wave_currency(d):
     d.mkdir(parents=True, exist_ok=True)
     frames = tidal_frames()
     res = {}
-    for tag in (None, "marconi:hs_best/tp_s", "buoy:wvht_m/dpd_s"):
+    for tag in (None, "marconi:hs_best/tp_s", "buoy:wvht_m/dpd_s", "unknown:wvht_m/dpd_s"):
         name = (tag or "none").split(":")[0]
         g = d / f"ground_{name}.csv"
         g.write_text("\n".join(ground_rows(frames, tag)) + "\n")
@@ -222,6 +250,12 @@ def test_dem_wave_currency(d):
           and info["wave_currency"]["all_fitted_currency"] is False
           and len(warn) == 1 and "raw buoy" in warn[0],
           "raw-buoy rows with a setup: one WARNING line, and info.json says not the fitted currency")
+    rc, log, info = res["unknown"]
+    check(rc == 0 and info["wave_currency"]["frames"] == {"unknown:wvht_m/dpd_s": nframes}
+          and info["wave_currency"]["all_fitted_currency"] is False and "WARNING" not in log
+          and any(ln.startswith("NOTE: unknown:wvht_m/dpd_s -- a wave file its columns do not name")
+                  for ln in log.splitlines()),
+          "rows from a wave file of unknown kind (process_chelsea.py's ADCP record): a NOTE, no WARNING")
     rc, log, info = res["none"]
     check(rc == 0 and info["wave_currency"]["frames"] == {"unrecorded": nframes} and "WARNING" not in log,
           "contours from before wave_source: 'unrecorded', no WARNING")
