@@ -1424,6 +1424,67 @@ only if it holds over several weeks of different waves; then change it in all th
 | Filter: threshold / window / bins | max(0.75 m, 4 x robust scatter) / +/-3 d, exp(-dt/1 d) / 32 px | `waterline_consistency.py` | section 2.1 |
 | Survey floor margin | 0.10 m above each transect's lowest shot | `survey_compare.py` SURVEY_FLOOR_MARGIN | section 4.1 |
 
+### 4.10 Georectification uncertainty (`georectify_uncertainty.py`; opt-in `--sigma-obs`)
+
+* **What.** The 2025-11-13 solve repeated with each of its targets left out, and its parameter
+  uncertainty drawn through `georectify.pixel_to_ground` to every pixel (Monte Carlo, 2000
+  draws, seed 0), written to `calibration/<cam>_geom_sigma.csv` (calibration/README.md).
+  `dem_from_contours.py --sigma-obs` turns it into `<stem>_sigma_obs.asc` =
+  sqrt(SE^2 + sigma_wl^2 + sigma_setup^2 + (tan(beta) x sigma_x)^2), tan(beta) from the DEM's own
+  3 x 3-cell plane. **Off by default**: without the switch every output is byte for byte what
+  42e3e86 wrote [SYNTH: builds with and without the day and frame tests, interpolation, the
+  fine DEM, the series copy and the page]. No pinned file is touched.
+* **Leave-one-out** [REAL], the error at the target left out, horizontal:
+
+  | camera | solve (the most parameters whose refit reproduces the calibration) | targets | in-sample mean / RMS / max | left out RMS / max |
+  |---|---|---|---|---|
+  | c1 | all 6 (the refit moves 0.045 m, 0.044 deg) | 14 at 29-92 m | 0.328 / 0.416 / 1.181 m | 0.589 m (1.41 x) / 1.80 m (#214, 92 m) |
+  | c2 | 3 angles, position held (6 would move 0.33 m) | 13 at 36-150 m | 0.330 / 0.416 / 0.994 m | 0.410 m (0.99 x) / 0.63 m (#214, 90 m) |
+
+  So the in-sample figure understates little AT the targets; what it cannot show is the
+  extrapolation in range.
+* **Parameter uncertainty** [REAL]: the Jacobian of the solve (CIRN's extrinsics error) and the
+  jackknife of the leave-one-out solves; the table uses the larger, the Jacobian for both
+  cameras. c1: x 0.17, y 0.15, z 0.18 m, azimuth 0.21, tilt 0.20, roll 0.25 deg (the position
+  was solved from targets within 92 m, so position and angles trade off); c2: azimuth 0.034,
+  tilt 0.029, roll 0.175 deg.
+* **Horizontal sigma on z = 0 m** [REAL], median over the columns (Jacobian; jackknife in
+  brackets), and the cross-shore pixel footprint:
+
+  | range | 50 m | 100 m | 150 m | 200 m | 300 m | 400 m |
+  |---|---|---|---|---|---|---|
+  | c1 sigma_h | 0.20 (0.16) | 1.05 (0.64) | 2.9 (1.8) | 5.6 (3.7) | 13.7 (9.6) | 23.8 (19.2) |
+  | c2 sigma_h | 0.11 (0.08) | 0.38 (0.28) | 0.83 (0.61) | 1.46 (1.07) | 3.3 (2.4) | 5.8 (4.2) |
+  | c1 / c2 footprint | 0.05 / 0.03 | 0.19 / 0.09 | 0.42 / 0.19 | 0.73 / 0.31 | 1.63 / 0.67 | 2.89 / 1.15 |
+
+  The far field is the tilt: (h^2 + r^2)/h x 0.20 deg is ~15 m at 300 m for c1 (h 20.5 m). In the station's
+  own rows (the 2026-09-29 survey-date build, 27 Sep - 2 Oct) c1's waterlines lie 63-89 m out
+  (p10-p90; sigma_h 0.34-0.71 m) and c2's 105-307 m (0.36-5.2 m). There `--sigma-obs` gives
+  median 0.258 m, p90 0.315 m on 1193 cells; the georectification term median 0.047 m, p90
+  0.18 m (tan(beta) median 0.10): the water level and setup defaults dominate [REAL].
+* **Defaults** (`dem_from_contours.py` SIGMA_WL_M, SIGMA_SETUP_M; `--sigma-wl`, `--sigma-setup`):
+  water level 0.12 m, the GNSS-R vs Chatham-transfer residual RMS of `gnssr_qc.py` (an upper bound:
+  the harbour transfer is in it; the datum's +/-0.061 m, section 4.2, is not); setup 0.21 m, the
+  RMSE of Stockdon et al. (2006)'s setup formula on its own 10 experiments as re-evaluated by
+  Dalinghaus, Coco & Higuera (2023, NHESS 23, 2157-2169) [secondary: Stockdon's full text was not
+  retrievable here]. Both are counted in full, not divided by sqrt(n) (errors the crossings share);
+  their random part is also in the SE, so `_sigma_obs` is an upper estimate.
+* **Limits.** Beyond 150 m the sigma is the solve's extrapolation, not a measurement; it holds for
+  the 2025-11-13 calibration only (the 2025 survey-date builds use other calibrations); it does
+  not include a camera turned since (section 4.6), the pick origin (VERIFIED L27) or the
+  detector's own pixel error (that is in the SE). The sea horizon, which pins tilt and roll,
+  is not used as an observation in the solve; adding it would shrink the far field most.
+* **[NUC] Is it honest?** `georectify_uncertainty.py --evaluate <stem> --survey <survey>` gives the
+  share of cells (or RTK shots) within 1 and 2 sigma_obs (about 68 / 95 % if right), raw and with
+  the median offset removed, and the RMS by thirds of sigma_obs. It needs a survey of a window
+  georectified with the 2025-11-13 calibration that reaches the waterlines: the 29 Sep 2026 RTK
+  stops at +1.17 m and meets only 2 cells of that week's DEM [REAL]. A calm low-tide RTK or
+  lidar survey (section 6) is the test. [SYNTH] residuals drawn from sigma_obs come back 68.3 /
+  95.0 %; the code reads the real 2025 lidar BigTIFFs (smoke test).
+* **Re-check.** `python3 georectify_uncertainty.py --no-write` (both cameras, ~20 s) prints the
+  tables above; `python3 test_georectify_uncertainty.py` (~50 s; `--quick` ~30 s) checks it on a
+  synthetic camera with known answers and the committed tables against a fresh run.
+
 ---
 
 ## 5. Reproducing the before/after on the real contours
