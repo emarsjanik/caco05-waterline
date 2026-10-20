@@ -1643,6 +1643,60 @@ def residual_diagnostic(pair_cell, pair_frame, pair_vals, info, cam_of, min_fram
     return rec, lines
 
 
+# Fewest shared cells the c1 - c2 offset is quoted on.
+DIAG_MIN_CELLS = 10
+
+
+def camera_offset(E, N, Z, cams, frames, cell, min_frames):
+    """
+    c1 - c2 in the cells both cameras cross (reporting only, review item
+    11). The cell value pools both cameras' frames in the seam and the
+    overlap, so a bias between the cameras shows there as spread (and
+    blanking), not as an offset. Here, in each cell with at least
+    min_frames frames of EACH camera, the median of c1's frame samples
+    minus the median of c2's (the samples as build_grid makes them, one per
+    cell and frame), then over those cells the median, the NMAD (1.4826 x
+    median absolute deviation) and the 16th-84th percentiles. One number
+    per DEM build, i.e. per window. Nothing is corrected (that needs a
+    validation of which camera is right). -> (record or None, lines)
+    """
+    if len(set(np.unique(cams).tolist()) & {"c1", "c2"}) < 2:
+        return None, []
+    pair_cell, pair_frame = frame_pairs(E, N, frames, cell)
+    names, first = np.unique(frames, return_index=True)     # each frame's elevation and camera
+    at = np.searchsorted(names, pair_frame)
+    v = Z[first][at]
+    ci = np.select([cams[first] == "c1", cams[first] == "c2"], [0, 1], 2)[at]
+    keep = ci < 2
+    key = pair_cell[keep].astype(np.int64) * 2 + ci[keep]
+    v = v[keep]
+    o = np.lexsort((v, key))
+    key, v = key[o], v[o]
+    starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]]) if len(key) else np.zeros(0, int)
+    n = np.diff(np.r_[starts, len(key)])
+    med = (v[starts + (n - 1) // 2] + v[starts + n // 2]) / 2 if len(key) else np.zeros(0)
+    gk, ok = key[starts], n >= max(min_frames, 1)
+    c1 = dict(zip((gk[ok & (gk % 2 == 0)] // 2).tolist(), med[ok & (gk % 2 == 0)].tolist()))
+    c2 = dict(zip((gk[ok & (gk % 2 == 1)] // 2).tolist(), med[ok & (gk % 2 == 1)].tolist()))
+    both = sorted(set(c1) & set(c2))
+    d = np.array([c1[k] - c2[k] for k in both])
+    rec = {"cells": len(both), "min_frames_each": int(min_frames),
+           "method": "per cell with >= min_frames_each frames of each camera: median of c1's frame samples minus "
+                     "median of c2's; over those cells median, NMAD (1.4826 x MAD), 16th and 84th percentiles. "
+                     "Reporting only: no value of the DEM depends on it"}
+    if len(both) >= DIAG_MIN_CELLS:
+        mid = float(np.median(d))
+        rec.update(median_m=round(mid, 4), nmad_m=round(float(1.4826 * np.median(np.abs(d - mid))), 4),
+                   p16_m=round(float(np.percentile(d, 16)), 4), p84_m=round(float(np.percentile(d, 84)), 4))
+        line = (f"Camera offset     : c1 - c2 over {len(both)} shared cell(s) (>= {min_frames} frames of each): "
+                f"median {rec['median_m']:+.3f} m, NMAD {rec['nmad_m']:.3f} m, 16-84% {rec['p16_m']:+.3f} to "
+                f"{rec['p84_m']:+.3f} m (reporting only; the cell values pool both cameras)")
+    else:
+        line = (f"Camera offset     : c1 - c2 not estimated: {len(both)} shared cell(s) with >= {min_frames} frames "
+                f"of each camera (needs {DIAG_MIN_CELLS})")
+    return rec, [line]
+
+
 def interpolate_between_contours(E, N, Z, frames, cell, max_spread, dem, max_edge):
     """
     Fill cells between waterlines by linear interpolation.
@@ -2234,6 +2288,13 @@ def main():
             no_points_page("The day-consistency test rejected every camera-day: nothing to map.", load_stats)
             sys.exit(4)
 
+    # c1 - c2 in the cells both cameras cross, on the frames the DEM is built from (reporting only)
+    if not args.no_diagnostics:
+        cam_rec, lines = camera_offset(E, N, Z, cams, frames, args.cell, args.min_points)
+        diagnostics["camera_offset"] = cam_rec
+        for line in lines:
+            print(line)
+
     # Which wave record tagged the frames (log and _info.json only, not the page)
     wave_record, wave_lines = wave_currency_record(frames, load_stats.get("wave_source", {}),
                                                    load_stats.get("setup_share", 0.0))
@@ -2359,8 +2420,8 @@ def main():
                                 "rows do not carry",
                   "median_m": round(float(np.nanmedian(sigma)), 4) if np.isfinite(sigma).any() else None,
                   "p90_m": round(float(np.nanpercentile(sigma, 90)), 4) if np.isfinite(sigma).any() else None},
-        # reporting only (residual_diagnostic): residuals against the tide's stage and Hs; {} with
-        # --no-diagnostics
+        # reporting only: residuals against the tide's stage and Hs (residual_diagnostic) and the
+        # c1 - c2 offset in shared cells (camera_offset, None with one camera); {} with --no-diagnostics
         "diagnostics": diagnostics,
         # True: this build wrote <stem>_source.asc (and the page may trust
         # it); False: any _source.asc beside the grids is an older run's.

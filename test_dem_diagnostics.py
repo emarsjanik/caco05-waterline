@@ -21,6 +21,9 @@ WHAT. The additions that report on a DEM without changing any value in it:
   * <stem>_sigma.asc: 1.25 x (spread/2) / sqrt(frames) on every cell
     with a value, NaN elsewhere, in the series copy too, convertible to
     GeoTIFF;
+  * the c1 - c2 offset in the cells both cameras cross (the DEM's log and
+    diagnostics.camera_offset): a planted 0.10 m comes back; none, none;
+    one camera, None;
   * the DEM's grids are the same with them as without: the elevations,
     spread and count grids do not depend on the new columns.
 
@@ -336,6 +339,28 @@ def test_sigma(d):
           "dem_change.py's series glob (dem_*_*d_dem.asc) does not pick it up")
 
 
+def test_camera_offset(d):
+    print("dem_from_contours.py: the c1 - c2 offset in the cells both cameras cross")
+    d = Path(d) / "cameras"
+    d.mkdir(parents=True, exist_ok=True)
+    rc, log, info = build(d, "off", tidal_frames(days=8, c2_offset=0.10))
+    co = info.get("diagnostics", {}).get("camera_offset") or {}
+    check(rc == 0 and co.get("cells", 0) >= 10 and abs(co["median_m"] + 0.10) < 0.02 and co["nmad_m"] < 0.05
+          and co["p16_m"] <= co["median_m"] <= co["p84_m"],
+          f"c2 planted 0.10 m high: c1 - c2 median {co.get('median_m')} m over {co.get('cells')} shared cells, "
+          f"NMAD {co.get('nmad_m')} m")
+    check("Camera offset     : c1 - c2 over" in log and "WARNING" not in log, "printed in the DEM log")
+    rc0, log0, info0 = build(d, "same", tidal_frames(days=8))
+    co0 = info0["diagnostics"]["camera_offset"]
+    check(rc0 == 0 and abs(co0["median_m"]) < 0.02, f"no offset planted: median {co0['median_m']:+.3f} m")
+    rc1, log1, info1 = build(d, "c1only", [f for f in tidal_frames(days=8) if f[0] == "c1"])
+    check(rc1 == 0 and info1["diagnostics"]["camera_offset"] is None and "Camera offset" not in log1,
+          "one camera: None, nothing printed")
+    same = all(np.array_equal(np.loadtxt(d / f"off_{k}.asc", skiprows=6), np.loadtxt(d / f"same_{k}.asc", skiprows=6))
+               for k in ("count",))
+    check(same, "the count grid is the same whatever the offset (the cells pool both cameras, as before)")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
@@ -363,6 +388,7 @@ def main():
         test_water_level_rates()
         test_residuals(d)
         test_sigma(d)
+        test_camera_offset(d)
         test_py38()
     finally:
         if not args.keep:
