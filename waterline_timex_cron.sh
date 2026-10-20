@@ -47,6 +47,17 @@ LOG="$BASE/logs/timex_cron.log"
 # "*12_00_00*.timex.jpg" to keep only a daily backdrop instead.
 BACKDROP_PATTERN="all"
 
+# The detector's debug images (8 energy PNGs per frame, ~8 MB, one folder
+# per frame under $BASE/debug) are written on every run and nothing in this
+# job reads them back: they are for looking at a frame that went wrong. At
+# ~60 daylight frames a day they grow ~0.5 GB a day without limit (the
+# detector only clears its input and output folders). Each run removes the
+# frame folders last changed DEBUG_KEEP_DAYS or more days ago. Detection
+# is unaffected: the detector never reads debug/ (its temporal blend uses
+# the previous frame's CSV). Set to "" to keep every debug image.
+DEBUG_DIR="$BASE/debug"
+DEBUG_KEEP_DAYS=7
+
 # The other Argus products, kept the same way, each in archive/images_<product>.
 # The wave models read the BRIGHT image, so without it the live wave record
 # can never be recomputed when a model improves; dark/snap/var are what a
@@ -273,10 +284,18 @@ python3 waterline_detector_v5.py \
     --image-suffix timex.jpg \
     --input-dir "$SCRATCH_INPUT" \
     --output-dir "$SCRATCH" \
-    --debug-dir "$BASE/debug" >> "$LOG" 2>&1
+    --debug-dir "$DEBUG_DIR" >> "$LOG" 2>&1
 status=$?
 if [ $status -ne 0 ]; then
     log "WARNING: detector exited $status (continuing to archive whatever it produced)"
+fi
+# 1b. Prune old debug images (see DEBUG_KEEP_DAYS). Only the frame folders
+#     directly inside DEBUG_DIR, by their modification time: find -mtime +N
+#     matches N+1 or more whole days old, hence DEBUG_KEEP_DAYS - 1.
+if [ -n "$DEBUG_KEEP_DAYS" ] && [ -d "$DEBUG_DIR" ]; then
+    pruned=$(find "$DEBUG_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +$((DEBUG_KEEP_DAYS - 1)) \
+        -print -exec rm -rf {} + 2>/dev/null | wc -l)
+    [ "$pruned" -gt 0 ] && log "debug images: removed $pruned frame folder(s) $DEBUG_KEEP_DAYS or more days old"
 fi
 
 # 2. Accumulate. -n never overwrites, so re-running is safe and a
