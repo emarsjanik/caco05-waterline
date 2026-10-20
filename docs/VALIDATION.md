@@ -504,7 +504,7 @@ cm), nothing else.
 
 | what | data | number | reproduce here | check on the NUC |
 |---|---|---|---|---|
-| Legacy is the code before the switch, bit for bit | [SYNTH] test (8 synthetic photos; 43 detection files; a 5-day ground file) | detector: 16/16 CSVs and overlays byte-identical to commit `42e3e86`, also with `TIMING_MODE=legacy`, `--timing-mode legacy`, no calibration folder (the built-in values) and an unreadable legacy file (a WARNING, the built-in values); contour file byte-identical; DEM grids, `_sigma.asc`, `_info.json` and log byte-identical | `python3 test_timing_mode.py` | after the pull the cron's products are as before (section 1) |
+| Legacy is the code without the switch, bit for bit | [SYNTH] test (8 synthetic photos; 43 detection files; a 5-day ground file) | detector: 16/16 CSVs and overlays byte-identical to the code without the switch (this checkout with the switch commit's own changes taken out by `git merge-file`, so a fix merged after it is on both sides; on its branch, commit `42e3e86`), also with `TIMING_MODE=legacy`, `--timing-mode legacy`, no calibration folder (the built-in values) and an unreadable legacy file (a WARNING, the built-in values); contour file byte-identical; DEM grids, `_sigma.asc`, `_info.json` and log byte-identical | `python3 test_timing_mode.py` | after the pull the cron's products are as before (section 1) |
 | `timex_bias_legacy.json` is the built-in v6.8 timex bias | [SYNTH] test | every float equal (c1 constant -11.03 px; c2's 10 points, the last three -17.22) | same | - |
 | Mid does all three, together | [SYNTH] test | detector: blend off, the mid file's corrections, `Timing_Mode=mid` on every row; refused without its file (unless that camera's bias is off, as in `detect_original_view.py`); contour step: level, waves and stale-gap check at +300 s (timex) / +0 s (snap), capture time unchanged, `level_time_offset_s` last; the other mode's detections left out, both ways | same | - |
 | The pass rule finds a planted lag | [SYNTH] test: synthetic lines shaped like a real 11 Sep 2026 hand-clicked line, georectified with the real CACO05 calibration, 4 days, a 7.9 min lag planted in the legacy lines and none in the mid ones | legacy lag 5.6 (c1) / 6.7 (c2) min, flood minus ebb +0.083 / +0.099 m; mid 0.1 / 0.8 min, +0.010 / +0.024 m: PASS | same | `recalibrate_timing.py --steps compare` |
@@ -610,6 +610,14 @@ python3 test_timing_mode.py                      # ends "all timing-mode tests p
 camera whose fit rests on few frames); whether legacy showed a lag at all (a legacy slope near 0 with
 no flood/ebb contrast means the timing error is not what moves the residuals of that window: try
 another window before concluding).
+
+**Not every flood/ebb difference is timing.** On a falling tide the beach's water table lags the
+sea and seeps out on the beach face above the waterline, a seepage face (Turner 1993; Vousdoukas
+2014). It can put an ebb line landward of still water, where the sand is higher than the level the
+line is given: low on the ebb, the same sign as the timing error. It is the same in both modes, so
+it does not decide the comparison (what mid removes is the timing), but it can be what is left in
+mid. A flood/ebb contrast left in mid is therefore no reason to change `TIMEX_MID_OFFSET_S` to null
+it: only the exposure (step 1) changes that constant.
 
 ---
 
@@ -1704,6 +1712,8 @@ copy of today's pictures made before the pull (section 1).
 * Hart-Davis, M.G., Piccioni, G., Dettmering, D., Schwatke, C., Passaro, M., Seitz, F., 2021.
   EOT20: a global ocean tide model from multi-mission satellite altimetry. Earth System Science
   Data 13, 3869-3884.
+* Holman, R.A., Stanley, J., 2007. The history and technical capabilities of Argus. Coastal
+  Engineering 54(6-7), 477-491.
 * Plant, N.G., Holman, R.A., 1997. Intertidal beach profile estimation using video images.
   Marine Geology 140(1-2), 1-24.
 * Plant, N.G., Aarninkhof, S.G.J., Turner, I.L., Kingston, K.S., 2007. The performance of
@@ -1712,3 +1722,7 @@ copy of today's pictures made before the pull (section 1).
 * Stockdon, H.F., Holman, R.A., Howd, P.A., Sallenger, A.H., 2006. Empirical parameterization
   of setup, swash, and runup. Coastal Engineering 53(7), 573-588.
   https://doi.org/10.1016/j.coastaleng.2005.12.005
+* Turner, I.L., 1993. Water table outcropping on macro-tidal beaches: a simulation model.
+  Marine Geology 115(3-4), 227-238.
+* Vousdoukas, M.I., 2014. Observations of wave run-up and groundwater seepage line motions on a
+  reflective-to-intermediate, meso-tidal beach. Marine Geology 350, 52-70.

@@ -7,19 +7,23 @@ Plain python3 (no pytest needed on the station):
     python3 test_timing_mode.py [--keep DIR] [--before REF]
 
 WHAT. The switch of timex_timing.py, off by default:
-  * LEGACY IS BIT FOR BIT THE CODE BEFORE THE SWITCH. The detector, the
+  * LEGACY IS BIT FOR BIT THE CODE WITHOUT THE SWITCH. The detector, the
     contour step and the DEM step are run on the same synthetic inputs by
-    the code of the commit before the switch (read with git: the parent of
-    the commit that added timex_timing.py, or HEAD before that commit
-    exists; --before REF names another) and by this code with no mode
-    given, with TIMING_MODE=legacy, with --timing-mode legacy and (the
-    detector) with no calibration folder at all (the built-in values):
-    every detection CSV, overlay PNG, contour file, DEM grid and DEM
-    info.json must be byte-identical. Without git that
-    comparison is skipped (said so at the end), and the rest still runs:
-    the legacy timex bias file holds exactly the built-in values, legacy
-    levels and waves are those of the file-name epoch, the headers are as
-    before, the blend still runs.
+    the code without the switch and by this code with no mode given, with
+    TIMING_MODE=legacy, with --timing-mode legacy and (the detector) with
+    no calibration folder at all (the built-in values): every detection
+    CSV, overlay PNG, contour file, DEM grid and DEM info.json must be
+    byte-identical. "Without the switch" is read with git: this checkout's
+    file with the switch commit's own changes (the commit that added
+    timex_timing.py) taken back out by git merge-file, so a fix another
+    commit made to the same file after the switch is in both runs and is
+    not mistaken for the switch; where that does not merge cleanly, the
+    file as of the switch commit's parent. --before REF compares with REF
+    as committed instead; before the switch is committed, HEAD. Without
+    git that comparison is skipped (said so at the end), and the rest
+    still runs: the legacy timex bias file holds exactly the built-in
+    values, legacy levels and waves are those of the file-name epoch, the
+    headers are as before, the blend still runs.
   * MID does all three things, together: the detector's blend is off and its
     timex bias is the mid file's (its rows = a legacy-code run with
     --no-temporal-filter and the same corrections, plus the Timing_Mode
@@ -95,6 +99,10 @@ def skip(msg):
 def run(args, cwd, env=None):
     e = dict(os.environ)
     e.pop("TIMING_MODE", None)                    # the test sets the mode itself
+    # A script copied out of the repository (the code without the switch, a
+    # detector without its calibration folder) still imports its companions
+    # from here; its own folder comes first, so its own copies win.
+    e["PYTHONPATH"] = str(HERE) + (os.pathsep + e["PYTHONPATH"] if e.get("PYTHONPATH") else "")
     e.update(env or {})
     r = subprocess.run([sys.executable] + [str(a) for a in args], stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, universal_newlines=True, cwd=str(cwd), env=e)
@@ -128,26 +136,65 @@ def git(*a):
     return r.stdout if r.returncode == 0 else None
 
 
+def switch_commit():
+    """The commit that added timex_timing.py (the timing switch), or None (not committed yet, no git)."""
+    hashes = (git("log", "--diff-filter=A", "--format=%H", "--", "timex_timing.py") or "").split()
+    return hashes[-1] if hashes else None
+
+
 def before_ref(override=None):
-    """The commit before the timing switch: --before, else the parent of the first commit that
-    added timex_timing.py, else HEAD (the switch not committed yet). None without git."""
+    """The code before the timing switch: (ref, switch). ref is --before, else the parent of the
+    switch commit, else HEAD (the switch not committed yet); None without git. switch is the
+    switch commit when ref is its parent (old_copy then takes only its changes out), else None."""
     if override:
-        return override if git("rev-parse", "--verify", "-q", override + "^{commit}") is not None else None
-    added = git("log", "--diff-filter=A", "--format=%H", "--", "timex_timing.py")
-    if added is None:
+        return (override if git("rev-parse", "--verify", "-q", override + "^{commit}") is not None else None), None
+    switch = switch_commit()
+    ref = switch + "^" if switch else "HEAD"
+    if git("rev-parse", "--verify", "-q", ref + "^{commit}") is None:
+        return None, None
+    return ref, switch
+
+
+def without_switch(now, at_switch, before, scratch):
+    """`now` with the changes from `before` to `at_switch` taken out (git merge-file: a 3-way
+    merge of at_switch -> before into now). -> the text, or None on a conflict or an error."""
+    scratch.mkdir(parents=True, exist_ok=True)
+    paths = [scratch / k for k in ("now", "at_switch", "before")]
+    for p, text in zip(paths, (now, at_switch, before)):
+        p.write_text(text)
+    try:
+        r = subprocess.run(["git", "merge-file", "-p"] + [str(p) for p in paths], stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, universal_newlines=True)
+    except OSError:
         return None
-    hashes = added.split()
-    ref = hashes[-1] + "^" if hashes else "HEAD"
-    return ref if git("rev-parse", "--verify", "-q", ref + "^{commit}") is not None else None
+    return r.stdout if r.returncode == 0 else None
 
 
-def old_copy(ref, names, dest):
-    """The files `names` as of `ref` into dest. -> True if all were read."""
+def old_copy(ref, names, dest, switch=None):
+    """
+    The files `names` without the timing switch, into dest. With `switch`
+    (ref is then its parent): each is THIS checkout's file with only the
+    switch commit's changes taken out (without_switch), so a later commit's
+    change to the same file is in the comparison on both sides. Where a
+    later change does not merge cleanly with the switch taken out (it
+    touched the same lines), and for every file without `switch`: the file
+    as of ref, as committed. -> True if all were written.
+    """
     dest.mkdir(parents=True, exist_ok=True)
     for n in names:
         text = git("show", f"{ref}:{n}")
         if text is None:
             return False
+        at_switch = git("show", f"{switch}:{n}") if switch else None
+        now = (HERE / n).read_text()
+        if at_switch is not None and now != at_switch:
+            merged = without_switch(now, at_switch, text, dest / ".merge" / n)
+            if merged is None:
+                print(f"  note: {n} was changed after the switch ({switch[:7]}) where the switch changed it: "
+                      f"compared with {ref} as committed, so a later change shows as a difference "
+                      f"(--before REF compares with another commit)")
+            else:
+                text = merged
         (dest / n).write_text(text)
     return True
 
@@ -196,8 +243,8 @@ def test_legacy_bias_file():
     except ValueError as e:
         refused = "not of 'mid'" in str(e)
     check(refused, "the legacy file is refused as a mid file")
-    check(not (HERE / "calibration" / "timex_bias_mid.json").exists() or True,
-          "(a station's own timex_bias_mid.json is not read by this test)")
+    # (a station's own calibration/timex_bias_mid.json is never read by this test: every mid run
+    # names its file, or runs from a copy without a calibration folder)
 
 
 def test_shared_constant():
@@ -271,7 +318,7 @@ def detect(script, d, name, extra=(), env=None, cwd=None):
     return rc, log, out / "det"
 
 
-def test_detector(d, ref, mid_file):
+def test_detector(d, ref, mid_file, switch=None):
     print("waterline_detector_v5.py: legacy is the old detector bit for bit; mid = blend off + mid bias")
     d = Path(d) / "detector"
     (d / "photos").mkdir(parents=True, exist_ok=True)
@@ -323,11 +370,11 @@ def test_detector(d, ref, mid_file):
         skip("detector before/after: git cannot read the commit before the switch (not a checkout?)")
     else:
         old = d / "old"
-        if old_copy(ref, ["waterline_detector_v5.py"], old):
+        if old_copy(ref, ["waterline_detector_v5.py"], old, switch):
             rc, log, out = detect(old / "waterline_detector_v5.py", d, "before")
             got = folder_digest(out) if out.is_dir() else {}
             check(rc == 0 and got == dig,
-                  f"the detector before the switch ({ref}): byte-identical CSVs and overlays "
+                  f"the detector without the switch: byte-identical CSVs and overlays "
                   f"({sum(got.get(n) == h for n, h in dig.items())}/{len(dig)} files equal)")
         else:
             skip(f"detector before/after: {ref}:waterline_detector_v5.py not readable")
@@ -426,7 +473,7 @@ def detection_set(folder, mode=None):
     return names
 
 
-def test_extract(d, ref):
+def test_extract(d, ref, switch=None):
     print("extract_elevation_contours.py: legacy as before; mid takes level, waves and stale check at mid-exposure")
     d = Path(d) / "extract"
     d.mkdir(parents=True, exist_ok=True)
@@ -475,10 +522,10 @@ def test_extract(d, ref):
     check(lev_ok and hs_ok, "legacy: each frame's level and Hs those at its file-name epoch")
     if ref is None:
         skip("contour step before/after: git cannot read the commit before the switch")
-    elif old_copy(ref, ["extract_elevation_contours.py"], d / "old"):
+    elif old_copy(ref, ["extract_elevation_contours.py"], d / "old", switch):
         rc_o, log_o, _ = extract(d / "old" / "extract_elevation_contours.py", "legacy_det", "before.csv")
         check(rc_o == 0 and sha(d / "before.csv") == outs["default"],
-              f"the contour step before the switch ({ref}): byte-identical contour file")
+              "the contour step without the switch: byte-identical contour file")
     else:
         skip(f"contour step before/after: {ref}:extract_elevation_contours.py not readable")
 
@@ -529,7 +576,7 @@ def test_extract(d, ref):
 # DEM
 # ---------------------------------------------------------------------
 
-def test_dem(d, ref):
+def test_dem(d, ref, switch=None):
     print("dem_from_contours.py: legacy as before; info.json water_level_timing only for timed contours")
     d = Path(d) / "dem"
     d.mkdir(parents=True, exist_ok=True)
@@ -565,18 +612,18 @@ def test_dem(d, ref):
     # the DEM step before the switch, on the same legacy contours: every file byte-identical
     if ref is None:
         skip("DEM step before/after: git cannot read the commit before the switch")
-    elif old_copy(ref, ["dem_from_contours.py"], d / "old"):
+    elif old_copy(ref, ["dem_from_contours.py"], d / "old", switch):
         outs = {}
         for name, script in (("now", HERE / "dem_from_contours.py"), ("before", d / "old" / "dem_from_contours.py")):
             (d / name).mkdir(exist_ok=True)
-            # the old copy imports its companions (extract_elevation_contours, waterline_track) from here
-            rc, log = run([script, d / "plain.csv", d / name / "dem", "--no-plot", "--max-day-offset", "0.15"], d,
-                          {"PYTHONPATH": str(HERE)})
+            # the old copy imports its companions (extract_elevation_contours, waterline_track) from
+            # here (run's PYTHONPATH)
+            rc, log = run([script, d / "plain.csv", d / name / "dem", "--no-plot", "--max-day-offset", "0.15"], d)
             (d / f"{name}.log").write_text(log)
             outs[name] = (rc, folder_digest(d / name), log.replace(str(d / name), "<out>"))
         a, b = outs["now"], outs["before"]
         check(a[0] == 0 and b[0] == 0 and len(a[1]) == 5 and a[1] == b[1] and a[2] == b[2],
-              f"the DEM step before the switch ({ref}): byte-identical grids, sigma and info.json, and log "
+              f"the DEM step without the switch: byte-identical grids, sigma and info.json, and log "
               f"({sum(b[1].get(n) == h for n, h in a[1].items())}/{len(a[1])} files equal)")
     else:
         skip(f"DEM step before/after: {ref}:dem_from_contours.py not readable")
@@ -705,7 +752,7 @@ def test_exposure(d):
     v, _ = rt.exposure_verdict(np.array([5000.0] * 10), np.array([]))
     check(v == "CONSISTENT", "written long after (the files waited): never a MISMATCH")
 
-    def station(name, delay, rows):
+    def station(name, delay, rows, extra=()):
         base = Path(d) / "exposure" / name
         for sub in ("archive/images_timex", "archive/ras_c2"):
             (base / sub).mkdir(parents=True, exist_ok=True)
@@ -718,7 +765,7 @@ def test_exposure(d):
             ras = base / "archive/ras_c2" / f"{stamp(ep)}.c2.ras.tiff"
             cv2.imwrite(str(ras), np.zeros((rows, 8, 3), np.uint8))
         rc, log = run([HERE / "recalibrate_timing.py", "--base", base, "--nice", "0",
-                       "--work", base / "work"], base)
+                       "--work", base / "work"] + list(extra), base)
         (base / "run.log").write_text(log)
         return rc, log
 
@@ -728,6 +775,9 @@ def test_exposure(d):
     rc, log = station("end_named", 25, 1200)
     check(rc == 4 and "EXPOSURE: MISMATCH" in log and "DERIVE" not in log,
           "written ~25 s after their names: MISMATCH, exit 4, nothing else run")
+    rc, log = station("end_named_alone", 25, 1200, ("--steps", "exposure"))
+    check(rc == 4 and "EXPOSURE: MISMATCH" in log and "STOPPED" not in log,
+          "the same with --steps exposure alone: exit 4 too")
 
 
 def test_write_calibration(d):
@@ -776,7 +826,10 @@ def test_derive(d):
                 lines = ["Column,Row,Confidence,Row_Precise,Peak_Sharpness,Has_Signal" + (",Timing_Mode" if mode else "")]
                 lines += [f"{c},{int(round(r))},0.95,{r:.3f},0.5,1" + (f",{mode}" if mode else "") for c, r in enumerate(rows)]
                 (work / "derive" / key / "detections" / f"{stem}.csv").write_text("\n".join(lines) + "\n")
-    legacy_sha = sha(HERE / "calibration" / "timex_bias_legacy.json")
+    def repo_calibration():         # the repository's timex bias files (a station may have its mid one)
+        return {n: sha(HERE / "calibration" / n) if (HERE / "calibration" / n).exists() else None
+                for n in ("timex_bias_legacy.json", "timex_bias_mid.json")}
+    repo_before = repo_calibration()
     args = [HERE / "recalibrate_timing.py", "--steps", "derive", "--reuse-detections", "--work", work,
             "--calibration-dir", cal, "--ground-truth-dir", gt, "--image-dirs", photos, "--nice", "0",
             "--base", d]
@@ -797,11 +850,13 @@ def test_derive(d):
           and abs(shifts.get("c2", {}).get("blend_shift_px_mean", 0) - 2.6) < 0.3
           and "blend lag the v6.8 values absorbed" in log,
           "the blend lag planted in the control (2.8 / 2.6 px) is what mid minus control measures")
-    check(sha(HERE / "calibration" / "timex_bias_legacy.json") == legacy_sha
-          and not (HERE / "calibration" / "timex_bias_mid.json").exists() or
-          sha(HERE / "calibration" / "timex_bias_legacy.json") == legacy_sha,
+    check(repo_calibration() == repo_before,
           "the repository's calibration/ is untouched (the test wrote only into its own folder)")
-    timex_timing.read_timex_bias(f, "mid") if f.exists() else None
+    try:
+        readable = f.exists() and timex_timing.read_timex_bias(f, "mid") is not None
+    except ValueError:
+        readable = False
+    check(readable, "the file written reads as the detector reads a mid timex bias file")
     rc2, log2 = run(args[:-2] + ["--min-frames", "8", "--base", d], d)
     check(rc2 == 1 and "only 7 ground-truth photo(s) found" in log2, "too few ground-truth photos: stopped, nothing written")
     return f
@@ -820,7 +875,8 @@ def test_compare(d, mid_file):
         return 0.4 + 1.1 * np.sin(w * (np.asarray(t, float) - t0))
     # GNSS-R spline every 30 min over the window
     ts = np.arange(t0 - 3600, t0 + 5 * 86400, 1800)
-    with open(d / "spline.txt", "w") if d.mkdir(parents=True, exist_ok=True) is None else None as f:
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / "spline.txt", "w") as f:
         f.write("% orthometric height minus RH, where Hortho (m) is    19.014 \n")
         for t in ts:
             u = datetime.fromtimestamp(int(t), tz=timezone.utc)
@@ -902,16 +958,17 @@ def main():
         Path(args.keep).mkdir(parents=True, exist_ok=True)
     d = os.path.realpath(tempfile.mkdtemp(prefix="timing_mode_", dir=args.keep))
     print(f"test folder: {d}")
-    ref = before_ref(args.before)
-    print(f"the code before the switch: {ref or 'not readable (git)'}")
+    ref, switch = before_ref(args.before)
+    print("the code without the switch: " + ("not readable (git)" if ref is None else
+          f"this checkout with {switch[:7]}'s changes taken out (else {ref})" if switch else ref))
     try:
         test_definitions()
         test_legacy_bias_file()
         test_shared_constant()
         mid_file = test_write_calibration(d)
-        test_detector(d, ref, mid_file)
-        test_extract(d, ref)
-        test_dem(d, ref)
+        test_detector(d, ref, mid_file, switch)
+        test_extract(d, ref, switch)
+        test_dem(d, ref, switch)
         test_cron()
         test_station_status(d)
         test_rules()

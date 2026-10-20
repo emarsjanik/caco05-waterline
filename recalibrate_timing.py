@@ -78,7 +78,19 @@ STEPS (--steps; default exposure,derive,compare):
             older than their levels: flood high, ebb low) and mid about 0.
             The minutes are indicative (a planted 6 min comes back as
             5.5-8 min); the sign, the flood/ebb contrast and which of the
-            two is smaller are the test. Also printed: mid minus legacy
+            two is smaller are the test.
+
+            NOT EVERY FLOOD/EBB DIFFERENCE IS TIMING. On a falling tide the
+            beach's water table lags the sea and seeps out on the beach
+            face above the waterline (a seepage face; Turner 1993;
+            Vousdoukas 2014), which can put an ebb line landward of still
+            water, where the sand is higher than its level: low on the
+            ebb, the sign the timing error has. It is the same in both
+            modes, so it does not decide the comparison (what mid removes
+            is the timing), but it can be what is left in mid. So a
+            contrast left in mid is no reason to change TIMEX_MID_OFFSET_S
+            to null it: only the exposure (step exposure, and the arguseyes
+            settings) changes that constant. Also printed: mid minus legacy
             over the DEM cells both have, and each DEM's median spread.
             --fit-setup also refits the setup coefficient C on contours
             built with C = 0 in both modes (dem_from_contours.py
@@ -103,6 +115,13 @@ Usage (on the NUC, in /mnt/I2Rgus_Data/waterline):
     python3 recalibrate_timing.py --steps compare --start-date ... --end-date ... --fit-setup
     python3 recalibrate_timing.py --steps backfill
 docs/VALIDATION.md section 2.7 is the full procedure.
+
+References:
+  Turner, I.L., 1993. Water table outcropping on macro-tidal beaches: a
+    simulation model. Marine Geology 115(3-4), 227-238.
+  Vousdoukas, M.I., 2014. Observations of wave run-up and groundwater
+    seepage line motions on a reflective-to-intermediate, meso-tidal
+    beach. Marine Geology 350, 52-70.
 """
 
 import os
@@ -732,6 +751,8 @@ def report_lines(start, end, res, verdicts, overall, grids, setup):
             lines.append(f"   {cam:<6} {mode:<7} {s['frames'] or 0:6d} {fmt(s['slope']):>7} {fmt(s['lag_min'], '+.1f'):>8} "
                          f"{fmt(s['r'], '+.2f'):>6} {fmt(s['flood_m']):>8} {fmt(s['ebb_m']):>8} {fmt(s['contrast_m']):>9}")
     lines.append("   expected if the timing error is real: legacy lag about +4 to +8 min and flood above ebb; mid near 0")
+    lines.append("   (a contrast left in mid is not by itself a wrong TIMEX_MID_OFFSET_S: a seepage face gives one in")
+    lines.append("   both modes; docs/VALIDATION.md section 2.7)")
     for cam in CAMERAS:
         v, why = verdicts[cam]
         lines.append(f"   {cam}: {v} -- {why}")
@@ -956,9 +977,11 @@ def main():
     rc = 0
     try:
         if "exposure" in steps:
-            if step_exposure(args) == "MISMATCH" and not args.ignore_exposure and steps != ["exposure"]:
-                say("STOPPED before " + ", ".join(s for s in steps if s != "exposure")
-                    + ": the exposure does not match TIMEX_MID_OFFSET_S (--ignore-exposure goes on)")
+            # A MISMATCH is exit 4 also when the check is the only step asked for
+            if step_exposure(args) == "MISMATCH" and not args.ignore_exposure:
+                if steps != ["exposure"]:
+                    say("STOPPED before " + ", ".join(s for s in steps if s != "exposure")
+                        + ": the exposure does not match TIMEX_MID_OFFSET_S (--ignore-exposure goes on)")
                 return 4
             say()
         if "derive" in steps:
