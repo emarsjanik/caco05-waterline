@@ -66,17 +66,23 @@ all its points, and a far-field line puts dozens of them in one window.
     many it does not shrink as the points multiply, only as the frames do.
     For an error that varies along a line (a detection that wanders) it is
     an upper bound.
-  * s^2 is corrected for the parameters the fit spends: x n/(n - 6), with
-    n the effective number of frames in the window ((sum of each frame's
-    weight)^2 / sum of their squares). Six frames make a quadratic go
-    through them exactly and their residuals say nothing of the noise;
-    the plain mean square residual would then give an error near 0. A cell
-    needs n > 6 (n > 3 for order 1).
+  * s^2 is the weighted residual sum over what it is expected to be for
+    a unit error common to each frame: s^2 = sum_j w_j r_j^2 /
+    sum_f (W_f - b_f' A^-1 b_f), with W_f the frame's weight (sum of its
+    w_j), b_f the sum of its w_j x_j (x_j the model's terms at point j)
+    and A = X'WX. The fit spends its six terms on the frames, and the
+    residuals are smaller by what it spends: six frames make a quadratic
+    go through them exactly, and the plain mean square residual would give
+    an error near 0. The n/(n - 6) of an unweighted fit, n the effective
+    number of frames ((sum of W_f)^2 / sum of W_f^2), does not hold for
+    tricube weights: it puts s ~2.5 x too high at n 6-8 and ~1.4 x at n
+    8-10. A cell needs n > 6 (n > 3 for order 1). For an error that varies
+    along a line it is an upper bound too.
 Points are first thinned to one per frame per half-cell (their mean), as in
 fine_dem, so the fit is not slowed by far-field lines and no stretch of one
 line outweighs the others. A week of the station's lines (86 frames) takes
-~1 s in the sandbox; 3,000 synthetic frames over 400 m of beach ~40 s and
-~300 MB, on Python 3.11 and on the station's Python 3.8 / numpy 1.17 alike.
+~1 s in the sandbox; 3,000 synthetic frames over 400 m of beach ~1 min and
+~300 MB (57 s on Python 3.11, 76 s on the station's Python 3.8 / numpy 1.17).
 
 FILLED ONLY WHERE THE DATA SURROUND THE CELL. A cell is left nodata when its
 window holds fewer than min_frames frames or too few for the error (n <= 6),
@@ -100,19 +106,21 @@ surface SMOOTHED at the chosen scales: a feature shorter than the scales is
 not in the surface and not in err either (it is in s, the residual scatter).
 And it treats frames as independent, which frames of one day sharing an
 error are not. dem_loess.py evaluate checks it against a survey.
-  On synthetic lines with a planted truth (test_dem_loess.py: a level error
-common to each frame, sd 0.04 m, and a 0.3 m detection scatter) the truth
-lies within err in 77-91% of the cells and within 2 err in all of them. On
-the real lines of the NUC's survey-date builds (copies of 15 Oct 2026, the
-dem step's settings), against the lidar with the median offset removed,
-the scatter is larger than err: Mar 2025 (c2, 3-9 Mar) NMAD 0.134 m against
-a median err of 0.067 m (2.0 x; 71% within 2 err), Jan 2025 (c2 alone,
-18-23 Jan) 0.127 m against 0.031 m (4.1 x; 44%). The binned DEM's
-_sigma.asc is as far off or further on the same builds (6.2 x and 4.1 x).
-So err is a floor on the error, not the accuracy: the scatter about the
-lidar also holds what the frames share and does not average down (a day's
-setup, the pointing, a detection offset), the beach's change through the
-window and the lidar's own error.
+  On fixed synthetic lines whose only error is a level error common to each
+frame (sd 0.04 m, 20 realisations; test_dem_loess.py) err is the size of
+the error: the cells' RMS error over their RMS err is 0.94 (median) and
+the truth lies within err 70% of the time, within 2 err 92%. With a 0.3 m
+detection scatter along each line as well, the truth lies within err in
+59-76% of the cells and within 2 err in 97-100%. On the real lines of the
+NUC's survey-date builds (copies of 15 Oct 2026, the dem step's settings),
+against the lidar with the median offset removed, the scatter is several
+times err: Mar 2025 (c2, 3-9 Mar) NMAD 0.137 m against a median err of
+0.038 m (3.6 x; 47% within 2 err), Jan 2025 (c2 alone, 18-23 Jan) 0.123 m
+against 0.024 m (5.2 x; 33%). The binned DEM's _sigma.asc on the same
+builds: 6.2 x and 4.1 x. So err is a floor on the error, not the accuracy:
+the scatter about the lidar also holds what the frames share and does not
+average down (a day's setup, the pointing, a detection offset), the
+beach's change through the window and the lidar's own error.
 
 THE SCALES (LOESS_SCALES, default 20 m alongshore x 5 m cross-shore, the
 half-widths of the window). What they pass along each axis (response(): the
@@ -254,12 +262,17 @@ def _solve_block(du, dv, w, z, fid, order):
     beta = np.linalg.solve(Ao, np.einsum("npi,p->ni", XWo, z)[..., None])[..., 0]
     res = z[None, :] - np.einsum("npi,ni->np", Xo, beta)
     swo = wo.sum(1)
-    msr = (wo * res ** 2).sum(1) / swo
+    wrss = (wo * res ** 2).sum(1)
+    msr = wrss / swo
     zbar = (wo * z[None, :]).sum(1) / swo
     var = (wo * (z[None, :] - zbar[:, None]) ** 2).sum(1) / swo
     ne = neff[ok]
+    # what the weighted residual sum expects per unit variance of an error common to each frame:
+    # sum_f (W_f - b_f' A^-1 b_f), b_f = sum of the frame's w_j x_j
+    Bf = np.stack([frame_sums(XWo[..., i], fid) for i in range(p)], 1)      # nodes x terms x frames
+    dof = swo - np.einsum("nif,nif->n", Bf, np.linalg.solve(Ao, Bf))
     with np.errstate(invalid="ignore", divide="ignore"):
-        s2 = np.where(ne > p, msr * ne / (ne - p), np.nan)
+        s2 = np.where((ne > p) & (dof > 1e-9 * swo), wrss / dof, np.nan)
         skill = np.where(var > 0, 1.0 - msr / var, np.nan)
     out["z"][ok] = beta[:, 0]
     out["nmse"][ok] = (frame_sums(a, fid) ** 2).sum(1)         # per frame: (sum of its a_j)^2
@@ -433,8 +446,8 @@ def info_record(lo):
         return round(float(np.nanpercentile(x, 90)), 4) if ok.any() else None
     order = lo["settings"]["order"]
     return {"method": f"{'quadratic' if order == 2 else 'linear'} loess, tricube weights, explicit scales (Plant, "
-                      f"Holland & Puleo 2002, Marine Geology 191); nmse summed per frame, scatter corrected for the "
-                      f"{n_terms(order)} terms (dem_loess.py)",
+                      f"Holland & Puleo 2002, Marine Geology 191); nmse summed per frame, scatter over its expected "
+                      f"share per frame after the {n_terms(order)} terms (dem_loess.py)",
             "files": {k: v + ".asc" for k, v in LOESS_FILES.items()},
             "settings": dict(lo["settings"]), "cells": dict(lo["counts"]),
             "err_median_m": med(lo["err"]), "err_p90_m": p90(lo["err"]), "nmse_median": med(lo["nmse"]),

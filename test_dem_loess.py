@@ -17,10 +17,15 @@ and its hooks (dem_from_contours.py --loess, survey_products.py
     a detection scatter along each line is recovered within its error
     bars: unbiased, and the truth within 2 err in >= 90% of the cells of
     every seed;
+  * err is the size of the error it predicts: on fixed lines with only a
+    level error common to each frame, many times over, the cells' RMS
+    error over err is ~1 and the truth within err in ~68% (an err too
+    large, as from the n/(n - 6) rule of an unweighted fit, fails);
   * the error grows away from the data: into a gap between the lines
     (nmse rising cell by cell from the last line to the middle of the
-    gap, which is left nodata) and beyond the lowest line (left nodata;
-    with extrapolation on, for this test only, err rising with distance);
+    gap, which is left nodata) and beyond the lowest line or the end of
+    the lines (left nodata, even with no nmse limit; with extrapolation
+    on, for this test only, err rising with distance);
   * nmse is summed per frame: with one point per frame it is Plant's
     sum a_j^2 (checked against a plain weighted least-squares solve), and
     it does not shrink when each line is sampled four times as densely;
@@ -29,8 +34,10 @@ and its hooks (dem_from_contours.py --loess, survey_products.py
     and the page are what they were; with it the DEM's grids and page
     are the same to the byte and pixel, the loess grids are on the DEM's
     grid, info.json gains 'loess', and bad --loess-scales are refused;
-  * dem_loess.py evaluate against a survey grid and survey points, and
-    its refusal of loess grids an earlier build left beside the DEM;
+  * dem_loess.py evaluate against a survey grid and survey points (an
+    offset planted in the points is the reported median and is removed
+    in the 'median removed' shares), and its refusal of loess grids an
+    earlier build left beside the DEM;
   * asc_to_geotiff.py: the loess surface carries the NAVD88 vertical keys,
     its error grids do not;
   * survey_products.py: without --dem-loess the dem step's commands and
@@ -169,7 +176,7 @@ def test_recovery():
         e = lo["err"][ok]
         in1, in2 = float(np.mean(np.abs(d) <= e)), float(np.mean(np.abs(d) <= 2 * e))
         rms = float(np.sqrt(np.mean(d ** 2)))
-        check(ok.sum() > 1000 and abs(np.median(d)) < 0.015 and rms < 0.03 and in2 >= 0.9 and in1 >= 0.6
+        check(ok.sum() > 1000 and abs(np.median(d)) < 0.015 and rms < 0.03 and in2 >= 0.9 and in1 >= 0.5
               and 0.3 < rms / np.median(e) < 1.5 and np.median(lo["skill"][ok]) > 0.7,
               f"seed {seed}: {int(ok.sum())} cells, loess - truth median {np.median(d):+.4f} m, RMS {rms:.3f} m; "
               f"median err {np.median(e):.3f} m; truth within err {100 * in1:.0f}%, within 2 err {100 * in2:.0f}%; "
@@ -178,6 +185,28 @@ def test_recovery():
     ax = s["axis_alongshore_deg"] % 180.0
     check(s["along_m"] == 20 and s["across_m"] == 5 and s["order"] == 2 and min(ax, 180.0 - ax) < 2,
           f"default scales 20 x 5 m, quadratic; shore axis {s['axis_alongshore_deg']} deg (the lines run north)")
+
+
+def test_calibration():
+    print("loess_grid: err the size of the error it predicts (a level error common to each frame)")
+    # the same 30 lines 20 times over, each time with a new level error per frame (sd 0.04 m) and nothing else
+    E, N, Z, F, _ = lines(0, nf=30, sig_e=0.0, sig_x=0.0)
+    fid = np.unique(F, return_inverse=True)[1]
+    rng = np.random.RandomState(1)
+    zs, es = [], []
+    for _ in range(20):
+        lo, X, Y = fit(E, N, Z + rng.normal(0, 0.04, fid.max() + 1)[fid], F)
+        zs.append(lo["z"])
+        es.append(lo["err"])
+    zs, es = np.array(zs), np.array(es)
+    ok = np.all(np.isfinite(zs), 0)
+    d, e = zs[:, ok] - truth(X, Y)[ok], es[:, ok]
+    r = np.sqrt(np.mean(d ** 2, 0)) / np.sqrt(np.mean(e ** 2, 0))
+    in1, in2 = float(np.mean(np.abs(d) <= e)), float(np.mean(np.abs(d) <= 2 * e))
+    check(ok.sum() > 200 and 0.8 < np.median(r) < 1.25 and 0.55 < in1 < 0.8 and in2 > 0.85,
+          f"{int(ok.sum())} cells x 20 realisations: RMS error / RMS err per cell median {np.median(r):.2f} "
+          f"(p10 {np.percentile(r, 10):.2f}, p90 {np.percentile(r, 90):.2f}); truth within err {100 * in1:.0f}%, "
+          f"within 2 err {100 * in2:.0f}%")
 
 
 def test_error_grows_into_gap():
@@ -207,11 +236,13 @@ def test_error_grows_into_gap():
 def test_error_grows_beyond_data():
     print("loess_grid: the error grows beyond the lowest line; no extrapolation in a product")
     # a straight shore (no alongshore wave), dense lines from 0.2 to 1.4 m, and a grid that runs 10 m on seaward
+    # and 10 m on past the north end of the lines
     E, N, Z, F, H = lines(2, nf=200, lo=0.2, hi=1.4, amp=0.0)
     cell = 2.0
     e0, n0, ncols, nrows = grid_of(E, N, cell)
     ncols += 5
-    lo = dl.loess_grid(E, N, Z, F, e0, n0, ncols, nrows, cell)
+    nrows += 5
+    lo = dl.loess_grid(E, N, Z, F, e0, n0, ncols, nrows, cell, max_nmse=None)
     lox = dl.loess_grid(E, N, Z, F, e0, n0, ncols, nrows, cell, extrapolate=True, max_nmse=None)
     X, Y = cell_xy(e0, n0, ncols, nrows, cell)
     tz = truth(X, Y, amp=0.0)
@@ -219,10 +250,12 @@ def test_error_grows_beyond_data():
     mid = (Y > 40) & (Y < 160)
     bands = [(-4.0, -2.0), (-2.0, 0.0), (0.0, 2.0), (2.0, 4.0)]
     sel = [mid & (X > xlow + a) & (X <= xlow + b) for a, b in bands]
+    north = (Y > N.max() - N0 + 2.0) & (X < xlow - 4.0)
     check(lo["counts"]["one_sided"] > 0 and not np.isfinite(lo["z"][sel[3]]).any()
-          and not np.isfinite(lo["z"][mid & (X > xlow + 2.0)]).any(),
-          f"more than 2 m seaward of the lowest line: nodata ({lo['counts']['one_sided']} cells with points on one "
-          f"side only left out)")
+          and not np.isfinite(lo["z"][mid & (X > xlow + 2.0)]).any()
+          and north.sum() > 20 and not np.isfinite(lo["z"][north]).any(),
+          f"no nmse limit, and even so nodata more than 2 m seaward of the lowest line and past the north end of "
+          f"the lines ({lo['counts']['one_sided']} cells with points on one side only left out)")
     er = [float(np.nanmedian(lox["err"][m])) for m in sel]
     nm = [float(np.nanmedian(lox["nmse"][m])) for m in sel]
     ae = [float(np.nanmedian(np.abs(lox["z"] - tz)[m])) for m in sel]
@@ -323,7 +356,8 @@ def test_dem_from_contours(d):
     i1 = json.loads((d / "lo_info.json").read_text())
     lo_rec = i1.pop("loess", None)
     check("loess" not in i0 and i0 == i1 and lo_rec and lo_rec["files"]["err"] == "_loess_err.asc"
-          and lo_rec["cells"]["filled"] > 0 and lo_rec["settings"]["max_sigma_m"] == 0.25,
+          and lo_rec["cells"]["filled"] > 0 and lo_rec["settings"]["max_sigma_m"] == 0.25
+          and lo_rec["settings"]["max_nmse"] == dl.LOESS_MAX_NMSE,
           f"info.json: without --loess no 'loess' key; with it the same + 'loess' ({lo_rec and lo_rec['cells']['filled']} "
           f"cells, err median {lo_rec and lo_rec['err_median_m']} m; scatter limit --max-spread / 2 = 0.25 m)")
     check(not any((d / f"plain{s}.asc").exists() for s in dl.LOESS_FILES.values())
@@ -387,11 +421,21 @@ def test_evaluate(d):
     rng = np.random.RandomState(8)
     pe = E0 + rng.uniform(5, 30, 60)
     pn = N0 + rng.uniform(10, 110, 60)
+    pe, pn = e0 + (np.floor((pe - e0) / cell) + 0.5) * cell, n0 + (np.floor((pn - n0) / cell) + 0.5) * cell
     pts = d / "points.csv"
-    pts.write_text("E,N,Z\n" + "\n".join(f"{a:.3f},{b:.3f},{truth(a - E0, b - N0):.4f}" for a, b in zip(pe, pn)) + "\n")
-    rcp, logp = run([HERE / "dem_loess.py", "evaluate", d / "lo", pts], d)
-    check(rcp == 0 and "points, median" in logp and "within err / 2 err" in logp,
-          "survey points: each against the cell it lies in")
+    # at cell centres, 0.3 m above the true beach: the loess 0.3 m below them, within 2 err once that is removed
+    pts.write_text("E,N,Z\n" + "\n".join(f"{a:.3f},{b:.3f},{truth(a - E0, b - N0) + 0.3:.4f}" for a, b in zip(pe, pn))
+                   + "\n")
+    rcp, logp = run([HERE / "dem_loess.py", "evaluate", d / "lo", pts, "--json", d / "evp.json"], d)
+    evp = json.loads((d / "evp.json").read_text()) if rcp == 0 else {}
+    lp, ecp = evp.get("loess_minus_survey", {}), evp.get("error_check", {})
+    check(rcp == 0 and "points, median" in logp and lp.get("n", 0) > 40 and abs(lp["median_m"] + 0.3) < 0.02
+          and lp["nmad_m"] < 0.03 and abs(ecp["median_offset_m"] + 0.3) < 0.02
+          and ecp["as_is"]["within_2err"] < 0.2 and ecp["median_removed"]["within_2err"] >= 0.8,
+          f"survey points at cell centres, 0.3 m above the beach, each against the cell it lies in: loess - points "
+          f"median {lp.get('median_m')} m, NMAD {lp.get('nmad_m')} m on {lp.get('n')} points; within 2 err "
+          f"{ecp.get('as_is', {}).get('within_2err')} as they are, {ecp.get('median_removed', {}).get('within_2err')} "
+          f"with the median offset removed")
     # a DEM rebuilt without --loess beside the old loess grids: refused, not compared
     shutil.copy(str(d / "plain_info.json"), str(d / "lo_info.json"))
     rcs, logs = run([HERE / "dem_loess.py", "evaluate", d / "lo", d / "survey.asc"], d)
@@ -540,6 +584,7 @@ def main():
     try:
         test_exact_quadratic()
         test_recovery()
+        test_calibration()
         test_error_grows_into_gap()
         test_error_grows_beyond_data()
         test_nmse_per_frame()
