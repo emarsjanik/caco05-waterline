@@ -679,9 +679,13 @@ for cam in ('c1', 'c2'):
 "
 ```
 
-`gcpfree_eo.py`'s sha256, the one these notes send to Chris, is unchanged. If
-the old module sha256s were already sent to him, send the new ones too
-(`sha256sum georectify.py view_reproject.py`), with the reason.
+`gcpfree_eo.py`'s sha256, the one these notes send to Chris, is unchanged,
+and B's ORDER line dates the pin by it (14 Oct 2026), so it does not show this
+change. **Send Chris the new module sha256s before A's DEM is shared, and
+before any run of `gcpfree_eo.py`**, whether or not the old ones were sent:
+`sha256sum georectify.py view_reproject.py`, with the reason ("modules
+corrected 20 Oct 2026, outputs bit-identical, gcpfree_eo.py unchanged; see
+docs/VALIDATION.md 3.5").
 
 ## 23 Oct 2024: BLIND (DEM only), two calibrations
 

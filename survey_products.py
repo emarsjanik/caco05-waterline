@@ -736,7 +736,7 @@ GCPFREE_PINS = [
     {"gcpfree_eo.py": "e97c24f045c56f85284499c0145dddca8761c0f94ec3612d92eea1bebf52ec2a",
      "modules": {
          "estimate_eo_rotation.py": "2fbb27b69db3604498b5cfd63739e4ab5ebdbb061e58e2397bc1323956406e72",
-         "georectify.py": "32c8631bfd277644c02c5baa02a4dd594c1c03a4d9a6080d937b0bfe39022bb2",
+         "georectify.py": "96f3f52e5adc4ca033c444ae2affb7377f7bb7eb66f1384f00ec14a8e1108a25",
          "horizon_check.py": "a7eeac44fe21ab1414b98568f235cb6c6e1e1892cee965f9ee88c7923f88c23f",
          "detect_original_view.py": "c807b2f907b4856cda08b21ddcf46c1c0470bd23b7559f990fc21e831a19036a",
          "view_reproject.py": "aba55fb29a9104103a2884fbf23efb2ed7bdba7d0462773eede8a701e1abca0c"},

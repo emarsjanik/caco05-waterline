@@ -10,7 +10,8 @@ WHAT.
   * "In front of the camera" (georectify.camera_depth, used by
     pixel_to_ground and view_reproject.ground_to_pixel). A synthetic
     camera at the station's UTM position (420,000 E, 4,638,000 N, 20 m
-    up, 70 deg tilt) is turned through every azimuth, 0-359 deg. At every
+    up, 70 deg tilt, and again at a steep 25 deg, where the vertical part
+    of the depth matters) is turned through every azimuth, 0-359 deg. At every
     azimuth each pixel must land where a ray cast independently lands,
     always in front of the camera; the principal point must land on the
     azimuth, at h tan(tilt) from the camera; ground_to_pixel must take
@@ -30,7 +31,9 @@ WHAT.
     synthetic lens that folds inside the frame, a pixel beyond the fold or
     one the passes do not converge on comes back NaN, never a finite wrong
     point, while the inversion without guards returns finite points that
-    miss their pixel.
+    miss their pixel. On a lens whose r_d rises again past its fold, the
+    passes converge onto that outer branch; only the fold guard makes those
+    pixels NaN. None of this, a NaN pixel included, raises a numpy warning.
   * georectify.py's command line on a camera aimed at 150 deg: every
     waterline point georectified (it used to write none and blame the
     horizon).
@@ -68,6 +71,7 @@ NU, NV, F = 2448, 2048, 2000.0
 PINHOLE = np.array([NU, NV, NU / 2, NV / 2, F, F, 0.0, 0.0, 0.0, 0.0, 0.0])
 CAM_E, CAM_N, CAM_Z = 420000.0, 4638000.0, 20.0
 TILT, ROLL = 70.0, -8.0
+STEEP_TILT = 25.0           # near nadir: the depth's vertical part outweighs its horizontal part
 Z_PLANE = 0.5
 
 
@@ -77,8 +81,8 @@ def check(cond, msg):
         FAILED.append(msg)
 
 
-def eo_at(az_deg, e=CAM_E, n=CAM_N):
-    return np.array([e, n, CAM_Z, np.radians(az_deg), np.radians(TILT), np.radians(ROLL)])
+def eo_at(az_deg, e=CAM_E, n=CAM_N, tilt=TILT):
+    return np.array([e, n, CAM_Z, np.radians(az_deg), np.radians(tilt), np.radians(ROLL)])
 
 
 def grid(step=32):
@@ -113,14 +117,15 @@ def forward(eo):
 # In front of the camera, at every azimuth
 # ---------------------------------------------------------------------
 
-def test_every_azimuth():
-    print("pixel_to_ground and ground_to_pixel at every azimuth, camera at the station's UTM position")
+def test_every_azimuth(tilt=TILT):
+    print(f"pixel_to_ground and ground_to_pixel at every azimuth, camera at the station's UTM position, "
+          f"tilt {tilt:g} deg")
     U, V = grid()
     n_ref = None
     worst_xy = worst_px = worst_pp = 0.0
     lost, ghosts, wrong_mask, refused, behind_ok = [], [], [], [], []
     for az in range(0, 360):
-        eo = eo_at(az)
+        eo = eo_at(az, tilt=tilt)
         X, Y = G.pixel_to_ground(U, V, Z_PLANE, PINHOLE, eo)
         Xr, Yr = cast_rays(U, V, Z_PLANE, eo)
         fin, fin_r = np.isfinite(X), np.isfinite(Xr)
@@ -141,8 +146,9 @@ def test_every_azimuth():
         pe, pn = G.pixel_to_ground(NU / 2, NV / 2, Z_PLANE, PINHOLE, eo)
         if np.isfinite(pe[0]):
             d_bear = (np.degrees(np.arctan2(pe[0] - eo[0], pn[0] - eo[1])) - az + 180.0) % 360.0 - 180.0
-            d_dist = np.hypot(pe[0] - eo[0], pn[0] - eo[1]) - (CAM_Z - Z_PLANE) * np.tan(np.radians(TILT))
-            worst_pp = max(worst_pp, abs(d_bear) * 1e3, abs(d_dist))
+            h_tan = (CAM_Z - Z_PLANE) * np.tan(np.radians(tilt))
+            d_dist = np.hypot(pe[0] - eo[0], pn[0] - eo[1]) - h_tan
+            worst_pp = max(worst_pp, abs(np.radians(d_bear)) * h_tan, abs(d_dist))   # across and along, in m
         else:
             worst_pp = np.inf
         # the ray cast's ground points, back to their pixels
@@ -165,7 +171,7 @@ def test_every_azimuth():
     check(worst_xy < 1e-6, f"... and land where the ray cast lands (worst {worst_xy:.1e} m)")
     check(not ghosts, f"no point returned behind the camera (at: {span(ghosts)})")
     check(worst_pp < 1e-5, f"the principal point lands on the azimuth, at h tan(tilt) from the camera "
-                           f"(worst {worst_pp:.1e} m or mdeg)")
+                           f"(worst {worst_pp:.1e} m across or along)")
     check(not refused, f"ground_to_pixel takes every ground point the ray cast found back as valid "
                        f"(refused at: {span(refused)})")
     check(worst_px < 1e-6, f"... to its own pixel (worst {worst_px:.1e} px)")
@@ -276,7 +282,7 @@ def test_folding_lens():
     check(no_lens == np.inf and abs(1 + 0.3 * s - 0.14 * s ** 3) < 1e-9 and s > 0,
           f"no distortion: no fold (inf); d1 0.1, d3 -0.02: fold at r^2 {s:.4f}, a root of 1 + 0.3 s - 0.14 s^3")
     U, V = grid(8)
-    # the guards add no numpy warning to those of the passes themselves (which overflow beyond the fold)
+    # the guards add no numpy warning to those of the passes themselves (which could overflow beyond the fold)
     with warnings.catch_warnings(record=True) as w_guarded:
         warnings.simplefilter("always")
         x, y = G.undistort_uv(U, V, io)
@@ -307,11 +313,34 @@ def test_folding_lens():
     ok_both = fin & np.isfinite(x0)
     check(np.array_equal(x[ok_both], x0[ok_both]) and np.array_equal(y[ok_both], y0[ok_both]),
           "where a pixel is kept, its value is the unguarded one, bit for bit")
+    # a lens whose r_d rises again past its fold: there the passes can converge onto that outer branch, onto a
+    # point that maps back onto its pixel, which only the fold guard catches
+    io3 = PINHOLE.copy()
+    io3[6], io3[7] = -0.9, 0.35                      # dr_d/dr = 1 - 2.7 s + 1.75 s^2: 0 at s = 0.618 and 0.925
+    fold3 = G.lens_fold_r2(io3)
+    with warnings.catch_warnings(record=True) as w_outer:
+        warnings.simplefilter("always")
+        x3, y3 = G.undistort_uv(U, V, io3)
+    with np.errstate(all="ignore"):
+        x30, y30 = unguarded(U, V, io3)
+        ud30, vd30 = VR.distort_uv(x30, y30, io3)
+    r230 = ((x30 - io3[2]) / io3[4]) ** 2 + ((y30 - io3[3]) / io3[5]) ** 2
+    outer = np.isfinite(x30) & (np.hypot(ud30 - U, vd30 - V) <= G.UNDISTORT_TOL_PX) & (r230 >= fold3)
+    check(abs(fold3 - (2.7 - 0.29 ** 0.5) / 3.5) < 1e-12 and outer.sum() > 100
+          and not np.isfinite(x3[outer]).any() and not np.isfinite(y3[outer]).any(),
+          f"d1 -0.9, d2 0.35 (fold at r^2 {fold3:.4f}): without the guards {int(outer.sum())} pixels converged "
+          f"onto the branch beyond the fold, each within {G.UNDISTORT_TOL_PX} px of its pixel: now NaN")
+    check(not w_outer, f"... with no numpy warning ({len(w_outer)} raised)")
     xs, ys = G.undistort_uv(1300.0, 1100.0, PINHOLE)
-    xn, yn = G.undistort_uv(np.nan, 1100.0, io)
+    # numpy 1.17 (the station's) warns on comparing a NaN outside np.errstate
+    with warnings.catch_warnings(record=True) as w_nan:
+        warnings.simplefilter("always")
+        xn, yn = G.undistort_uv(np.nan, 1100.0, io)
+        xg, yg = G.undistort_uv(np.r_[np.nan, 1300.0], np.r_[1100.0, 1100.0], io)
     check(isinstance(xs, float) and abs(xs - 1300.0) < 1e-9 and abs(ys - 1100.0) < 1e-9 and np.isnan(xn)
-          and np.isnan(yn),
-          "a scalar pixel gives a scalar back; a NaN pixel gives NaN")
+          and np.isnan(yn) and np.isnan(xg[0]) and np.isnan(yg[0]) and np.isfinite(xg[1]),
+          "a scalar pixel gives a scalar back; a NaN pixel gives NaN, alone or beside a good one")
+    check(not w_nan, f"a NaN pixel raises no numpy warning ({len(w_nan)} raised)")
 
 
 # ---------------------------------------------------------------------
@@ -339,7 +368,10 @@ def test_cli(d):
     r = subprocess.run([sys.executable, str(HERE / "georectify.py"), str(contour), str(out),
                         "--io-c1", str(io_p), "--eo-c1", str(eo_p)],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-    rows = list(csv.DictReader(open(out))) if out.exists() else []
+    rows = []
+    if out.exists():
+        with open(out, newline="") as fh:
+            rows = list(csv.DictReader(fh))
     E = np.array([float(x["easting_utm19"]) if x["easting_utm19"] else np.nan for x in rows])
     N = np.array([float(x["northing_utm19"]) if x["northing_utm19"] else np.nan for x in rows])
     Er, Nr = cast_rays(cols, np.full(cols.size, 1300.0), Z_PLANE, G.load_extrinsics(eo_p))
@@ -354,10 +386,15 @@ def test_py38():
     for f in ("georectify.py", "view_reproject.py", "test_georectify.py"):
         src = (HERE / f).read_text(encoding="utf-8")
         try:
-            ast.parse(src, feature_version=(3, 8))
-        except TypeError:                        # Python 3.7 has no feature_version
-            ast.parse(src)
-        check(True, f"{f} parses as Python 3.8")
+            try:
+                ast.parse(src, feature_version=(3, 8))
+            except TypeError:                    # Python 3.7 has no feature_version
+                ast.parse(src)
+            ok = True
+        except SyntaxError as e:
+            print(f"       {e}")
+            ok = False
+        check(ok, f"{f} parses as Python 3.8")
 
 
 def main():
@@ -370,6 +407,7 @@ def main():
     print(f"test folder: {d}")
     try:
         test_every_azimuth()
+        test_every_azimuth(STEEP_TILT)
         test_local_frame()
         test_station_lens_every_azimuth()
         test_station_lenses()

@@ -171,11 +171,14 @@ def lens_fold_r2(intrinsics):
     radius. Where dr_d/dr = 1 + 3 d1 r^2 + 5 d2 r^4 + 7 d3 r^6 first
     reaches zero, the curve folds back: beyond that point two undistorted
     radii give the same pixel, and the polynomial no longer describes a
-    lens. CIRN's distortUV.m marks points beyond that radius invalid
-    (Bruder & Brodie 2020, CIRN Quantitative Coastal Imaging Toolbox,
-    SoftwareX 12, 100582). This returns the smallest positive real root
-    s = r^2 of 1 + 3 d1 s + 5 d2 s^2 + 7 d3 s^3. The station's lenses
-    fold well outside the frame or never: see undistort_uv.
+    lens. CIRN's UAV-Processing-Toolbox keeps only that increasing part
+    of the curve ("no folding back", makeRadDist.m). The Quantitative
+    Coastal Imaging Toolbox's distortUV.m (Bruder & Brodie 2020) has no
+    such test: its flag marks only points outside the image and points
+    with more tangential distortion than the frame's corners. This
+    returns the smallest positive real root s = r^2 of
+    1 + 3 d1 s + 5 d2 s^2 + 7 d3 s^3. The station's lenses fold well
+    outside the frame or never: see undistort_uv.
     """
     d1, d2, d3 = float(intrinsics[6]), float(intrinsics[7]), float(intrinsics[8])
     roots = np.roots([7.0 * d3, 5.0 * d2, 3.0 * d1, 1.0])
@@ -194,18 +197,21 @@ def undistort_uv(Ud, Vd, intrinsics, iterations=20):
     point and repeatedly subtract the distortion implied by the current
     estimate. Converges in a few passes for normal lens coefficients.
 
-    Two guards follow the passes. Both are in the style of CIRN's
-    distortUV.m validity flag (Bruder & Brodie 2020). A point comes back
-    NaN, not as a finite wrong coordinate:
+    Two guards follow the passes. A point comes back NaN, not as a
+    finite wrong coordinate:
       * when its result does not map back onto its own pixel under the
         forward model to within UNDISTORT_TOL_PX, i.e. the passes did not
         converge;
       * when its result lies at or beyond the radius where the radial
         model folds back (lens_fold_r2), where the inverse is not unique.
-    For a lens much stronger than the station's, the passes near the fold
-    do not converge, because the root on the folded branch repels them.
-    Pixels beyond the fold have no root at all. Without the guards, both
-    returned finite garbage.
+    For a lens much stronger than the station's with only d1 < 0, the
+    passes near the fold do not converge, because the root on the folded
+    branch repels them, and pixels beyond the largest radius the lens
+    reaches have no root at all: the first guard catches both. Where r_d
+    rises again past the fold (which takes d2 or d3 > 0), the passes can
+    converge onto that outer branch, onto a point that maps back onto its
+    pixel, and only the second guard catches that. Without the guards,
+    all of these returned finite garbage.
 
     On the station's lenses neither guard removes a point. Over the full
     frame of each of the 8 IO files in calibration/, the forward residual

@@ -650,22 +650,28 @@ as its comment allows while nothing has run on the station:
   `R[2].(X - C) > 0` (`georectify.camera_depth`; Hartley & Zisserman 2003, section 6.2.3).
 * `georectify.undistort_uv` gives NaN, not a finite wrong pixel, where its 20 passes do not
   converge (forward residual > 0.01 px) or beyond the radius where the lens polynomial folds
-  back (C-B7), in the style of CIRN's `distortUV` flag (Bruder & Brodie 2020).
+  back (C-B7). The fold limit is the one CIRN's UAV-Processing-Toolbox applies ("no folding
+  back", `makeRadDist.m`); the Quantitative Coastal Imaging Toolbox's `distortUV.m` (Bruder &
+  Brodie 2020) has no such test, its flag marking only points outside the image and points with
+  more tangential distortion than the frame's corners.
 
 Neither change moves a number on this station. Over every pixel of the 2448 x 2048 frame, each
-of the 8 IO files in `calibration/` was paired with each of the 20 EO files of its camera (80
-pairs), at z = -1, 0.5 and 2.5 m. Every output hashed bit-identical before and after:
-`pixel_to_ground`'s X and Y, and `ground_to_pixel`'s U, V and valid flag, on those points and on
-points all round the camera out to 3 km. The two files of calibration A (`CACO03_<cam>_20241023_EO`)
-were not opened: the NUC check in `surveys/README.md` ("Deploying on the station") says whether
-they agree too. The 20 EOs are aimed at 11.9-79.7 deg. Every lens inverts to 1e-12 px, reaching
-0.01 px in 4-5 passes. Each folds at 1.33 x the radius of the frame's corners or further out, or
-never folds. `gcpfree_eo.py` and its pre-registered constants are the same files (sha256
-`e97c24f045c5...`, the one the deploy notes send to Chris).
+of the 8 IO files in `calibration/` was paired with each of the 10 EO files of its camera (20 EO
+files in all; 80 pairs), at z = -1, 0.5 and 2.5 m. Every output hashed bit-identical before and
+after: `pixel_to_ground`'s X and Y, and `ground_to_pixel`'s U, V and valid flag, on those points
+and on points all round the camera out to 3 km. The two files of calibration A
+(`CACO03_<cam>_20241023_EO`) were not opened: the NUC check in `surveys/README.md` ("Deploying
+on the station") says whether they agree too. The 20 EOs are aimed at 11.9-79.7 deg. Every lens
+inverts to 1e-12 px, reaching 0.01 px in 4-5 passes. Each folds at 1.33 x the radius of the
+frame's corners or further out, or never folds. `gcpfree_eo.py` and its pre-registered constants
+are the same files (sha256 `e97c24f045c5...`, the one the deploy notes send to Chris).
 The pin was replaced, not appended: `gcpfree_pin_of` takes the first pin with a given
 `gcpfree_eo.py` sha256, so a second pin of the same file would never be read. B's ORDER line
 dates the pin by `gcpfree_eo.py`'s sha256, so it still gives that file's first pinned commit
-(14 Oct 2026), not this re-pin of its modules.
+(14 Oct 2026), not this re-pin of its modules. So the holder's record shows the change only when
+he is told: before A's DEM is shared, and before any run of `gcpfree_eo.py`, Chris is sent
+`sha256sum georectify.py view_reproject.py` with the reason (`surveys/README.md`, "The re-pin of
+20 Oct 2026").
 
 | what | data | number | reproduce |
 |---|---|---|---|
