@@ -624,7 +624,7 @@ def test_cron():
 def test_py38():
     print("Python 3.8 syntax")
     import ast
-    for f in ("setup_model.py", "test_setup_model.py"):
+    for f in ("setup_model.py", "test_setup_model.py", "evaluate_setup_model.py", "test_evaluate_setup_model.py"):
         p = HERE / f
         if not p.exists():
             check(False, f"{f} missing")

@@ -798,8 +798,10 @@ in that month's build (0.6 in January, 0.8 in March; at 0.8 January would be ~0.
 These are estimates, not measurements. They add to the ADCP still-water effect above. The
 real builds on the NUC are the test.
 
-The re-projecting fits exist only as scratch scripts; `dem_from_contours.py --fit-setup` does
-not re-project and is in principle biased low by roughly the re-projection factor.
+The re-projecting repeat-crossing fits exist only as scratch scripts; `dem_from_contours.py
+--fit-setup` does not re-project and is in principle biased low by roughly the re-projection
+factor. The re-projecting fit against the surveys is now in the repository:
+`evaluate_setup_model.py` (below).
 
 **Re-check on the NUC.**
 ```
@@ -842,6 +844,38 @@ Stockdon's own form, `setup = k * beta_f * sqrt(H0 * L0)` with k = 0.35 (Eq. 10)
 | One formula: every replaced copy against the expression as written before | [SYNTH] Hs 0-6 m by 0.01, Tp 1-25 s by 0.1, 3000 random pairs, 0 / NaN / negative Hs, four C | the same bits everywhere; the extractor's rows the old expression's text; `--setup-model c` the same file, byte for byte | `python3 test_setup_model.py` |
 | Slope-aware rows | [SYNTH] a 0.08 plane DEM; a two-slope beach (0.13 above +0.5 m, 0.06 below) | `setup_beta_f` 0.08, setup = 0.35 x 0.08 x sqrt(H0 L0) to the 0.1 mm rounding; high water 0.130, low water 0.060; no DEM: every frame C/k with a WARNING | same |
 
+**Choosing between them: `evaluate_setup_model.py`.** On the station, over the survey-date
+products `survey_products.py` built (`/mnt/I2Rgus_Data/survey_products/<date>`), it refits C and
+Stockdon's k against each date's survey, every line RE-PROJECTED at every setup it scores (two
+`pixel_to_ground` planes per camera; the ray is straight, so any other plane is exact
+interpolation), the survey-floor rule applied (RTK: the transect's lowest shot; lidar: its local
+floor within ~10 m, i.e. its water edge), lines more than 1 m off at C = 0.037 left out as
+detection failures. It reports, per survey, bias, median, RMSE and NMAD of the per-frame residuals
+for C = 0, C = 0.037 (CIRCULAR on the 2026-09-29 RTK, which it was fitted to), Stockdon's own k =
+0.35 (no fit), and the refits: in-sample, each survey alone, and LEAVE-ONE-SURVEY-OUT (each survey
+scored with the coefficient fitted on the others). It recommends Stockdon (k refitted, H0 = Hs/Ks,
+fixed beforehand; H0 = Hs is a sensitivity) only when, with 3 or more surveys, its cross-validated
+RMSE is at least 0.01 m below C's and lower on a majority of the held-out surveys; otherwise the
+station keeps C. The BLIND 2024-10-23 row is skipped before anything of it is opened; a survey row
+without a path is never looked up by its date.
+
+| check | data | result | reproduce |
+|---|---|---|---|
+| Truth C = 0.045 on beaches of slope 0.13, 0.07, 0.10 (two DSMs, one RTK transect file; real c1 calibration) | [SYNTH] | C refit 0.045 in-sample and held out on each; held-out RMSE 0.016-0.019 m; Stockdon's cross-validated RMSE 0.145 m against C's 0.018 m: keep C | `python3 test_evaluate_setup_model.py` |
+| Truth Stockdon k = 0.35 (H0 deshoaled) on the same beaches | [SYNTH] | k refit 0.35 (held out 0.35-0.355); the paper's k 0.013-0.018 m RMSE; H0 = Hs needs k 0.365; C's cross-validated RMSE 0.133 m against 0.016 m: switch, with the cron lines | same |
+| Survey floor, gross failures, BLIND | [SYNTH] | lines below a DSM's water edge (-0.5 m) or the transects' lowest shot are not scored; two lines planted 1.5 m low: 2 gross failures; the blind row's survey file and product never opened (audit hook) | same |
+| Two surveys only | [SYNTH] | no recommendation, keep C | same |
+
+**[NUC] Run it** once the survey-date products are built (each with its DEM):
+```
+python3 evaluate_setup_model.py --json /mnt/I2Rgus_Data/survey_products/setup_model_eval.json
+```
+Read the LEAVE-ONE-SURVEY-OUT tables and the RECOMMENDATION. To switch, set
+`SETUP_MODEL="stockdon"` and `SETUP_STOCKDON_K="<k>"` in the cron as the report prints; the
+next run re-tags every contour row (the cron re-extracts the whole archive) and builds its DEMs
+with it; the dated copies already in `archive/dems` stay as they were built (they are the slopes'
+source), and `dem_change.py --rebuild` rebuilds the reference week like for like. Frames older
+than the series, or more than 7 days from its nearest DEM, keep C's setup.
 
 ### 4.2 GNSS-R water level onto NAVD88: +0.349 m
 
