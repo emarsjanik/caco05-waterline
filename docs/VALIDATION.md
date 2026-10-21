@@ -468,9 +468,11 @@ number changes.
   - lowest Hs third (the setup error) is between days by construction (Hs hardly changes within a
   day): an error of whole days that falls on the big- or small-wave days reads the same way. The
   strata stay in `NAME_comparison.json`; survey_products.py's provenance.json does not copy them.
-* `dem_change.py` reads each DEM's `<stem>_sigma.asc` (the same formula, so the same LoD to the
-  file's 4 decimals) and says so; `--day-block-lod` (report only) prints the LoD from the
-  day-block SE of `dem_from_contours.py --day-block-se` (`<stem>_sigma_day.asc`).
+* `dem_change.py` reads each DEM's `<stem>_sigma.asc` and says so; it takes the file's SE only
+  where that differs from the formula by more than the file's 4-decimal rounding (a file of
+  another definition), so the default map is byte for byte the same as from the formula alone;
+  `--day-block-lod` (report only) prints the LoD from the day-block SE of
+  `dem_from_contours.py --day-block-se` (`<stem>_sigma_day.asc`).
 * Labels: calibration targets that a calibration names in its notes are PARTLY-CIRCULAR (they were
   CIRCULAR, against the label's own definition and the GCP-day rule); a pointing "fitted to the
   Jan 2025 lidar" that names no file is unresolved (CIRCULAR as a rule), no longer "fitted to

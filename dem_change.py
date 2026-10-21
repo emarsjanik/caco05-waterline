@@ -20,11 +20,12 @@ a difference is called significant only where
 (95% level of detection). --min-lod (default 0.05 m) is a floor for
 errors a single DEM cannot see: errors shared by every crossing in a
 week (e.g. a week-long water-level or setup bias) do not show in s.
-The standard errors are read from each DEM's <stem>_sigma.asc
-(dem_from_contours.sigma_grid, the same formula) when it is there and on
-the same grid, so the DEM and the change map use one definition; a DEM
-built before that file existed, or a cell without a value in it, gets
-the formula above from its _spread and _count grids (the log says which).
+Each DEM's <stem>_sigma.asc (dem_from_contours.sigma_grid, the same
+formula) is read when it is there and on the same grid (the log says
+which); a cell where it differs from the formula above (from the _spread
+and _count grids) by more than its 4-decimal rounding takes the file's
+value (a file built by another definition), every other cell the
+formula's, so a file of the same definition leaves the map as without it.
 
 CROSSINGS OF ONE DAY ARE NOT INDEPENDENT. The frames of a day share its
 water-level error, its wave setup and, per camera, its pointing, so the
@@ -207,12 +208,14 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
     in_both = np.isfinite(A) & np.isfinite(B) & (nA > 0) & (nB > 0)
     both = in_both & (nA >= min_count) & (nB >= min_count)
     diff = np.where(both, B - A, np.nan)
-    # each DEM's own standard errors (<stem>_sigma.asc); the same formula from its spread and count
-    # where a DEM has no such file, or a cell no value in it
+    # each DEM's standard errors: the formula from its spread and count, and its own <stem>_sigma.asc
+    # where that differs by more than the file's 4-decimal rounding (a file built by another
+    # definition); within the rounding the formula's value stays, so the default map is unchanged
     seA_f = 1.25 * (np.nan_to_num(sA) / 2.0) / np.sqrt(np.maximum(nA, 1))
     seB_f = 1.25 * (np.nan_to_num(sB) / 2.0) / np.sqrt(np.maximum(nB, 1))
-    seA = seA_f if gA is None else np.where(np.isfinite(gA[ia]), gA[ia], seA_f)
-    seB = seB_f if gB is None else np.where(np.isfinite(gB[ib]), gB[ib], seB_f)
+    with np.errstate(invalid="ignore"):          # NaN where a file has no value
+        seA = seA_f if gA is None else np.where(np.isfinite(gA[ia]) & (np.abs(gA[ia] - seA_f) > 1e-4), gA[ia], seA_f)
+        seB = seB_f if gB is None else np.where(np.isfinite(gB[ib]) & (np.abs(gB[ib] - seB_f) > 1e-4), gB[ib], seB_f)
     lod = np.maximum(1.96 * np.sqrt(seA ** 2 + seB ** 2), min_lod)
     with np.errstate(invalid="ignore"):          # NaN outside the overlap
         sig = both & (np.abs(diff) > lod)

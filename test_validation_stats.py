@@ -40,7 +40,9 @@ WHAT.
     again with one crossing per day, k values' worth when each day's
     crossings sit on one side, none on one day; no other grid changes;
   * dem_change.py: the standard errors read from each DEM's _sigma.asc
-    (and the formula where there is none), and --day-block-lod printed
+    (and the formula where there is none), a file of the same definition
+    leaving the _sig and _diff grids byte for byte those of the formula on
+    noisy grids at the level of detection, and --day-block-lod printed
     beside the map's numbers without changing a grid, also with --rebuild.
 
 HOW. Synthetic grids, points and ground files in a temporary folder
@@ -787,8 +789,8 @@ def test_dem_change(d):
     rc2, log2, sig2, diff2 = change("formula")
     check(rc2 == 0 and "A from its spread and count" in log2 and "no A_sigma.asc" in log2
           and np.array_equal(np.isfinite(sig), np.isfinite(sig2)) and np.array_equal(np.nan_to_num(diff), np.nan_to_num(diff2)),
-          "without A's file: the formula from its spread and count (said), the same significant cells -- the file "
-          "holds the same SE to its 4 decimals")
+          "without A's file: the formula from its spread and count (said), the same significant cells -- the map "
+          "takes the file's SE only where it differs by more than its 4-decimal rounding")
     hdr = [float(x.split()[1]) for x in (d / "A_sigma.keep").read_text().splitlines()[2:5]]   # xll, yll, cell
     write_asc(d / "A_sigma.asc", read_asc(d / "A_sigma.keep") * 3.0, *hdr)
     rc3, log3, sig3, _ = change("tripled")
@@ -839,6 +841,39 @@ def test_dem_change(d):
           "--series --rebuild --day-block-lod: the rebuilt reference has its day-block SE, the block is printed")
     check(dem_change.load_se(d / "nothere", {"ncols": 1, "nrows": 1, "xllcorner": 0, "yllcorner": 0, "cellsize": 2})
           == (None, "no nothere_sigma.asc"), "load_se: no file, said")
+    # the default map is the formula's to the bit: a _sigma.asc of the same definition (4 decimals)
+    # flips no borderline cell. B = A + noise of about the LoD, rounded to 4 dp, A's spread, count, SE
+    nz = d / "noisy"
+    for sub in ("files", "formula"):
+        (nz / sub).mkdir(parents=True)
+    hdrA = [float(x.split()[1]) for x in (d / "A_dem.asc").read_text().splitlines()[2:5]]
+    a_dem, a_sp, a_n, a_se = (read_asc(d / f"A_{k}.asc") for k in ("dem", "spread", "count", "sigma"))
+    se_f = 1.25 * (np.nan_to_num(a_sp) / 2.0) / np.sqrt(np.maximum(np.nan_to_num(a_n), 1))
+    lod_f = 1.96 * np.sqrt(2.0) * se_f
+    lod_g = 1.96 * np.sqrt(2.0) * np.where(np.isfinite(a_se), a_se, se_f)
+    same, would_flip = [], 0
+    for seed in range(8):
+        rng = np.random.RandomState(seed)
+        b_dem = np.round(a_dem + np.where(rng.rand(*a_dem.shape) < 0.5, -1, 1) * lod_f
+                         * rng.uniform(0.97, 1.03, a_dem.shape), 4)
+        with np.errstate(invalid="ignore"):
+            use = np.isfinite(a_dem) & (np.nan_to_num(a_n) >= 5)
+            dd = np.abs(np.round(b_dem, 4) - a_dem)
+            would_flip += int((use & ((dd > lod_f) != (dd > lod_g))).sum())
+        for sub in ("files", "formula"):
+            for nm, dem in (("A", a_dem), ("N", b_dem)):
+                write_asc(nz / sub / f"{nm}_dem.asc", dem, *hdrA)
+                for k in ("spread", "count") + (("sigma",) if sub == "files" else ()):
+                    shutil.copy(str(d / f"A_{k}.asc"), str(nz / sub / f"{nm}_{k}.asc"))
+            quiet(dem_change.compare, str(nz / sub / "A"), str(nz / sub / "N"), 0.0,
+                  out_dir=str(nz / sub / f"out{seed}"), plot=False)
+        same.append(all((nz / "files" / f"out{seed}" / f"change_A_to_N_{k}.asc").read_bytes()
+                        == (nz / "formula" / f"out{seed}" / f"change_A_to_N_{k}.asc").read_bytes()
+                        for k in ("sig", "diff")))
+    check(all(same) and would_flip > 0,
+          f"8 noisy B grids at the LoD (--min-lod 0): _sig and _diff grids byte for byte the same with and "
+          f"without the _sigma.asc files ({sum(same)} of 8), where the file's rounded SE alone would flip "
+          f"{would_flip} borderline cell(s)")
 
 
 def test_py38():
