@@ -736,16 +736,22 @@ GCPFREE_PINS = [
     {"gcpfree_eo.py": "e97c24f045c56f85284499c0145dddca8761c0f94ec3612d92eea1bebf52ec2a",
      "modules": {
          "estimate_eo_rotation.py": "2fbb27b69db3604498b5cfd63739e4ab5ebdbb061e58e2397bc1323956406e72",
-         "georectify.py": "e9f1d2c1872697b1be5d805d2762c40b9e32752251f0e9e6d6cb75f5bc7eba1e",
+         "georectify.py": "96f3f52e5adc4ca033c444ae2affb7377f7bb7eb66f1384f00ec14a8e1108a25",
          "horizon_check.py": "a7eeac44fe21ab1414b98568f235cb6c6e1e1892cee965f9ee88c7923f88c23f",
          "detect_original_view.py": "c807b2f907b4856cda08b21ddcf46c1c0470bd23b7559f990fc21e831a19036a",
-         "view_reproject.py": "2d63650ec558c90f7aada6a223f6dfb6dd61dc55f5998d9a8f0cf737de3cd817"},
+         "view_reproject.py": "aba55fb29a9104103a2884fbf23efb2ed7bdba7d0462773eede8a701e1abca0c"},
      "constants_sha256": "6259cec4a81e4e0d7da96fec2a6ec4430e589b5a5935401ab274f069feee9f96",
-     "pinned": "2026-10-14 (integration review round 1: every run, a trial too, refused until the "
-               "pre-registration's commit is on a remote-tracking branch (pushed), and its messages say 'git push'; "
-               "no gate, threshold, window or rule of the computation changed, the constants are the same). It "
-               "replaces the pins of review rounds 0-2 of 2026-10-14 (2387f2d3857d... the last), under which nothing "
-               "was run outside tests and whose sha256 was not yet sent to the holder"},
+     "pinned": "2026-10-20 (two modules: georectify.py and view_reproject.py test 'in front of the camera' by the "
+               "point's depth along the optical axis, no longer by the sign of the projective scale, which depends "
+               "on the camera's absolute UTM position and lost every point for azimuths of ~95-275 deg; "
+               "georectify.undistort_uv returns NaN where its passes do not converge or beyond the lens model's "
+               "fold. Their outputs are bit-identical for every IO and EO file in calibration/ (calibration A not "
+               "opened), over every pixel of the frame, so nothing the procedure computes changes; gcpfree_eo.py "
+               "and its constants are the same files). It replaces the pin of 2026-10-14 (integration review round "
+               "1: the same gcpfree_eo.py, georectify.py e9f1d2c18726... and view_reproject.py 2d63650ec558...), "
+               "which replaced the pins of review rounds 0-2 (2387f2d3857d... the last). Nothing was run outside "
+               "tests under any of them. The pin is replaced, not appended: a second pin with the same "
+               "gcpfree_eo.py sha256 would never be looked up (gcpfree_pin_of takes the first)"},
 ]
 # gcpfree_eo.py's ROOTS: the station's photo folders a delivery run must use (a B made from other folders is a test of
 # the procedure, never the delivered B)

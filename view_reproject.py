@@ -41,7 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
-from georectify import build_P, load_extrinsics, load_intrinsics, pixel_to_ground
+from georectify import build_P, camera_depth, load_extrinsics, load_intrinsics, pixel_to_ground
 
 HERE = Path(__file__).resolve().parent
 MAP_STEP = 4            # remap tables are computed every MAP_STEP px, then interpolated
@@ -75,8 +75,14 @@ def ground_to_pixel(X, Y, Z, intrinsics, extrinsics):
         V = (P[1, 0] * X + P[1, 1] * Y + P[1, 2] * Z + P[1, 3]) / s
     Ud, Vd = distort_uv(U, V, intrinsics)
     nu, nv = intrinsics[0], intrinsics[1]
-    # s < 0 in front of the camera under this convention (see pixel_to_ground)
-    valid = np.isfinite(Ud) & np.isfinite(Vd) & (s < 0) & \
+    # In front of the camera: a positive depth along the optical axis
+    # (georectify.camera_depth). Until Oct 2026 this was s < 0, whose sign
+    # also depends on where the camera sits in UTM: for azimuths of
+    # ~95-275 deg here, every point in front read as behind the camera
+    # and every point behind as in front. s stays the divisor above, so
+    # U and V are unchanged.
+    depth = camera_depth(X, Y, Z, extrinsics)
+    valid = np.isfinite(Ud) & np.isfinite(Vd) & (depth > 0) & \
         (Ud >= 0) & (Ud <= nu - 1) & (Vd >= 0) & (Vd <= nv - 1)
     return Ud, Vd, valid
 

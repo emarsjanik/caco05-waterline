@@ -120,6 +120,73 @@ def build_P(intrinsics, extrinsics):
     return P / P[2, 3]
 
 
+def camera_depth(X, Y, Z, extrinsics):
+    """
+    How far each world point lies in front of the camera, along its
+    optical axis: R[2] . (X - C), in metres. Positive in front of the
+    camera, negative behind it. This is the test for "in front of the
+    camera" (the depth of a point: Hartley & Zisserman 2003, Multiple
+    View Geometry, 2nd ed., sec. 6.2.3). R[2] is the viewing direction
+    (azimuth, and tilt from straight down), so the test needs nothing
+    but the EO.
+
+    WHY NOT THE SIGN OF THE PROJECTIVE SCALE. Until Oct 2026,
+    pixel_to_ground and view_reproject.ground_to_pixel took a point as
+    in front when s = P[2] . [X Y Z 1] < 0. build_P divides P by its own
+    P[2,3], which is -R[2] . C because K's third row is [0 0 1], so
+    s = depth / (-R[2] . C). That divisor holds the camera's ABSOLUTE
+    easting and northing (~4.2e5 and ~4.64e6 m here). Its sign at this
+    site flips at an azimuth of about 95.2 and 275.2 deg. A camera aimed
+    between those lost every in-view point (NaN, counted as "ray at or
+    above the horizon") and took a few sky pixels as ground points
+    0.4-1 km BEHIND it. A camera near the origin of a local frame failed
+    at any azimuth. The 20 EO files in calibration/ are aimed at
+    11.9-79.7 deg, where the two tests agree. (The two files of
+    calibration A, 23 Oct 2024, were not opened.) Over every pixel of
+    the full frame, for every IO with every EO of its camera, at z = -1,
+    0.5 and 2.5 m, pixel_to_ground's X and Y came out bit-identical with
+    this test. So did ground_to_pixel's U, V and valid flag, on those
+    points and on points all round the camera out to 3 km.
+    test_georectify.py turns a camera through every azimuth, including
+    the 96-275 deg that used to fail.
+    """
+    R = cirn_angles_to_R(extrinsics[3], extrinsics[4], extrinsics[5])
+    C = extrinsics[0:3]
+    return R[2, 0] * (X - C[0]) + R[2, 1] * (Y - C[1]) + R[2, 2] * (Z - C[2])
+
+
+# Largest forward-model miss, in pixels, that undistort_uv accepts: a
+# point whose result does not map back onto its own pixel to within
+# this did not converge (see undistort_uv).
+UNDISTORT_TOL_PX = 0.01
+
+
+def lens_fold_r2(intrinsics):
+    """
+    The squared normalised radius r^2 at which the radial lens model
+    stops being monotonic, or inf when it never does.
+
+    The distorted radius is r_d = r (1 + d1 r^2 + d2 r^4 + d3 r^6). While
+    r_d grows with r, every distorted radius has exactly one undistorted
+    radius. Where dr_d/dr = 1 + 3 d1 r^2 + 5 d2 r^4 + 7 d3 r^6 first
+    reaches zero, the curve folds back: beyond that point two undistorted
+    radii give the same pixel, and the polynomial no longer describes a
+    lens. CIRN's UAV-Processing-Toolbox keeps only that increasing part
+    of the curve ("no folding back", makeRadDist.m). The Quantitative
+    Coastal Imaging Toolbox's distortUV.m (Bruder & Brodie 2020) has no
+    such test: its flag marks only points outside the image and points
+    with more tangential distortion than the frame's corners. This
+    returns the smallest positive real root s = r^2 of
+    1 + 3 d1 s + 5 d2 s^2 + 7 d3 s^3. The station's lenses fold well
+    outside the frame or never: see undistort_uv.
+    """
+    d1, d2, d3 = float(intrinsics[6]), float(intrinsics[7]), float(intrinsics[8])
+    roots = np.roots([7.0 * d3, 5.0 * d2, 3.0 * d1, 1.0])
+    real = [float(r.real) for r in np.atleast_1d(roots)
+            if abs(r.imag) <= 1e-9 * max(1.0, abs(r.real)) and r.real > 0]
+    return min(real) if real else np.inf
+
+
 def undistort_uv(Ud, Vd, intrinsics, iterations=20):
     """
     Removes lens distortion from image coordinates.
@@ -129,6 +196,30 @@ def undistort_uv(Ud, Vd, intrinsics, iterations=20):
     which has no closed form, so this iterates: start from the distorted
     point and repeatedly subtract the distortion implied by the current
     estimate. Converges in a few passes for normal lens coefficients.
+
+    Two guards follow the passes. A point comes back NaN, not as a
+    finite wrong coordinate:
+      * when its result does not map back onto its own pixel under the
+        forward model to within UNDISTORT_TOL_PX, i.e. the passes did not
+        converge;
+      * when its result lies at or beyond the radius where the radial
+        model folds back (lens_fold_r2), where the inverse is not unique.
+    For a lens much stronger than the station's with only d1 < 0, the
+    passes near the fold do not converge, because the root on the folded
+    branch repels them, and pixels beyond the largest radius the lens
+    reaches have no root at all: the first guard catches both. Where r_d
+    rises again past the fold (which takes d2 or d3 > 0), the passes can
+    converge onto that outer branch, onto a point that maps back onto its
+    pixel, and only the second guard catches that. Without the guards,
+    all of these returned finite garbage.
+
+    On the station's lenses neither guard removes a point. Over the full
+    frame of each of the 8 IO files in calibration/, the forward residual
+    is at most 1.0e-12 px, and 4-5 of the 20 passes already reach 0.01
+    px. In the distorted image, the live CACO05 c1 lens folds at 2.27 x
+    the radius of the frame's corners, and c2's never folds. The worst
+    historical file, CACO02 c1 2021-02-25, folds at 1.33 x. So the result
+    is bit-identical to the inversion without guards.
     """
     c0U, c0V, fx, fy = intrinsics[2], intrinsics[3], intrinsics[4], intrinsics[5]
     d1, d2, d3, t1, t2 = intrinsics[6], intrinsics[7], intrinsics[8], intrinsics[9], intrinsics[10]
@@ -145,6 +236,19 @@ def undistort_uv(Ud, Vd, intrinsics, iterations=20):
         x = (xd - dx) / radial
         y = (yd - dy) / radial
 
+    # The guards (docstring). A NaN pixel in, or a pass that overflowed,
+    # is a bad point too, without a numpy warning of the guards' own.
+    with np.errstate(invalid="ignore", over="ignore"):
+        r2 = x * x + y * y
+        radial = 1.0 + d1 * r2 + d2 * r2 * r2 + d3 * r2 * r2 * r2
+        dx = 2.0 * t1 * x * y + t2 * (r2 + 2.0 * x * x)
+        dy = t1 * (r2 + 2.0 * y * y) + 2.0 * t2 * x * y
+        resid = np.hypot((x * radial + dx - xd) * fx, (y * radial + dy - yd) * fy)
+        bad = ~(resid <= UNDISTORT_TOL_PX) | ~(r2 < lens_fold_r2(intrinsics))
+    if np.any(bad):
+        x = np.where(bad, np.nan, x)
+        y = np.where(bad, np.nan, y)
+
     return x * fx + c0U, y * fy + c0V
 
 
@@ -159,7 +263,10 @@ def pixel_to_ground(Ud, Vd, Z, intrinsics, extrinsics, max_range_m=1000.0):
     Points whose ray is near-parallel to the plane (looking at or above
     the horizon) are returned as NaN rather than a huge extrapolated
     coordinate: the intersection is real but meaningless, and silently
-    emitting a value kilometres offshore would be worse than a gap.
+    emitting a value kilometres offshore would be worse than a gap. So
+    are points whose ray meets the plane only behind the camera (a ray
+    above the horizon, traced backwards), and pixels the lens model
+    cannot invert (undistort_uv).
     """
     P = build_P(intrinsics, extrinsics)
     U, V = undistort_uv(Ud, Vd, intrinsics)
@@ -182,16 +289,18 @@ def pixel_to_ground(Ud, Vd, Z, intrinsics, extrinsics, max_range_m=1000.0):
     X = np.where(bad, np.nan, X)
     Y = np.where(bad, np.nan, Y)
 
-    # Reject rays that do not reach the plane in front of the camera.
-    #
-    # The scale factor is NEGATIVE for valid in-view points under this
-    # convention, because both focal terms in K are negative. Measured
-    # on the surveyed ground control, every in-view point gave
-    # s between -1.2e-5 and -2.6e-5. An earlier version tested s > 0
-    # and rejected every point in the dataset -- the sign here is not
-    # something to reason about, it is something to check.
-    s = P[2, 0] * X + P[2, 1] * Y + P[2, 2] * Z + P[2, 3]
-    invalid = ~np.isfinite(s) | (s >= 0)
+    # Reject rays that do not reach the plane in front of the camera:
+    # the intersection's depth along the optical axis must be positive
+    # (camera_depth). Until Oct 2026 this tested the sign of the scale
+    # factor s = P[2] . [X Y Z 1] instead, and an older comment here put
+    # its negative sign down to the negative focal terms in K. K's third
+    # row has no focal term. s is negative in front only because build_P
+    # divides by P[2,3] = -R[2] . C, and that sign depends on where the
+    # camera sits in UTM and where it points: every point was lost for
+    # azimuths of ~95-275 deg here (camera_depth says more). For the
+    # station's calibrations the two tests agree bit for bit.
+    depth = camera_depth(X, Y, Z, extrinsics)
+    invalid = ~np.isfinite(depth) | (depth <= 0)
 
     # Also drop absurd ranges. Near the horizon the ray becomes almost
     # parallel to the water plane, so a pixel one row higher can move
