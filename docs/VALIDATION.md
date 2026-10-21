@@ -641,6 +641,28 @@ line is given: low on the ebb, the same sign as the timing error. It is the same
 it does not decide the comparison (what mid removes is the timing), but it can be what is left in
 mid. A flood/ebb contrast left in mid is therefore no reason to change `TIMEX_MID_OFFSET_S` to null
 it: only the exposure (step 1) changes that constant.
+### 2.8 The loess DEM and its prediction error (opt-in, not in the cron: `--loess`, `--dem-loess`)
+
+**Claim.** `dem_from_contours.py --loess` (and `survey_products.py --dem-loess`) also writes
+`<stem>_loess.asc`, the DEM's points interpolated by scale-controlled quadratic loess (Plant,
+Holland & Puleo 2002; half-widths 20 m alongshore x 5 m cross-shore), and its prediction error
+`<stem>_loess_err.asc` (with `_loess_nmse` and `_loess_skill`; GeoTIFFs in the survey products).
+Off by default: the cron and the survey products do not ask for it, and without it every grid,
+`_info.json`, page and command is what it was. No figure draws it. `err` is the random error of
+the smoothed surface; it leaves out what the frames share (datum, setup, pointing, detector).
+
+| what | data | number | reproduce here | check on the NUC |
+|---|---|---|---|---|
+| Default unchanged | [REAL] 2026-09-29 survey-date lines (26 Sep - 2 Oct, the dem step's settings) | `_dem/_spread/_count/_sigma.asc` and `_info.json` byte-identical to `42e3e86`'s; with `--loess` the same grids and the same `_info.json` but its `loess` key | `python3 dem_from_contours.py <ground.csv> x --start-date 2026-09-26 --end-date 2026-10-02 --max-hs 1.5 --max-day-offset 0.15 --anchor-date 2026-09-29 --no-plot [--loess]` | `cmp` the grids of a build with and without `--loess` |
+| A known surface recovered within its error bars | [SYNTH] curved profile + alongshore wave, a 0.04 m level error per frame, 0.3 m detection scatter, 4 seeds | bias -0.002 to +0.012 m, RMS 0.013-0.018 m; truth within err 59-76%, within 2 err 97-100% | `python3 test_dem_loess.py` | same |
+| err the size of the error it predicts | [SYNTH] the same 30 lines 20 times over, only a 0.04 m level error per frame | RMS error / RMS err per cell median 0.94; truth within err 70%, within 2 err 92% (the n/(n - 6) of an unweighted fit put err ~2 x too high here) | same | same |
+| The error grows away from the data | [SYNTH] a gap between the lines; the lowest line | into the gap nmse 0.13 -> 0.90 -> 9.8 (among the lines 0.08), its middle nodata; beyond the lowest line nodata (with extrapolation on, tests only: err 0.007 -> 0.016 -> 0.12 m over 4 m) | same | same |
+| The DEM page is not touched | [SYNTH] | the page with `--loess` is the same to the pixel | same | - |
+| err against a survey | [REAL] NUC survey-date lines (copies of 15 Oct 2026) vs the 2025 lidar, median offset removed | Mar 2025 (c2): NMAD 0.137 m vs median err 0.038 m (3.6 x), 47% within 2 err; Jan 2025 (c2 alone, `--camera c2`: c1's lines in those builds sit ~1.8 m below the lidar): 0.123 vs 0.024 m (5.2 x), 33%. The binned DEM's `_sigma.asc` on the same builds: 6.2 x and 4.1 x | `python3 dem_loess.py evaluate <stem> <lidar.tif>` on builds made with `--loess` | `python3 survey_products.py --date 2025-03-06 --steps dem --dem-loess`, then `python3 dem_loess.py evaluate <root>/2025-03-06/dem/2025-03-06 <the Mar 2025 lidar .tif> --json loess_check.json` (and 2025-01-23 with the Jan lidar). Read "NMAD / median err" and the shares by nmse |
+
+What would make `err` more than a floor: the frames' shared errors (setup per day, pointing,
+detection offset) as terms of their own; until then read it as the interpolation's part of the
+error, the cells' relative quality, and where the lines are too far apart (nmse).
 
 ---
 
@@ -1910,6 +1932,8 @@ copy of today's pictures made before the pull (section 1).
   Data 13, 3869-3884.
 * Holman, R.A., Stanley, J., 2007. The history and technical capabilities of Argus. Coastal
   Engineering 54(6-7), 477-491.
+* Plant, N.G., Holland, K.T., Puleo, J.A., 2002. Analysis of the scale of errors in nearshore
+  bathymetric data. Marine Geology 191(1-2), 71-86.
 * Plant, N.G., Holman, R.A., 1997. Intertidal beach profile estimation using video images.
   Marine Geology 140(1-2), 1-24.
 * Plant, N.G., Aarninkhof, S.G.J., Turner, I.L., Kingston, K.S., 2007. The performance of

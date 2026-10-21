@@ -24,7 +24,11 @@ coefficient and the DEM settings (cell, minimum frames, spread, Hs and
 day-offset limits, GeoTIFF EPSG) reported are those the outputs on disk were
 built with, never a later command line's: `--steps compare --dem-cell 1`
 warns that the option is not applied and says to rerun `--steps
-dem,maps,compare`. The DEM's day test (`--dem-max-day-offset`, 0.15 m;
+dem,maps,compare`. `--dem-loess` (off by default) also writes the loess
+surface and its prediction error beside the DEM (`dem/<date>_loess*.asc`
+and `.tif`), which no figure, comparison or label uses; it is not among the
+options a later step warns about, so give it with `--steps dem`
+(docs/VALIDATION.md section 2.8). The DEM's day test (`--dem-max-day-offset`, 0.15 m;
 docs/VALIDATION.md section 2.3a) leaves out a camera-day whose waterlines
 sit, on median, more than 0.15 m from the DEM of the other kept days. It is
 iterative: the day furthest over the limit goes first and the others are

@@ -86,7 +86,10 @@ stale, and nothing stale is ever reported as current):
             says so), asc_to_geotiff.py (EPSG:6348, NAD83(2011) / UTM 19N,
             the surveys' frame; NAVD88 EPSG:5703 vertical keys on the DEM),
             and the DEM page by dem_figure.py with the date's own camera
-            positions.
+            positions. --dem-loess (off by default) also writes the
+            scale-controlled loess surface and its prediction error
+            (dem_loess.py; <stem>_loess*.asc/.tif): a second surface beside
+            the DEM, which no figure, comparison or label uses.
   maps      daily_elevation_map.py per camera on the window's photos, and a
             plan view of the filtered waterlines coloured by elevation over
             the survey (or the DEM).
@@ -3879,6 +3882,32 @@ def calibration_label(plan, args):
     return ", ".join(sorted(set(out)))
 
 
+# The grids dem_from_contours.py writes that the dem step converts to GeoTIFF; with --dem-loess also the loess
+# surface and its error (dem_loess.LOESS_FILES), none of which a figure, comparison or label reads.
+DEM_GRIDS = ("dem", "spread", "count", "sigma")
+DEM_LOESS_GRIDS = ("loess", "loess_err", "loess_nmse", "loess_skill")
+
+
+def dem_loess_on(args):
+    """--dem-loess (off by default; False for callers whose options predate it)."""
+    return bool(getattr(args, "dem_loess", False))
+
+
+def dem_grids(args):
+    """The grids the dem step converts and expects: DEM_GRIDS, + DEM_LOESS_GRIDS with --dem-loess."""
+    return DEM_GRIDS + (DEM_LOESS_GRIDS if dem_loess_on(args) else ())
+
+
+def dem_loess_settings():
+    """What the DEM's stamp, provenance.json and README record of a --dem-loess build."""
+    from dem_loess import LOESS_SCALES, LOESS_ORDER, LOESS_MAX_NMSE
+    return {"script": "dem_loess.py", "half_widths_m": {"alongshore": LOESS_SCALES[0], "cross_shore": LOESS_SCALES[1]},
+            "order": LOESS_ORDER, "max_nmse": LOESS_MAX_NMSE, "grids": [f"_{k}" for k in DEM_LOESS_GRIDS],
+            "note": "a second surface beside the DEM (quadratic loess with explicit scales, Plant, Holland & Puleo "
+                    "2002) and its prediction error; no figure, comparison or label uses it; check its error with "
+                    "python3 dem_loess.py evaluate <dem stem> <survey>"}
+
+
 def dem_cmds(plan, args, day_test=True):
     out = plan["out"]
     stem = dem_stem(plan)
@@ -3893,7 +3922,9 @@ def dem_cmds(plan, args, day_test=True):
         # are those around the survey, not whichever end weighs more (dem_from_contours.py
         # --anchor-date; 23 Oct 2024, c2: 24 and 26 Oct kept, the survey's own day left out, without it)
         cmd += ["--max-day-offset", args.dem_max_day_offset, "--anchor-date", plan["date"]]
-    tif = [sys.executable, HERE / "asc_to_geotiff.py"] + [f"{stem}_{k}.asc" for k in ("dem", "spread", "count", "sigma")] + \
+    if dem_loess_on(args):
+        cmd += ["--loess"]                  # opt-in: the loess surface and its error beside the DEM (dem_loess.py)
+    tif = [sys.executable, HERE / "asc_to_geotiff.py"] + [f"{stem}_{k}.asc" for k in dem_grids(args)] + \
           ["--epsg", args.geotiff_epsg, "--note", calibration_identity(plan, args)]
     station = "/".join(sorted({c["station"] for c in plan["cams"].values()}))
     cal = calibration_label(plan, args)
@@ -3919,11 +3950,12 @@ def step_dem(plan, args, state):
     if no_day_test:
         warn(f"DEM day test NOT run: {no_day_test}")
     stem, cmd, tif, page = dem_cmds(plan, args, day_test=not no_day_test)
-    outs = [Path(f"{stem}_{k}.{e}") for k in ("dem", "spread", "count", "sigma") for e in ("asc", "tif")] + \
+    outs = [Path(f"{stem}_{k}.{e}") for k in dem_grids(args) for e in ("asc", "tif")] + \
            [Path(f"{stem}_dem.png")]
     src_key = "filter" if src.name.endswith("_filtered.csv") else "merge"
+    scripts = STEP_SCRIPTS["dem"] + (["dem_loess.py"] if dem_loess_on(args) else [])
     sig = {"cmd": cmd_text(cmd), "tif": cmd_text(tif), "page": cmd_text(page),
-           "after": {src_key: token(out, src_key)}, "scripts": scripts_sig("dem")}
+           "after": {src_key: token(out, src_key)}, "scripts": {s: script_sha(s) for s in scripts}}
     fresh, why = is_fresh(out, "dem", sig, outs, [src])
     if fresh and not args.force:
         say("dem", f"SKIPPED: {stem}_dem.asc/.tif/.png are up to date (--force to rebuild)")
@@ -3931,7 +3963,9 @@ def step_dem(plan, args, state):
     say("dem", f"dem_from_contours.py over {plan['first']} .. {plan['last']} ({why}); ~10-40 s on the NUC")
     drop_stamp(out, "dem")
     (out / "dem").mkdir(parents=True, exist_ok=True)
-    for o in outs + [Path(f"{stem}_info.json"), Path(f"{stem}_map.png")]:   # no stale grid or page from an earlier build
+    # no stale grid or page from an earlier build (a --dem-loess build's loess grids included, whatever this one asks)
+    for o in outs + [Path(f"{stem}_info.json"), Path(f"{stem}_map.png")] + \
+            [Path(f"{stem}_{k}.{e}") for k in DEM_LOESS_GRIDS for e in ("asc", "tif")]:
         if o.exists():
             o.unlink()
     clear_comparisons(plan, "the DEM is being rebuilt")
@@ -3953,13 +3987,13 @@ def step_dem(plan, args, state):
         warn(f"the plain DEM map (dem_map.py) failed; the grids are fine. See {log}")
     rc = run_cmd(page, log)
     extra = {"cells": cells, "source": str(src),
-             "settings": dict(dem_settings_requested(args), day_test_off=no_day_test or None)}
+             "settings": dict(dem_settings_requested(args), day_test_off=no_day_test or None,
+                              **({"loess": dem_loess_settings()} if dem_loess_on(args) else {}))}
     if rc != 0 or not Path(f"{stem}_dem.png").exists():
         warn(f"the DEM page (dem_figure.py) failed (exit {rc}); the grids are fine. See {log}")
-        write_stamp(out, "dem", dict(sig, page_failed=True), [cmd, tif, page], scripts=STEP_SCRIPTS["dem"],
-                    extra=extra)
+        write_stamp(out, "dem", dict(sig, page_failed=True), [cmd, tif, page], scripts=scripts, extra=extra)
         return "built (page failed)"
-    write_stamp(out, "dem", sig, [cmd, tif, page], scripts=STEP_SCRIPTS["dem"], extra=extra)
+    write_stamp(out, "dem", sig, [cmd, tif, page], scripts=scripts, extra=extra)
     return "built"
 
 
@@ -5082,7 +5116,8 @@ SCRIPTS = ["survey_products.py", "historical_forcing.py", "detect_original_view.
            "extract_elevation_contours.py", "georectify.py", "waterline_consistency.py", "dem_from_contours.py",
            "dem_figure.py", "asc_to_geotiff.py", "daily_elevation_map.py", "survey_compare.py",
            "pointing_check.py", "horizon_check.py", "estimate_eo_rotation.py", "view_reproject.py",
-           "compare_dem_survey.py", "compare_rtk.py", "marconi_water_level.py", "timex_timing.py"]
+           "compare_dem_survey.py", "compare_rtk.py", "marconi_water_level.py", "timex_timing.py",
+           "dem_loess.py"]
 
 _SOFTWARE = {}
 
@@ -8801,7 +8836,8 @@ def write_provenance(plan, args, state, final=True):
                     settings_from=("the DEM on disk (its build stamp)" if dem_built else
                                    "this run's options (no DEM built yet)"),
                     requested_this_run=dem_want,
-                    files={k: f"{dem_stem(plan)}_{k}" for k in ("dem", "spread", "count")},
+                    files=dict({k: f"{dem_stem(plan)}_{k}" for k in ("dem", "spread", "count")},
+                               **({k: f"{dem_stem(plan)}_{k}" for k in DEM_LOESS_GRIDS} if dem_set.get("loess") else {})),
                     cells=dstamp.get("cells"),
                     built_from=info,
                     geotiff=(f"asc_to_geotiff.py: tagged EPSG:{dem_set.get('geotiff_epsg')}"
@@ -8809,7 +8845,10 @@ def write_provenance(plan, args, state, final=True):
                              + "; the grid coordinates are in the GCP frame, assumed NAD83(2011) / UTM zone 19N "
                                "as the surveys (the GCP files state no CRS) "
                                "(EPSG:6348), untransformed; only the _dem GeoTIFF carries vertical keys (NAVD88, "
-                               "EPSG:5703); spread, count, sigma and difference grids are not heights")),
+                               "EPSG:5703); spread, count, sigma and difference grids are not heights"
+                             + ("; with --dem-loess the _loess GeoTIFF (a second surface, NAVD88) carries them too; "
+                                "its _loess_err, _loess_nmse and _loess_skill are not heights"
+                                if dem_set.get("loess") else ""))),
         "chain": {"current": chain_ok, "why": chain_why or None},
         "blind": blind,
         "comparisons": comps,
@@ -9189,6 +9228,10 @@ def write_readme(plan, args, prov):
     if bf.get("frames"):
         for ln in dem_built_from_lines(bf):
             w(ln)
+    if dm.get("loess"):
+        lo = dm["loess"]
+        w(f"      loess (--dem-loess): {lo.get('script')} half-widths {lo['half_widths_m']['alongshore']:g} m "
+          f"alongshore x {lo['half_widths_m']['cross_shore']:g} m cross-shore: {lo.get('note')}")
     w(f"      GeoTIFFs: {dm['geotiff']}")
     sw = prov["software"]
     w(f"  software: {sw.get('note')} (per step in provenance.json software.by_step)")
@@ -9202,6 +9245,8 @@ def write_readme(plan, args, prov):
       "no_setup_frames.csv (frames left out: no wave record)")
     ds = dem_stem(plan).name
     w(f"  dem/          {ds}_dem/_spread/_count/_sigma .asc and .tif, {ds}_dem.png (the DEM page)"
+      + (f"; {ds}_loess/_loess_err/_loess_nmse/_loess_skill .asc and .tif (--dem-loess: the loess surface and its "
+         f"prediction error, dem_loess.py)" if (prov.get("dem") or {}).get("loess") else "")
       + (f" (the calibration variant in the file names: {plan_variant(plan)})" if plan_variant(plan) else ""))
     w(f"  maps/         {map_png(plan, '<cam>').name}: waterlines drawn on the photos, per camera "
       f"(daily_elevation_map.py, as the station's own maps: its colour bar says which elevation colours the lines); "
@@ -9980,6 +10025,7 @@ def built_args(args, plan):
                 setattr(b, opt, dem[k] if dem[k] is not None else 0.0)
         if dem.get("geotiff_epsg"):
             b.geotiff_epsg = int(dem["geotiff_epsg"])
+        b.dem_loess = bool(dem.get("loess"))     # --dem-loess: whether the DEM on disk was built with the loess
     if read_stamp(plan["out"], "merge"):
         fits, _ = setup_in_use(plan, args)
         coefs = {f.get("coef") for f in fits}
@@ -10070,6 +10116,8 @@ def state_argv(args, date):
                          ("dem_max_hs", DEM_MAX_HS), ("dem_max_day_offset", DEM_MAX_DAY_OFFSET)):
         if getattr(args, opt) != default:
             a += ["--" + opt.replace("_", "-"), str(getattr(args, opt))]
+    if getattr(args, "dem_loess", False):
+        a.append("--dem-loess")
     if args.keep_moved_days:
         a.append("--keep-moved-days")
     if args.force_disabled:
@@ -10856,6 +10904,12 @@ def main():
     ap.add_argument("--dem-max-spread", type=float, default=DEM_MAX_SPREAD)
     ap.add_argument("--dem-max-hs", type=float, default=DEM_MAX_HS, help="0 = keep every frame")
     ap.add_argument("--dem-max-day-offset", type=float, default=DEM_MAX_DAY_OFFSET, help="0 = off")
+    ap.add_argument("--dem-loess", action="store_true",
+                    help="also write the scale-controlled loess surface of the DEM's points and its prediction error "
+                         "(dem_from_contours.py --loess, dem_loess.py: <stem>_loess, _loess_err, _loess_nmse, "
+                         "_loess_skill .asc and .tif). Off by default; the DEM, its page, maps and comparisons are "
+                         "the same with it. Check its error against the date's survey with python3 dem_loess.py "
+                         "evaluate dem/<date> <survey file>")
     args = ap.parse_args()
 
     arm_blind_guard()          # no file named like a held survey (BLIND_DATES) is opened by this run, whatever asks
@@ -11112,7 +11166,8 @@ def share(args):
     stem = next(iter(sorted((out / "dem").glob("*_dem.asc"))), None) if (out / "dem").is_dir() else None
     if stem is not None:
         st = str(stem)[:-len("_dem.asc")]
-        for suf in ("_dem.tif", "_spread.tif", "_count.tif", "_sigma.tif", "_dem.png", "_map.png", "_info.json"):
+        for suf in ("_dem.tif", "_spread.tif", "_count.tif", "_sigma.tif", "_dem.png", "_map.png", "_info.json") + \
+                tuple(f"_{k}.tif" for k in DEM_LOESS_GRIDS):          # the loess ones only when --dem-loess built them
             if Path(st + suf).is_file():
                 files.append((Path(st + suf), f"dem/{Path(st + suf).name}"))
     for f in sorted((out / "maps").glob("*.png")) if (out / "maps").is_dir() else []:
