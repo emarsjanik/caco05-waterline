@@ -10,8 +10,9 @@
 #     every run, so the working folder can never be the accumulator --
 #     each run would destroy the previous day's detections. The
 #     detector writes to a scratch folder and results are copied into
-#     archive/processed_timex with `cp -n` (no clobber), which
-#     accumulates and is idempotent.
+#     archive/processed_timex (archive/processed_timex_mid when
+#     TIMING_MODE=mid) with `cp -n` (no clobber), which accumulates and
+#     is idempotent.
 #   * Because it is idempotent, running it more often than necessary is
 #     harmless. That matters: cleanup.sh runs at 19:45 AND 21:00 local
 #     while captures continue to 20:59, so a single nightly run cannot
@@ -35,7 +36,35 @@ SCRATCH="$BASE/processed_timex"
 # for ground-truth collection three times a day.
 SCRATCH_INPUT="$BASE/input_timex"
 LOCK="$BASE/.timex_cron.lock"
-ARCHIVE_CSV="$BASE/archive/processed_timex"
+
+# Water-level timing (timex_timing.py; docs/VALIDATION.md section 2.7): ONE
+# line for the detector and the contour step together, so the level time and
+# the temporal blend can never change one without the other.
+#   legacy  the level at each timex's file-name epoch (the START of its
+#           10-min exposure), the detector's temporal blend on, the v6.8 timex
+#           bias (calibration/timex_bias_legacy.json): the products as they
+#           have always been made. A line is then 4-8 min older than its level
+#           (the blend is recursive): high on the flood, low on the ebb, up to
+#           ~0.1 m a frame at spring rates (review finding C-B1).
+#   mid     the level, the waves and the stale-gap check at mid-exposure (the
+#           file-name epoch + 300 s), the blend off, and the timex bias
+#           re-derived with it off (calibration/timex_bias_mid.json, which only
+#           recalibrate_timing.py writes, on this computer). Its detections are
+#           archived in archive/processed_timex_mid, never mixed with the
+#           blended ones (a blended line given a mid-exposure level is worse
+#           than either mode).
+# Before setting mid: recalibrate_timing.py (derive, then compare: it must
+# print PASS), then its backfill, which re-detects archive/images_timex into
+# archive/processed_timex_mid; run the backfill again right before the switch.
+# Going back to legacy: the legacy archive is kept as it was, but holds no
+# detection of the photos taken while the cron ran in mid (it archives only
+# the mid ones): re-detect those days of archive/images_timex in legacy into
+# archive/processed_timex, or the legacy maps and DEMs have a gap there.
+TIMING_MODE=legacy
+case "$TIMING_MODE" in
+    mid) ARCHIVE_CSV="$BASE/archive/processed_timex_mid" ;;
+    *)   ARCHIVE_CSV="$BASE/archive/processed_timex" ;;    # an unknown mode is refused below
+esac
 ARCHIVE_IMG="$BASE/archive/images_timex"
 ARCHIVE_RAS="$BASE/archive/ras_c2"
 LOG="$BASE/logs/timex_cron.log"
@@ -338,11 +367,32 @@ log "=== run start ==="
 
 cd "$BASE" || { log "FATAL: cannot cd to $BASE"; exit 1; }
 
+# The timing mode (see TIMING_MODE above), exported so that every script this
+# run starts takes its level at the same time.
+case "$TIMING_MODE" in
+    legacy|mid) export TIMING_MODE ;;
+    *) log "FATAL: TIMING_MODE=$TIMING_MODE is not legacy or mid (see its comment in this file)"; exit 1 ;;
+esac
+if [ "$TIMING_MODE" != "legacy" ]; then
+    log "timing mode: $TIMING_MODE (level at mid-exposure, blend off; detections in $ARCHIVE_CSV)"
+    [ -f "$BASE/calibration/timex_bias_$TIMING_MODE.json" ] \
+        || log "ERROR: calibration/timex_bias_$TIMING_MODE.json not found (recalibrate_timing.py writes it): the detector will refuse to run"
+    n_legacy=$(find "$BASE/archive/processed_timex" -name '*.csv' 2>/dev/null | wc -l)
+    n_mode=$(find "$ARCHIVE_CSV" -name '*.csv' 2>/dev/null | wc -l)
+    if [ "$n_mode" -lt $(( n_legacy * 9 / 10 )) ]; then
+        log "WARNING: $ARCHIVE_CSV holds $n_mode detection(s) against $n_legacy in the legacy archive: the"
+        log "         backfill (recalibrate_timing.py --steps backfill) has not run or not finished, so the"
+        log "         maps and DEMs cover only the frames detected in mode $TIMING_MODE so far."
+    fi
+fi
+
 # 1. Detect. Bias correction is ON: timex-specific corrections were
 #    derived in v6.8 and the detector selects them by image suffix, so
-#    a timex run no longer picks up the snap-tuned values.
+#    a timex run no longer picks up the snap-tuned values. --timing-mode
+#    chooses the blend and the timex bias file (TIMING_MODE above).
 python3 waterline_detector_v5.py \
     --image-suffix timex.jpg \
+    --timing-mode "$TIMING_MODE" \
     --input-dir "$SCRATCH_INPUT" \
     --output-dir "$SCRATCH" \
     --debug-dir "$DEBUG_DIR" >> "$LOG" 2>&1
@@ -493,6 +543,7 @@ else
 
     python3 "$BASE/extract_elevation_contours.py" "$GNSSR_SPLINE" \
         --processed-dir "$ARCHIVE_CSV" $waves_arg $setup_arg $qc_arg \
+        --timing-mode "$TIMING_MODE" \
         --output "$CONTOURS" >> "$LOG" 2>&1
     if [ $? -ne 0 ]; then
         log "ERROR: contour extraction failed -- see above. Maps not regenerated."

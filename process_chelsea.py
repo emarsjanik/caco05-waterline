@@ -51,6 +51,13 @@ HOW, AND WHY IT DIFFERS FROM process_historical.py
     in processing.log) rather than mis-detected. Many such rejections on
     otherwise clear days mean the envelope needs widening for this period.
 
+  * Water-level timing. --timing-mode (default: the TIMING_MODE
+    environment variable, else legacy) goes to the detector and the
+    contour step together (timex_timing.py), and the plane each frame is
+    resampled on is the water level at the same time: the file-name epoch
+    in legacy mode, mid-exposure in mid mode (blend off; the timex bias of
+    calibration/timex_bias_mid.json unless --bias-correction-file is given).
+
   * Input layout. Downloaded folders may hold duplicate copies (the same
     period with and without a leading '__'), c1/c2 subfolders and
     quarantine_* subfolders. Every *.timex.jpg below --images is used
@@ -74,6 +81,8 @@ from datetime import datetime, timezone
 from collections import defaultdict
 
 import numpy as np
+
+import timex_timing
 
 HERE = Path(__file__).resolve().parent
 CAL = HERE / "calibration"
@@ -397,7 +406,15 @@ def main():
                          "tens of metres on the ground). '' keeps every column.")
     ap.add_argument("--no-overlays", action="store_true", help="Skip the per-frame overlay images.")
     ap.add_argument("--skip-geometry-check", action="store_true")
+    ap.add_argument("--timing-mode", default=None, choices=timex_timing.TIMING_MODES,
+                    help="legacy (level at the file-name epoch, temporal blend on) or mid (level at "
+                         "mid-exposure, blend off); passed to the detector and the contour step "
+                         "together, and the resampling plane follows it. Default: TIMING_MODE, else legacy.")
     args = ap.parse_args()
+    try:
+        timing = timex_timing.timing_mode(args.timing_mode)
+    except ValueError as e:
+        ap.error(str(e))
 
     import cv2
     from georectify import load_extrinsics, load_intrinsics
@@ -484,8 +501,11 @@ def main():
             f"{int(h1):02d}:{round(h1 % 1 * 60):02d} UTC skipped (low sun and the bluff's "
             f"shadow; --utc-hours)")
     levels, no_level = {}, defaultdict(int)
+    say(f"  water-level time: {timex_timing.describe(timing)}")
     for name, f in frames.items():
-        z = level_at(ep_wl, lv_wl, f["epoch"], args.max_gap_minutes * 60)
+        # the level at the time the contour step takes it (timex_timing.py)
+        z = level_at(ep_wl, lv_wl, f["epoch"] + timex_timing.level_time_offset_s(name, timing),
+                     args.max_gap_minutes * 60)
         if z is None:
             no_level[f["period"]] += 1
         else:
@@ -522,6 +542,8 @@ def main():
     signature = REPROJECT_VERSION + " " + " ".join(
         f"{eo}:" + ",".join(f"{v:.6f}" for v in c[1]) for eo, c in sorted(calib.items()))
     signature += " " + str(sorted(setups))
+    if timing != "legacy":          # the plane follows the mode; legacy keeps its older caches
+        signature += f" timing:{timing}:{timex_timing.TIMEX_MID_OFFSET_S}"
     if not marker.exists() or marker.read_text().strip() != signature:
         shutil.rmtree(work / "src", ignore_errors=True)       # made by an older resampling
         (work / "src").mkdir(parents=True)
@@ -571,7 +593,7 @@ def main():
                 *(["--bias-correction-file", args.bias_correction_file] if args.bias_correction_file else []),
                 *(["--min-confidence", args.min_confidence] if args.min_confidence is not None else []),
                 *(["--column-limits", args.column_limits] if args.column_limits else []),
-                "--image-suffix", "timex.jpg",
+                "--image-suffix", "timex.jpg", "--timing-mode", timing,
                 "--source-dir", work / "src", "--input-dir", work / "in",
                 "--output-dir", work / "detections", "--debug-dir", work / "debug"],
                log, "detecting waterlines"):
@@ -583,7 +605,7 @@ def main():
                 "--time-col", "time", "--level-col", "water_level_navd88",
                 "--max-gap-minutes", args.max_gap_minutes,
                 "--min-coverage", args.min_signal_fraction,
-                "--waves", waves_csv, "--wave-max-gap-minutes", 60,
+                "--waves", waves_csv, "--wave-max-gap-minutes", 60, "--timing-mode", timing,
                 "--processed-dir", work / "detections", "--output", all_contours],
                log, "matching water levels and filtering contours") or not all_contours.exists():
         sys.exit(f"Contour extraction failed; see {log}")

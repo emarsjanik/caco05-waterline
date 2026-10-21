@@ -30,6 +30,14 @@ WHAT IT CHECKS BEFORE PROCESSING, and why each check exists:
   * Dependencies and companion scripts. Failing at the first prompt
     with a clear message beats failing twenty minutes into a run.
 
+WATER-LEVEL TIMING. --timing-mode (default: the TIMING_MODE environment
+variable, else legacy) is passed to the detector AND the contour step
+together (timex_timing.py): legacy takes each frame's level at its
+file-name epoch with the detector's temporal blend on, as the station has
+always done; mid takes it at mid-exposure with the blend off and the timex
+bias of calibration/timex_bias_mid.json, which must exist
+(recalibrate_timing.py writes it on the NUC).
+
 VERTICAL DATUM. A tide MODEL is not the same measurement as GNSS-R.
 Compared over a 47-day overlap at this site the model sat 0.2574 m
 above the GNSS-R water level -- but that GNSS-R was itself 0.349 m low
@@ -42,6 +50,7 @@ low. Override with care.
 Usage:
     python3 process_historical.py                 (prompts for everything)
     python3 process_historical.py --images DIR --tides DIR --output DIR
+    python3 process_historical.py ... --timing-mode mid
 """
 
 import os
@@ -53,6 +62,12 @@ import argparse
 import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
+
+try:
+    import timex_timing
+except ImportError:         # the options need it, so before check_environment() can say so
+    sys.exit(f"STOPPED: timex_timing.py must sit beside this script in {os.path.dirname(os.path.abspath(__file__))} "
+             f"(companion scripts not found).")
 
 # The camera move this calibration follows. Imagery before this date
 # needs a different extrinsic solve.
@@ -68,6 +83,7 @@ REQUIRED_SCRIPTS = [
     "dem_from_contours.py",
     "dem_figure.py",
     "daily_elevation_map.py",
+    "timex_timing.py",
 ]
 
 REQUIRED_CALIBRATION = [
@@ -338,13 +354,25 @@ def main():
     ap.add_argument("--datum-offset", type=float, default=DEFAULT_DATUM_OFFSET)
     ap.add_argument("--cell", type=float, default=2.0)
     ap.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
+    ap.add_argument("--timing-mode", default=None, choices=timex_timing.TIMING_MODES,
+                    help="legacy (level at the file-name epoch, temporal blend on) or mid (level at "
+                         "mid-exposure, blend off, calibration/timex_bias_mid.json); passed to the "
+                         "detector and the contour step together. Default: TIMING_MODE, else legacy.")
     args = ap.parse_args()
+    try:
+        timing = timex_timing.timing_mode(args.timing_mode)
+    except ValueError as e:
+        ap.error(str(e))
 
     say("=" * 70)
     say("CACO05 HISTORICAL IMAGERY PROCESSING")
     say("=" * 70)
     say()
     cal_dir = check_environment()
+    if timing != "legacy" and not timex_timing.timex_bias_path(timing, cal_dir).exists():
+        fail(f"--timing-mode {timing} needs {timex_timing.timex_bias_path(timing, cal_dir)}, the timex "
+             f"bias re-derived with the temporal blend off (recalibrate_timing.py, on the NUC). "
+             f"Copy it here, or run --timing-mode legacy.")
     say()
 
     # --- images -------------------------------------------------------
@@ -405,6 +433,7 @@ def main():
     say( "                   without this every elevation would be that much too high)")
     say(f"  output        : {out_dir}")
     say(f"  DEM cell      : {args.cell} m")
+    say(f"  timing        : {timex_timing.describe(timing)}")
     say()
     say("  Will produce: elevation maps with waterlines for c1 and c2, an")
     say("  intertidal DEM with repeatability and sample-count grids, and the")
@@ -438,6 +467,7 @@ def main():
 
     ok = run([sys.executable, str(HERE / "waterline_detector_v5.py"),
               "--image-suffix", "timex.jpg",
+              "--timing-mode", timing,
               "--source-dir", str(src),
               "--input-dir", str(work / "in"),
               "--output-dir", str(work / "detections"),
@@ -457,7 +487,8 @@ def main():
               str(merged_tide),
               "--processed-dir", str(work / "detections"),
               "--output", str(contours),
-              "--vertical-datum-offset", str(args.datum_offset)],
+              "--vertical-datum-offset", str(args.datum_offset),
+              "--timing-mode", timing],
              log_path, "matching water levels and filtering contours")
     if not ok or not contours.exists():
         fail(f"contour extraction failed. See {log_path}")

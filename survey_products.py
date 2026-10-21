@@ -614,8 +614,8 @@ STEP_SCRIPTS = {
     "forcing": ["historical_forcing.py"],
     "pointing": ["horizon_check.py", "pointing_check.py", "estimate_eo_rotation.py"],
     "detect": ["detect_original_view.py", "waterline_detector_v5.py", "extract_elevation_contours.py",
-               "georectify.py", "view_reproject.py", "compare_dem_survey.py"],
-    "detect_live": ["georectify.py", "extract_elevation_contours.py"],
+               "georectify.py", "view_reproject.py", "compare_dem_survey.py", "timex_timing.py"],
+    "detect_live": ["georectify.py", "extract_elevation_contours.py", "timex_timing.py"],
     "merge": [],
     "filter": ["waterline_consistency.py", "waterline_track.py"],
     "dem": ["dem_from_contours.py", "waterline_track.py", "asc_to_geotiff.py", "dem_figure.py", "dem_map.py"],
@@ -3200,6 +3200,17 @@ def step_detect(plan, args, state):
             sig = {"cmd": cmd_text(cmd), "photos": hashlib.sha1("\n".join(p.name for p in photos).encode()).hexdigest(),
                    "after": {"forcing": token(out, "forcing")}, "eo_file": file_sig(c["eo_path"]),
                    "envelope": file_sig(c["envelope_path"]), "setup_fit": fit_sig(fit), "scripts": scripts_sig("detect")}
+            # The water-level timing (timex_timing.py) reaches the detection through
+            # detect_original_view.py's detector and contour subprocesses (TIMING_MODE). A mode
+            # other than legacy is part of the signature, so a switch rebuilds the detection;
+            # legacy adds nothing to it (no key), so going back to legacy matches legacy stamps.
+            from timex_timing import timing_mode
+            try:
+                timing = timing_mode()
+            except ValueError as e:
+                raise StepFailed(str(e))
+            if timing != "legacy":
+                sig["timing_mode"] = timing
             fresh, why = is_fresh(out, f"detect_{cam}", sig, [ground],
                                   [f / "water_level.csv", f / "waves.csv", c["eo_path"]])
             if fresh:
@@ -5060,7 +5071,7 @@ SCRIPTS = ["survey_products.py", "historical_forcing.py", "detect_original_view.
            "extract_elevation_contours.py", "georectify.py", "waterline_consistency.py", "dem_from_contours.py",
            "dem_figure.py", "asc_to_geotiff.py", "daily_elevation_map.py", "survey_compare.py",
            "pointing_check.py", "horizon_check.py", "estimate_eo_rotation.py", "view_reproject.py",
-           "compare_dem_survey.py", "compare_rtk.py", "marconi_water_level.py"]
+           "compare_dem_survey.py", "compare_rtk.py", "marconi_water_level.py", "timex_timing.py"]
 
 _SOFTWARE = {}
 

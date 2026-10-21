@@ -1,0 +1,14 @@
+{
+  "mode": "legacy",
+  "c1": [[0.00, -11.03], [1.00, -11.03]],
+  "c2": [[0.050, 3.87], [0.150, -1.19], [0.249, -8.15], [0.349, -8.49], [0.449, -5.26],
+         [0.548, -4.55], [0.648, -8.44], [0.748, -17.22], [0.848, -17.22], [0.949, -17.22]],
+  "about": {
+    "what": "The timex bias corrections of waterline_detector_v5.py v6.8 (CameraProfile.bias_correction_points_timex), in raw pixels, (x fraction of the width, correction) points interpolated across columns and SUBTRACTED from the detected row. The same numbers as the built-in ones, which the detector falls back to when this file is missing; test_timing_mode.py checks the two are identical.",
+    "used_by": "TIMING_MODE=legacy (the default): the water level at the file-name epoch, the temporal blend on.",
+    "fitted": "derive_bias_correction.py --suffix .timex. --uncorrected on hand-clicked ground truth of 11 Sep 2026 (12 c1 frames, 13 c2 frames), detected with the temporal blend ON.",
+    "c1": "CONSTANT: spread across the frame 11.2 px against a 4.2 px standard error (spread/SEM 2.7, below 3), so the shape is noise; the offset is real at 2.6 SEM.",
+    "c2": "PER-COLUMN: spread 61.6 px against 5.1 px (spread/SEM 12.0). The last two segments are CLAMPED to the last trustworthy value (-17.22): measured -41.28 +/- 48.26 and -57.78 +/- 67.00, error bars larger than the values, in the far field where the detector is unreliable.",
+    "caveat": "The 11 Sep frames were all on the flood (10:30-16:30 UTC), so with the blend on these values absorbed about -2.8 px (c1) and -2.6 px (c2) of blend lag (known finding C-B1). Do not use them with the blend off: TIMING_MODE=mid uses timex_bias_mid.json, which recalibrate_timing.py derives with the blend off. Keep this file as it is: the legacy products are the v6.8 ones, and a changed value fails test_timing_mode.py."
+  }
+}

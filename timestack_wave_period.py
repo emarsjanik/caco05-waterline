@@ -46,8 +46,10 @@ import cv2
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from timex_timing import TIMEX_MID_OFFSET_S      # noqa: E402
+
 SAMPLE_HZ = 2.0
-BURST_MID_OFFSET_S = 300.0
+BURST_MID_OFFSET_S = float(TIMEX_MID_OFFSET_S)   # 300.0 s: the burst's middle (timex_timing.py)
 FIELDS = ["epoch", "time_utc", "filename", "line", "tp_s", "tm01_s", "ig_fraction", "peak_ratio", "status",
           "n_pixels", "surf_from_m", "surf_to_m", "water_level_m"]
 # beach geometry from the Jan 2025 lidar: the 0 m NAVD88 contour (sea_patch.py)
