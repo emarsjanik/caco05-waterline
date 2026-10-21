@@ -4811,6 +4811,11 @@ def honest_label(s, plan, args, survey_path, fits=None, verdict=None):
                 v.worse("CIRCULAR", f"the {cam} pointing {Path(eo).name} "
                                     + ("carries a correction fitted to" if len(lin["chain"]) > 1 else "was fitted to")
                                     + f" this survey{via}")
+            elif named and s["survey_type"] == "points" and re.search(r"target|gcp", sname, re.I):
+                # calibration targets the calibration names (solved from them?): PARTLY-CIRCULAR, as the
+                # GCP-day rule below and survey_compare.audit_label say
+                v.worse("PARTLY-CIRCULAR", f"the {cam} calibration {Path(eo).name} names these calibration targets "
+                                           f"in its notes (solved from them?)", heuristic=True)
             elif named:
                 v.worse("CIRCULAR", f"the {cam} calibration {Path(eo).name} names this survey in its notes "
                                     f"(was it fitted to it?)", heuristic=True)

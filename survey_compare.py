@@ -1243,6 +1243,19 @@ def _rank(label):
     return LABELS.index(label) if label in LABELS else 0
 
 
+def suggested_label(label, findings):
+    """
+    The label the checks suggest: the worst of the label passed and every finding's suggestion
+    (audit_label: a comparison is never better than its weakest step). A finding can only make it
+    worse, never better, and a suggestion that is not one of LABELS (None: a note) is ignored.
+    """
+    worst = label
+    for sug, _, _ in findings:
+        if sug and _rank(sug) > _rank(worst):
+            worst = sug
+    return worst
+
+
 def _date_from_name(name):
     m = re.search(r"(20\d\d)-?(\d\d)-?(\d\d)", name)
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
@@ -1313,6 +1326,20 @@ def same_survey(name, survey_path, dirs=()):
     return bool(q and q.resolve() != s.resolve() and file_sha256(q) == file_sha256(s))
 
 
+# A survey file as the notes of a fit name it ('fitted to <survey>': fit_eo_to_survey.py writes its file name)
+SURVEY_FILE = re.compile(r"\.(tif|tiff|asc|csv|txt|laz|las|xyz|dat)$", re.IGNORECASE)
+
+
+def names_file(word):
+    """
+    Does the word after 'fitted to' in a note name a file? Yes for a survey file name (SURVEY_FILE:
+    fit_eo_to_survey.py writes Path(survey).name), a path, or a file stem without its extension (the
+    station's surveys all carry an underscore: 2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm,
+    2026-09-29_Marconi_Checkshots); no for a word of a sentence ('fitted to the Jan 2025 lidar': 'the').
+    """
+    return bool(SURVEY_FILE.search(word)) or "/" in word or "\\" in word or "_" in word
+
+
 def pointing_lineage(eo_path, dirs=(), _depth=0):
     """
     Where a camera pointing came from, following the files its notes name.
@@ -1322,6 +1349,8 @@ def pointing_lineage(eo_path, dirs=(), _depth=0):
         EO>' in its notes: the change a survey fit made, CARRIED to another period. Such a pointing
         is as survey-derived as the fit it came from, so the fit file is read in turn (looked for
         next to the EO, then in `dirs`) for the survey it was fitted to.
+    A 'fitted to X' whose X is not a file name (names_file: 'fitted to the Jan 2025 lidar') names no
+    survey that can be checked: that link is unresolved, like one that names none.
     -> {"survey_fit": bool, "fitted_to": [survey names], "chain": [file names],
         "unresolved": [why the survey of a link is not known], "notes": all notes read}
     """
@@ -1335,9 +1364,16 @@ def pointing_lineage(eo_path, dirs=(), _depth=0):
     if direct:
         out["survey_fit"] = True
         ft = [x.rstrip(".,;:)'\"") for x in re.findall(r"fitted to (\S+)", notes)]
-        if ft:
-            out["fitted_to"] += ft
-        else:
+        # 'fitted to the Jan 2025 lidar' (a note written by hand) names no file: which survey is not known,
+        # as if it named none -- never a fit to 'another survey' called 'the'
+        files_ = [x for x in ft if names_file(x)]
+        for x in ft:
+            if x not in files_:
+                out["unresolved"].append(f"{p.name} says it was fitted to '{x} ...', not a file name: which survey "
+                                         f"is not known")
+        if files_:
+            out["fitted_to"] += files_
+        elif not ft:
             out["unresolved"].append(f"{p.name} is a survey fit (fit_eo_to_survey.py naming) and does not "
                                      f"say which survey")
     if carried:
@@ -1374,6 +1410,9 @@ def lineage_text(lin):
 # survey fit that does not say which survey): survey_products.py lets a reason written in
 # surveys.csv overrule it. 'note': no downgrade.
 KINDS = ("chain", "rule", "note")
+# provenance.json keys that hold sentences, not file names (the calibration history note, how a step was done,
+# why, the table's notes): a survey named there is a mention, not a file the step used
+PROSE_KEY = re.compile(r"(^|[._\]])(history|how|why|note|notes|text|statement|reason|what)(\[\d+\])?$")
 
 
 def dem_setup(dem_path, dem_info=None):
@@ -1470,6 +1509,7 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
     gcp_file = survey_type == "points" and re.search(r"target|gcp", sname, re.I)
     gcp_date = _date_from_name(sname) if gcp_file else None
     look = list(dirs) + [HERE / "calibration"]
+    cal_flag = False                  # a camera's calibration found to rest on these points (date or notes)
     for cam, c in sorted((cams or {}).items()):
         p = Path(c["eo_path"])
         lin = pointing_lineage(p, look)
@@ -1482,6 +1522,15 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
                                       + ("carries a correction fitted to" if len(lin["chain"]) > 1 else
                                          "was fitted to")
                                       + f" this survey{via} (notes: '{textwrap.shorten(notes, 170)}')", "chain"))
+        elif named and gcp_file:
+            # calibration targets named by the calibration (solved from them?): the pointing would rest on these
+            # points, the elevations still come from water levels -- PARTLY-CIRCULAR, as the date rule below and
+            # the label's definition (LABELS, the docstring) say
+            cal_flag = True
+            found.append(("PARTLY-CIRCULAR", f"{cam} calibration {p.name} names these calibration targets in its "
+                                             f"notes (solved from them?): the pointing would rest on them, the "
+                                             f"elevations still come from water levels -> PARTLY-CIRCULAR "
+                                             f"('{textwrap.shorten(notes, 150)}')", "rule"))
         elif named:
             found.append(("CIRCULAR", f"{cam} calibration {p.name} names this survey in its notes (was it "
                                       f"fitted to it?): '{textwrap.shorten(notes, 170)}'", "rule"))
@@ -1496,6 +1545,7 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
         eo_date = _date_from_name(p.name)
         hist = history_note(p)
         if survey_type == "points" and eo_date and (eo_date == survey_date or eo_date == gcp_date):
+            cal_flag = True
             found.append(("PARTLY-CIRCULAR", f"{cam} calibration {p.name} is dated the day of these "
                           f"points ({eo_date}): if it was solved from them, the pointing is fitted to "
                           f"them (elevations still come from water levels) -> PARTLY-CIRCULAR"
@@ -1508,7 +1558,7 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
         found.append(("PARTLY-CIRCULAR", f"{sname} looks like calibration targets (GCPs): if the "
                       f"cameras' calibration was solved from these points, the comparison is "
                       f"PARTLY-CIRCULAR (no --camera-eo to check)", "rule"))
-    elif gcp_file and not any(f[0] == "PARTLY-CIRCULAR" for f in found):
+    elif gcp_file and not cal_flag:
         found.append((None, f"{sname} looks like calibration targets (GCPs), but no camera EO "
                             f"given is dated {gcp_date or 'their day'}: not the calibration's own points", "note"))
     if envelope_source:
@@ -1533,10 +1583,16 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
             k = key.lower()
             if "compar" in k or not (sname in val or (len(sstem) > 6 and sstem in val)):
                 continue
+            # a file a step used (an envelope's survey, a fit's) is what the chain did; a SENTENCE that mentions the
+            # survey (a history note, a 'how') may say it was not used ('independent of ...'): the same suggestion,
+            # as a rule that can misfire (survey_products.py lets a reason in surveys.csv overrule it)
+            prose = PROSE_KEY.search(k) is not None
+            kind = "rule" if prose else "chain"
+            in_text = " (in a sentence, not as a file the step used: was it used?)" if prose else ""
             if "envelope" in k:
-                found.append(("PARTLY-CIRCULAR", f"provenance {pj.name}: {key} = {val}", "chain"))
+                found.append(("PARTLY-CIRCULAR", f"provenance {pj.name}: {key} = {val}{in_text}", kind))
             elif re.search(r"calib|pointing|fit|(^|[._\[])eo([._\]]|$)", k):
-                found.append(("CIRCULAR", f"provenance {pj.name}: {key} = {val}", "chain"))
+                found.append(("CIRCULAR", f"provenance {pj.name}: {key} = {val}{in_text}", kind))
             else:
                 found.append((None, f"provenance {pj.name} names this survey at {key}", "note"))
         if not envelope_source:
@@ -2375,10 +2431,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     findings = audit_label(label, survey_path, survey_type, survey_date, cams, envelope_source,
                            dem_path, dirs=eo_dirs or (), dem_info=dem_info)
     outside, from_mid, gap_text = time_gap(survey_date, photo_dates)
-    worst = label
-    for sug, _, _ in findings:
-        if sug and _rank(sug) > _rank(worst):
-            worst = sug
+    worst = suggested_label(label, findings)
     warn_lines = []
     if worst != label:
         warn_lines.append(f"DOWNGRADE WARNING: passed {label}, but the checks below suggest "
