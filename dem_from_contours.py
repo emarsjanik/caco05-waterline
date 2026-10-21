@@ -26,8 +26,13 @@ WHAT THIS DEM IS AND IS NOT:
 SOURCES OF ERROR, roughly in order of size:
   * Waterline detection: the largest term, and it varies across the
     frame. The far field is worse than the near field.
-  * Georectification: 0.33 m horizontal RMS against surveyed control,
-    as of the Nov 2025 calibration. Unverified since.
+  * Georectification: on the Nov 2025 solve's own targets, mean 0.33 m
+    and RMS 0.42 m horizontally (in-sample: c1 n=14, c2 n=13, 29-150 m
+    from the cameras); left out one at a time, RMS c1 0.59 m, c2 0.41 m.
+    That does not bound it farther out: the solve's uncertainty grows to
+    metres at 200-400 m (georectify_uncertainty.py, which writes it per
+    pixel to calibration/<cam>_geom_sigma.csv), tan(beta) times that in
+    elevation. Not verified against a survey since Nov 2025.
   * Water level: GNSS-R, a measurement rather than a model.
   * Wave setup: the detected edge sits ABOVE the still-water line by an
     amount that grows with wave height. When the contours carry
@@ -46,8 +51,10 @@ Usage:
         [--max-spread 0.5] [--fill-gaps] [--start-date ...] [--end-date ...]
 
 Writes dem_out_{dem,spread,count,sigma}.asc (_sigma: the standard error of
-each cell's median, sigma_grid; and _source.asc with
---interpolate-edge), dem_out_info.json (dates, frames per camera and
+each cell's median, sigma_grid; _source.asc with --interpolate-edge;
+_sigma_obs.asc with --sigma-obs: the SE with the errors a cell's
+crossings share, observation_sigma_grid), dem_out_info.json (dates,
+frames per camera and
 what the filters left out -- what the page needs and the grids do not
 hold; with --max-day-offset also each camera-day left out with its
 offset, and the day test's first-pass and final offsets) and the page
@@ -1957,9 +1964,11 @@ def sigma_grid(dem, spread, count):
     of C), the georectification (0.33-0.42 m horizontal in-sample, times
     the beach slope) and a detector bias. No observation term is added
     because the inputs are not there: the live rows carry no per-frame
-    water-level sigma (tide_model_spread is 0 for GNSS-R) and there is no
-    per-pixel horizontal sigma yet; adding a guessed constant would make the
-    grid look like an accuracy it is not. It also treats the crossings as
+    water-level sigma (tide_model_spread is 0 for GNSS-R), and the per-pixel
+    horizontal sigma (georectify_uncertainty.py) enters only the opt-in
+    <stem>_sigma_obs.asc (--sigma-obs, observation_sigma_grid), with stated
+    defaults for the other terms; adding a guessed constant here would make
+    the grid look like an accuracy it is not. It also treats the crossings as
     independent, so it is optimistic where a day's frames share an error.
     """
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -1979,6 +1988,193 @@ def write_ascii_grid(path, grid, e0, n0, cell, nodata=-9999.0):
         f.write(f"NODATA_value {nodata}\n")
         for r in flipped:
             f.write(" ".join("%.4f" % (v if np.isfinite(v) else nodata) for v in r) + "\n")
+
+
+# ---------------------------------------------------------------------
+# --sigma-obs: the observation errors a cell's crossings share. Opt-in;
+# no other output depends on it.
+# ---------------------------------------------------------------------
+
+# Water level, m: GNSS-R against the level predicted from the NOAA Chatham gauge, residual RMS
+# 0.12 m on calm Aug-Sep 2026 (the station's own QC, gnssr_qc.py's reference test). An upper
+# bound on the GNSS-R's own error: the transfer from a harbour gauge 30 km away is in it (the
+# published sub-daily GNSS-IR standard is 0.02-0.05 m against a co-located gauge: Larson et al.
+# 2013, Lofgren et al. 2014), and it leaves out the +/-0.061 m of the NAVD88 datum (OPUS,
+# mostly the geoid model: docs/VALIDATION.md 4.2), which every frame shares.
+SIGMA_WL_M = 0.12
+# Wave setup, m: the scatter of Stockdon et al. (2006)'s setup <eta> = 0.35 beta_f sqrt(H0 L0)
+# about the setup measured in its own 10 field experiments, RMSE 0.21 m -- as re-evaluated on
+# that data set by Dalinghaus, Coco & Higuera (2023, NHESS 23, 2157-2169, doi:10.5194/nhess-
+# 23-2157-2023) and quoted as 21 cm by the USGS's parametric setup hindcasts; the full text of
+# Stockdon et al. was not retrievable when this was written, so check it before quoting. The
+# station's C (0.037, fitted to its own RTK) removes the formula's mean bias at this beach, not
+# this scatter about it (setup varies with the slope, which changes with storms: 0.13 in Jan
+# 2025, 0.07 in Mar 2025, VALIDATION 4.1).
+SIGMA_SETUP_M = 0.21
+# A cell's local slope is the least-squares plane through the measured cells of its 3 x 3
+# neighbourhood (itself included), with at least this many of them.
+SLOPE_MIN_CELLS = 4
+
+
+def point_geometry_cov(E, N, Z, cams, ucol, table_dir):
+    """
+    Per point, the horizontal error covariance its georectification
+    carries (sxx, syy, sxy, m^2): its camera's table
+    <table_dir>/<camera>_geom_sigma.csv (georectify_uncertainty.py) at the
+    point's pixel column, its ground range from that camera (the camera's
+    position from the table) and its elevation, interpolated
+    (georectify_uncertainty.geom_cov). NaN for a camera without a table,
+    a point without a pixel column, and a point the table cannot place.
+    The tables describe the live 2025-11-13 calibration: frames
+    georectified with another EO need their own.
+    -> (n x 3 array, {camera: table record}, lines to print)
+    """
+    from georectify_uncertainty import read_geom_sigma, geom_cov
+    out = np.full((len(E), 3), np.nan)
+    ucol = np.full(len(E), np.nan) if ucol is None or len(ucol) != len(E) else np.asarray(ucol, float)
+    tables, lines = {}, []
+    for c in sorted(set(cams.tolist())):
+        path = Path(table_dir) / f"{c}_geom_sigma.csv"
+        m = cams == c
+        if not path.exists():
+            lines.append(f"NOTE: --sigma-obs: no {path} -- {c}'s {int(m.sum())} point(s) get no georectification "
+                         f"term, and cells only {c} crosses no _sigma_obs value (python3 georectify_uncertainty.py "
+                         f"writes it)")
+            continue
+        t = read_geom_sigma(path)
+        tables[c] = t
+        rng = np.hypot(E[m] - t["x"], N[m] - t["y"])
+        out[m] = np.stack(geom_cov(t, ucol[m], rng, Z[m]), 1)
+        placed = int(np.isfinite(out[m, 0]).sum())
+        lines.append(f"Georectification  : {c} {placed} of {int(m.sum())} point(s) placed in {path.name} "
+                     f"({t['provenance'].get('covariance', '?').split(' --')[0]} covariance, solve "
+                     f"{t['provenance'].get('solve', '?').split(' --')[0]})")
+    return out, tables, lines
+
+
+def local_slope(dem, cell):
+    """
+    The DEM's own slope at each cell: dz/dE and dz/dN (m/m) of the
+    least-squares plane through the measured cells of its 3 x 3
+    neighbourhood, itself included (at least SLOPE_MIN_CELLS of them, not
+    all in one line). NaN elsewhere. Rows of `dem` run north, as
+    build_grid makes them.
+    """
+    nr, nc = dem.shape
+    pad = np.pad(dem, 1, mode="constant", constant_values=np.nan)
+    keys = ("n", "x", "y", "xx", "yy", "xy", "z", "xz", "yz")
+    S = {k: np.zeros((nr, nc)) for k in keys}
+    for a in (-1, 0, 1):                         # rows: north
+        for b in (-1, 0, 1):                     # columns: east
+            z = pad[1 + a:1 + a + nr, 1 + b:1 + b + nc]
+            m = np.isfinite(z).astype(float)
+            zz = np.where(m > 0, z, 0.0)
+            dx, dy = b * cell, a * cell
+            S["n"] += m
+            S["x"] += m * dx
+            S["y"] += m * dy
+            S["xx"] += m * dx * dx
+            S["yy"] += m * dy * dy
+            S["xy"] += m * dx * dy
+            S["z"] += zz
+            S["xz"] += zz * dx
+            S["yz"] += zz * dy
+    A = np.stack([np.stack([S["n"], S["x"], S["y"]], -1), np.stack([S["x"], S["xx"], S["xy"]], -1),
+                  np.stack([S["y"], S["xy"], S["yy"]], -1)], -2).reshape(-1, 3, 3)
+    rhs = np.stack([S["z"], S["xz"], S["yz"]], -1).reshape(-1, 3)
+    ok = (np.isfinite(dem) & (S["n"] >= SLOPE_MIN_CELLS)).ravel()
+    ok[ok] = np.abs(np.linalg.det(A[ok])) > 1e-6 * cell ** 4
+    sol = np.full((nr * nc, 3), np.nan)
+    if ok.any():
+        sol[ok] = np.linalg.solve(A[ok], rhs[ok][..., None])[..., 0]
+    return sol[:, 1].reshape(nr, nc), sol[:, 2].reshape(nr, nc)
+
+
+def observation_sigma_grid(dem, sigma, E, N, frames, geo, e0, n0, cell, sigma_wl=SIGMA_WL_M,
+                           sigma_setup=SIGMA_SETUP_M):
+    """
+    <stem>_sigma_obs.asc (--sigma-obs), m: the cell's standard error
+    (sigma_grid) combined with the observation errors its crossings share,
+
+        sqrt(SE^2 + sigma_wl^2 + sigma_setup^2 + g' S g)
+
+    g the gradient of the DEM's local plane (local_slope: |g| = tan beta,
+    the DEM's own slope), S the horizontal error covariance of the
+    georectification at the cell (point_geometry_cov: the mean over the
+    cell's frames of each frame's mean over its points there). g' S g is
+    (tan beta x sigma_x)^2 with sigma_x the horizontal error along the
+    slope: a waterline placed sigma_x off across the slope lands where the
+    beach is tan beta x sigma_x higher or lower than its elevation. The
+    defaults: SIGMA_WL_M (the station's GNSS-R vs gauge QC) and
+    SIGMA_SETUP_M (Stockdon et al. 2006); --sigma-wl and --sigma-setup set
+    others.
+
+    WHY NOT DIVIDED BY sqrt(n). Every frame of a camera is georectified
+    with the same EO, carries the same water-level datum and the same
+    setup coefficient: those errors do not average down over a cell's
+    crossings, and the SE (which does) cannot see them. The random part
+    of the water-level and setup errors also scatters the crossings, so
+    it is in the SE too and counted twice here: with the defaults this
+    is an upper estimate of a cell's error, not a best one. Plant et al.
+    (2002) put an error on every cell of a coastal DEM; this one is meant
+    to be tested against a survey (georectify_uncertainty.py --evaluate),
+    not taken on trust.
+
+    Only cells with an SE (measured, as _sigma.asc), a local slope and a
+    georectification term; NaN elsewhere. -> (grid, record, lines)
+    """
+    nr, ncols = dem.shape
+    cov = np.full((nr * ncols, 3), np.nan)
+    ok = np.all(np.isfinite(geo), axis=1) if geo is not None else np.zeros(len(E), bool)
+    if ok.any():
+        flat = ((N[ok] - n0) / cell).astype(np.int64) * ncols + ((E[ok] - e0) / cell).astype(np.int64)
+        _, fid = np.unique(frames[ok], return_inverse=True)
+        fid = np.asarray(fid).ravel()
+        nf = int(fid.max()) + 1
+        uk, inv = np.unique(flat * nf + fid, return_inverse=True)
+        inv = np.asarray(inv).ravel()
+        cnt = np.bincount(inv).astype(float)
+        per = np.stack([np.bincount(inv, weights=geo[ok, j]) / cnt for j in range(3)], 1)
+        kc = uk // nf
+        nfc = np.bincount(kc, minlength=nr * ncols).astype(float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            cov = np.stack([np.bincount(kc, weights=per[:, j], minlength=nr * ncols) / nfc
+                            for j in range(3)], 1)
+    sxx, syy, sxy = (cov[:, j].reshape(nr, ncols) for j in range(3))
+    gE, gN = local_slope(dem, cell)
+    with np.errstate(invalid="ignore"):
+        var_geo = gE * gE * sxx + gN * gN * syy + 2.0 * gE * gN * sxy
+        have_se = np.isfinite(sigma)
+        good = have_se & np.isfinite(var_geo)
+        out = np.where(good, np.sqrt(sigma ** 2 + sigma_wl ** 2 + sigma_setup ** 2 + np.maximum(var_geo, 0.0)),
+                       np.nan)
+    geo_term = np.sqrt(np.maximum(var_geo[good], 0.0))
+    tanb = np.hypot(gE, gN)[good]
+    no_slope = int((have_se & ~np.isfinite(gE)).sum())
+    no_geo = int((have_se & np.isfinite(gE) & ~np.isfinite(sxx)).sum())
+    q = lambda x, p: round(float(np.percentile(x, p)), 4) if len(x) else None
+    rec = {"file": "_sigma_obs.asc",
+           "definition": "sqrt(SE^2 + sigma_wl^2 + sigma_setup^2 + g' S g): SE the _sigma.asc value; g the gradient "
+                         "of the DEM's least-squares plane over 3 x 3 cells (|g| = tan beta); S the georectification's "
+                         "horizontal error covariance at the cell (calibration/<cam>_geom_sigma.csv, "
+                         "georectify_uncertainty.py), mean over the cell's frames. The observation terms are errors "
+                         "the crossings share, not divided by sqrt(n); their random part is in the SE too, so it is "
+                         "an upper estimate. Test it against a survey: georectify_uncertainty.py --evaluate",
+           "sigma_wl_m": sigma_wl, "sigma_setup_m": sigma_setup, "cells": int(good.sum()),
+           "median_m": q(out[good], 50), "p90_m": q(out[good], 90),
+           "geometry_median_m": q(geo_term, 50), "geometry_p90_m": q(geo_term, 90), "tan_beta_median": q(tanb, 50),
+           "cells_with_se_but_no_value": {"no_local_slope": no_slope, "no_georectification_term": no_geo}}
+    lines = []
+    if good.any():
+        lines.append(f"observation sigma : median {rec['median_m']:.3f} m, p90 {rec['p90_m']:.3f} m on {rec['cells']} "
+                     f"cell(s) (sqrt(SE^2 + water level {sigma_wl:g}^2 + setup {sigma_setup:g}^2 + (tan(beta) x "
+                     f"sigma_x)^2): --sigma-obs, an upper estimate)")
+        lines.append(f"                    georectification term median {rec['geometry_median_m']:.3f} m, p90 "
+                     f"{rec['geometry_p90_m']:.3f} m; tan(beta) median {rec['tan_beta_median']:.3f}")
+    if no_slope or no_geo:
+        lines.append(f"                    no value on {no_slope} cell(s) without a local slope (fewer than "
+                     f"{SLOPE_MIN_CELLS} measured cells around them) and {no_geo} without a georectification term")
+    return out, rec, lines
 
 
 def main():
@@ -2092,6 +2288,21 @@ def main():
                     help="Skip the reporting-only diagnostics (residuals against the tide's stage and Hs, "
                          "the c1 - c2 offset in shared cells). They change no value of the DEM; they are "
                          "printed and kept in <stem>_info.json (diagnostics).")
+    ap.add_argument("--sigma-obs", action="store_true",
+                    help="Also write <stem>_sigma_obs.asc: the standard error (_sigma.asc) combined with the "
+                         "observation errors a cell's crossings share -- the water level (--sigma-wl), the wave "
+                         "setup (--sigma-setup) and the georectification's horizontal error times the DEM's local "
+                         "slope, from <geom-sigma-dir>/<camera>_geom_sigma.csv (georectify_uncertainty.py). Off by "
+                         "default; no other grid, number or page changes. See observation_sigma_grid().")
+    ap.add_argument("--sigma-wl", type=float, default=SIGMA_WL_M,
+                    help=f"With --sigma-obs: the water-level error, m (default {SIGMA_WL_M:g}: GNSS-R against the "
+                         f"Chatham gauge's transfer, gnssr_qc.py)")
+    ap.add_argument("--sigma-setup", type=float, default=SIGMA_SETUP_M,
+                    help=f"With --sigma-obs: the wave-setup error, m (default {SIGMA_SETUP_M:g}: the scatter of "
+                         f"Stockdon et al. 2006's setup formula)")
+    ap.add_argument("--geom-sigma-dir", default=str(Path(__file__).resolve().parent / "calibration"),
+                    help="With --sigma-obs: the folder of <camera>_geom_sigma.csv (default calibration/ beside "
+                         "this script)")
     ap.add_argument("--no-plot", action="store_true",
                     help="Skip the page (<stem>_dem.png). The grids and <stem>_info.json are "
                          "still written; 'python3 dem_figure.py <stem>' draws the page later.")
@@ -2165,6 +2376,16 @@ def main():
     print(f"extent            : {E.max()-E.min():.1f} m E-W by {N.max()-N.min():.1f} m N-S")
     print()
 
+    # --sigma-obs: each point's georectification error from its camera's table, kept beside the
+    # points through the filters below (geo is None without it)
+    geo, geo_tables = None, {}
+    if args.sigma_obs:
+        geo, geo_tables, lines = point_geometry_cov(E, N, Z, cams, load_stats.get("pixel_column"),
+                                                    args.geom_sigma_dir)
+        for line in lines:
+            print(line)
+        print()
+
     # Runs of a line across the shore (waterline_track.py): the line tracer carrying on along
     # one pixel row out over the water. The survey-date builds' consistency filter drops them
     # already (their files carry the ground); the live cron's filter runs on the photo rows
@@ -2200,6 +2421,7 @@ def main():
         if drop_cs.any():
             k = ~drop_cs
             E, N, Z, cams, dates, frames = E[k], N[k], Z[k], cams[k], dates[k], frames[k]
+            geo = None if geo is None else geo[k]
         print()
 
     if args.fit_setup or args.max_day_offset or args.max_frame_offset or not args.no_diagnostics:
@@ -2228,6 +2450,7 @@ def main():
         if bad:
             keep = np.array([f not in bad for f in frames])
             E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
+            geo = None if geo is None else geo[keep]
             print(f"   left out {len(bad)} frame(s), {int((~keep).sum())} point(s)")
             pair_cell, pair_frame = frame_pairs(E, N, frames, args.cell)
         print()
@@ -2332,6 +2555,7 @@ def main():
         rejected_days = set(rejected)
         if keep is not None:
             E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
+            geo = None if geo is None else geo[keep]
         print()
         if len(E) == 0:
             print("No points left: the day-consistency test rejected every camera-day "
@@ -2388,6 +2612,21 @@ def main():
     if np.isfinite(sigma).any():
         print(f"standard error    : median {np.nanmedian(sigma):.3f} m, p90 {np.nanpercentile(sigma, 90):.3f} m"
               f"  (1.25 x spread/2 / sqrt(frames): repeatability of the median, not accuracy)")
+    # --sigma-obs: the SE with the observation errors the crossings share (observation_sigma_grid)
+    sigma_obs, obs_record = None, None
+    if args.sigma_obs:
+        sigma_obs, obs_record, lines = observation_sigma_grid(dem, sigma, E, N, frames, geo, e0, n0, args.cell,
+                                                              args.sigma_wl, args.sigma_setup)
+        obs_record["tables"] = {c: {"file": Path(t["path"]).name, "sha256": t["sha256"],
+                                    "covariance": t["provenance"].get("covariance", "").split(" --")[0],
+                                    "solve": t["provenance"].get("solve", "").split(" --")[0]}
+                                for c, t in sorted(geo_tables.items())}
+        for line in lines:
+            print(line)
+        if not np.isfinite(sigma_obs).any():
+            print("NOTE: --sigma-obs: no cell has an observation sigma; _sigma_obs.asc not written")
+            sigma_obs = None
+            obs_record["file"] = None
 
     source = None
     if args.interpolate_edge:
@@ -2425,6 +2664,8 @@ def main():
     write_ascii_grid(str(stem) + "_count.asc",
                      count.astype(float), e0, n0, args.cell, nodata=0.0)
     write_ascii_grid(str(stem) + "_sigma.asc", sigma, e0, n0, args.cell)
+    if sigma_obs is not None:
+        write_ascii_grid(str(stem) + "_sigma_obs.asc", sigma_obs, e0, n0, args.cell)
     if source is not None:
         write_ascii_grid(str(stem) + "_source.asc", source.astype(float), e0, n0, args.cell,
                          nodata=0.0)
@@ -2433,6 +2674,8 @@ def main():
     print(f"wrote {stem}_spread.asc  (16-84 percentile range, m)")
     print(f"wrote {stem}_count.asc   (samples per cell)")
     print(f"wrote {stem}_sigma.asc   (standard error of the cell median, m: repeatability only)")
+    if sigma_obs is not None:
+        print(f"wrote {stem}_sigma_obs.asc (SE with the errors the crossings share, m: --sigma-obs)")
 
     sstem = None
     if args.series_dir:
@@ -2447,6 +2690,8 @@ def main():
             write_ascii_grid(str(sstem) + "_count.asc", count.astype(float), e0, n0,
                              args.cell, nodata=0.0)
             write_ascii_grid(str(sstem) + "_sigma.asc", sigma, e0, n0, args.cell)
+            if sigma_obs is not None:
+                write_ascii_grid(str(sstem) + "_sigma_obs.asc", sigma_obs, e0, n0, args.cell)
             print(f"series            : {sstem}_{{dem,spread,count,sigma}}.asc (+ _info.json)")
 
     # What the page needs and the grids do not hold: dates, frames, filters.
@@ -2502,6 +2747,9 @@ def main():
             **day_record,
         },
     }
+    if obs_record is not None:
+        # only with --sigma-obs: <stem>_sigma_obs.asc, what it is and the inputs it was made with
+        page_info["sigma_obs"] = obs_record
     with open(str(stem) + "_info.json", "w") as f:
         json.dump(page_info, f, indent=1)
     print(f"wrote {stem}_info.json   (dates, frames, filters: for the page)")
