@@ -193,6 +193,12 @@ DEM_MAX_DAY_OFFSET=0.15
 # (dem_change.py). Set DEM_WINDOW_DAYS="" to skip.
 DEM_WINDOW_DAYS=7
 DEM_SERIES="$BASE/archive/dems"
+# Report-only check of the change map's level of detection when the crossings of one day share an
+# error (its water level, setup, pointing): set to 1 and the window DEM also writes
+# <stem>_sigma_day.asc (dem_from_contours.py --day-block-se) and dem_change.py prints a DAY-BLOCK
+# LEVEL OF DETECTION block (--day-block-lod) beside its usual lines. The DEMs, the change grids and
+# the map stay exactly as they are. "" = off (the default).
+DEM_DAY_BLOCK_LOD=""
 
 # Wave-setup correction (extract_elevation_contours.py --setup-coef): each
 # waterline's elevation becomes water level + C*sqrt(Hs*L0), Hs and Tp from
@@ -552,6 +558,7 @@ else
                 if [ -n "$DEM_WINDOW_DAYS" ]; then
                     python3 "$BASE/dem_from_contours.py" "$GROUND" "${DEM_STEM}_${DEM_WINDOW_DAYS}day" $hs_arg \
                         --last-days "$DEM_WINDOW_DAYS" --series-dir "$DEM_SERIES" \
+                        ${DEM_DAY_BLOCK_LOD:+--day-block-se} \
                         --cell "$DEM_CELL" \
                         --min-points "$DEM_MIN_POINTS" \
                         --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1
@@ -586,7 +593,8 @@ else
                             new_dem="$DEM_SERIES/dem_${win_end}_${DEM_WINDOW_DAYS}d"
                         fi
                         python3 "$BASE/dem_change.py" --series "$DEM_SERIES" --days "$DEM_WINDOW_DAYS" \
-                            ${new_dem:+--b "$new_dem"} --rebuild "$GROUND" -- $hs_arg \
+                            ${new_dem:+--b "$new_dem"} ${DEM_DAY_BLOCK_LOD:+--day-block-lod} \
+                            --rebuild "$GROUND" -- $hs_arg \
                             --cell "$DEM_CELL" \
                             --min-points "$DEM_MIN_POINTS" \
                             --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1 \
