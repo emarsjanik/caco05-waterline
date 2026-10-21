@@ -260,6 +260,26 @@ GNSSR_STALE_DAYS=5
 GNSSR_START_FILE="$BASE/archive/gnssr_record_start.txt"
 GNSSR_MAX_LOST_DAYS=3
 
+# Camera pointing log (pointing_daily.py). LOG ONLY: nothing here changes a
+# product; every waterline is still georectified with the calibrations of
+# step 6 as they are. Each run, for each camera and each complete UTC day of
+# the last 7 not yet logged (at most 2 a run, so a backlog fills over a few
+# runs; off the station a camera-day of 2 frames took 14 s with its
+# reference, not yet timed on the NUC), up to 3 archived timex spread over the
+# day are matched against the camera's reference frame (land features, the
+# survey products' matcher), each gated as survey_products.py
+# --correct-pointing gates a day (40+ inliers, turn_sigma 4+, inliers spread
+# 180 px+, a turn of 2.5 deg or less), and the day's turn from the reference
+# is written to archive/pointing_daily_<cam>.json with the EO a correction
+# would use, and one line per day to this log (no WARNING: a camera that
+# turned reads 'MOVED' there; look before trusting the maps). c1 turned
+# -1.2 deg of pan on 26-28 Sep 2026 and nothing here saw it. The reference:
+# pointing_check.py's bank (calibration/pointing/<cam>/) at this
+# calibration, else a frame of the calibration's own day still in the
+# archive, else none (the log says how to give one: --reference-day). Set
+# POINTING_LOG_ENABLE=0 to skip.
+POINTING_LOG_ENABLE=1
+
 mkdir -p "$SCRATCH" "$SCRATCH_INPUT" "$ARCHIVE_CSV" "$ARCHIVE_IMG" "$ARCHIVE_RAS" "$(dirname "$LOG")"
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
@@ -620,6 +640,16 @@ else
             done
         fi
     fi
+fi
+
+# 7b. Camera pointing log (see POINTING_LOG_ENABLE): log only, after the
+#     products so a slow match never holds them up; its failure is a WARNING
+#     (the products are unaffected).
+if [ "$POINTING_LOG_ENABLE" = "1" ]; then
+    python3 "$BASE/pointing_daily.py" --image-dir "$ARCHIVE_IMG" --log-dir "$BASE/archive" \
+        --eo-c1 "$CAL/CACO05_c1_20251113_EO-CV.yaml" \
+        --eo-c2 "$CAL/CACO05_c2_20251113_EO-CV.yaml" >> "$LOG" 2>&1 \
+        || log "WARNING: camera pointing log failed (see above); the products are unaffected"
 fi
 
 # 8. Station health summary (station_status.py): also written to

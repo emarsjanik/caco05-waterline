@@ -65,7 +65,12 @@ stale, and nothing stale is ever reported as current):
             confirm (UNCONFIRMED), is LEFT OUT of the detection and listed
             with what was measured (--keep-moved-days keeps both); if most
             days differ from the reference nothing is left out and a warning
-            says to look. Nothing is dropped silently.
+            says to look. Nothing is dropped silently. OPT-IN: with
+            --correct-pointing (an evaluation, in its own root
+            <root>_pointing-corrected) a day whose matched features pass
+            pointing_daily.py's gates is detected and its waterlines mapped
+            with its own pointing (the calibration turned by the change
+            measured that day) instead; every other day as without it.
   detect    historical eras: detect_original_view.py per camera with the
             station ID, the date's calibration, the search envelope from the
             OTHER survey, the forcing files and --setup-coef (the detector's
@@ -549,6 +554,18 @@ HORIZON_LIMIT_PX = 50
 # nothing shows the camera back). When the days left out are most of the window,
 # the step and the README say so with the count (pointing_majority_note).
 LEFT_OUT_VERDICTS = ("DIFFERENT POINTING", "UNCONFIRMED")
+# OPT-IN per-day pointing CORRECTION (--correct-pointing; pointing_daily.py, whose docstring has the method and the
+# gates). Instead of leaving a turned day out, a day whose matched features pass pointing_daily's gates (MATCH_INLIERS
+# or more, TURN_SIGMA_MIN or more, inliers spread MATCH_SPREAD_TESTED_PX or more, a turn of at most
+# pointing_daily.CORRECT_MAX_DEG, not UNCONFIRMED, not the reference day) is detected like the others and its
+# waterlines are mapped with its own pointing: the calibration turned by the change the features measured that day,
+# the coastal-imaging practice (Rodriguez-Padilla et al. 2020; Arriaga et al. 2022: ~40% less shoreline error at
+# Sisal). Every other day is as in the default build (a day measured to differ that fails a gate is still left out).
+# OFF by default, so the products stay as they are; a corrected build goes in its own root, <root>_pointing-corrected
+# (pointing_root_problem), so the two can be compared date by date against the same survey (docs/VALIDATION.md
+# 4.6b). No survey enters the correction, so the labels do not change. Not on a BLIND date (its A and B builds are
+# fixed by its protocol) and not with --eo (a GCP-free B is the pre-registered procedure's product as made).
+POINTING_CORRECTED = "pointing-corrected"
 
 # Fewer compared cells or points than this is not an estimate (as survey_compare.py's MIN_BAND_N).
 FEW_N = 10
@@ -2979,10 +2996,102 @@ def other_pointing_warning(info, lo, where, date=None):
 def skip_days_of(res, args):
     """The days the detection leaves out, from a pointing result and this run's options (None: the
     defaults). A result of the rule before Oct 2026 whose 'most days differ' guard kept every day
-    ('leave_out' False) gives none, as its detection left out none."""
+    ('leave_out' False) gives none, as its detection left out none. With --correct-pointing the days it
+    corrects (pointing_corrections) are detected, not left out."""
     if not res or getattr(args, "keep_moved_days", False) or not res.get("leave_out", True):
         return []
-    return sorted(res.get("different_days") or [])
+    skip = sorted(res.get("different_days") or [])
+    if getattr(args, "correct_pointing", False):
+        fixed = pointing_corrections(res)[0]
+        skip = [d for d in skip if d not in fixed]
+    return skip
+
+
+def pointing_correction_rules():
+    """pointing_daily's gates (correction_rules) with this script's thresholds: MATCH_INLIERS, TURN_SIGMA_MIN and
+    MATCH_SPREAD_TESTED_PX, and its own CORRECT_MAX_DEG."""
+    import pointing_daily
+    return pointing_daily.correction_rules(MATCH_INLIERS, TURN_SIGMA_MIN, MATCH_SPREAD_TESTED_PX)
+
+
+def pointing_corrections(res):
+    """--correct-pointing: the days of a pointing result that pass pointing_daily's gates, {day: the change measured
+    and its match}, and why each other day does not, {day: [why]}; judged against the result's reference day.
+    ({}, {}) without rows."""
+    import pointing_daily
+    if not res or not res.get("rows"):
+        return {}, {}
+    return pointing_daily.window_corrections(res["rows"], pointing_correction_rules(),
+                                             (res.get("info") or {}).get("reference_day"))
+
+
+def corrected_days(dst):
+    """The days a detection mapped with their own pointing (its stamp's pointing_correction; none without it)."""
+    return sorted(((dst or {}).get("pointing_correction") or {}).get("days") or {})
+
+
+def pointing_correction_plan(plan, state, cam, args):
+    """--correct-pointing: what the detection of this camera corrects, from the pointing results it uses
+    (pointing_skip_days has checked they are this window's and this calibration's): {"days": {day: change},
+    "not_corrected": {day: [why]}, "res": the results}; None without the option."""
+    if not getattr(args, "correct_pointing", False):
+        return None
+    res = (state.get("pointing") or {}).get(cam) or load_json(plan["out"] / "pointing" / f"pointing_{cam}.json")
+    corr, why_not = pointing_corrections(res)
+    return {"days": corr, "not_corrected": why_not, "res": res}
+
+
+def pointing_correction_sig(pc_):
+    """The part of a corrected detection's signature that the correction adds: its version, gates, the days and
+    their changes, pointing_daily.py's sha256. Only with --correct-pointing: a default build's signature is as it
+    was, so nothing rebuilds for this code."""
+    import pointing_daily
+    return {"v": pointing_daily.CORRECTION_VERSION, "rules": pointing_correction_rules(),
+            "days": {d: v["d_deg"] for d, v in sorted(pc_["days"].items())}, "script": script_sha("pointing_daily.py")}
+
+
+def correct_pointing_rows(plan, cam, ground, pc_):
+    """--correct-pointing, once the camera's waterlines are georectified with the calibration: each corrected day's
+    rows of `ground` mapped again with that day's own pointing (pointing_daily.apply_corrections; its EO files in
+    waterlines/<cam>/pointing_corrected_eo/). -> the record the detection's stamp keeps, which the README and
+    provenance read."""
+    import pointing_daily
+    from georectify import load_intrinsics, load_extrinsics
+    c = plan["cams"][cam]
+    info = (pc_.get("res") or {}).get("info") or {}
+    days = pointing_daily.apply_corrections(ground, cam, load_intrinsics(c["io_path"]), load_extrinsics(c["eo_path"]),
+                                            c["eo_file"], pc_["days"], Path(ground).parent / "pointing_corrected_eo",
+                                            reference=info.get("reference_frame") or "")
+    say(f"pointing correction {cam}", (", ".join(
+        f"{d} {v['d_deg'][0]:+.2f}/{v['d_deg'][1]:+.2f}/{v['d_deg'][2]:+.2f} deg ({v['rows']} points"
+        + (f", moved {v['moved_m_median']:.2f} m median" if v.get("moved_m_median") is not None else "") + ")"
+        for d, v in sorted(days.items())) or "no day passes the gates")
+        + " (--correct-pointing: mapped with each day's own pointing)")
+    return {"v": pointing_daily.CORRECTION_VERSION, "rules": pointing_correction_rules(),
+            "reference_day": info.get("reference_day"), "reference_frame": info.get("reference_frame"),
+            "days": days, "not_corrected": pc_["not_corrected"]}
+
+
+def pointing_root_problem(plan, args):
+    """--correct-pointing builds in its own root, named for it (<root>_pointing-corrected, optionally + _c<C>), and no
+    other build goes in such a root, so a corrected product never replaces a default one and a root's name says
+    which it holds; not on a BLIND date, not with --eo. -> text ('' when fine). Refused, exit 5."""
+    on = bool(getattr(args, "correct_pointing", False))
+    root = Path(str(getattr(args, "output_root", "") or ""))
+    named = bool(re.search(rf"_{re.escape(POINTING_CORRECTED)}(_c\d+(\.\d+)?)?$", root.name))
+    if on and plan.get("blind"):
+        return (f"--correct-pointing is not for a BLIND date: its builds (A, the table's calibration, and the GCP-free "
+                f"B) are fixed by its protocol")
+    if on and any(c.get("eo_given") for c in plan["cams"].values()):
+        return "--correct-pointing does not go with --eo: a calibration given there is built as it was made"
+    if on and not named:
+        return (f"a --correct-pointing build goes in its own root, named for it: --output-root "
+                f"{root.parent / (root.name + '_' + POINTING_CORRECTED)} (not {root}: a corrected product never "
+                f"replaces a default one, and the root's name says which it holds)")
+    if named and not on:
+        return (f"{root} is named for pointing-corrected products: build there with --correct-pointing, or build this "
+                f"one in another --output-root")
+    return ""
 
 
 def pointing_majority_note(res, args, skip=None, ran=True):
@@ -3088,9 +3197,17 @@ def print_pointing(cam, res, args, detect_now=True, detected=None):
     note = pointing_majority_note(res, args)
     if note:
         warn(f"{cam}: {note}")
+    fixed = pointing_corrections(res)[0] if getattr(args, "correct_pointing", False) else {}
+    if fixed:
+        verdict = {r["date"]: r.get("verdict", "?") for r in res["rows"]}
+        say(f"{cam} corrected", ("" if detect_now else "when the detection runs again: ")
+            + ", ".join(f"{d} ({verdict.get(d, '?')}, {v['d_deg'][0]:+.2f}/{v['d_deg'][1]:+.2f}/{v['d_deg'][2]:+.2f} "
+                        f"deg)" for d, v in sorted(fixed.items()))
+            + " (--correct-pointing: detected, and mapped with the calibration turned by the change matched features "
+              "measured that day)")
     if res.get("different_days"):
         skip = skip_days_of(res, args)
-        kept = [d for d in res["different_days"] if d not in skip]
+        kept = [d for d in res["different_days"] if d not in skip and d not in fixed]
         verdict = {r["date"]: r.get("verdict", "?") for r in res["rows"]}
         # what the detection does with these results: this run's when it runs the detection too; a pointing-only
         # run (--steps pointing) says what the next detection will do and what the one on disk did
@@ -3200,6 +3317,9 @@ def step_detect(plan, args, state):
             sig = {"cmd": cmd_text(cmd), "photos": hashlib.sha1("\n".join(p.name for p in photos).encode()).hexdigest(),
                    "after": {"forcing": token(out, "forcing")}, "eo_file": file_sig(c["eo_path"]),
                    "envelope": file_sig(c["envelope_path"]), "setup_fit": fit_sig(fit), "scripts": scripts_sig("detect")}
+            pc_ = pointing_correction_plan(plan, state, cam, args)
+            if pc_ is not None:
+                sig["pointing_correction"] = pointing_correction_sig(pc_)
             fresh, why = is_fresh(out, f"detect_{cam}", sig, [ground],
                                   [f / "water_level.csv", f / "waves.csv", c["eo_path"]])
             if fresh:
@@ -3232,11 +3352,20 @@ def step_detect(plan, args, state):
                      f"{wdir / cam / 'processing.log'}: camera left out")
                 state.setdefault("failed_cams", {})[cam] = f"detection failed (exit {rc})"
                 continue
-            write_stamp(out, f"detect_{cam}", sig, [cmd], scripts=STEP_SCRIPTS["detect"],
-                        extra={"setup_coef": args.setup_coef, "setup_fit": fit, "skip_days": skip,
-                               "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
-                               "photos": len(photos), "eo_sha256": calibration_record(c)["eo_sha256"],
-                               "calibration": calibration_record(c)})
+            extra = {"setup_coef": args.setup_coef, "setup_fit": fit, "skip_days": skip,
+                     "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
+                     "photos": len(photos), "eo_sha256": calibration_record(c)["eo_sha256"],
+                     "calibration": calibration_record(c)}
+            if pc_ is not None:
+                try:
+                    extra["pointing_correction"] = correct_pointing_rows(plan, cam, ground, pc_)
+                except (OSError, ValueError, KeyError) as exc:
+                    warn(f"detect {cam}: the pointing correction FAILED ({exc.__class__.__name__}: {exc}): camera "
+                         f"left out")
+                    state.setdefault("failed_cams", {})[cam] = f"pointing correction failed ({exc})"
+                    continue
+            write_stamp(out, f"detect_{cam}", sig, [cmd], scripts=STEP_SCRIPTS["detect"]
+                        + (["pointing_daily.py"] if pc_ is not None else []), extra=extra)
             # the search envelope's content as this detection used it (a GCP-free B of a blind date must use A's)
             update_stamp(out, f"detect_{cam}", envelope_sha256=file_sha(c["envelope_path"]))
             if not args.keep_detector_debug:
@@ -3339,6 +3468,9 @@ def live_detect(plan, args, state, fit):
         sig = {"rows": str(rows_file), "after": {"archive_rows": token(out, "archive_rows")},
                "setup_coef": args.setup_coef, "setup_fit": fit_sig(fit), "skip": sorted(skip), "cmd": cmd_text(geo),
                "eo_file": file_sig(c["eo_path"]), "v": LIVE_DETECT_VERSION, "scripts": scripts_sig("detect_live")}
+        pc_ = pointing_correction_plan(plan, state, cam, args)
+        if pc_ is not None:
+            sig["pointing_correction"] = pointing_correction_sig(pc_)
         fresh, why = is_fresh(out, f"detect_{cam}", sig, [ground], [rows_file, c["eo_path"]])
         if fresh:
             fresh, why = eo_content_fresh(out, f"detect_{cam}", c["eo_path"])
@@ -3367,14 +3499,23 @@ def live_detect(plan, args, state, fit):
             warn(f"georectify {cam} FAILED (exit {rc}): camera left out")
             state.setdefault("failed_cams", {})[cam] = f"georectification failed (exit {rc})"
             continue
+        extra = {"setup": {k: v for k, v in stats.items() if k != "frame_names"},
+                 "setup_coef": args.setup_coef, "setup_fit": fit, "skip_days": skip,
+                 "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
+                 "eo_sha256": calibration_record(c)["eo_sha256"], "calibration": calibration_record(c)}
+        if pc_ is not None:
+            try:
+                extra["pointing_correction"] = correct_pointing_rows(plan, cam, ground, pc_)
+            except (OSError, ValueError, KeyError) as exc:
+                warn(f"georectify {cam}: the pointing correction FAILED ({exc.__class__.__name__}: {exc}): camera "
+                     f"left out")
+                state.setdefault("failed_cams", {})[cam] = f"pointing correction failed ({exc})"
+                continue
         # photos of the frames, for the maps (the maps step links them again from the photo roots of
         # its own run, so a photo that turns up later is used without a new georectification)
         link_frame_photos(plan, cam, args)
-        write_stamp(out, f"detect_{cam}", sig, [geo], scripts=STEP_SCRIPTS["detect_live"],
-                    extra={"setup": {k: v for k, v in stats.items() if k != "frame_names"},
-                           "setup_coef": args.setup_coef, "setup_fit": fit, "skip_days": skip,
-                           "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
-                           "eo_sha256": calibration_record(c)["eo_sha256"], "calibration": calibration_record(c)})
+        write_stamp(out, f"detect_{cam}", sig, [geo], scripts=STEP_SCRIPTS["detect_live"]
+                    + (["pointing_daily.py"] if pc_ is not None else []), extra=extra)
         parts.append((cam, ground))
     return parts
 
@@ -6683,10 +6824,11 @@ def b_forcing_problem(plan, args):
 
 def option_refusal(plan, args):
     """What refuses this run before anything is written (exit 5): a wrong --eo, a variant in the wrong root,
-    an --eo calibration whose acceptance failed, a GCP-free B under another name than the procedure gave it.
+    an --eo calibration whose acceptance failed, a GCP-free B under another name than the procedure gave it,
+    a --correct-pointing build outside its own root (or another build in that root).
     -> text ('' when none)."""
     return (eo_option_problems(plan, args) or variant_root_problem(plan, args) or eo_acceptance_problem(plan, args)
-            or procedure_variant_problem(plan, args))
+            or procedure_variant_problem(plan, args) or pointing_root_problem(plan, args))
 
 
 def blind_independence_warnings(plan, args):
@@ -6834,7 +6976,8 @@ def missing_parts(plan, state, args=None):
             # these results, is not complete
             op = res["info"]["other_pointing"]
             dst = read_stamp(out, f"detect_{cam}")
-            inside = [d for d in op["days"] if d not in ((dst or {}).get("skip_days") or [])]
+            inside = [d for d in op["days"] if d not in ((dst or {}).get("skip_days") or [])
+                      and d not in corrected_days(dst)]
             if dst is None or inside:
                 miss.append(f"{cam}: the window holds two pointings: {', '.join(op['days'])} agree with each other, "
                             f"away from the calibration's own day {res['info'].get('reference_day')}; "
@@ -6845,7 +6988,8 @@ def missing_parts(plan, state, args=None):
         elif (res.get("info") or {}).get("other_pointing"):
             op = res["info"]["other_pointing"]
             dst = read_stamp(out, f"detect_{cam}")
-            inside = [d for d in op["days"] if d not in ((dst or {}).get("skip_days") or [])]
+            inside = [d for d in op["days"] if d not in ((dst or {}).get("skip_days") or [])
+                      and d not in corrected_days(dst)]
             miss.append(f"{cam}: the window holds two pointings: {', '.join(op['days'])} agree with each other, "
                         f"away from the reference's ({other_pointing_groups(op)}); "
                         + ("the detection has not run with these pointing results" if dst is None else
@@ -7527,6 +7671,37 @@ def calibration_caveats(plan, args, prov):
     return cav
 
 
+def pointing_correction_caveat(cam, pcr, byday=None):
+    """The README's line for a --correct-pointing detection, from its stamp's record (correct_pointing_rows): each day
+    mapped with its own pointing, with the change, the match and how far its lines moved; the days measured to differ
+    (or unconfirmed) that a gate kept from a correction, and why; what the correction is against and what it is not."""
+    byday = byday or {}
+    ru = pcr.get("rules") or {}
+    parts = []
+    for d, v in sorted((pcr.get("days") or {}).items()):
+        a, t, r = v["d_deg"]
+        mv = (f", its {v.get('georectified')} points moved {v['moved_m_median']:.2f} m median ({v['moved_m_max']:.2f} m "
+              f"max) from where the calibration put them" if v.get("moved_m_median") is not None else
+              f", {v.get('georectified', 0)} points")
+        parts.append(f"{d} ({(byday.get(d) or {}).get('verdict') or v.get('verdict') or '?'}): {a:+.3f}/{t:+.3f}/"
+                     f"{r:+.3f} deg pan/tilt/roll on {v.get('inliers')} inliers, turn_sigma {v.get('turn_sigma')}" + mv)
+    left = [f"{d} ({'; '.join(w)})" for d, w in sorted((pcr.get("not_corrected") or {}).items())
+            if (byday.get(d) or {}).get("verdict") in LEFT_OUT_VERDICTS]
+    return (f"{cam}: POINTING CORRECTED PER DAY (--correct-pointing: an evaluation product, in its own root): "
+            + ("; ".join(parts) if parts else "no day passed the gates")
+            + f". Each such day was detected like the others and its waterlines mapped with the calibration turned by "
+              f"the change matched features measured that day against the reference frame "
+              f"{pcr.get('reference_frame') or '?'} ({pcr.get('reference_day') or '?'}) (pointing_daily.py; the EO "
+              f"files in waterlines/{cam}/pointing_corrected_eo/); the default product leaves a day measured to differ "
+              f"out instead, and grids a smaller change uncorrected. Gates: {ru.get('min_inliers')} or more inliers, "
+              f"turn_sigma {ru.get('min_turn_sigma', 0):g} or more, inliers spread {ru.get('min_spread_px', 0):g} px or "
+              f"more, a turn of at most {ru.get('max_turn_deg', 0):g} deg, not UNCONFIRMED, not the reference day"
+            + (f". Measured to differ or unconfirmed and NOT corrected (left out or kept as the lines above say): "
+               f"{'; '.join(left)}" if left else "")
+            + ". The window's constant offset against the calibration (the sea horizon's, above) is not corrected "
+              "(docs/VALIDATION.md 4.6b).")
+
+
 def small_change_caveat(plan, cam, rows, skip=()):
     """The README's line for a camera's KEPT 'small change' days (pointing_verdicts: matched features measured a turn
     of POINT_WARN_DEG - POINT_FAIL_DEG with tilt and roll within RUN_TOL_DEG, or an ambiguous match): each day's
@@ -7679,12 +7854,20 @@ def collect_caveats(plan, args, state, forcing, prov):
         # (--keep-moved-days)'); its days are compared with these results' defaults, and a difference has
         # either reason
         kmd_ = (dst or {}).get("keep_moved_days")
-        stale = dst is not None and skip != skip_days_of(res, argparse.Namespace(keep_moved_days=bool(kmd_)))
+        # a --correct-pointing detection (its stamp's record; its root holds no other) is judged by that option
+        cp_ = "pointing_correction" in (dst or {})
+        dflt = argparse.Namespace(correct_pointing=True) if cp_ else None
+        stale = dst is not None and (skip != skip_days_of(res, argparse.Namespace(keep_moved_days=bool(kmd_),
+                                                                                  correct_pointing=cp_))
+                                     or (cp_ and corrected_days(dst) != sorted(pointing_corrections(res)[0])))
         if dst is None or stale:
             if stale:
                 cav.append(f"{cam}: the detection left out " + (", ".join(skip) if skip else "no day")
+                           + (f" and corrected {', '.join(corrected_days(dst)) or 'no day'}" if cp_ else "")
                            + ", where these pointing results leave out "
-                           + (", ".join(skip_days_of(res, None)) or "no day")
+                           + (", ".join(skip_days_of(res, dflt)) or "no day")
+                           + (f" and correct {', '.join(sorted(pointing_corrections(res)[0])) or 'no day'}" if cp_
+                              else "")
                            # --keep-moved-days leaves out no day: it can explain a detection that left out
                            # none, never one that left days out (review 4)
                            + (" by default: it ran with other pointing results (the pointing step was run again "
@@ -7704,12 +7887,14 @@ def collect_caveats(plan, args, state, forcing, prov):
         else:
             if skip:
                 cav.append(f"{cam}: days left out of the detection for their pointing: {with_why(skip)}.")
-            kept_ = [d_ for d_ in diff_ if d_ not in skip]
+            kept_ = [d_ for d_ in diff_ if d_ not in skip and d_ not in corrected_days(dst)]
             if kept_:
                 cav.append(f"{cam}: days with a different or unconfirmed pointing KEPT in the detection ("
                            f"{kept_reason(res, args, dst)}): {with_why(kept_)}.")
+            if cp_:
+                cav.append(pointing_correction_caveat(cam, dst["pointing_correction"], byday))
         ran_ = dst is not None and not stale
-        note_ = (pointing_majority_note(res, args, skip=skip if ran_ else skip_days_of(res, None), ran=ran_)
+        note_ = (pointing_majority_note(res, args, skip=skip if ran_ else skip_days_of(res, dflt), ran=ran_)
                  if res.get("rows") else None)
         if note_:
             cav.append(f"{cam}: {note_}.")
@@ -7728,7 +7913,8 @@ def collect_caveats(plan, args, state, forcing, prov):
                        + (f"; the detection on disk left out {', '.join(gone)}, so they are kept once it runs again"
                           if gone else "")
                        + f": {with_why(over)}.")
-        small_ = small_change_caveat(plan, cam, res.get("rows") or [], skip if ran_ else skip_days_of(res, None))
+        small_ = small_change_caveat(plan, cam, res.get("rows") or [], (skip + corrected_days(dst)) if ran_ else
+                                     skip_days_of(res, dflt) + (sorted(pointing_corrections(res)[0]) if cp_ else []))
         if small_:
             cav.append(small_)
         bun_ = [r_ for r_ in res.get("rows") or [] if r_.get("verdict") not in LEFT_OUT_VERDICTS and bunched(r_)
@@ -8607,6 +8793,9 @@ def write_provenance(plan, args, state, final=True):
             ({"photos": (dst or {}).get("photos"), "skip_days": (dst or {}).get("skip_days")} if dst else None),
             "built": bool(dst) and cam not in failed_cameras(plan, state),
             "notes": c["notes"]}
+        if cams[cam]["pointing_check"] is not None and "pointing_correction" in (dst or {}):
+            # --correct-pointing (its own root): the days mapped with their own pointing (absent from a default build)
+            cams[cam]["pointing_check"]["pointing_correction"] = dst["pointing_correction"]
     # a GCP-free B made by the pre-registered procedure: its stated rotation term's DEM effect taken as a pure TILT,
     # per range band, from this date's DEM and calibration (the procedure's synthetic errors were almost all roll)
     pinned = {cam: v["calibration"]["origin"]["procedure"] for cam, v in cams.items()
@@ -9107,6 +9296,12 @@ def write_readme(plan, args, prov):
             for r in pc_["per_day"]:
                 verdicts.setdefault(r["verdict"], []).append(r["date"])
             w("      pointing check: " + "; ".join(f"{k} {', '.join(v)}" for k, v in verdicts.items()))
+        pcr = pc_.get("pointing_correction")
+        if pcr is not None:
+            w("      pointing CORRECTED per day (--correct-pointing): "
+              + ("; ".join(f"{d} {v['d_deg'][0]:+.2f}/{v['d_deg'][1]:+.2f}/{v['d_deg'][2]:+.2f} deg pan/tilt/roll"
+                           for d, v in sorted((pcr.get("days") or {}).items())) or "no day passed the gates")
+              + " (KNOWN CAVEATS)")
         ref = pc_.get("reference") or {}
         if ref.get("window_horizon_dtilt_deg") is not None and ref.get("clear_horizon_days"):
             w(f"      sea horizon vs the calibration over the window: tilt/roll {ref['window_horizon_dtilt_deg']:+.2f}/"
@@ -9325,6 +9520,9 @@ def dry_run(plan, args, steps):
                f"is NOT measured yet: allow up to ~{max(1.0, (est + total * SEC_PER_PHOTO_DETECT) / 60):.0f} min "
                f"(twice the detection) and read the real rate from the first 'detecting : photo k of N ... "
                f"(S s per photo)' line")
+    if getattr(args, "correct_pointing", False):
+        say("pointing", "CORRECTED per day (--correct-pointing): each day whose matched features pass "
+            "pointing_daily.py's gates is detected and mapped with its own pointing; the others as by default")
     say("steps", ", ".join(steps))
     for st in steps:
         key = {"forcing": "forcing", "filter": "filter", "dem": "dem"}.get(st)
@@ -10050,6 +10248,8 @@ def state_argv(args, date):
             a += ["--" + opt.replace("_", "-"), str(getattr(args, opt))]
     if args.keep_moved_days:
         a.append("--keep-moved-days")
+    if getattr(args, "correct_pointing", False):
+        a.append("--correct-pointing")
     if args.force_disabled:
         a.append("--force-disabled")
     if args.no_download:
@@ -10816,6 +11016,12 @@ def main():
     ap.add_argument("--keep-moved-days", action="store_true",
                     help="keep the days the pointing check marks DIFFERENT POINTING or UNCONFIRMED (default: "
                          "left out of the detection)")
+    ap.add_argument("--correct-pointing", action="store_true",
+                    help="OPT-IN, an evaluation: a day whose matched features pass pointing_daily.py's gates is "
+                         "detected and its waterlines mapped with its own pointing (the calibration turned by the "
+                         "change measured that day) instead of being left out; every other day as by default. Into "
+                         f"its own root only, <root>_{POINTING_CORRECTED} (e.g. {DEFAULT_OUTPUT_ROOT}_"
+                         f"{POINTING_CORRECTED}; any other root is refused, exit 5); not on a BLIND date, not with --eo")
     ap.add_argument("--pointing-frames", type=int, default=3, help="frames per day for the horizon (default 3)")
     ap.add_argument("--pointing-log-dir", default=str(HERE / "archive"),
                     help="live era: folder of the station's pointing_<cam>.csv monitor logs (summarised)")
@@ -11101,6 +11307,10 @@ def share(args):
     wl = waterline_file(product_plan(prov, out), quiet_=True)
     if wl.is_file():
         files.append((wl, f"waterlines/{wl.name}"))
+    # a --correct-pointing product: the per-day pointings its waterlines were mapped with, with the calibration files
+    # (none in a default build)
+    for f in sorted((out / "waterlines").glob("c*/pointing_corrected_eo/*.yaml")) if (out / "waterlines").is_dir() else []:
+        files.append((f, f"calibration/pointing_corrected_eo/{f.name}"))
     seen = set()
     for cam, v in sorted(cams.items()):
         cal = v.get("calibration") or {}
