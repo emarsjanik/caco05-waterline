@@ -17,6 +17,12 @@ checks plant the answer and ask for it back:
     over 2.5 deg, UNCONFIRMED, the reference day, an older row without
     the numbers), each said; a day that passes is corrected by exactly
     what was measured; the thresholds are survey_products.py's own;
+    the survey products' gates of the day: a day at rest (a turn within
+    MATCH_ERR_DEG) is not corrected, nor one whose pointing did not
+    hold through the day (a turn in the middle of the day, its first
+    or last photo unread, or not checked); the pointing step matches a
+    day's first and last photos only with --correct-pointing, and a
+    camera that turned at 15:00 is not corrected (real matches);
   * the corrected pointing is exact: the CIRN angles plus the measured
     change give the rotation pointing_check.measure fitted, also after
     the EO file is written and read back;
@@ -37,12 +43,16 @@ checks plant the answer and ask for it back:
     detection with that day no longer skipped), a failing one is still
     left out, and the README, provenance and the rebuild line say so;
     the root rule (its own <root>_pointing-corrected, never a blind date
-    or --eo);
+    or --eo); the compare step's C = 0 lines of a corrected day are
+    re-projected with that day's EO (survey_compare.py --camera-eo-day),
+    the default compare command as before;
   * the live log: complete days not yet logged, the reference made from
     --reference-day, a turned day, a day within its noise, a turn over
     the limit, the reference frame itself, another station's photos,
-    a rerun that measures nothing again, no reference at all; nothing is
-    applied, nothing written where another job reads;
+    a rerun that measures nothing again (and says a new --reference-day
+    is not used), no reference at all; each day records its calibration
+    and reference; nothing is applied, nothing written where another job
+    reads;
   * the cron calls it log-only, with the calibrations of its own step 6.
 
 STATION FILES. Only the repository's calibration files are read; every
@@ -96,13 +106,26 @@ def photo_name(t, station, cam):
     return f"{e}.{t:%a.%b.%d_%H_%M_%S}.GMT.{t.year}.{station}.{cam}.timex.jpg"
 
 
-def prow(date, verdict="matches", features="ok", inliers=400, sigma=12.0, spread="250/520", d=(0.0, 0.0, 0.0)):
-    """A pointing row as survey_products' pointing step writes it (the columns the gates read)."""
+def prow(date, verdict="matches", features="ok", inliers=400, sigma=12.0, spread="250/520", d=(0.0, 0.0, 0.0),
+         day_check=None):
+    """A pointing row as survey_products' pointing step writes it (the columns the gates read); day_check: the
+    records of the day's first and last photos (--correct-pointing; None: not checked)."""
     r = {"camera": "c2", "date": date, "verdict": verdict, "features": features, "inliers": inliers,
          "turn_sigma": sigma, "inlier_spread_px": spread, "d_azimuth_deg": "", "d_tilt_deg": "", "d_roll_deg": ""}
     if features in ("ok", "moved", "MOVED", "ambiguous"):
         r.update(d_azimuth_deg=d[0], d_tilt_deg=d[1], d_roll_deg=d[2])
+    if day_check is not None:
+        r.update(feature_time_utc="17:00", day_check=day_check)
     return r
+
+
+def frec(time_utc, d, features="MOVED", inliers=60, sigma=9.0, spread="230/480"):
+    """One of a day's other frames as check_pointing records it (pointing_day_check)."""
+    return dict(prow("x", None, features, inliers, sigma, spread, d), feature_frame=f"f{time_utc}.jpg",
+                time_utc=time_utc)
+
+
+STORM_D = (-1.214, 0.004, 0.03)
 
 
 # ---------------------------------------------------------------------
@@ -110,18 +133,45 @@ def prow(date, verdict="matches", features="ok", inliers=400, sigma=12.0, spread
 def test_gates():
     print("the gates: a day is corrected only on a match the survey products trust, and more")
     rules = sp.pointing_correction_rules()
-    check(rules == pdl.station_rules() == {"min_inliers": sp.MATCH_INLIERS, "min_turn_sigma": sp.TURN_SIGMA_MIN,
-                                           "min_spread_px": float(sp.MATCH_SPREAD_TESTED_PX),
-                                           "max_turn_deg": pdl.CORRECT_MAX_DEG}
+    frame_rules = pdl.station_rules()
+    check(frame_rules == {"min_inliers": sp.MATCH_INLIERS, "min_turn_sigma": sp.TURN_SIGMA_MIN,
+                          "min_spread_px": float(sp.MATCH_SPREAD_TESTED_PX), "max_turn_deg": pdl.CORRECT_MAX_DEG}
           and (rules["min_inliers"], rules["min_turn_sigma"], rules["min_spread_px"], rules["max_turn_deg"])
-          == (40, 4.0, 180.0, 2.5),
-          "the thresholds are survey_products.py's own (40 inliers, turn_sigma 4, 180 px) and CORRECT_MAX_DEG 2.5")
-    storm = prow("2026-09-27", "DIFFERENT POINTING", "MOVED", 48, 9.1, "210/450", (-1.214, 0.004, 0.03))
+          == (40, 4.0, 180.0, 2.5)
+          and rules == dict(frame_rules, min_turn_deg=sp.MATCH_ERR_DEG, max_day_spread_deg=sp.MATCH_ERR_DEG)
+          and pdl.frame_gates(rules) == frame_rules and sp.MATCH_ERR_DEG == 0.1,
+          "the thresholds are survey_products.py's own (40 inliers, turn_sigma 4, 180 px) and CORRECT_MAX_DEG 2.5; "
+          "the survey products add the gates of the day at MATCH_ERR_DEG 0.1, the live log's frames have none")
+    held = [frec("14:05", (-1.20, 0.01, 0.02)), frec("19:55", (-1.23, 0.0, 0.05))]
+    storm = prow("2026-09-27", "DIFFERENT POINTING", "MOVED", 48, 9.1, "210/450", STORM_D, day_check=held)
     d, why = pdl.day_correction(storm, rules, "2026-09-29")
     check(d == [-1.214, 0.004, 0.03] and why == [],
-          "c1's measured -1.21 deg storm pan (48 inliers, turn_sigma 9.1, spread 210 px): corrected by exactly that")
-    d, why = pdl.day_correction(prow("2026-09-30", sigma=12.0, d=(0.012, -0.004, 0.0)), rules, "2026-09-29")
-    check(d == [0.012, -0.004, 0.0], "a 'matches' day whose small turn is 12 of its standard errors: corrected too")
+          "c1's measured -1.21 deg storm pan (48 inliers, turn_sigma 9.1, spread 210 px), the same on the day's "
+          "14:05 and 19:55 frames: corrected by exactly the probe's turn")
+    rest = prow("2026-09-30", sigma=12.0, d=(0.012, -0.004, 0.0), day_check=[])
+    d, why = pdl.day_correction(rest, rules, "2026-09-29")
+    check(d is None and why[0].startswith("a turn of 0.012 deg, within the match's own error") and "at rest" in why[0],
+          f"a 'matches' day whose small turn is 12 of its standard errors: at rest, NOT corrected ({why[0][:70]})")
+    check(pdl.day_correction(rest, frame_rules, "2026-09-29")[0] == [0.012, -0.004, 0.0],
+          "... while the live log's frame gates still read it (its record of the drift)")
+    small = prow("2026-09-30", "small change", "moved", 300, 15.0, d=(0.0, 0.18, 0.0), day_check=[])
+    check(pdl.day_correction(small, rules, "2026-09-29")[0] == [0.0, 0.18, 0.0],
+          "a 'small change' kept by default (0.18 deg of tilt), its only photo: corrected")
+    print("  a turn in the middle of the day, and a day not shown to hold:")
+    mid = {
+        "came back by 14:05 (at rest, within its noise)":
+            ([frec("14:05", (0.0, 0.001, 0.0), "ok", 300, 1.6), held[1]], "the 14:05 UTC frame gives no reading"),
+        "14:05 read at rest on a confident match":
+            ([frec("14:05", (0.02, 0.01, 0.0), "ok", 300, 8.0), held[1]], "the 14:05 UTC frame reads +0.020"),
+        "turned further by 19:55":
+            ([held[0], frec("19:55", (-1.40, 0.0, 0.03))], "the 19:55 UTC frame reads -1.400"),
+        "fog at 14:05": ([frec("14:05", None, "unmatched", 12), held[1]], "the 14:05 UTC frame gives no reading"),
+        "not checked (an older row)": (None, "the pointing through the day not checked"),
+    }
+    for name, (chk, want) in mid.items():
+        d, why = pdl.day_correction(prow("2026-09-27", "DIFFERENT POINTING", "MOVED", 48, 9.1, "210/450", STORM_D,
+                                         day_check=chk), rules, "2026-09-29")
+        check(d is None and any(w.startswith(want) for w in why), f"{name}: not corrected ({'; '.join(why)[:110]})")
     cases = {
         "unmatched": (prow("x", "UNCONFIRMED", "unmatched", 12), "no feature reading (unmatched)"),
         "ambiguous": (prow("x", "small change", "ambiguous", 300, 20.0, d=(0.0, 0.0, 0.0)),
@@ -145,6 +195,10 @@ def test_gates():
     check(list(corr) == ["2026-09-27"] and corr["2026-09-27"]["inliers"] == 48 and sorted(not_) == ["2026-09-29",
                                                                                                     "2026-09-30"],
           "window_corrections: the days that pass, by date, and why each other one does not")
+    c27 = corr["2026-09-27"]
+    check([f["time_utc"] for f in c27["day_check"]] == ["14:05", "19:55"] and c27["day_spread_deg"] == 0.02
+          and c27["probe_time_utc"] == "17:00" and c27["day_check"][0]["d_deg"] == [-1.2, 0.01, 0.02],
+          "... with the frames the day was checked on and their largest difference from the probe (0.02 deg)")
 
 
 def test_corrected_eo_exact():
@@ -221,15 +275,18 @@ def test_dirt_and_fog_gated():
 def _contours(path, rows):
     fields = ["source_file", "camera", "capture_time_utc", "capture_epoch", "pixel_column", "pixel_row",
               "tide_elevation_navd88", "offshore_hs_m", "offshore_tp_s"]
+    if any("beach_elevation_navd88" in r for r in rows):
+        fields.insert(fields.index("tide_elevation_navd88") + 1, "beach_elevation_navd88")
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         w.writerows(rows)
 
 
-def _lines_for(cam, t, eo, n=40, seed=0, z=0.6):
+def _lines_for(cam, t, eo, n=40, seed=0, z=0.6, setup=None):
     """Waterline rows of one frame of `cam` at time t, as its detector reports them for a camera at eo (the true
-    pointing): pixels of ground points on the plane z (all inside the frame)."""
+    pointing): pixels of ground points on the plane z (all inside the frame). setup: the rows also carry
+    beach_elevation_navd88 = z, their still water (tide_elevation_navd88) that much lower, as a C > 0 build's."""
     from view_reproject import ground_to_pixel
     E, N = pdl.beach_points(IO2, EO2, z=z, n=3 * n, seed=seed)
     U, V, ok = ground_to_pixel(E, N, np.full_like(E, z), IO2, eo)
@@ -239,19 +296,25 @@ def _lines_for(cam, t, eo, n=40, seed=0, z=0.6):
     rows = [{"source_file": name, "camera": cam, "capture_time_utc": f"{t:%Y-%m-%dT%H:%M:%SZ}", "capture_epoch": e,
              "pixel_column": f"{u:.2f}", "pixel_row": f"{v:.2f}", "tide_elevation_navd88": f"{z:.4f}",
              "offshore_hs_m": "1.0", "offshore_tp_s": "8.0"} for u, v in zip(U, V)]
+    if setup is not None:
+        for r in rows:
+            r.update(tide_elevation_navd88=f"{z - setup:.4f}", beach_elevation_navd88=f"{z:.4f}")
     return rows, E, N
 
 
 def test_regeorectify(d):
-    print("the corrected days' rows are what georectify.py gives with the day's EO; every other row is unchanged")
+    print("the corrected days' rows are what georectify.py gives with the day's EO (on the beach plane of a C > 0 "
+          "build, not the still water); every other row is unchanged")
     d = Path(d) / "regeo"
     d.mkdir()
     t1, t2 = datetime(2026, 9, 27, 17, tzinfo=timezone.utc), datetime(2026, 9, 29, 17, tzinfo=timezone.utc)
     turn = (-1.214, 0.004, 0.03)
     eo_t = pdl.corrected_eo(EO2, turn)
-    r1, E1, N1 = _lines_for("c2", t1, eo_t, seed=1)
-    r2, _, _ = _lines_for("c2", t2, EO2, seed=2)
-    r3 = [dict(r, camera="c1") for r in _lines_for("c2", t1, EO2, seed=3)[0]]       # another camera, same day
+    # each line on its beach plane (still water + a 0.25 m setup, as C = 0.037 gives in ~1.5 m waves), as
+    # georectify.py places it; mapped on the still water instead it would sit metres off
+    r1, E1, N1 = _lines_for("c2", t1, eo_t, seed=1, setup=0.25)
+    r2, _, _ = _lines_for("c2", t2, EO2, seed=2, setup=0.25)
+    r3 = [dict(r, camera="c1") for r in _lines_for("c2", t1, EO2, seed=3, setup=0.25)[0]]   # another camera
     _contours(d / "contours.csv", r1 + r2 + r3)
     io1 = CAL / "CACO05_c1_20240801_IO.yaml"
     eo1 = CAL / "CACO05_c1_20251113_EO-CV.yaml"
@@ -323,7 +386,8 @@ def test_apply_corrections(d):
 # --- survey_products.py ---------------------------------------------------------------------------------------
 
 def _res():
-    rows = [prow("2026-09-27", "DIFFERENT POINTING", "MOVED", 48, 9.1, "210/450", (-1.214, 0.004, 0.03)),
+    rows = [prow("2026-09-27", "DIFFERENT POINTING", "MOVED", 48, 9.1, "210/450", STORM_D,
+                 day_check=[frec("14:05", (-1.20, 0.01, 0.02)), frec("19:55", (-1.23, 0.0, 0.05))]),
             prow("2026-09-28", "UNCONFIRMED", "unmatched", 3),
             prow("2026-09-29", sigma=30.0),
             prow("2026-09-30", sigma=2.0, d=(0.0, 0.001, 0.0))]
@@ -454,10 +518,14 @@ def test_live_detect(d):
     cav_ = sp.pointing_correction_caveat("c2", pcr, byday)
     check(cav_.startswith("c2: POINTING CORRECTED PER DAY (--correct-pointing")
           and "2026-09-27 (DIFFERENT POINTING): -1.214/+0.004/+0.030 deg pan/tilt/roll on 48 inliers" in cav_
+          and "(the 17:00 UTC frame; held through the day: its 14:05, 19:55 UTC frames read it within 0.020 deg)"
+          in cav_ and "of more than 0.1 deg (the match's own error" in cav_ and "held through the day)" in cav_
+          and "Only the georectification is corrected" in cav_
           and "NOT corrected" in cav_ and "2026-09-28 (" in cav_ and "2026-09-30" not in cav_.split("NOT corrected")[1]
           and all(ord(ch) < 128 for ch in cav_),
-          "README: the corrected day with its change and how far its lines moved; the day measured to differ that a "
-          "gate kept from it, with why (not the kept days); ASCII")
+          "README: the corrected day with its change, the frames it held on and how far its lines moved; the gates of "
+          "the day; the day measured to differ that a gate kept from it, with why (not the kept days); the detector's "
+          "search is the calibration's; ASCII")
     cav = {}
     for tag in ("default", "corrected"):
         out = Path(d) / f"live_{tag}"
@@ -560,6 +628,87 @@ def test_historical_detect(d):
           f"27 Sep mapped with its own pointing (to {err.max() * 1000:.0f} mm); every other row as by default")
 
 
+def test_check_pointing_day_held(d):
+    print("survey_products.check_pointing --correct-pointing: the day's first and last photos matched too; a camera "
+          "that turned at 15:00 is not corrected (real matches)")
+    import cv2
+    d = Path(d) / "dayheld"
+    img_dir = d / "photos"
+    img_dir.mkdir(parents=True)
+    tex = pdl.textured_scene(IO2, seed=6)
+    turned = pdl.rotated_view(tex, IO2, EO2, pdl.corrected_eo(EO2, STORM_D))
+    photos = []
+    # 27 Sep turned all day; 28 Sep at rest at 14:00, turned from 15:00; 29 Sep (the reference day) at rest
+    for day, plan_ in (("2026-09-27", (1, 1, 1)), ("2026-09-28", (0, 1, 1)), ("2026-09-29", (0, 0, 0))):
+        for hour, on in zip((14, 17, 19), plan_):
+            t = datetime.strptime(day, "%Y-%m-%d").replace(hour=hour, tzinfo=timezone.utc)
+            img = turned if on else tex
+            # each frame its own sensor noise (two copies of one image match at no noise at all)
+            noise = np.random.default_rng(calendar.timegm(t.timetuple())).normal(0, 3.0, img.shape)
+            p = img_dir / photo_name(t, "CACO05", "c2")
+            cv2.imwrite(str(p), np.clip(img + noise, 0, 255).astype(np.uint8))
+            photos.append(p)
+    got = {}
+    for tag, on in (("default", False), ("corrected", True)):
+        plan = _live_plan(d / tag)
+        args = cfg_args(correct_pointing=on)
+        (rows, info), _ = quiet(sp.check_pointing, plan, "c2", photos, args)
+        got[tag] = ({r["date"]: r for r in rows}, info, sp.pointing_sig(plan, "c2", args, photos))
+    rows0, _, sig0 = got["default"]
+    rows1, info1, sig1 = got["corrected"]
+    check(not any("day_check" in r or "feature_time_utc" in r for r in rows0.values()) and "day_check" not in sig0
+          and sig1["day_check"]["rules"] == sp.pointing_correction_rules(),
+          "default: one probe frame a day, as before (no new column, no new key in the step's signature)")
+    check(info1["reference_day"] == "2026-09-29" and "day_check" not in rows1["2026-09-29"]
+          and [f["time_utc"] for f in rows1["2026-09-27"]["day_check"]] == ["14:00", "19:00"]
+          and [f["time_utc"] for f in rows1["2026-09-28"]["day_check"]] == ["14:00", "19:00"],
+          "--correct-pointing: the 14:00 and 19:00 photos of each day the 17:00 probe would correct are matched "
+          "against the same reference (not the reference day)")
+    # the features' gates (a synthetic scene has no sea horizon: the verdicts are not what is tested here)
+    corr, why = pdl.window_corrections([{k: v for k, v in r.items() if k != "verdict"} for r in rows1.values()],
+                                       sp.pointing_correction_rules(), info1["reference_day"])
+    c27 = corr.get("2026-09-27") or {}
+    check(list(corr) == ["2026-09-27"] and max(abs(a - b) for a, b in zip(c27["d_deg"], STORM_D)) < 0.02
+          and c27["day_spread_deg"] < 0.02,
+          f"27 Sep (turned all day): corrected by {c27.get('d_deg')}, its 14:00 and 19:00 frames within "
+          f"{c27.get('day_spread_deg')} deg")
+    w28 = "; ".join(why.get("2026-09-28") or [])
+    check(rows1["2026-09-28"]["features"] == "MOVED" and "the 14:00 UTC frame gives no reading" in w28
+          and "not shown to hold" in w28,
+          f"28 Sep (turned at 15:00): its 17:00 probe reads the turn, but not corrected ({w28[:100]})")
+
+
+def test_compare_c0(d):
+    print("survey_compare C = 0: a corrected day's lines re-projected with that day's EO; the default command as "
+          "before")
+    import survey_compare as sc
+    out = Path(d) / "live_corrected"
+    g = out / "waterlines" / "c2" / "contour_points_ground.csv"
+    eo_f = out / "waterlines" / "c2" / "pointing_corrected_eo" / "c2_2026-09-27_pointing_corrected_EO.yaml"
+    cont = sc.read_contours(str(g))
+    cams = sc.load_cameras({"c2": CAL / "CACO05_c2_20251113_EO-CV.yaml"}, {})
+    plain, how0 = sc.without_setup(cont, cams)
+    days = sc.parse_cam_day_specs([f"c2:2026-09-27={eo_f}"], "--camera-eo-day")
+    cams["c2"]["eo_by_day"] = {k: load_extrinsics(v) for k, v in days["c2"].items()}
+    c0, how = sc.without_setup(cont, cams)
+    on = np.array([str(x).startswith("2026-09-27") for x in cont["day"]])
+    E, N = pixel_to_ground(cont["U"][on], cont["V"][on], cont["Zt"][on], IO2, load_extrinsics(eo_f))
+    E0, N0 = pixel_to_ground(cont["U"][on], cont["V"][on], cont["Zt"][on], IO2, EO2)
+    check(days == {"c2": {"2026-09-27": eo_f}} and np.abs(c0["E"][on] - E).max() < 1e-9
+          and np.abs(c0["N"][on] - N).max() < 1e-9 and np.median(np.hypot(plain["E"][on] - E, plain["N"][on] - N)) > 1,
+          f"27 Sep's C = 0 lines are pixel_to_ground with the day's EO (with the calibration they would sit "
+          f"{np.median(np.hypot(E0 - E, N0 - N)):.1f} m off: the correction undone)")
+    check(np.array_equal(c0["E"][~on], plain["E"][~on]) and np.array_equal(c0["N"][~on], plain["N"][~on])
+          and "(c2 2026-09-27) with that day's EO" in how and "--camera-eo-day" not in how0,
+          "every other day's C = 0 lines as with the calibration alone; the how-text says which days")
+    plan = _live_plan(out)
+    check(sp.pointing_eo_day_specs(plan, ["c2"]) == [f"c2:2026-09-27={eo_f}"]
+          and sp.pointing_eo_day_specs(_live_plan(Path(d) / "live_default"), ["c2"]) == []
+          and sp.pointing_eo_day_specs(plan, []) == [],
+          "survey_products passes --camera-eo-day for a corrected detection's days only (none for a default build, "
+          "so its compare command is as it was)")
+
+
 def test_provenance_readme_lines(d):
     print("survey_products: provenance and the README's camera line carry the correction only when it was made")
     src = open(HERE / "survey_products.py").read()
@@ -628,9 +777,14 @@ def test_live_log(d):
           and f"pointing c2 {D[1]}: moved" in r.stdout and "log only" in r.stdout and "WARNING" not in r.stdout,
           "its own reference in archive/pointing_daily_reference/c2/ (not the monitor's bank); one line a day in the "
           "log, no WARNING")
+    check(e1["calibration"]["eo_file"] == "CACO05_c2_20251113_EO-CV.yaml" and e1["calibration"]["eo_sha256"]
+          and e1["reference"] == {"kind": "reference day", "day": D[0], "frames": log["reference"]["frames"]},
+          "each day records the calibration and the reference it was measured against")
     stamp = e1["checked_utc"]
-    r = subprocess.run(base + ["--max-days", "2"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                       universal_newlines=True)
+    r = subprocess.run(base + ["--max-days", "2", "--reference-day", D[2]], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, universal_newlines=True)
+    check(f"--reference-day {D[2]} not used: the log keeps its reference" in r.stdout and "remove " in r.stdout,
+          "a new --reference-day with a reference already made: said, with how to replace it (not silently ignored)")
     log = json.loads((log_dir / "pointing_daily_c2.json").read_text())
     newd = sorted(set(log["days"]) - set(days))
     want = sorted([(today - timedelta(days=1)).isoformat(), (today - timedelta(days=6)).isoformat()])
@@ -694,6 +848,8 @@ def main():
         test_root_rule()
         test_live_detect(d)
         test_historical_detect(d)
+        test_compare_c0(d)
+        test_check_pointing_day_held(d)
         test_provenance_readme_lines(d)
         test_live_log(d)
         test_cron()

@@ -55,8 +55,10 @@ of the station's own rows, minutes) only if the new rule leaves out other days t
 on disk did; then its DEM, plan view and comparisons. The GeoTIFFs are then tagged EPSG:6348
 (section 4.8), and a further run skips every step. (PR #87's own note, that its pull reran only
 the plan-view map and the comparisons, was checked on a 2026-09-29 build then.) The per-day pointing
-log and its opt-in correction (`pointing_daily.py`, section 4.6b) change no step's signature
-unless `--correct-pointing` is given, so they rerun nothing.
+log and its opt-in correction (`pointing_daily.py`, section 4.6b) add nothing to a step's signature
+unless `--correct-pointing` is given. `survey_compare.py` gains `--camera-eo-day`, which only a
+corrected build passes; its new sha256 reruns a default build's comparisons and plan-view map once,
+with the same numbers.
 
 `view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file
 is unchanged by this PR, and the survey products use only its `ground_to_pixel`, which
@@ -1407,6 +1409,21 @@ only if it holds over several weeks of different waves; then change it in all th
     40 or more inliers, `turn_sigma` 4 or more, inliers spread 180 px or more, a turn of 2.5 deg or
     less, not UNCONFIRMED and not the reference day. The first three are `survey_products.py`'s own
     constants.
+  * `--correct-pointing` adds two gates of the day, both at `MATCH_ERR_DEG` (0.1 deg):
+    * **A turn of more than 0.1 deg** in pan, tilt or roll. A smaller one is within the match's own
+      error against another day, so that day is at rest and is gridded as by default. `turn_sigma`
+      does not include this error: real at-rest matches read 4.9-18.5. The corrected days are
+      therefore the turned ones: the days the default leaves out or keeps as a 'small change'.
+    * **The pointing held through the day.** The turn is measured on one probe frame (nearest
+      17:00 UTC) and maps every row of the UTC day. The pointing step therefore also matches the
+      day's first and last photos of the detection against the same reference. Each must pass the
+      gates and read the probe's turn within 0.1 deg. A day the camera turned or came back during
+      is not corrected. Neither is a day whose first or last photo cannot be read (fog, rain): it
+      stays left out when the default leaves it out, and the README gives the reason. These extra
+      matches run only with the option, and only on days that would otherwise be corrected.
+  * The compare step's C = 0 sensitivity re-projects a corrected day's lines with that day's EO
+    (`survey_compare.py --camera-eo-day`), not the calibration's. Otherwise it would undo the
+    correction and count the difference as setup effect.
   * The corrected EO is the calibration's position with its angles plus the measured change. This
     is exact for `pointing_check.measure`. It is written next to the waterlines it mapped, and no
     pinned file is edited.
@@ -1416,9 +1433,10 @@ only if it holds over several weeks of different waves; then change it in all th
     as in a default build. The README has a KNOWN CAVEATS line `POINTING CORRECTED PER DAY` and a
     camera line. Provenance has `pointing_check.pointing_correction`, the record the detection's
     stamp keeps.
-  * **Default builds are unchanged.** No step's signature changes without the option, so this pull
-    reruns nothing. The default README and provenance gain no line or key, and the default
-    detection leaves out the same days (`test_pointing_daily.py`).
+  * **Default builds are unchanged.** Without the option no signature gains a key, and the compare
+    command is the same. The new `survey_compare.py` reruns the comparisons and the plan-view map
+    once, with the same numbers. The default README and provenance gain no line or key, and the
+    default detection leaves out the same days (`test_pointing_daily.py`).
   * The live cron (step 7b, `POINTING_LOG_ENABLE=1`) **only logs**. It writes
     `archive/pointing_daily_<cam>.json`, its own reference frame in
     `archive/pointing_daily_reference/<cam>/` and one `pointing <cam> <day>: ...` line per day in
@@ -1487,14 +1505,24 @@ only if it holds over several weeks of different waves; then change it in all th
      * 2025-01-23 and 2025-03-06 compare with INDEPENDENT lidar. The 2026-09-29 window (26 Sep -
        2 Oct) holds the c1 storm. Its RTK is CIRCULAR for C, but C is the same in all three builds,
        so their difference tests the pointing alone.
-     * Read the corrected README's `POINTING CORRECTED PER DAY` line: which days, by how much, and
-       how far their lines moved.
+     * Read the corrected README's `POINTING CORRECTED PER DAY` line: which days, by how much, on
+       which frames, and how far their lines moved. Its 'NOT corrected' list gives, for each day
+       measured to differ, the gate that kept it out (for example, the pointing did not hold
+       through the day).
+     * Only turned days are corrected (over 0.1 deg). On a date with no such day, the corrected
+       build's waterlines are the default's, row for row. The README line then says 'no day passed
+       the gates'.
      * Compare per camera in `compare/` the DEM - survey median and NMAD of the three, and the
        waterlines - survey of the corrected days against the other days.
   4. **Decision.** Make the correction the default only if both hold on the INDEPENDENT surveys:
      * the corrected DEM - survey (median, NMAD, per camera) is no worse than the default's;
      * a corrected day's waterlines - survey agree with the unturned days' within their NMAD, where
        the same days uncorrected (`_keepmoved`) do not.
+
+     An independent date with no corrected day gives no evidence either way, because its two
+     builds are the same. The rule is read only on the independent dates that have a corrected day.
+     If none has one, the rule cannot be applied and the correction stays opt-in. The storm window
+     (2026-09-29) then shows only that the correction is consistent with its own survey.
 
      Until then it stays opt-in. A live correction would follow only after this, and as its own
      change.
@@ -1503,6 +1531,14 @@ only if it holds over several weeks of different waves; then change it in all th
     tilt on the 2026 cameras (section 4.6) may be the lens model. The correction aligns each day
     with the reference frame's pointing, taken as the calibration's, as the pointing step does.
   * Days nothing could read: they stay left out, as by default.
+  * The detector's search. Only the georectification is corrected. A historical era's search
+    envelope is placed with `--eo`, and the live crop is fixed. Both are the calibration's, padded by
+    0.03 / 0.06 of the frame height (~61 / ~123 px). That is ~1.4 / ~2.7 deg of tilt for c1
+    (fy ~2573 px) and ~1.0 / ~1.9 deg for c2 (fy ~3681 px). On a corrected day tilted ~1 deg or
+    more, or rolled so that the band's ends move as far, part of the waterline band can fall
+    outside the search, and the detector can follow another edge. c1's +1.17 m lines already sit
+    ~33 px below its envelope floor at the calibration (`waterline_consistency.py`). The gates still
+    allow up to 2.5 deg, so read such a day's lines in the comparison before trusting them.
 
 ### 4.7 Detector edge position
 

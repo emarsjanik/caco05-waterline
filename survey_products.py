@@ -68,9 +68,11 @@ stale, and nothing stale is ever reported as current):
             says to look. Nothing is dropped silently. OPT-IN: with
             --correct-pointing (an evaluation, in its own root
             <root>_pointing-corrected) a day whose matched features pass
-            pointing_daily.py's gates is detected and its waterlines mapped
-            with its own pointing (the calibration turned by the change
-            measured that day) instead; every other day as without it.
+            pointing_daily.py's gates (a turn over MATCH_ERR_DEG, held
+            through the day on its first and last photos) is detected and
+            its waterlines mapped with its own pointing (the calibration
+            turned by the change measured that day) instead; every other
+            day as without it.
   detect    historical eras: detect_original_view.py per camera with the
             station ID, the date's calibration, the search envelope from the
             OTHER survey, the forcing files and --setup-coef (the detector's
@@ -556,11 +558,14 @@ HORIZON_LIMIT_PX = 50
 LEFT_OUT_VERDICTS = ("DIFFERENT POINTING", "UNCONFIRMED")
 # OPT-IN per-day pointing CORRECTION (--correct-pointing; pointing_daily.py, whose docstring has the method and the
 # gates). Instead of leaving a turned day out, a day whose matched features pass pointing_daily's gates (MATCH_INLIERS
-# or more, TURN_SIGMA_MIN or more, inliers spread MATCH_SPREAD_TESTED_PX or more, a turn of at most
-# pointing_daily.CORRECT_MAX_DEG, not UNCONFIRMED, not the reference day) is detected like the others and its
-# waterlines are mapped with its own pointing: the calibration turned by the change the features measured that day,
-# the coastal-imaging practice (Rodriguez-Padilla et al. 2020; Arriaga et al. 2022: ~40% less shoreline error at
-# Sisal). Every other day is as in the default build (a day measured to differ that fails a gate is still left out).
+# or more, TURN_SIGMA_MIN or more, inliers spread MATCH_SPREAD_TESTED_PX or more, a turn of more than MATCH_ERR_DEG
+# (a smaller one is the match's own error: the day is at rest and gridded as by default) and at most
+# pointing_daily.CORRECT_MAX_DEG, the same turn within MATCH_ERR_DEG on the day's first and last photos (the pointing
+# held through the day: check_pointing matches them too), not UNCONFIRMED, not the reference day) is detected like the
+# others and its waterlines are mapped with its own pointing: the calibration turned by the change the features
+# measured that day, the coastal-imaging practice (Rodriguez-Padilla et al. 2020; Arriaga et al. 2022: ~40% less
+# shoreline error at Sisal). Every other day is as in the default build (a day measured to differ that fails a gate
+# is still left out).
 # OFF by default, so the products stay as they are; a corrected build goes in its own root, <root>_pointing-corrected
 # (pointing_root_problem), so the two can be compared date by date against the same survey (docs/VALIDATION.md
 # 4.6b). No survey enters the correction, so the labels do not change. Not on a BLIND date (its A and B builds are
@@ -1928,6 +1933,8 @@ def check_pointing(plan, cam, photos, args):
             img = cv2.imread(str(probe))
             m = pc.measure(img, [ref], io, min_inliers=MATCH_INLIERS, second=True) if img is not None else None
         r.update(feature_record(m, probe, args.pointing_fail))
+        if getattr(args, "correct_pointing", False):
+            r.update(pointing_day_check(days[day], probe, ref_src, ref, io, r, ref_day, args))
         rows.append(r)
     storms = storm_days_of(plan, days)
     info = {"reference_frame": ref_src.name, "reference_day": ref_day, "reference_kind": ref_kind,
@@ -2799,13 +2806,20 @@ POINTING_VERSION = 11
 
 def pointing_sig(plan, cam, args, photos):
     c = plan["cams"][cam]
-    return {"eo": c["eo_file"], "eo_file": file_sig(c["eo_path"]),
-            "photos": hashlib.sha1("\n".join(p.name for p in photos).encode()).hexdigest(),
-            "frames": args.pointing_frames, "fail": args.pointing_fail, "v": POINTING_VERSION,
-            # the window's storm days (from the forcing's waves): a new wave record reruns the verdicts only
-            # when it changes them
-            "storm_days": storm_days_of(plan, per_day(photos)),
-            "scripts": scripts_sig("pointing")}
+    sig = {"eo": c["eo_file"], "eo_file": file_sig(c["eo_path"]),
+           "photos": hashlib.sha1("\n".join(p.name for p in photos).encode()).hexdigest(),
+           "frames": args.pointing_frames, "fail": args.pointing_fail, "v": POINTING_VERSION,
+           # the window's storm days (from the forcing's waves): a new wave record reruns the verdicts only
+           # when it changes them
+           "storm_days": storm_days_of(plan, per_day(photos)),
+           "scripts": scripts_sig("pointing")}
+    if getattr(args, "correct_pointing", False):
+        # --correct-pointing also matches the first and last photos of a day it would correct (pointing_day_check);
+        # a default build's signature is as it was
+        import pointing_daily
+        sig["day_check"] = {"v": pointing_daily.CORRECTION_VERSION, "rules": pointing_correction_rules(),
+                            "script": script_sha("pointing_daily.py")}
+    return sig
 
 
 def step_pointing(plan, args, state):
@@ -3009,9 +3023,36 @@ def skip_days_of(res, args):
 
 def pointing_correction_rules():
     """pointing_daily's gates (correction_rules) with this script's thresholds: MATCH_INLIERS, TURN_SIGMA_MIN and
-    MATCH_SPREAD_TESTED_PX, and its own CORRECT_MAX_DEG."""
+    MATCH_SPREAD_TESTED_PX, its own CORRECT_MAX_DEG, and the gates of the day at MATCH_ERR_DEG (a turn over it; the
+    day's other frames within it of the probe's turn)."""
     import pointing_daily
-    return pointing_daily.correction_rules(MATCH_INLIERS, TURN_SIGMA_MIN, MATCH_SPREAD_TESTED_PX)
+    return pointing_daily.correction_rules(MATCH_INLIERS, TURN_SIGMA_MIN, MATCH_SPREAD_TESTED_PX,
+                                           min_turn_deg=MATCH_ERR_DEG, max_day_spread_deg=MATCH_ERR_DEG)
+
+
+def pointing_day_check(day_photos, probe, ref_src, ref, io, row, ref_day, args):
+    """
+    --correct-pointing (pointing_daily.day_held): did the pointing the probe measured hold through the day? For a day
+    whose probe passes every other gate, its first and last photos of the detection (other than the probe and the
+    reference frame) are matched against the same reference; the other days are not corrected, so they are not
+    matched again. -> the columns added to the day's row, feature_time_utc and day_check
+    ([feature_record + time_utc]; [] when the probe is the day's only photo), or {} for a day not checked.
+    """
+    import cv2
+    import pointing_check as pc
+    import pointing_daily
+    if probe is None:
+        return {}
+    rules = {k: v for k, v in pointing_correction_rules().items() if k != "max_day_spread_deg"}
+    if pointing_daily.day_correction(row, rules, ref_day)[0] is None:
+        return {}
+    others = sorted((p for p in day_photos if p.name not in (probe.name, ref_src.name)), key=lambda p: utc_of(p.name))
+    chk = []
+    for p in (others[:1] + others[-1:]) if len(others) > 1 else others:
+        img = cv2.imread(str(p))
+        m = pc.measure(img, [ref], io, min_inliers=MATCH_INLIERS, second=True) if img is not None else None
+        chk.append(dict(feature_record(m, p, args.pointing_fail), time_utc=f"{utc_of(p.name):%H:%M}"))
+    return {"feature_time_utc": f"{utc_of(probe.name):%H:%M}", "day_check": chk}
 
 
 def pointing_corrections(res):
@@ -3070,6 +3111,19 @@ def correct_pointing_rows(plan, cam, ground, pc_):
     return {"v": pointing_daily.CORRECTION_VERSION, "rules": pointing_correction_rules(),
             "reference_day": info.get("reference_day"), "reference_frame": info.get("reference_frame"),
             "days": days, "not_corrected": pc_["not_corrected"]}
+
+
+def pointing_eo_day_specs(plan, cams):
+    """--correct-pointing: survey_compare.py's --camera-eo-day CAM:DAY=PATH for each day the detection of one of
+    `cams` mapped with its own pointing (its stamp's record; the EO files in waterlines/<cam>/pointing_corrected_eo/),
+    so the C = 0 sensitivity re-projects those days' lines with the pointing they were mapped with, not the
+    calibration's. [] for a default build (its compare command is as it was)."""
+    specs = []
+    for cam in sorted(cams):
+        pcr = (read_stamp(plan["out"], f"detect_{cam}") or {}).get("pointing_correction") or {}
+        for d, v in sorted((pcr.get("days") or {}).items()):
+            specs.append(f"{cam}:{d}={plan['out'] / 'waterlines' / cam / 'pointing_corrected_eo' / v['eo_file']}")
+    return specs
 
 
 def pointing_root_problem(plan, args):
@@ -5128,6 +5182,9 @@ def step_compare(plan, args, state):
                (out / "waterlines" / cam / "contour_points_ground.csv").exists()]
         if eos:
             cmd += ["--camera-eo"] + eos + ["--eo-dirs"] + eo_dirs(args)
+        eod = pointing_eo_day_specs(plan, [e.split("=", 1)[0] for e in eos])
+        if eod:
+            cmd += ["--camera-eo-day"] + eod
         if len(envs) == 1:
             cmd += ["--envelope-source", envs[0]]
         syn = product_synthetic(plan)
@@ -7683,8 +7740,15 @@ def pointing_correction_caveat(cam, pcr, byday=None):
         mv = (f", its {v.get('georectified')} points moved {v['moved_m_median']:.2f} m median ({v['moved_m_max']:.2f} m "
               f"max) from where the calibration put them" if v.get("moved_m_median") is not None else
               f", {v.get('georectified', 0)} points")
+        chk = v.get("day_check")
+        held = ("" if chk is None else
+                f" (the {v.get('probe_time_utc') or '?'} UTC frame; held through the day: its "
+                f"{', '.join((f.get('time_utc') or '?') for f in chk)} UTC frames read it within "
+                f"{v.get('day_spread_deg') or 0:.3f} deg)" if chk else
+                f" (the {v.get('probe_time_utc') or '?'} UTC frame, the day's only photo)")
         parts.append(f"{d} ({(byday.get(d) or {}).get('verdict') or v.get('verdict') or '?'}): {a:+.3f}/{t:+.3f}/"
-                     f"{r:+.3f} deg pan/tilt/roll on {v.get('inliers')} inliers, turn_sigma {v.get('turn_sigma')}" + mv)
+                     f"{r:+.3f} deg pan/tilt/roll on {v.get('inliers')} inliers, turn_sigma {v.get('turn_sigma')}"
+                     + held + mv)
     left = [f"{d} ({'; '.join(w)})" for d, w in sorted((pcr.get("not_corrected") or {}).items())
             if (byday.get(d) or {}).get("verdict") in LEFT_OUT_VERDICTS]
     return (f"{cam}: POINTING CORRECTED PER DAY (--correct-pointing: an evaluation product, in its own root): "
@@ -7695,10 +7759,17 @@ def pointing_correction_caveat(cam, pcr, byday=None):
               f"files in waterlines/{cam}/pointing_corrected_eo/); the default product leaves a day measured to differ "
               f"out instead, and grids a smaller change uncorrected. Gates: {ru.get('min_inliers')} or more inliers, "
               f"turn_sigma {ru.get('min_turn_sigma', 0):g} or more, inliers spread {ru.get('min_spread_px', 0):g} px or "
-              f"more, a turn of at most {ru.get('max_turn_deg', 0):g} deg, not UNCONFIRMED, not the reference day"
+              f"more, a turn of at most {ru.get('max_turn_deg', 0):g} deg"
+            + (f" and of more than {ru['min_turn_deg']:g} deg (the match's own error: a day at rest is gridded as by "
+               f"default)" if "min_turn_deg" in ru else "")
+            + (f", the same turn within {ru['max_day_spread_deg']:g} deg on the day's first and last photos (the "
+               f"pointing held through the day)" if "max_day_spread_deg" in ru else "")
+            + ", not UNCONFIRMED, not the reference day"
             + (f". Measured to differ or unconfirmed and NOT corrected (left out or kept as the lines above say): "
                f"{'; '.join(left)}" if left else "")
-            + ". The window's constant offset against the calibration (the sea horizon's, above) is not corrected "
+            + ". Only the georectification is corrected: the detector searched each day with the calibration's "
+              "envelope or crop (padded ~1-2.7 deg of tilt), so a day tilted ~1 deg or more may have lines outside "
+              "it. The window's constant offset against the calibration (the sea horizon's, above) is not corrected "
               "(docs/VALIDATION.md 4.6b).")
 
 
@@ -11017,9 +11088,10 @@ def main():
                     help="keep the days the pointing check marks DIFFERENT POINTING or UNCONFIRMED (default: "
                          "left out of the detection)")
     ap.add_argument("--correct-pointing", action="store_true",
-                    help="OPT-IN, an evaluation: a day whose matched features pass pointing_daily.py's gates is "
-                         "detected and its waterlines mapped with its own pointing (the calibration turned by the "
-                         "change measured that day) instead of being left out; every other day as by default. Into "
+                    help="OPT-IN, an evaluation: a day whose matched features pass pointing_daily.py's gates (a "
+                         f"turn over {MATCH_ERR_DEG:g} deg, held through the day) is detected and its waterlines "
+                         "mapped with its own pointing (the calibration turned by the change measured that day) "
+                         "instead of being left out; every other day as by default. Into "
                          f"its own root only, <root>_{POINTING_CORRECTED} (e.g. {DEFAULT_OUTPUT_ROOT}_"
                          f"{POINTING_CORRECTED}; any other root is refused, exit 5); not on a BLIND date, not with --eo")
     ap.add_argument("--pointing-frames", type=int, default=3, help="frames per day for the horizon (default 3)")

@@ -54,8 +54,29 @@ THREE PARTS, none of which changes a product unless asked:
          pointing step's two methods disagree, an ambiguous match, or a
          day nothing could read next to one left out:
          survey_products.pointing_verdicts).
-     The first three thresholds are survey_products.py's own, passed in
-     (correction_rules), so there is one definition of each.
+     The survey products (--correct-pointing) add two gates of the day:
+       * a turn of MORE than MATCH_ERR_DEG (0.1 deg) in pan, tilt or
+         roll: a smaller one is within the match's own error against
+         another day (<= 0.101 deg at 40-59 inliers), so a day at rest
+         is left as the default build grids it, not moved by the
+         matcher's noise (turn_sigma is a distance from no turn in the
+         inliers' own scatter, not this error: real at-rest matches
+         read 4.9-18.5). The corrected days are then the turned ones,
+         those the default leaves out or keeps as a 'small change';
+       * the pointing HELD through the day: the day's first and last
+         photos of the detection (other than its probe frame and the
+         reference frame) are matched against the same reference, and
+         each must pass the gates above and read the probe's turn
+         within MATCH_ERR_DEG in pan, tilt and roll. The correction is
+         measured on one probe frame (nearest 17:00 UTC) and maps every
+         row of the UTC day; on a day the camera turned or came back
+         (wind load, a slip) the frames before the change would be
+         moved by the whole turn. A frame that cannot be read (fog,
+         rain) shows nothing held: the day is not corrected, and stays
+         left out when the default leaves it out.
+     The first three thresholds and MATCH_ERR_DEG are survey_products.py's
+     own, passed in (correction_rules), so there is one definition of
+     each.
 
   2. THE CORRECTED POINTING (corrected_eo, regeorectify). The camera
      only rotates, so its pointing on the day is the reference's turned
@@ -63,7 +84,8 @@ THREE PARTS, none of which changes a product unless asked:
      rotation R = Q R_ref (Kabsch inside RANSAC) and reports R's CIRN
      angles less the reference's, so the day's EO is the calibration's
      position with its angles plus that change: exact, to the 0.001 deg
-     the pointing rows keep (~3 mm at 350 m). The day's waterline points
+     the pointing rows keep (~6-9 cm of line position in range, ~1.5 mm
+     of DEM, at 250-350 m). The day's waterline points
      are mapped again with it (georectify.pixel_to_ground, each on its
      own elevation plane, written as georectify.py writes them); every
      other row is left as it was, byte for byte. The pinned files
@@ -78,7 +100,17 @@ THREE PARTS, none of which changes a product unless asked:
      passes, in its own output root (<root>_pointing-corrected), keeps
      every other day as the default build does (a day measured to differ
      that fails a gate is still left out), and says which days, by how
-     much and how far their lines moved, in its README.
+     much, on which frames and how far their lines moved, in its README.
+     Its compare step re-projects a corrected day's lines for the C = 0
+     sensitivity with that day's EO (survey_compare.py --camera-eo-day).
+     Only the georectification is corrected: the detector's search
+     (the envelope of a historical era, placed with --eo; the live
+     crop) is the calibration's, padded by 0.03 / 0.06 of the frame
+     height (~61 / ~123 px: ~1.4 / ~2.7 deg of tilt for c1, fy ~2573
+     px, ~1.0 / ~1.9 deg for c2, fy ~3681 px), so a corrected day
+     tilted ~1 deg or more (or rolled so the band's ends move as far)
+     may have part of its waterline band outside the search, where the
+     detector can follow another edge (docs/VALIDATION.md 4.6b).
 
   3. THE LIVE LOG (main; waterline_timex_cron.sh). For each camera and
      each complete UTC day not yet logged (the last --lookback-days, at
@@ -157,7 +189,7 @@ CORRECT_MAX_DEG = 2.5
 # The correction's version (its gates, and how the corrected pointing is made and applied): part of
 # survey_products' detection signature with --correct-pointing, bumped when either changes, so a corrected
 # product is rebuilt.
-CORRECTION_VERSION = 1
+CORRECTION_VERSION = 2
 # The live log: the cron's calibrations and archive (waterline_timex_cron.sh: step 6 and ARCHIVE_IMG).
 LIVE_EO = {c: CAL / f"CACO05_{c}_20251113_EO-CV.yaml" for c in ("c1", "c2")}
 ARCHIVE = HERE / "archive"
@@ -176,12 +208,20 @@ def _num(v):
 # 1. The gates
 # ---------------------------------------------------------------------
 
-def correction_rules(min_inliers, min_turn_sigma, min_spread_px, max_turn_deg=CORRECT_MAX_DEG):
+def correction_rules(min_inliers, min_turn_sigma, min_spread_px, max_turn_deg=CORRECT_MAX_DEG, min_turn_deg=None,
+                     max_day_spread_deg=None):
     """The gates of day_correction, as numbers. The first three are the survey products' own (survey_products.py
     MATCH_INLIERS, TURN_SIGMA_MIN, MATCH_SPREAD_TESTED_PX), passed in so each has one definition; max_turn_deg is
-    this module's CORRECT_MAX_DEG."""
-    return {"min_inliers": int(min_inliers), "min_turn_sigma": float(min_turn_sigma),
-            "min_spread_px": float(min_spread_px), "max_turn_deg": float(max_turn_deg)}
+    this module's CORRECT_MAX_DEG. The gates of the day, given by the survey products only (MATCH_ERR_DEG; the
+    live log reads frames, not days to correct): min_turn_deg, the turn a day needs to be corrected at all, and
+    max_day_spread_deg, how far the day's other frames (its row's day_check) may read from its probe."""
+    r = {"min_inliers": int(min_inliers), "min_turn_sigma": float(min_turn_sigma),
+         "min_spread_px": float(min_spread_px), "max_turn_deg": float(max_turn_deg)}
+    if min_turn_deg is not None:
+        r["min_turn_deg"] = float(min_turn_deg)
+    if max_day_spread_deg is not None:
+        r["max_day_spread_deg"] = float(max_day_spread_deg)
+    return r
 
 
 def station_rules():
@@ -197,7 +237,8 @@ def day_correction(row, rules, ref_day=None):
     pointing_verdicts judged it; the live log's rows have no verdict). rules: correction_rules. ref_day: the day of
     the reference frame. -> (d_deg [pan, tilt, roll] or None, [why not, ...]): the change measured from the
     reference, when every gate (the module's docstring) passes; a row of an older build without turn_sigma or the
-    inliers' spread fails those gates (not measured is not passed).
+    inliers' spread fails those gates (not measured is not passed). With the rules' gates of the day: a turn of
+    min_turn_deg or less is at rest, and the row's day_check must show the pointing held (day_held).
     """
     why = []
     if ref_day and row.get("date") == ref_day:
@@ -229,21 +270,64 @@ def day_correction(row, rules, ref_day=None):
     turn = max(abs(x) for x in d)
     if turn > rules["max_turn_deg"]:
         why.append(f"a turn of {turn:.2f} deg, over {rules['max_turn_deg']:g} (a re-set? it may have moved too)")
+    if "min_turn_deg" in rules and turn <= rules["min_turn_deg"]:
+        why.append(f"a turn of {turn:.3f} deg, within the match's own error against another day "
+                   f"({rules['min_turn_deg']:g} deg): at rest, as the default build grids it")
+    if not why and "max_day_spread_deg" in rules:
+        why = day_held(row, d, rules)
     return (None if why else d), why
+
+
+def frame_gates(rules):
+    """The gates of one frame's reading (correction_rules without the gates of the day)."""
+    return {k: rules[k] for k in ("min_inliers", "min_turn_sigma", "min_spread_px", "max_turn_deg")}
+
+
+def day_held(row, d, rules):
+    """
+    Did the pointing a day's probe measured (d) hold through the day? row["day_check"]: the feature records
+    (survey_products.feature_record, with 'time_utc') of the day's other frames, its first and last photos of the
+    detection (survey_products.check_pointing; [] when the probe is the day's only photo). Each must pass the gates
+    of a frame and read d within rules["max_day_spread_deg"] in pan, tilt and roll. -> [why not] ([]: it held).
+    """
+    chk = row.get("day_check")
+    if chk is None:
+        return ["the pointing through the day not checked (only the probe frame was matched)"]
+    lim = rules["max_day_spread_deg"]
+    why = []
+    for fr in chk:
+        dd, w = day_correction(fr, frame_gates(rules))
+        t = f"the {fr.get('time_utc') or '?'} UTC frame"
+        if dd is None:
+            why.append(f"{t} gives no reading ({'; '.join(w)}): the pointing is not shown to hold through the day")
+        elif max(abs(a - b) for a, b in zip(dd, d)) > lim:
+            why.append(f"{t} reads {dd[0]:+.3f}/{dd[1]:+.3f}/{dd[2]:+.3f} deg, more than {lim:g} deg from the "
+                       f"probe's {d[0]:+.3f}/{d[1]:+.3f}/{d[2]:+.3f}: the pointing did not hold through the day "
+                       f"(turned or came back)")
+    return why
 
 
 def window_corrections(rows, rules, ref_day=None):
     """day_correction for each day of a window's pointing rows. -> ({day: {d_deg, inliers, turn_sigma,
-    inlier_spread_px, verdict}} of the days that pass, {day: [why not]} of the others), by date."""
+    inlier_spread_px, verdict, and with the gates of the day: probe_frame, day_check [{frame, time_utc, d_deg}],
+    day_spread_deg (the largest difference from the probe's turn)}} of the days that pass, {day: [why not]} of the
+    others), by date."""
     corr, why_not = {}, {}
     for r in sorted(rows or [], key=lambda r_: str(r_.get("date") or "")):
         d, why = day_correction(r, rules, ref_day)
         if d is None:
             why_not[r.get("date")] = why
-        else:
-            corr[r["date"]] = {"d_deg": [round(float(x), 3) for x in d], "inliers": int(_num(r.get("inliers"))),
-                               "turn_sigma": _num(r.get("turn_sigma")),
-                               "inlier_spread_px": r.get("inlier_spread_px"), "verdict": r.get("verdict")}
+            continue
+        corr[r["date"]] = {"d_deg": [round(float(x), 3) for x in d], "inliers": int(_num(r.get("inliers"))),
+                           "turn_sigma": _num(r.get("turn_sigma")),
+                           "inlier_spread_px": r.get("inlier_spread_px"), "verdict": r.get("verdict")}
+        if "max_day_spread_deg" in rules:
+            chk = [{"frame": f.get("feature_frame"), "time_utc": f.get("time_utc"),
+                    "d_deg": [_num(f.get(k)) for k in ("d_azimuth_deg", "d_tilt_deg", "d_roll_deg")]}
+                   for f in r.get("day_check") or []]
+            corr[r["date"]].update(probe_frame=r.get("feature_frame"), probe_time_utc=r.get("feature_time_utc"),
+                                   day_check=chk, day_spread_deg=round(max(
+                                       [abs(a - b) for f in chk for a, b in zip(f["d_deg"], d)] or [0.0]), 3))
     return corr, why_not
 
 
@@ -550,7 +634,12 @@ def live_references(cam, io, eo, eo_file, frames, args):
     own = Path(args.log_dir) / "pointing_daily_reference" / cam
     have = [p for p in sorted(own.glob("*.jpg")) if not p.stem.endswith("_mask") and same_eo(p.with_suffix(".json"), eo)]
     if have:
-        return have[:1], json.loads(have[0].with_suffix(".json").read_text()).get("info") or {"kind": "own"}
+        info = json.loads(have[0].with_suffix(".json").read_text()).get("info") or {"kind": "own"}
+        if args.reference_day and args.reference_day != info.get("day"):
+            print(f"pointing {cam}: --reference-day {args.reference_day} not used: the log keeps its reference "
+                  f"{have[0].name} ({info.get('day') or '?'}) at this calibration; to replace it, remove {own} and "
+                  f"run again with --reference-day")
+        return have[:1], info
     day = args.reference_day or eo_day(eo_file)
     kind = "reference day" if args.reference_day else "calibration day"
     cands = (frames.get(day) or []) if day else []
@@ -722,6 +811,9 @@ def main():
         names = set(p.name for p in refs)
         for day in sorted(todo):
             ent = measure_day(cam, day, frames.get(day) or [], loaded, names, io, eo, rules, args)
+            # what this day was measured against (the header's calibration and reference are the latest run's)
+            ent.update(calibration=dict(log["calibration"]),
+                       reference={k: rinfo.get(k) for k in ("kind", "day", "frames")})
             log["days"][day] = ent
             log["days"] = dict(sorted(log["days"].items()))
             save_log(log_path, log)
