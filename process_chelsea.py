@@ -542,6 +542,8 @@ def main():
     signature = REPROJECT_VERSION + " " + " ".join(
         f"{eo}:" + ",".join(f"{v:.6f}" for v in c[1]) for eo, c in sorted(calib.items()))
     signature += " " + str(sorted(setups))
+    if timing != "legacy":          # the plane follows the mode; legacy keeps its older caches
+        signature += f" timing:{timing}:{timex_timing.TIMEX_MID_OFFSET_S}"
     if not marker.exists() or marker.read_text().strip() != signature:
         shutil.rmtree(work / "src", ignore_errors=True)       # made by an older resampling
         (work / "src").mkdir(parents=True)

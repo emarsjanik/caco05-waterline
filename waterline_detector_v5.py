@@ -2114,7 +2114,7 @@ def print_banner():
     print("Confidence discard threshold:", CONFIDENCE_DISCARD_THRESHOLD)
     print("Timing mode  :", timex_timing.describe(TIMING_MODE))
     print("Temporal blend:", "on" if TEMPORAL_FILTER_ENABLED else "off")
-    print("Timex bias   :", TIMEX_BIAS_SOURCE)
+    print("Timex bias   :", TIMEX_BIAS_SOURCE if "timex" in IMAGE_SUFFIX.lower() else "not used (snap)")
     print()
 
 

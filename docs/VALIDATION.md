@@ -504,7 +504,7 @@ cm), nothing else.
 
 | what | data | number | reproduce here | check on the NUC |
 |---|---|---|---|---|
-| Legacy is the code without the switch, bit for bit | [SYNTH] test (8 synthetic photos; 43 detection files; a 5-day ground file) | detector: 16/16 CSVs and overlays byte-identical to the code without the switch (this checkout with the switch commit's own changes taken out by `git merge-file`, so a fix merged after it is on both sides; on its branch, commit `42e3e86`), also with `TIMING_MODE=legacy`, `--timing-mode legacy`, no calibration folder (the built-in values) and an unreadable legacy file (a WARNING, the built-in values); contour file byte-identical; DEM grids, `_sigma.asc`, `_info.json` and log byte-identical | `python3 test_timing_mode.py` | after the pull the cron's products are as before (section 1) |
+| Legacy is the code without the switch, bit for bit | [SYNTH] test (8 synthetic photos; 43 detection files; a 5-day ground file) | detector: 16/16 CSVs and overlays byte-identical to the code without the switch (this checkout with the changes of the commit that brought the switch in taken out by `git merge-file`: the switch commit on its own line, else the merge that joined it, against its first parent; so a fix merged after it is on both sides; on its branch, `--before 42e3e86`), also with `TIMING_MODE=legacy`, `--timing-mode legacy`, no calibration folder (the built-in values) and an unreadable legacy file (a WARNING, the built-in values); contour file byte-identical; DEM grids, `_sigma.asc`, `_info.json` and log byte-identical | `python3 test_timing_mode.py` | after the pull the cron's products are as before (section 1) |
 | `timex_bias_legacy.json` is the built-in v6.8 timex bias | [SYNTH] test | every float equal (c1 constant -11.03 px; c2's 10 points, the last three -17.22) | same | - |
 | Mid does all three, together | [SYNTH] test | detector: blend off, the mid file's corrections, `Timing_Mode=mid` on every row; refused without its file (unless that camera's bias is off, as in `detect_original_view.py`); contour step: level, waves and stale-gap check at +300 s (timex) / +0 s (snap), capture time unchanged, `level_time_offset_s` last; the other mode's detections left out, both ways | same | - |
 | The pass rule finds a planted lag | [SYNTH] test: synthetic lines shaped like a real 11 Sep 2026 hand-clicked line, georectified with the real CACO05 calibration, 4 days, a 7.9 min lag planted in the legacy lines and none in the mid ones | legacy lag 5.6 (c1) / 6.7 (c2) min, flood minus ebb +0.083 / +0.099 m; mid 0.1 / 0.8 min, +0.010 / +0.024 m: PASS | same | `recalibrate_timing.py --steps compare` |
@@ -529,6 +529,17 @@ detections take the detector's rate per photo (printed as it goes), twice for co
 cd /mnt/I2Rgus_Data/waterline
 python3 test_timing_mode.py                      # ends "all timing-mode tests passed"
 ```
+
+On an integrated tree the "without the switch" code is built from git (the test's first lines say
+from which commit). Where it cannot be built exactly (a later change on the switch's own lines, or a
+squash: the commit that added `timex_timing.py` then carries other branches' changes), a difference
+is a SKIP that names the command to decide it: `python3 test_timing_mode.py --before REF`, REF a
+commit with every change of the tree but the switch's (after a merge, the merge's first parent). The
+branch-level proof is `python3 test_timing_mode.py --before 42e3e86` on `deep/cam-timing`; merge the
+branch with a merge commit (not a squash) to keep the default check exact. A copy of the scripts
+elsewhere (a mirror) needs `timex_timing.py`, `calibration/timex_bias_legacy.json`,
+`calibration/README.md`, `recalibrate_timing.py` and `test_timing_mode.py` beside them: the detector,
+the contour step, `process_chelsea.py` and `process_historical.py` import `timex_timing.py`.
 
 1. **The exposure.** `python3 recalibrate_timing.py --steps exposure` reads when the newest
    archived timex were written (their modification time, kept by the cron's `cp -p`, minus the time
@@ -563,7 +574,10 @@ python3 test_timing_mode.py                      # ends "all timing-mode tests p
    with the bias off, blend ON (the CONTROL, as when the v6.8 values were fitted) and blend OFF,
    runs `derive_bias_correction.py --suffix .timex. --uncorrected` on both, and writes the blend-off
    result to `calibration/timex_bias_mid.json` by the v6.8 rules (a constant unless spread/SEM > 3;
-   far-field segments clamped where the error bar exceeds the value). Read its table: mid minus
+   a curve's segments beyond x = 0.8, the detector's far field, take the value of the outermost
+   segment at x <= 0.8, as v6.8; nothing at x <= 0.8 is clamped, whatever its scatter). A table those
+   rules cannot settle (a segment at x <= 0.8 that too few frames reach, another segmentation) writes
+   nothing and stops with exit 5: read the table, click more ground truth, or set the points by hand. Read its table: mid minus
    control is the blend lag the v6.8 values absorbed (expect about +2.8 px c1, +2.6 px c2); control
    minus the v6.8 values says whether the old fit is reproducible (a NOTE above 3 px: the detector
    or the ground truth changed since; mid is still a like-for-like fit). `--dry-run` writes
@@ -580,7 +594,10 @@ python3 test_timing_mode.py                      # ends "all timing-mode tests p
    from legacy to mid, BOTH the |slope| of the residual on dz/dt AND |flood - ebb| (the median
    residual of frames with dz/dt above +0.1 m/h minus that below -0.1 m/h) shrink; overall PASS when
    every camera that could be judged passes (exit 0; FAIL exit 2; NOT JUDGED, too few flood or ebb
-   frames, exit 3: take a longer window). Expected if the timing error is real: legacy lag about +4
+   frames, exit 3: take a longer window). The slope and the contrast are blind to a wrong offset or
+   shape in the mid bias file, so each camera's DEM is also built alone in both modes, and a camera
+   FAILs when its median mid minus legacy is more than 0.1 m from what the fix predicts (c1 +0.04 m,
+   c2 +0.02 m); without such a DEM in both modes it is not judged. Expected if the timing error is real: legacy lag about +4
    to +8 min with flood above ebb, mid near 0. The minutes are indicative (a planted 6 min comes back
    as 5.5-8 min); the sign, the contrast and which mode is smaller are the test. The report is in
    `timing_recalibration/compare/<window>/report.txt` and `.json`.
@@ -588,7 +605,9 @@ python3 test_timing_mode.py                      # ends "all timing-mode tests p
 5. **Backfill** (after a PASS). `python3 recalibrate_timing.py --steps backfill` re-detects every
    photo of `archive/images_timex` in mode mid into `archive/processed_timex_mid`, one UTC day at a
    time, never overwriting a file there; a stopped run resumes (days done are listed in
-   `timing_recalibration/backfill/done_days.txt`). Hours for a few months of photos.
+   `timing_recalibration/backfill/done_days.txt`; today's UTC day is never listed, as the cron is
+   still adding its photos). Hours for a few months of photos. Run it again right before step 6, so
+   the days since the first run are in `archive/processed_timex_mid` too.
 
 6. **Switch.** In `waterline_timex_cron.sh` change `TIMING_MODE=legacy` to `TIMING_MODE=mid`. The
    next run logs `timing mode: mid (...)` and WARNs while `archive/processed_timex_mid` holds fewer
@@ -602,8 +621,10 @@ python3 test_timing_mode.py                      # ends "all timing-mode tests p
    contours built with C = 0. Change `SETUP_COEF` (and its copies, section 4.1) only by the rule
    of section 4.1: when it holds over several weeks of different waves.
 
-8. **Going back.** `TIMING_MODE=legacy` again. The legacy archive was never changed, so the
-   products are again exactly those of before.
+8. **Going back.** `TIMING_MODE=legacy` again. The legacy archive was never changed, but while the
+   cron ran in mid it archived only mid detections (`ImageProducts` is cleared daily): re-detect the
+   photos of that period from `archive/images_timex` in legacy into `archive/processed_timex`, or
+   the legacy maps and DEMs have a gap there.
 
 **If compare FAILs.** Keep `TIMING_MODE=legacy`. Look at: the exposure (step 1: a wrong
 `TIMEX_MID_OFFSET_S` moves the mid lines' level by that error x dz/dt); the mid file's table (a

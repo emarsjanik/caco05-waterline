@@ -63,7 +63,11 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 
-import timex_timing
+try:
+    import timex_timing
+except ImportError:         # the options need it, so before check_environment() can say so
+    sys.exit(f"STOPPED: timex_timing.py must sit beside this script in {os.path.dirname(os.path.abspath(__file__))} "
+             f"(companion scripts not found).")
 
 # The camera move this calibration follows. Imagery before this date
 # needs a different extrinsic solve.

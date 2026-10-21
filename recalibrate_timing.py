@@ -34,11 +34,13 @@ STEPS (--steps; default exposure,derive,compare):
             CONSISTENT, MISMATCH or NOT MEASURED (no file kept its time).
             A MISMATCH stops the run before the other steps (--ignore-
             exposure goes on): the constant is then the one number to
-            change, in timex_timing.py. The written-after test cannot tell
-            a 10-min exposure named by its start from a shorter one, and
-            the timestacks are the c2 timestack's own collection, assumed
-            to match the timex's; the docs' section 2.7 has the check by
-            hand in the arguseyes settings.
+            change, in timex_timing.py. The written-after test catches
+            only an exposure shorter than 600 s, or one named by its end,
+            and only when the files are written promptly: a LONGER
+            exposure named by its start (or a late write) passes it. The
+            timestacks are the c2 timestack's own collection, assumed to
+            match the timex's. So the arguseyes collection length is the
+            authority; the docs' section 2.7 has the check by hand.
 
   derive    1. the photos of the hand-clicked timex ground truth
                (<ground truth>/*.timex.csv) are looked up in --image-dirs;
@@ -50,7 +52,9 @@ STEPS (--steps; default exposure,derive,compare):
             4. the blend-off table becomes the mid corrections by the rules
                the v6.8 values were set by (points_from_table), written to
                calibration/timex_bias_mid.json with its provenance (a
-               previous one is kept beside it as .bak);
+               previous one is kept beside it as .bak); a table those rules
+               cannot settle (a thin segment at x <= 0.8, another
+               segmentation) writes nothing and stops for a person (exit 5);
             5. legacy, control and mid are printed side by side: control
                minus legacy says whether the fit itself is reproducible,
                mid minus control is the blend lag the v6.8 values absorbed
@@ -72,7 +76,14 @@ STEPS (--steps; default exposure,derive,compare):
                   minutes a line is older than its level), and
                 * |flood - ebb|, the median residual of the flood frames
                   minus that of the ebb frames (|dz/dt| > 0.1 m/h).
-              Overall PASS when every camera that could be judged passes.
+              and, per camera, the DEM built from that camera alone moves
+              from legacy to mid by about what the fix predicts: its median
+              mid minus legacy within DEM_SHIFT_BOUND_M (0.1 m) of
+              EXPECTED_DEM_SHIFT_M (c1 +0.04, c2 +0.02 m); further, a FAIL
+              (the slope and the contrast do not see a wrong offset or
+              shape in the mid bias file; this does), and no such DEM, not
+              judged. Overall PASS when every camera that could be judged
+              passes.
 
             The timing error predicts legacy about +4 to +8 min (lines
             older than their levels: flood high, ebb low) and mid about 0.
@@ -102,11 +113,13 @@ STEPS (--steps; default exposure,derive,compare):
             archive/processed_timex_mid, one UTC day at a time, never
             overwriting a file there; days done are listed in the work
             folder, so a stopped run resumes. Run it once, after derive
-            and a PASS, before setting TIMING_MODE=mid in the cron.
+            and a PASS, before setting TIMING_MODE=mid in the cron, and
+            again right before the switch: today's UTC day is detected but
+            never listed as done (the cron is still adding its photos).
 
 Exit status: 0 done (compare: PASS), 2 compare FAIL, 3 compare could not
 judge any camera, 4 the exposure check found a MISMATCH (nothing else
-run), 1 an error.
+run), 5 derive needs a person's decision (nothing written), 1 an error.
 
 Usage (on the NUC, in /mnt/I2Rgus_Data/waterline):
     python3 recalibrate_timing.py --start-date 2026-09-29 --end-date 2026-10-05
@@ -153,9 +166,30 @@ CAMERAS = ("c1", "c2")
 # data).
 SPREAD_SEM_CURVE = 3.0
 
+# The far field of a per-column correction: the segments centred beyond this
+# x fraction (with derive_bias_correction.py's 10 segments, x 0.848 and
+# 0.949, the two v6.8 clamped). They always take the value of the outermost
+# segment at x <= FAR_FIELD_X, and no segment there is ever clamped
+# (points_from_table).
+FAR_FIELD_X = 0.8
+# The most segments the far-field clamp may take: v6.8's two. A table whose
+# far field holds more (another segmentation) is left to a person.
+FAR_FIELD_MAX_CLAMPED = 2
+# A segment's mean counts as measured (different from 0) when it is more
+# than this many standard errors (std / sqrt(frames)) from 0.
+SIGNIFICANT_Z = 2.0
+
 # The review's reproduction of what the v6.8 timex corrections absorbed from
 # the blend (mid minus control, px), printed beside the measured values.
 EXPECTED_BLEND_SHIFT_PX = {"c1": 2.8, "c2": 2.6}
+
+# What the fix moves each camera's DEM by (mid minus legacy, median over the
+# cells, m; known finding C-B1: c1 +0.04, c2 +0.02), and how far from it the
+# compare step's per-camera DEM may be before that camera FAILs: a wrong
+# offset or shape in timex_bias_mid.json moves the DEM without changing the
+# residuals' slope on dz/dt or the flood - ebb contrast.
+EXPECTED_DEM_SHIFT_M = {"c1": 0.04, "c2": 0.02}
+DEM_SHIFT_BOUND_M = 0.10
 
 # The cron's settings this script reads from waterline_timex_cron.sh, and
 # what it assumes when a line is missing.
@@ -169,6 +203,11 @@ CRON_DEFAULTS = {
 
 def say(text=""):
     print(text, flush=True)
+
+
+class NeedsDecision(Exception):
+    """The derive step's table is one its rules cannot turn into a correction by
+    themselves (points_from_table): nothing is written, exit 5."""
 
 
 # ---------------------------------------------------------------------
@@ -414,31 +453,56 @@ def ground_truth_photos(gt_dir, image_dirs):
 def points_from_table(table):
     """
     derive_bias_correction.py's table (--json) -> (points, decision), by the
-    rules the v6.8 timex corrections were set by:
+    rules the v6.8 timex corrections were set by. points is None when the
+    table needs a person's decision (the decision then says why, and the
+    derive step prints the table and writes nothing):
       * SHAPE: the raw error's spread across the frame (max - min of the
         segment means) against its standard error (the median over the
         segments of std / sqrt(frames)). Spread/SEM above SPREAD_SEM_CURVE
         (3) is a real shape: one point per segment. Otherwise the shape is
         noise and the correction is the mean, constant across the frame
         (c1 in v6.8: 11.2 px against 4.2 px, 2.7, constant -11.03).
-      * FAR-FIELD CLAMP (curves only): from the far end inward, segments
-        whose error bar is larger than their value (std > |mean|), or that
-        too few frames reach (fewer than max(3, half the frames), derive's
-        own FEW FRAMES flag), take the value of the nearest segment that is
-        neither (c2 in v6.8: -41.28 +/- 48.26 and -57.78 +/- 67.00 became
-        -17.22). The near end is kept as measured, as it was.
-    Segments no frame reaches are left out (the detector interpolates, and
-    holds the end values beyond the last point). Values are rounded as
-    derive_bias_correction.py prints them (x to 0.001, px to 0.01).
+      * FAR-FIELD CLAMP (curves only): the segments beyond x = FAR_FIELD_X
+        (0.8) always take the value of the outermost segment at x <= 0.8 (c2
+        in v6.8: -41.28 +/- 48.26 and -57.78 +/- 67.00 became -17.22).
+        That is v6.8's own reason, which is about the detector and not the
+        sample: in c2's far field the energy peak collapses ~15x and the
+        detector holds a flat line 53 px RMS from the hand-traced truth
+        (waterline_detector_v5.py, CACO05_C2 bias_correction_points_timex),
+        so a value fitted there is fitted to output known to be wrong. The
+        rule does not look at the scatter. An earlier version clamped every
+        segment whose per-frame std exceeded |mean|, walking inward to the
+        first that did not; with c2's ~18 px per-frame std (SEM 5.1 px over
+        13 frames) against means of -1 to -17 px, that walk could run to x
+        = 0.05 and turn the curve into a constant, by chance in a quarter of
+        13-frame samples (the review of this switch). A far-field segment
+        that looks measured (more than SIGNIFICANT_Z standard errors from 0,
+        std below |mean|, enough frames) is clamped all the same, with a
+        NOTE: v6.8 says to re-derive by hand once the far field is reliable.
+      * NOTHING AT x <= 0.8 IS CLAMPED. A segment there whose mean is within
+        2 standard errors of 0 is a small correction measured as small, and
+        is kept. The rule does not set a curve by itself (points None) when
+        a segment there is reached by too few frames (fewer than max(3,
+        half the frames), derive_bias_correction.py's FEW FRAMES flag, or
+        none), when the far field holds more than FAR_FIELD_MAX_CLAMPED
+        segments (another segmentation), or when no segment at x <= 0.8
+        has data to clamp to.
+    Far-field segments no frame reaches are left out (the detector
+    interpolates, and holds the end values beyond the last point: the same
+    correction). Values are rounded as derive_bias_correction.py prints
+    them (x to 0.001, px to 0.01).
     """
-    segs = [s for s in table["segments"] if s.get("n", 0) > 0 and s.get("raw") is not None]
+    cam = table.get("camera")
+    allsegs = list(table["segments"])
+    segs = [s for s in allsegs if s.get("n", 0) > 0 and s.get("raw") is not None]
     if len(segs) < 2:
-        raise ValueError(f"{table.get('camera')}: fewer than 2 segments with data")
+        raise ValueError(f"{cam}: fewer than 2 segments with data")
     x = np.array([s["x"] for s in segs], float)
     raw = np.array([s["raw"] for s in segs], float)
     std = np.array([s["std"] if s.get("std") is not None else 0.0 for s in segs], float)
     n = np.array([s["n"] for s in segs], float)
-    sem = float(np.median(std / np.sqrt(n)))
+    sem_each = std / np.sqrt(n)
+    sem = float(np.median(sem_each))
     spread = float(raw.max() - raw.min())
     ratio = spread / sem if sem > 0 else float("inf")
     if ratio <= SPREAD_SEM_CURVE:
@@ -446,19 +510,39 @@ def points_from_table(table):
         return ((0.0, c), (1.0, c)), (f"CONSTANT {c:+.2f} px: spread across the frame {spread:.1f} px against a "
                                       f"{sem:.1f} px standard error (spread/SEM {ratio:.1f}, not above "
                                       f"{SPREAD_SEM_CURVE:g}: the shape is noise); the mean of {len(segs)} segments")
+    shape = (f"spread {spread:.1f} px against a {sem:.1f} px standard error (spread/SEM {ratio:.1f}, "
+             f"above {SPREAD_SEM_CURVE:g}: a per-column curve)")
     few = max(3.0, 0.5 * float(table.get("n_frames", 0)))
-    untrusted = (std > np.abs(raw)) | (n < few)
-    k = len(segs) - 1
-    while k > 0 and untrusted[k]:
-        k -= 1
+    thin = [s for s in allsegs if s["x"] <= FAR_FIELD_X and (s.get("n", 0) < few or s.get("raw") is None)]
+    n_far = sum(1 for s in allsegs if s["x"] > FAR_FIELD_X)
+    inside = np.flatnonzero(x <= FAR_FIELD_X)
+    why_not = []
+    if thin:
+        why_not.append("segment(s) " + ", ".join(f"{s['x']:.3f} ({int(s.get('n', 0))} frames)" for s in thin)
+                       + f" at x <= {FAR_FIELD_X:g} reached by fewer than {few:g} frames (FEW FRAMES): the "
+                         f"rule never clamps at x <= {FAR_FIELD_X:g}")
+    if n_far > FAR_FIELD_MAX_CLAMPED:
+        why_not.append(f"{n_far} segments beyond x = {FAR_FIELD_X:g}, more than the {FAR_FIELD_MAX_CLAMPED} "
+                       f"v6.8 clamped (another segmentation)")
+    if not len(inside):
+        why_not.append(f"no segment at x <= {FAR_FIELD_X:g} has data to clamp the far field to")
+    if why_not:
+        return None, (f"NEEDS A DECISION, nothing written: {shape}, but " + "; and ".join(why_not)
+                      + ". Read the table, then click more ground truth (collect_all_ground_truth.py) or set "
+                        "the points by hand")
+    k = int(inside[-1])
     vals = raw.copy()
     vals[k + 1:] = raw[k]
     pts = tuple((round(float(a), 3), round(float(b), 2)) for a, b in zip(x, vals))
     clamped = [f"{x[i]:.3f} ({raw[i]:+.2f} +/- {std[i]:.2f}, {int(n[i])} frames)" for i in range(k + 1, len(segs))]
-    return pts, (f"PER-COLUMN, {len(pts)} points: spread {spread:.1f} px against a {sem:.1f} px standard error "
-                 f"(spread/SEM {ratio:.1f}, above {SPREAD_SEM_CURVE:g})"
-                 + (f"; far-field segment(s) {', '.join(clamped)} CLAMPED to {raw[k]:+.2f} (x {x[k]:.3f}): "
-                    f"error bar larger than the value, or too few frames" if clamped else "; nothing clamped"))
+    measured = [f"{x[i]:.3f}" for i in range(k + 1, len(segs))
+                if abs(raw[i]) > SIGNIFICANT_Z * sem_each[i] and std[i] < abs(raw[i]) and n[i] >= few]
+    return pts, (f"PER-COLUMN, {len(pts)} points: {shape}"
+                 + (f"; far field (x > {FAR_FIELD_X:g}) {', '.join(clamped)} CLAMPED to {raw[k]:+.2f} "
+                    f"(x {x[k]:.3f}), as v6.8: the detector's far field" if clamped else "; nothing clamped")
+                 + (f". NOTE: {', '.join(measured)} look(s) measured (beyond {SIGNIFICANT_Z:g} standard errors, "
+                    f"std below the value): clamped all the same; if the far field has been made reliable, "
+                    f"set it by hand" if measured else ""))
 
 
 def correction_at(points, xs):
@@ -539,7 +623,10 @@ def step_derive(args, work, cal_dir):
         ctl_pts, ctl_why = points_from_table(t_on)
         points[cam], decisions[cam] = pts, why
         xs = [s["x"] for s in t_off["segments"]]
-        leg_at, ctl_at, mid_at = correction_at(legacy, xs), correction_at(ctl_pts, xs), correction_at(pts, xs)
+        none = np.full(len(xs), np.nan)
+        leg_at = correction_at(legacy, xs)
+        ctl_at = correction_at(ctl_pts, xs) if ctl_pts else none
+        mid_at = correction_at(pts, xs) if pts else none
 
         def raw_of(t):        # a segment no frame reaches has no raw error (derive writes 0 there)
             return np.array([s["raw"] if s["raw"] is not None and s["n"] > 0 else np.nan
@@ -547,7 +634,7 @@ def step_derive(args, work, cal_dir):
         raw_on, raw_off = raw_of(t_on), raw_of(t_off)
         both = np.isfinite(raw_on) & np.isfinite(raw_off)
         shift = float(np.mean((raw_off - raw_on)[both])) if both.any() else float("nan")
-        repro = float(np.mean(ctl_at - leg_at))
+        repro = float(np.mean(ctl_at - leg_at)) if ctl_pts else float("nan")
         say(f"{cam}: {t_off['n_frames']} frame(s) blend off, {t_on['n_frames']} blend on")
         say(f"   {'x':>6} | {'legacy':>8} | {'control':>8} | {'mid raw':>8} | {'mid':>8} | {'std':>6} | {'n':>3}")
         for i, s in enumerate(t_off["segments"]):
@@ -556,14 +643,22 @@ def step_derive(args, work, cal_dir):
         say(f"   mid: {why}")
         say(f"   blend lag the v6.8 values absorbed (mid minus control, raw error): {shift:+.2f} px mean "
             f"(the review's reproduction: about {EXPECTED_BLEND_SHIFT_PX[cam]:+.1f} px)")
-        say(f"   control by the same rules minus the v6.8 values: {repro:+.2f} px mean"
-            + ("  <-- NOTE: the fit with the blend on does not reproduce the v6.8 values to 3 px: the detector, "
-               "the ground truth or its photos changed since; mid is still a like-for-like fit"
-               if abs(repro) > 3.0 else " (the fit is reproducible)"))
-        summary[cam] = {"control_points": [list(p) for p in ctl_pts], "control_decision": ctl_why,
-                        "blend_shift_px_mean": round(shift, 2) if np.isfinite(shift) else None, "control_minus_v68_px_mean": round(repro, 2),
+        if ctl_pts:
+            say(f"   control by the same rules minus the v6.8 values: {repro:+.2f} px mean"
+                + ("  <-- NOTE: the fit with the blend on does not reproduce the v6.8 values to 3 px: the detector, "
+                   "the ground truth or its photos changed since; mid is still a like-for-like fit"
+                   if abs(repro) > 3.0 else " (the fit is reproducible)"))
+        else:
+            say(f"   control: {ctl_why}")
+        summary[cam] = {"control_points": [list(p) for p in ctl_pts] if ctl_pts else None, "control_decision": ctl_why,
+                        "blend_shift_px_mean": round(shift, 2) if np.isfinite(shift) else None,
+                        "control_minus_v68_px_mean": round(repro, 2) if np.isfinite(repro) else None,
                         "frames": t_off["frames"]}
         say()
+    undecided = [cam for cam in CAMERAS if points[cam] is None]
+    if undecided:
+        raise NeedsDecision(f"{', '.join(undecided)}: the rules cannot set the mid correction by themselves (the "
+                            f"table above); {timex_timing.timex_bias_path('mid', cal_dir)} NOT written")
     if args.dry_run:
         say("--dry-run: calibration NOT written")
         return points
@@ -579,8 +674,9 @@ def step_derive(args, work, cal_dir):
                    f"{socket.gethostname()}, detector v{detector.VERSION}",
         "method": "the hand-clicked timex ground truth detected with --timing-mode mid --no-bias-correction, "
                   "then derive_bias_correction.py --suffix .timex. --uncorrected; points_from_table: a constant "
-                  f"unless spread/SEM > {SPREAD_SEM_CURVE:g}, far-field segments clamped where the error bar is "
-                  "larger than the value or few frames reach them",
+                  f"unless spread/SEM > {SPREAD_SEM_CURVE:g}; a curve's segments beyond x = {FAR_FIELD_X:g} (the "
+                  "detector's far field) clamped to the outermost segment at x <= that, as v6.8, nothing there "
+                  "clamped",
         "ground_truth_dir": str(gt_dir),
         "c1": decisions["c1"], "c2": decisions["c2"],
         "tables": {cam: tables[("blend_off", cam)] for cam in CAMERAS},
@@ -608,7 +704,9 @@ def window_photos(images_dir, start, end):
 
 def chain_commands(mode, mdir, cfg, waves, gauge, cal_dir, setup_coef):
     """The cron's steps after detection, on mdir/detections, in timing mode `mode`:
-    [(name, command, output)]. setup_coef None: no setup (for --fit-setup)."""
+    [(name, command, output)]. setup_coef None: no setup (for --fit-setup). With the
+    setup, each camera's DEM is also built alone (dem_c1, dem_c2: the same settings, for
+    judge's per-camera mid minus legacy)."""
     stem = "" if setup_coef is not None else "c0_"
     contours, qc, ground = mdir / f"{stem}contours.csv", mdir / f"{stem}contours_qc.csv", mdir / f"{stem}ground.csv"
     extract = [sys.executable, HERE / "extract_elevation_contours.py", cfg["GNSSR_SPLINE"],
@@ -636,16 +734,25 @@ def chain_commands(mode, mdir, cfg, waves, gauge, cal_dir, setup_coef):
         dem += ["--max-day-offset", cfg["DEM_MAX_DAY_OFFSET"], "--trend-note"]
     if setup_coef is None:
         dem += ["--fit-setup"]
-    steps.append(("dem", dem, mdir / f"{stem}dem_info.json"))
+        steps.append(("dem", dem, mdir / f"{stem}dem_info.json"))
+        return steps
+    steps.append(("dem", dem, mdir / "dem_info.json"))
+    for cam in CAMERAS:
+        one = [mdir / f"dem_{cam}" if c == mdir / "dem" else c for c in dem]
+        steps.append((f"dem_{cam}", one + ["--camera", cam, "--no-diagnostics"], mdir / f"dem_{cam}_info.json"))
     return steps
 
 
 def run_chain(mode, mdir, cfg, waves, gauge, cal_dir, setup_coef, log):
     """Runs chain_commands as the cron does (the consistency filter's failure falls back
-    to the unfiltered contours). -> the DEM's info.json path."""
-    use = None
+    to the unfiltered contours; a camera's own DEM that cannot be built is left out, and
+    judge then does not judge that camera). -> the DEM's info.json path."""
+    use, info = None, None
     for name, cmd, out in chain_commands(mode, mdir, cfg, waves, gauge, cal_dir, setup_coef):
         cmd = [use if c == "<contours>" else c for c in cmd]
+        if name.startswith("dem_"):
+            for old in Path(out).parent.glob(f"{name}_*"):      # never a previous run's DEM
+                old.unlink()
         rc = run(cmd, log)
         if name == "contours":
             if rc != 0 or not Path(out).exists():
@@ -656,9 +763,14 @@ def run_chain(mode, mdir, cfg, waves, gauge, cal_dir, setup_coef, log):
                 use = out
             else:
                 say(f"   {mode}: consistency filter failed (exit {rc}); the unfiltered contours are used, as the cron does")
+        elif name.startswith("dem_"):
+            if rc != 0 or not Path(out).exists():
+                say(f"   {mode}: the {name[4:]} DEM alone failed (exit {rc}); see {log}")
         elif rc != 0 or not Path(out).exists():
             raise RuntimeError(f"{mode}: {name} failed (exit {rc}); see {log}")
-    return Path(out)
+        elif name == "dem":
+            info = Path(out)
+    return info
 
 
 def residual_summary(info):
@@ -676,14 +788,17 @@ def residual_summary(info):
     return out
 
 
-def judge(legacy, mid):
+def judge(legacy, mid, shifts=None):
     """
     The pass rule, per camera (c1, c2): PASS when from legacy to mid BOTH
-    |slope of the residual on dz/dt| and |flood median - ebb median| shrink;
-    FAIL when either does not; 'not judged' when either mode has no fit or no
-    flood or ebb frames. -> ({camera: (verdict, why)}, overall), overall
-    PASS (every judged camera passes, at least one judged), FAIL, or
-    NOT JUDGED.
+    |slope of the residual on dz/dt| and |flood median - ebb median| shrink,
+    and the camera's own DEM moves by about what the fix predicts (shifts:
+    {camera: median mid minus legacy, m, or None}, within DEM_SHIFT_BOUND_M
+    of EXPECTED_DEM_SHIFT_M); FAIL when one of them does not; 'not judged'
+    when either mode has no fit or no flood or ebb frames, or (shifts given)
+    the camera has no DEM of its own in both modes. shifts None: the shift
+    is not judged. -> ({camera: (verdict, why)}, overall), overall PASS
+    (every judged camera passes, at least one judged), FAIL, or NOT JUDGED.
     """
     out = {}
     for cam in CAMERAS:
@@ -691,12 +806,23 @@ def judge(legacy, mid):
         if not a or not b or None in (a["slope"], b["slope"], a["contrast_m"], b["contrast_m"]):
             out[cam] = ("not judged", "too few frames with a rate, or no flood or ebb frames, in one of the modes")
             continue
+        shift = None if shifts is None else shifts.get(cam)
+        if shifts is not None and shift is None:
+            out[cam] = ("not judged", "no DEM of this camera alone in both modes, so the mid bias file's effect on "
+                                      "the DEM cannot be bounded")
+            continue
         s_ok = abs(b["slope"]) < abs(a["slope"])
         c_ok = abs(b["contrast_m"]) < abs(a["contrast_m"])
         why = (f"|slope| {abs(a['slope']):.3f} -> {abs(b['slope']):.3f} m per m/h "
                f"({'shrinks' if s_ok else 'does NOT shrink'}), |flood - ebb| {abs(a['contrast_m']):.3f} -> "
                f"{abs(b['contrast_m']):.3f} m ({'shrinks' if c_ok else 'does NOT shrink'})")
-        out[cam] = ("PASS" if s_ok and c_ok else "FAIL", why)
+        d_ok = True
+        if shift is not None:
+            d_ok = abs(shift - EXPECTED_DEM_SHIFT_M[cam]) <= DEM_SHIFT_BOUND_M
+            why += (f", its DEM mid minus legacy {shift:+.3f} m (expected about {EXPECTED_DEM_SHIFT_M[cam]:+.2f}: "
+                    + ("within" if d_ok else "NOT within") + f" {DEM_SHIFT_BOUND_M:g} m"
+                    + ("" if d_ok else "; the mid bias file (step derive) is suspect") + ")")
+        out[cam] = ("PASS" if s_ok and c_ok and d_ok else "FAIL", why)
     judged = [v for v, _ in out.values() if v != "not judged"]
     overall = "NOT JUDGED" if not judged else "PASS" if all(v == "PASS" for v in judged) else "FAIL"
     return out, overall
@@ -736,7 +862,7 @@ def fmt(v, f="+.3f"):
     return "--" if v is None else format(v, f)
 
 
-def report_lines(start, end, res, verdicts, overall, grids, setup):
+def report_lines(start, end, res, verdicts, overall, grids, setup, cam_grids=None):
     lines = [f"Water-level timing test, {start} .. {end}: the DEM's residuals against dz/dt "
              f"(dem_from_contours.py diagnostics)",
              "   slope in m per m/h (x 60 = minutes a line is older than its level); flood/ebb: median residual of",
@@ -763,6 +889,11 @@ def report_lines(start, end, res, verdicts, overall, grids, setup):
                         if grids["mid_minus_legacy_p16_p84_m"] else "--")
                      + f"); median spread legacy {fmt(grids['spread_median_legacy_m'], '.3f')} m, "
                        f"mid {fmt(grids['spread_median_mid_m'], '.3f')} m")
+    for cam, g in (cam_grids or {}).items():
+        lines.append(f"   DEM of {cam} alone: mid minus legacy "
+                     + (f"median {fmt(g['mid_minus_legacy_median_m'])} m over {g['cells_both']} shared cells"
+                        if g else "not built in both modes")
+                     + f" (expected about {EXPECTED_DEM_SHIFT_M[cam]:+.2f} m; judged within {DEM_SHIFT_BOUND_M:g} m)")
     for mode in ("legacy", "mid"):
         if setup.get(mode):
             lines.append(f"   setup refit ({mode}, contours with C = 0):")
@@ -830,21 +961,29 @@ def step_compare(args, work, cal_dir, cfg):
             before = log.read_text() if log.exists() else ""
             run_chain(mode, mdir, cfg, waves, gauge, cal_dir, None, log)
             setup[mode] = setup_fit_lines(log.read_text()[len(before):])
-    verdicts, overall = judge(res["legacy"], res["mid"])
-    try:
-        grids = grid_comparison(cdir / "legacy" / "dem_dem.asc", cdir / "mid" / "dem_dem.asc",
-                                cdir / "legacy" / "dem_spread.asc", cdir / "mid" / "dem_spread.asc")
-    except (OSError, ValueError, KeyError) as e:
-        say(f"   (DEM comparison skipped: {e})")
-        grids = None
-    lines = report_lines(args.start_date, args.end_date, res, verdicts, overall, grids, setup)
+    grids, cam_grids = None, {}
+    for key in ("",) + CAMERAS:
+        stem = f"dem_{key}_" if key else "dem_"
+        try:
+            g = grid_comparison(cdir / "legacy" / f"{stem}dem.asc", cdir / "mid" / f"{stem}dem.asc",
+                                cdir / "legacy" / f"{stem}spread.asc", cdir / "mid" / f"{stem}spread.asc")
+        except (OSError, ValueError, KeyError) as e:
+            say(f"   (DEM comparison{' of ' + key + ' alone' if key else ''} skipped: {e})")
+            g = None
+        if key:
+            cam_grids[key] = g
+        else:
+            grids = g
+    verdicts, overall = judge(res["legacy"], res["mid"],
+                              {c: (g or {}).get("mid_minus_legacy_median_m") for c, g in cam_grids.items()})
+    lines = report_lines(args.start_date, args.end_date, res, verdicts, overall, grids, setup, cam_grids)
     say()
     for ln in lines:
         say(ln)
     (cdir / "report.txt").write_text("\n".join(lines) + "\n")
     (cdir / "report.json").write_text(json.dumps(
         {"window": [args.start_date, args.end_date], "residuals": res, "verdicts": verdicts, "overall": overall,
-         "grids": grids, "setup_fit": setup, "settings": cfg, "waves": waves, "gauge": gauge,
+         "grids": grids, "grids_by_camera": cam_grids, "setup_fit": setup, "settings": cfg, "waves": waves, "gauge": gauge,
          "timex_bias_mid": str(mid_file)}, indent=1) + "\n")
     say(f"report: {cdir / 'report.txt'}")
     return overall
@@ -881,6 +1020,7 @@ def step_backfill(args, work, cal_dir):
         f"{sum(len(days[d]) for d in todo)} photo(s) to detect -> {target}")
     log = bdir / "backfill.log"
     added = 0
+    today = utc_day(datetime.now(timezone.utc).timestamp())
     for k, d in enumerate(todo, 1):
         say(f"   {d} ({k}/{len(todo)}): {len(days[d])} photo(s)")
         dets = detect("mid", days[d], bdir / "run", log, timex_bias_file=mid_file, keep_debug=False)
@@ -889,6 +1029,9 @@ def step_backfill(args, work, cal_dir):
             if not dst.exists():                        # never overwrite (the cron's cp -pn)
                 shutil.copy2(str(f), str(dst))
                 added += 1
+        if d >= today:                                  # still filling: detected again by the next run
+            say(f"   {d} is today (UTC): not listed as done, so the next run detects its later photos")
+            continue
         with open(done_file, "a") as fh:
             fh.write(d + "\n")
     say(f"backfill: {added} detection(s) added to {target} "
@@ -991,6 +1134,9 @@ def main():
             rc = {"PASS": 0, "FAIL": 2, "NOT JUDGED": 3}[overall]
         if "backfill" in steps:
             step_backfill(args, work, cal_dir)
+    except NeedsDecision as e:
+        say(f"STOPPED, A DECISION NEEDED: {e} (docs/VALIDATION.md section 2.7, step 3)")
+        return 5
     except (RuntimeError, ValueError, OSError) as e:
         say(f"STOPPED: {e}")
         return 1

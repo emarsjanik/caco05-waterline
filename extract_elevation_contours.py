@@ -908,7 +908,7 @@ def main():
         sys.exit(1)
 
     print(f"Found {len(shoreline_files)} processed shoreline file(s) in {processed_dir}")
-    print(f"Water-level time         : {timex_timing.describe(timing)}")
+    print(f"Water-level time         : {timex_timing.describe(timing, level_only=True)}")
     print()
 
     output_rows = []

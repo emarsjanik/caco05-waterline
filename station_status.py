@@ -76,6 +76,17 @@ def newest_epoch_in_csv(path, column="epoch"):
     return last
 
 
+def cron_timing_mode(base):
+    """The TIMING_MODE= line of <base>/waterline_timex_cron.sh (the one switch), else legacy."""
+    try:
+        for ln in (Path(base) / "waterline_timex_cron.sh").read_text().splitlines():
+            if ln.startswith("TIMING_MODE="):
+                return ln.split("=", 1)[1].split("#")[0].strip().strip("\"'")
+    except OSError:
+        pass
+    return "legacy"
+
+
 def fmt_age(h):
     return "missing" if h is None else (f"{h:.0f} h ago" if h < 48 else f"{h / 24:.1f} days ago")
 
@@ -102,12 +113,11 @@ def main():
     # The detections of the cron's timing mode (waterline_timex_cron.sh
     # TIMING_MODE, which it exports): archive/processed_timex (legacy) or
     # archive/processed_timex_mid (mid). Run by hand, without TIMING_MODE,
-    # whichever holds the newest line; with no mid archive, the legacy one.
-    t = newest_mtime(base / "archive/processed_timex", "*.csv")
-    t_mid = newest_mtime(base / "archive/processed_timex_mid", "*.csv")
-    mode = os.environ.get("TIMING_MODE", "")
-    newest_mid = mode == "mid" or (mode != "legacy" and t_mid is not None and (t is None or t_mid > t))
-    t = t_mid if newest_mid else t
+    # the mode the cron script is set to (never the newest archive: the
+    # backfill fills the mid one while the cron is still legacy).
+    mode = os.environ.get("TIMING_MODE", "") or cron_timing_mode(base)
+    newest_mid = mode == "mid"
+    t = newest_mtime(base / ("archive/processed_timex_mid" if newest_mid else "archive/processed_timex"), "*.csv")
     h = age_hours(t) if t else None
     add("detections", grade(h, 48, 120), f"newest waterline {fmt_age(h)}"
         + (" (timing mode mid, archive/processed_timex_mid)" if newest_mid else ""))

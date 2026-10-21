@@ -55,8 +55,11 @@ LOCK="$BASE/.timex_cron.lock"
 #           than either mode).
 # Before setting mid: recalibrate_timing.py (derive, then compare: it must
 # print PASS), then its backfill, which re-detects archive/images_timex into
-# archive/processed_timex_mid. Going back to legacy needs nothing: the legacy
-# archive is kept as it was.
+# archive/processed_timex_mid; run the backfill again right before the switch.
+# Going back to legacy: the legacy archive is kept as it was, but holds no
+# detection of the photos taken while the cron ran in mid (it archives only
+# the mid ones): re-detect those days of archive/images_timex in legacy into
+# archive/processed_timex, or the legacy maps and DEMs have a gap there.
 TIMING_MODE=legacy
 case "$TIMING_MODE" in
     mid) ARCHIVE_CSV="$BASE/archive/processed_timex_mid" ;;

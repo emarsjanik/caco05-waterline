@@ -235,7 +235,6 @@ def water_level_timing_record(frames_used, level_offset_of):
     min older than its level, a mid one is not, so a DEM of both pools two
     timings. -> (record for _info.json or None, lines to print)
     """
-    from timex_timing import TIMEX_MID_OFFSET_S
     tags = {}
     for f in set(frames_used.tolist()):
         v = level_offset_of.get(f)
@@ -243,6 +242,8 @@ def water_level_timing_record(frames_used, level_offset_of):
         tags[t] = tags.get(t, 0) + 1
     if set(tags) == {"legacy"} or not tags:
         return None, []
+    # imported only here: a legacy DEM needs nothing the timing switch added
+    from timex_timing import TIMEX_MID_OFFSET_S
     rec = {"frames": dict(sorted(tags.items())), "mixed": "legacy" in tags,
            "timex_mid_offset_s": TIMEX_MID_OFFSET_S}
     lines = ["Water-level time  : " + ", ".join(f"{t} {n} frame(s)" for t, n in sorted(tags.items()))

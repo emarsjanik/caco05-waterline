@@ -13,17 +13,27 @@ WHAT. The switch of timex_timing.py, off by default:
     TIMING_MODE=legacy, with --timing-mode legacy and (the detector) with
     no calibration folder at all (the built-in values): every detection
     CSV, overlay PNG, contour file, DEM grid and DEM info.json must be
-    byte-identical. "Without the switch" is read with git: this checkout's
-    file with the switch commit's own changes (the commit that added
-    timex_timing.py) taken back out by git merge-file, so a fix another
-    commit made to the same file after the switch is in both runs and is
-    not mistaken for the switch; where that does not merge cleanly, the
-    file as of the switch commit's parent. --before REF compares with REF
-    as committed instead; before the switch is committed, HEAD. Without
-    git that comparison is skipped (said so at the end), and the rest
-    still runs: the legacy timex bias file holds exactly the built-in
-    values, legacy levels and waves are those of the file-name epoch, the
-    headers are as before, the blend still runs.
+    byte-identical. "Without the switch" is read with git (before_ref):
+    where the switch came in is the commit that added timex_timing.py
+    when it is on this checkout's own line (its branch, a fast-forward, a
+    rebase), else the merge that joined that commit's line; this
+    checkout's file with that commit's changes taken back out by git
+    merge-file (against its first parent: exactly the tree before the
+    switch, the conflict resolutions and every branch merged before it
+    included), so a fix another commit made to the same file is in both
+    runs and is not mistaken for the switch. Where that does not merge
+    cleanly, the file as of that first parent; that copy, or one taken
+    from a commit that added timex_timing.py but is not the switch commit
+    as written (a squash, which carries other branches' changes too), is
+    not exactly the code without the switch, so a difference is then a
+    SKIP naming the --before command to decide it, never a failure.
+    --before REF compares with REF as committed instead (REF a commit with
+    every change of this checkout but the switch's; on the switch's own
+    branch, deep/cam-timing, --before 42e3e86); before the switch is
+    committed, HEAD. Without git that comparison is skipped (said so at
+    the end), and the rest still runs: the legacy timex bias file holds
+    exactly the built-in values, legacy levels and waves are those of the
+    file-name epoch, the headers are as before, the blend still runs.
   * MID does all three things, together: the detector's blend is off and its
     timex bias is the mid file's (its rows = a legacy-code run with
     --no-temporal-filter and the same corrections, plus the Timing_Mode
@@ -136,23 +146,79 @@ def git(*a):
     return r.stdout if r.returncode == 0 else None
 
 
+# The switch commit's subject as written: a commit that added timex_timing.py under another one
+# (a squash) may carry other changes besides the switch's.
+SWITCH_SUBJECT = "Water-level timing fix behind one switch, TIMING_MODE (off by default)"
+
+
 def switch_commit():
     """The commit that added timex_timing.py (the timing switch), or None (not committed yet, no git)."""
     hashes = (git("log", "--diff-filter=A", "--format=%H", "--", "timex_timing.py") or "").split()
     return hashes[-1] if hashes else None
 
 
+def has(commit, tip):
+    return git("merge-base", "--is-ancestor", commit, tip) is not None
+
+
+def oldest_with(commit, tip):
+    """The oldest commit of tip's first-parent line that has `commit` (all newer ones have it too), or None."""
+    line = (git("rev-list", "--first-parent", tip) or "").split()           # newest first
+    if not line or not has(commit, line[0]):
+        return None
+    lo, hi = 0, len(line) - 1
+    if has(commit, line[hi]):
+        return line[hi]
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if has(commit, line[mid]) else (lo, mid)
+    return line[lo]
+
+
+def switch_entry(switch):
+    """
+    Where the switch came into this checkout: the switch commit itself when
+    it is on HEAD's own first-parent line (its branch, a fast-forward, a
+    rebase), else the innermost merge that joined its line (each merge on
+    the way followed into the parent that brought it). That commit's first
+    parent is the tree just before the switch. -> the commit, or None.
+    """
+    tip, entry = "HEAD", None
+    while True:
+        c = oldest_with(switch, tip)
+        if c is None or c == switch:
+            return entry if c else None
+        entry = c
+        parents = (git("rev-list", "--parents", "-n", "1", c) or "").split()[2:]
+        tip = next((q for q in parents if has(switch, q)), None)
+        if tip is None:
+            return entry
+
+
 def before_ref(override=None):
-    """The code before the timing switch: (ref, switch). ref is --before, else the parent of the
-    switch commit, else HEAD (the switch not committed yet); None without git. switch is the
-    switch commit when ref is its parent (old_copy then takes only its changes out), else None."""
+    """
+    The code before the timing switch: (ref, entry, note). ref is
+    --before, else the first parent of entry (switch_entry: the switch
+    commit, or the merge that joined it), else HEAD (the switch not
+    committed yet); None without git. entry is the commit whose changes
+    old_copy takes out (None: ref as committed). note: why entry's changes
+    may be more than the switch's (the switch commit not as written: a
+    squash), else None.
+    """
     if override:
-        return (override if git("rev-parse", "--verify", "-q", override + "^{commit}") is not None else None), None
+        ok = git("rev-parse", "--verify", "-q", override + "^{commit}") is not None
+        return (override if ok else None), None, None
     switch = switch_commit()
-    ref = switch + "^" if switch else "HEAD"
+    entry = switch_entry(switch) if switch else None
+    ref = entry + "^1" if entry else switch + "^" if switch else "HEAD"
     if git("rev-parse", "--verify", "-q", ref + "^{commit}") is None:
-        return None, None
-    return ref, switch
+        return None, None, None
+    entry = entry or switch
+    note = None
+    if entry == switch and (git("log", "-1", "--format=%s", switch) or "").strip() != SWITCH_SUBJECT:
+        note = (f"{switch[:7]}, which added timex_timing.py, is not the switch commit as written (a squash?), "
+                f"so its changes may hold other branches' too")
+    return ref, entry, note
 
 
 def without_switch(now, at_switch, before, scratch):
@@ -170,33 +236,46 @@ def without_switch(now, at_switch, before, scratch):
     return r.stdout if r.returncode == 0 else None
 
 
-def old_copy(ref, names, dest, switch=None):
+def old_copy(ref, names, dest, entry=None, note=None):
     """
-    The files `names` without the timing switch, into dest. With `switch`
-    (ref is then its parent): each is THIS checkout's file with only the
-    switch commit's changes taken out (without_switch), so a later commit's
-    change to the same file is in the comparison on both sides. Where a
-    later change does not merge cleanly with the switch taken out (it
-    touched the same lines), and for every file without `switch`: the file
-    as of ref, as committed. -> True if all were written.
+    The files `names` without the timing switch, into dest. With `entry`
+    (ref is then its first parent): each is THIS checkout's file with only
+    entry's changes taken out (without_switch), so a later commit's change
+    to the same file is in the comparison on both sides. Where a later
+    change does not merge cleanly with the switch taken out (it touched the
+    same lines), and for every file without `entry`: the file as of ref,
+    as committed. -> None if one is not readable, else why the copy may
+    not be exactly the code without the switch ('' when it is; with
+    `note`, never '').
     """
     dest.mkdir(parents=True, exist_ok=True)
+    why = []
     for n in names:
         text = git("show", f"{ref}:{n}")
         if text is None:
-            return False
-        at_switch = git("show", f"{switch}:{n}") if switch else None
+            return None
+        at_entry = git("show", f"{entry}:{n}") if entry else None
         now = (HERE / n).read_text()
-        if at_switch is not None and now != at_switch:
-            merged = without_switch(now, at_switch, text, dest / ".merge" / n)
+        if at_entry is not None and now != at_entry:
+            merged = without_switch(now, at_entry, text, dest / ".merge" / n)
             if merged is None:
-                print(f"  note: {n} was changed after the switch ({switch[:7]}) where the switch changed it: "
-                      f"compared with {ref} as committed, so a later change shows as a difference "
-                      f"(--before REF compares with another commit)")
+                why.append(f"{n} was changed after {entry[:7]} on lines the switch changed, so it is compared "
+                           f"with {ref} as committed, which lacks that later change")
+                print(f"  note: {why[-1]}")
             else:
                 text = merged
         (dest / n).write_text(text)
-    return True
+    return "; ".join(why + ([note] if note else []))
+
+
+def check_before(cond, msg, inexact):
+    """check() of a comparison with the code without the switch; when that code may not be exact
+    (old_copy's reason) and they differ, a skip: the difference may be another change."""
+    if cond or not inexact:
+        check(cond, msg)
+    else:
+        skip(f"{msg}: they DIFFER, but {inexact}; decide with python3 test_timing_mode.py --before REF, REF a "
+             f"commit with every change of this checkout but the timing switch's (docs/VALIDATION.md 2.7)")
 
 
 # ---------------------------------------------------------------------
@@ -318,7 +397,7 @@ def detect(script, d, name, extra=(), env=None, cwd=None):
     return rc, log, out / "det"
 
 
-def test_detector(d, ref, mid_file, switch=None):
+def test_detector(d, ref, mid_file, entry=None, note=None):
     print("waterline_detector_v5.py: legacy is the old detector bit for bit; mid = blend off + mid bias")
     d = Path(d) / "detector"
     (d / "photos").mkdir(parents=True, exist_ok=True)
@@ -370,12 +449,13 @@ def test_detector(d, ref, mid_file, switch=None):
         skip("detector before/after: git cannot read the commit before the switch (not a checkout?)")
     else:
         old = d / "old"
-        if old_copy(ref, ["waterline_detector_v5.py"], old, switch):
+        inexact = old_copy(ref, ["waterline_detector_v5.py"], old, entry, note)
+        if inexact is not None:
             rc, log, out = detect(old / "waterline_detector_v5.py", d, "before")
             got = folder_digest(out) if out.is_dir() else {}
-            check(rc == 0 and got == dig,
-                  f"the detector without the switch: byte-identical CSVs and overlays "
-                  f"({sum(got.get(n) == h for n, h in dig.items())}/{len(dig)} files equal)")
+            check_before(rc == 0 and got == dig,
+                         f"the detector without the switch: byte-identical CSVs and overlays "
+                         f"({sum(got.get(n) == h for n, h in dig.items())}/{len(dig)} files equal)", inexact)
         else:
             skip(f"detector before/after: {ref}:waterline_detector_v5.py not readable")
     # mid: refused without a mid file
@@ -473,7 +553,7 @@ def detection_set(folder, mode=None):
     return names
 
 
-def test_extract(d, ref, switch=None):
+def test_extract(d, ref, entry=None, note=None):
     print("extract_elevation_contours.py: legacy as before; mid takes level, waves and stale check at mid-exposure")
     d = Path(d) / "extract"
     d.mkdir(parents=True, exist_ok=True)
@@ -520,12 +600,13 @@ def test_extract(d, ref, switch=None):
         return hour_hs[best]
     hs_ok = all(abs(float(r["offshore_hs_m"]) - hs_at(int(r["capture_epoch"]))) < 1e-9 for r in first.values())
     check(lev_ok and hs_ok, "legacy: each frame's level and Hs those at its file-name epoch")
+    inexact = None if ref is None else old_copy(ref, ["extract_elevation_contours.py"], d / "old", entry, note)
     if ref is None:
         skip("contour step before/after: git cannot read the commit before the switch")
-    elif old_copy(ref, ["extract_elevation_contours.py"], d / "old", switch):
+    elif inexact is not None:
         rc_o, log_o, _ = extract(d / "old" / "extract_elevation_contours.py", "legacy_det", "before.csv")
-        check(rc_o == 0 and sha(d / "before.csv") == outs["default"],
-              "the contour step without the switch: byte-identical contour file")
+        check_before(rc_o == 0 and sha(d / "before.csv") == outs["default"],
+                     "the contour step without the switch: byte-identical contour file", inexact)
     else:
         skip(f"contour step before/after: {ref}:extract_elevation_contours.py not readable")
 
@@ -576,7 +657,7 @@ def test_extract(d, ref, switch=None):
 # DEM
 # ---------------------------------------------------------------------
 
-def test_dem(d, ref, switch=None):
+def test_dem(d, ref, entry=None, note=None):
     print("dem_from_contours.py: legacy as before; info.json water_level_timing only for timed contours")
     d = Path(d) / "dem"
     d.mkdir(parents=True, exist_ok=True)
@@ -610,9 +691,10 @@ def test_dem(d, ref, switch=None):
                for k in ("dem", "spread", "count"))
     check(same, "the grids do not depend on the column")
     # the DEM step before the switch, on the same legacy contours: every file byte-identical
+    inexact = None if ref is None else old_copy(ref, ["dem_from_contours.py"], d / "old", entry, note)
     if ref is None:
         skip("DEM step before/after: git cannot read the commit before the switch")
-    elif old_copy(ref, ["dem_from_contours.py"], d / "old", switch):
+    elif inexact is not None:
         outs = {}
         for name, script in (("now", HERE / "dem_from_contours.py"), ("before", d / "old" / "dem_from_contours.py")):
             (d / name).mkdir(exist_ok=True)
@@ -622,9 +704,9 @@ def test_dem(d, ref, switch=None):
             (d / f"{name}.log").write_text(log)
             outs[name] = (rc, folder_digest(d / name), log.replace(str(d / name), "<out>"))
         a, b = outs["now"], outs["before"]
-        check(a[0] == 0 and b[0] == 0 and len(a[1]) == 5 and a[1] == b[1] and a[2] == b[2],
-              f"the DEM step without the switch: byte-identical grids, sigma and info.json, and log "
-              f"({sum(b[1].get(n) == h for n, h in a[1].items())}/{len(a[1])} files equal)")
+        check_before(a[0] == 0 and b[0] == 0 and len(a[1]) == 5 and a[1] == b[1] and a[2] == b[2],
+                     f"the DEM step without the switch: byte-identical grids, sigma and info.json, and log "
+                     f"({sum(b[1].get(n) == h for n, h in a[1].items())}/{len(a[1])} files equal)", inexact)
     else:
         skip(f"DEM step before/after: {ref}:dem_from_contours.py not readable")
 
@@ -675,12 +757,16 @@ def test_station_status(d):
     os.utime(str(old), (1.0e9, 1.0e9))
     (d / "archive/processed_timex_mid/b.csv").write_text("x\n")
     lines = {}
-    for mode in ("", "legacy", "mid"):
-        rc, out = run([HERE / "station_status.py", "--base", d], d, {"TIMING_MODE": mode} if mode else None)
+    for mode in ("", "legacy", "mid", "cron_mid"):
+        if mode == "cron_mid":
+            (d / "waterline_timex_cron.sh").write_text("BASE=x\nTIMING_MODE=mid\n")
+        env = {"TIMING_MODE": mode} if mode in ("legacy", "mid") else None
+        rc, out = run([HERE / "station_status.py", "--base", d], d, env)
         lines[mode] = next((ln for ln in out.splitlines() if "detections" in ln), "")
     check("ALERT" in lines["legacy"] and "OK" in lines["mid"] and "processed_timex_mid" in lines["mid"]
-          and "OK" in lines[""],
-          "TIMING_MODE=legacy reads the legacy archive (old: ALERT), mid the mid one (new: OK); by hand the newest")
+          and "ALERT" in lines[""] and "OK" in lines["cron_mid"] and "processed_timex_mid" in lines["cron_mid"],
+          "TIMING_MODE=legacy reads the legacy archive (old: ALERT), mid the mid one (new: OK); by hand the "
+          "cron script's mode, never the newest archive (no script: legacy, ALERT; TIMING_MODE=mid in it: OK)")
 
 
 # ---------------------------------------------------------------------
@@ -689,7 +775,9 @@ def test_station_status(d):
 
 V68_C2 = ((0.050, 3.87), (0.150, -1.19), (0.249, -8.15), (0.349, -8.49), (0.449, -5.26), (0.548, -4.55),
           (0.648, -8.44), (0.748, -17.22), (0.848, -41.28), (0.949, -57.78))
-V68_C2_STD = (17.0, 18.0, 18.4, 18.4, 18.5, 18.6, 19.0, 15.0, 48.26, 67.00)
+# c2's per-frame std: ~18 px everywhere (SEM 5.1 px over 13 frames), so above |mean| in every
+# segment but the far two's 48.26 / 67.00 too: a rule that clamps by the scatter cascades on it
+V68_C2_STD = (17.0, 18.0, 18.4, 18.4, 18.5, 18.6, 19.0, 18.6, 48.26, 67.00)
 
 
 def table(camera, xs, raw, std, n, n_frames):
@@ -715,6 +803,30 @@ def test_rules():
     pts, _ = rt.points_from_table(table("c2", xs, [p[1] for p in V68_C2], V68_C2_STD,
                                         [13] * 8 + [2, 0], 13))
     check(len(pts) == 9 and pts[-1] == (0.848, -17.22), "a segment no frame reaches is left out; one too few reach clamped")
+    # mid-like means (+2.6 px): the same curve shifted, the far two clamped to the 0.748 value, nothing inside
+    mid_raw = [p[1] + 2.6 for p in V68_C2]
+    pts, why = rt.points_from_table(table("c2", xs, mid_raw, V68_C2_STD, [13] * 10, 13))
+    check(pts is not None and [p[1] for p in pts[:8]] == [round(v, 2) for v in mid_raw[:8]]
+          and pts[8][1] == pts[9][1] == round(mid_raw[7], 2) and "nothing clamped" not in why,
+          f"mid-like c2 means with the real ~18 px std: the measured curve, only x > 0.8 clamped -- {why}")
+    # the clamp does not depend on the sample: 300 draws of 13 frames at the real std, mid-like means
+    rng = np.random.RandomState(3)
+    same = 0
+    for _ in range(300):
+        draw = [m + rng.normal(0, sd / np.sqrt(13)) for m, sd in zip(mid_raw, V68_C2_STD)]
+        sd = [abs(v + rng.normal(0, 2.0)) for v in V68_C2_STD]
+        p2, _ = rt.points_from_table(table("c2", xs, draw, sd, [13] * 10, 13))
+        same += p2 is not None and len(p2) == 10 and [q[1] for q in p2[:8]] == [round(v, 2) for v in draw[:8]] \
+            and p2[8][1] == p2[9][1] == round(draw[7], 2)
+    check(same == 300, f"300 draws at the real scatter: always only the far two clamped, never a cascade ({same}/300)")
+    # what the rules cannot settle: nothing, and the reason
+    pts, why = rt.points_from_table(table("c2", xs, [p[1] for p in V68_C2], V68_C2_STD, [13] * 6 + [4] + [13] * 3, 13))
+    check(pts is None and "NEEDS A DECISION" in why and "0.648 (4 frames)" in why,
+          f"a segment at x <= 0.8 reached by too few frames: no curve, a person decides -- {why}")
+    xs20 = [round(0.025 + 0.05 * i, 3) for i in range(20)]
+    pts, why = rt.points_from_table(table("c2", xs20, [-1.0 - 3.0 * i for i in range(20)], [18.4] * 20, [13] * 20, 13))
+    check(pts is None and "4 segments beyond x = 0.8" in why,
+          "another segmentation (20 segments, 4 beyond x = 0.8): no curve, a person decides")
 
     def summ(slope, fl, eb):
         return {"slope": slope, "contrast_m": None if fl is None else round(fl - eb, 4)}
@@ -730,6 +842,14 @@ def test_rules():
     check(o == "NOT JUDGED" and v["c1"][0] == "not judged" == v["c2"][0], "no flood/ebb frames, or no camera: NOT JUDGED")
     v, o = rt.judge(leg, {"c1": summ(0.01, 0.004, -0.002), "c2": summ(0.0, None, None)})
     check(o == "PASS" and v["c2"][0] == "not judged", "one camera judged and passing, the other not judged: PASS")
+    good = {"c1": summ(0.01, 0.004, -0.002), "c2": summ(-0.02, 0.01, 0.0)}
+    v, o = rt.judge(leg, good, {"c1": 0.05, "c2": 0.0})
+    check(o == "PASS" and "within 0.1 m" in v["c1"][1], "each camera's DEM moved about as predicted: PASS")
+    v, o = rt.judge(leg, good, {"c1": 0.05, "c2": 0.15})
+    check(o == "FAIL" and v["c2"][0] == "FAIL" and "suspect" in v["c2"][1],
+          "slope and contrast shrink, but c2's DEM moves 0.15 m (a wrong mid bias file): FAIL")
+    v, o = rt.judge(leg, good, {"c1": 0.05, "c2": None})
+    check(o == "PASS" and v["c2"][0] == "not judged", "no DEM of c2 alone in both modes: c2 not judged")
     cfg = rt.cron_settings(HERE / "waterline_timex_cron.sh")
     check(cfg["SETUP_COEF"] == "0.037" and cfg["DEM_CELL"] == "2.0" and cfg["DEM_MAX_DAY_OFFSET"] == "0.15"
           and cfg["GNSSR_SPLINE"].endswith("usgs_spline_out.txt") and cfg["CONSISTENCY_ENABLE"] == "1",
@@ -927,6 +1047,11 @@ def test_compare(d, mid_file):
     g = rep.get("grids") or {}
     check(g.get("cells_both", 0) > 50 and g.get("mid_minus_legacy_median_m") is not None
           and "DEM: mid minus legacy over" in log, f"the two DEMs compared over {g.get('cells_both')} shared cells")
+    gc = rep.get("grids_by_camera") or {}
+    check(all((gc.get(c) or {}).get("cells_both", 0) > 20 for c in ("c1", "c2")) and "DEM of c2 alone" in log
+          and all("its DEM mid minus legacy" in rep["verdicts"][c][1] for c in ("c1", "c2")),
+          "each camera's DEM built alone in both modes and its mid minus legacy judged: "
+          + ", ".join(f"{c} {(gc.get(c) or {}).get('mid_minus_legacy_median_m')} m" for c in ("c1", "c2")))
     ex = (cdir / "mid" / "contours.csv").read_text().splitlines()[0] if (cdir / "mid" / "contours.csv").exists() else ""
     check(ex.endswith(",level_time_offset_s") and "--timing-mode mid" in (cdir / "compare.log").read_text(),
           "the mid chain ran its contour step with --timing-mode mid")
@@ -958,17 +1083,18 @@ def main():
         Path(args.keep).mkdir(parents=True, exist_ok=True)
     d = os.path.realpath(tempfile.mkdtemp(prefix="timing_mode_", dir=args.keep))
     print(f"test folder: {d}")
-    ref, switch = before_ref(args.before)
+    ref, entry, note = before_ref(args.before)
     print("the code without the switch: " + ("not readable (git)" if ref is None else
-          f"this checkout with {switch[:7]}'s changes taken out (else {ref})" if switch else ref))
+          f"this checkout with {entry[:7]}'s changes taken out (else {ref})" if entry else ref)
+          + (f" (NOTE: {note})" if note else ""))
     try:
         test_definitions()
         test_legacy_bias_file()
         test_shared_constant()
         mid_file = test_write_calibration(d)
-        test_detector(d, ref, mid_file, switch)
-        test_extract(d, ref, switch)
-        test_dem(d, ref, switch)
+        test_detector(d, ref, mid_file, entry, note)
+        test_extract(d, ref, entry, note)
+        test_dem(d, ref, entry, note)
         test_cron()
         test_station_status(d)
         test_rules()

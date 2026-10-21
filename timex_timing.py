@@ -125,14 +125,16 @@ def level_time_offset_s(name, mode):
     return TIMEX_MID_OFFSET_S if ".timex." in Path(name).name.lower() else 0
 
 
-def describe(mode):
-    """One line on what the mode does, for the logs."""
+def describe(mode, level_only=False):
+    """One line on what the mode does, for the logs. level_only: only the
+    water-level time (the contour step, which sets neither the blend nor
+    the bias)."""
     if mode == "legacy":
-        return ("legacy: water level at the file-name epoch (the exposure's start), temporal blend on, "
-                "timex bias calibration/timex_bias_legacy.json")
+        return ("legacy: water level at the file-name epoch (the exposure's start)"
+                + ("" if level_only else ", temporal blend on, timex bias calibration/timex_bias_legacy.json"))
     return (f"{mode}: water level, waves and stale-gap check at the file-name epoch + "
-            f"{TIMEX_MID_OFFSET_S} s for a timex (mid-exposure; + 0 s for a snap), temporal blend off, "
-            f"timex bias calibration/timex_bias_{mode}.json")
+            f"{TIMEX_MID_OFFSET_S} s for a timex (mid-exposure; + 0 s for a snap)"
+            + ("" if level_only else f", temporal blend off, timex bias calibration/timex_bias_{mode}.json"))
 
 
 def timex_bias_path(mode, calibration_dir=None):
