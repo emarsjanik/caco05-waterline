@@ -84,6 +84,7 @@ REQUIRED_SCRIPTS = [
     "dem_figure.py",
     "daily_elevation_map.py",
     "timex_timing.py",
+    "setup_model.py",
 ]
 
 REQUIRED_CALIBRATION = [

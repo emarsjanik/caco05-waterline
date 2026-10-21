@@ -900,7 +900,9 @@ source, how well it is verified, its limits, and how to re-check it on the NUC.
 where `eta_still` is the still-water level (GNSS-R on the live station, the ADCP for the 2025
 dates), `Hs` the offshore significant wave height and `Tp` the peak period of the frame
 (`extract_elevation_contours.py --setup-coef`; `survey_products.apply_setup` uses the same
-formula and rounding). **Value: C = 0.037** (`waterline_timex_cron.sh` SETUP_COEF; the same
+formula and rounding; since Oct 2026 the formula exists once, in `setup_model.py`, which every
+module that uses it calls, bit-identical to the copies it replaced: `test_setup_model.py`).
+**Value: C = 0.037** (`waterline_timex_cron.sh` SETUP_COEF; the same
 value in `survey_products.py` and `historical_forcing.py`, checked by a test). Not changed by
 this PR.
 
@@ -918,7 +920,8 @@ wavelength from the peak period, and `beta_f` the foreshore beach slope. (For ve
 dissipative beaches, Iribarren number below 0.3, they give `R2% = 0.043 sqrt(H0 L0)`
 instead; Marconi's foreshore is not in that range: at beta_f 0.1, Hs 1 m, Tp 8 s the
 Iribarren number is ~1.0.) The repository implements the same equations in
-`foreshore_slope.py` and `gnssr_qc.py`.
+`setup_model.py` (`stockdon_setup`, `stockdon_swash`; `foreshore_slope.py` and the opt-in
+slope-aware setup below use them) and in `gnssr_qc.py` (its QC allowance, slope fixed at 0.10).
 
 **What our C means.** Our form is Stockdon's setup with `C = 0.35 * beta_f`. C = 0.037 implies
 **beta_f = 0.037 / 0.35 = 0.106 (about 1:9.5)**. The real 7-day DEM of 29 Sep - 5 Oct 2026
@@ -1023,8 +1026,10 @@ in that month's build (0.6 in January, 0.8 in March; at 0.8 January would be ~0.
 These are estimates, not measurements. They add to the ADCP still-water effect above. The
 real builds on the NUC are the test.
 
-The re-projecting fits exist only as scratch scripts; `dem_from_contours.py --fit-setup` does
-not re-project and is in principle biased low by roughly the re-projection factor.
+The re-projecting repeat-crossing fits exist only as scratch scripts; `dem_from_contours.py
+--fit-setup` does not re-project and is in principle biased low by roughly the re-projection
+factor. The re-projecting fit against the surveys is now in the repository:
+`evaluate_setup_model.py` (below).
 
 **Re-check on the NUC.**
 ```
@@ -1036,6 +1041,79 @@ Read the printed curve, the near-best band and the verdict. It offers a C to app
 C = 0 and the C in use both lie outside the band and the minimum is not flat. Adopt a new C
 only if it holds over several weeks of different waves; then change it in all three places
 (the cron, `survey_products.py`, `historical_forcing.py`) and give it a SETUP_FITS entry.
+
+**The slope-aware alternative (opt-in; the station stays on C).** `setup_model.py` also holds
+Stockdon's own form, `setup = k * beta_f * sqrt(H0 * L0)` with k = 0.35 (Eq. 10), selected by
+`extract_elevation_contours.py --setup-model stockdon` or, on the station, by
+`SETUP_MODEL="stockdon"` in `waterline_timex_cron.sh` (default `""`: C, unchanged). What it does:
+
+* `beta_f` is measured for each frame on the dated 7-day DEM of `archive/dems` nearest its day
+  (within 7 days), as the median slope (5 x 5 plane fits, `foreshore_slope.surface_slope`) of the
+  DEM cells inside the frame's swash band, still water + setup +/- S/2 (Stockdon's definition of the
+  foreshore slope, over the region of significant swash), iterated three passes as
+  `foreshore_slope.py --iterate` does. One value per frame: the contours are tagged in pixel space,
+  before their ground positions are known.
+* `H0` is Stockdon's DEEP-WATER height. The station's Hs is the ADCP's at 21 m (`hs_best`), so it
+  is deshoaled with linear theory, `H0 = Hs / Ks`: Ks at 21 m is 0.97 (Tp 6 s), 0.92 (8 s), 0.913
+  (9 s, its minimum), 0.94 (12 s), so H0 is 0.7-9.5% above Hs over Tp 5-14 s and sqrt(H0 L0)
+  0.3-4.7% above sqrt(Hs L0) [SYNTH, `test_setup_model.py`]. Refraction is not undone (no wave
+  direction or offshore bathymetry here). The raw-buoy currency is taken as deep water.
+  `--setup-deshoal-depth none` uses Hs as it is.
+* A frame no DEM can serve (none within 7 days, fewer than 20 cells in its band, or a slope
+  outside 0.01-0.30) keeps `beta_f = C / k` (0.106): C's setup, up to the deshoaling. The rows
+  carry `setup_beta_f` and `setup_model`; the extractor prints the slopes used and how many
+  frames fell back and why; the DEM's `_info.json` names the model (only for such contours: the
+  station's C rows and their DEM records are unchanged).
+* `survey_products.py` keeps C whatever the cron says (its live rows are recomputed with C, the
+  two slope-aware columns dropped), and warns when the cron runs `stockdon`.
+
+| check | data | result | reproduce |
+|---|---|---|---|
+| One formula: every replaced copy against the expression as written before | [SYNTH] Hs 0-6 m by 0.01, Tp 1-25 s by 0.1, 3000 random pairs, 0 / NaN / negative Hs, four C | the same bits everywhere; the extractor's rows the old expression's text; `--setup-model c` the same file, byte for byte | `python3 test_setup_model.py` |
+| Slope-aware rows | [SYNTH] a 0.08 plane DEM; a two-slope beach (0.13 above +0.5 m, 0.06 below) | `setup_beta_f` 0.08, setup = 0.35 x 0.08 x sqrt(H0 L0) to the 0.1 mm rounding; high water 0.130, low water 0.060; no DEM: every frame C/k with a WARNING | same |
+
+**Choosing between them: `evaluate_setup_model.py`.** On the station, over the survey-date
+products `survey_products.py` built (`/mnt/I2Rgus_Data/survey_products/<date>`), it refits C and
+Stockdon's k against each date's survey, every line RE-PROJECTED at every setup it scores (two
+`pixel_to_ground` planes per camera; the ray is straight, so any other plane is exact
+interpolation), the survey-floor rule applied (RTK: the transect's lowest shot; lidar: its local
+floor within ~10 m, i.e. its water edge), lines more than 1 m off at C = 0.037 left out as
+detection failures. It reports, per survey, bias, median, RMSE and NMAD of the per-frame residuals
+for C = 0, C = 0.037 (CIRCULAR on the 2026-09-29 RTK, which it was fitted to), Stockdon's own k =
+0.35 (no fit), and the refits: in-sample, each survey alone, and LEAVE-ONE-SURVEY-OUT (each survey
+scored with the coefficient fitted on the others), each also WITH A FREE OFFSET PER SURVEY AND
+CAMERA (the residuals less their mean: only how the lines follow the waves within a survey). That
+second score is needed because with a few surveys of one dominant slope each, C and Stockdon differ
+mostly by a scale on each survey's setup, so a level offset of a survey (pointing, the still-water
+datum: ADCP in 2025, GNSS-R in 2026; a camera's bias) that lines up with the slopes is credited to
+Stockdon by the absolute score. It recommends Stockdon (k refitted, H0 = Hs/Ks, fixed beforehand;
+H0 = Hs is a sensitivity) only when, with 3 or more surveys, against the C refit held out and over
+the frames both keep, its cross-validated RMSE is at least 0.01 m below C's and lower on a majority
+of the held-out surveys, AND with the free offset its cross-validated RMSE is below C's and lower on
+a majority; otherwise the station keeps C. A coefficient on the edge of its grid is flagged. The
+BLIND 2024-10-23 row is skipped before anything of it is opened, and so is any row whose survey file
+is named like a survey of that date (the run also arms `survey_products.arm_blind_guard`); a survey
+row without a path is never looked up by its date.
+
+| check | data | result | reproduce |
+|---|---|---|---|
+| Truth C = 0.045 on beaches of slope 0.13, 0.07, 0.10 (two DSMs, one RTK transect file; real c1 calibration) | [SYNTH] | C refit 0.045 in-sample and held out on each; held-out RMSE 0.016-0.019 m; Stockdon's cross-validated RMSE 0.145 m against C's 0.018 m: keep C | `python3 test_evaluate_setup_model.py` |
+| Truth Stockdon k = 0.35 (H0 deshoaled) on the same beaches | [SYNTH] | k refit 0.35 (held out 0.35-0.355); the paper's k 0.013-0.018 m RMSE; H0 = Hs needs k 0.365; C's cross-validated RMSE 0.133 m against 0.016 m: switch, with the cron lines | same |
+| Truth C = 0.037, each survey's lines offset in level with its slope (+0.10 m on the 0.13 beach, -0.08 m on the 0.07 one) | [SYNTH] | absolute: Stockdon 0.065 m against C's 0.080 m, lower on 2 of 3 (it alone would switch); free offset: Stockdon 0.045 m against C's 0.019 m, C held out 0.037-0.038: keep C. Jan held out = the fit on Mar and the RTK alone, every model; no DEM: every frame C / k | same |
+| Survey floor, gross failures, BLIND | [SYNTH] | lines below a DSM's water edge (-0.5 m) or the transects' lowest shot are not scored; two lines planted 1.5 m low: 2 gross failures; the blind row's survey file and product never opened, nor another date's survey file named like a survey of the blind date (audit hook) | same |
+| Two surveys only | [SYNTH] | no recommendation, keep C | same |
+
+**[NUC] Run it** once the survey-date products are built (each with its DEM):
+```
+python3 evaluate_setup_model.py --json /mnt/I2Rgus_Data/survey_products/setup_model_eval.json
+```
+Read the LEAVE-ONE-SURVEY-OUT tables (absolute and with a free offset) and the RECOMMENDATION's
+two tests. To switch, set
+`SETUP_MODEL="stockdon"` and `SETUP_STOCKDON_K="<k>"` in the cron as the report prints; the
+next run re-tags every contour row (the cron re-extracts the whole archive) and builds its DEMs
+with it; the dated copies already in `archive/dems` stay as they were built (they are the slopes'
+source), and `dem_change.py --rebuild` rebuilds the reference week like for like. Frames older
+than the series, or more than 7 days from its nearest DEM, keep C's setup.
 
 ### 4.2 GNSS-R water level onto NAVD88: +0.349 m
 

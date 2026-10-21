@@ -54,6 +54,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from setup_model import wave_scale          # sqrt(Hs*L0): the setup formula, once
+
 HS_BINS = [0, 0.5, 1.0, 1.5, 2.0, 2.5, 10]
 FILTER_HS = 1.5          # the --max-hs the station cron uses
 BIAS_LIMIT = 0.10        # m; a frame bias worth filtering out
@@ -180,7 +182,7 @@ def wave_bias(contours, lines):
     if len(f) < 8:
         lines.append(f"B. only {len(f)} frames overlap other days with a wave record -- too few")
         return None
-    f["x"] = np.sqrt(f.hs * 9.81 * f.tp.fillna(f.tp.median()) ** 2 / (2 * np.pi))
+    f["x"] = wave_scale(f.hs, f.tp.fillna(f.tp.median()))
     r_hs = np.corrcoef(f.hs, f.offset)[0, 1]
     r_x = np.corrcoef(f.x, f.offset)[0, 1]
     slope, icpt = np.polyfit(f.hs, f.offset, 1)

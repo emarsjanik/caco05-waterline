@@ -103,6 +103,8 @@ from pathlib import Path
 
 import numpy as np
 
+from setup_model import wave_scale          # sqrt(Hs*L0): the setup formula, once
+
 
 def carries_setup(text):
     """True when a setup_correction_m cell holds a wave setup: blank is a frame with no
@@ -129,12 +131,14 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     with_setup = 0
     wave_source_of = {}           # frame -> its wave_source (extract_elevation_contours.py)
     level_offset_of = {}          # frame -> its level_time_offset_s (None: a legacy row, none)
+    setup_model_of = {}           # frame -> its setup_model (--setup-model stockdon rows only)
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
         if "easting_utm19" not in (reader.fieldnames or []):
             print("ERROR: no 'easting_utm19' column. Run georectify.py on the contour file first.")
             sys.exit(1)
         has_source = "source_file" in (reader.fieldnames or [])
+        has_model = "setup_model" in (reader.fieldnames or [])
         if max_hs is not None and "offshore_hs_m" not in (reader.fieldnames or []):
             print("ERROR: --max-hs needs an 'offshore_hs_m' column. Run "
                   "extract_elevation_contours.py with --waves first.")
@@ -175,6 +179,8 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
             wave_source_of.setdefault(frames[-1], r.get("wave_source") or "")
             level_offset_of.setdefault(frames[-1], r.get("level_time_offset_s"))
+            if has_model:
+                setup_model_of.setdefault(frames[-1], r.get("setup_model") or "")
             try:
                 ucol.append(float(r.get("pixel_column") or "nan"))
             except ValueError:
@@ -189,6 +195,8 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
                      setup_share=with_setup / len(Z) if Z else 0.0,
                      pixel_column=np.array(ucol, float), wave_source=wave_source_of,
                      level_time_offset=level_offset_of)
+        if has_model:
+            stats.update(setup_model=setup_model_of)
     return (np.array(E), np.array(N), np.array(Z),
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
 
@@ -431,7 +439,7 @@ def carried_setup_coef(info):
     cs = []
     for v in info.values():
         if np.isfinite(v["setup"]) and v["setup"] != 0.0 and v["hs"] > 0 and v["tp"] > 0:
-            cs.append(v["setup"] / np.sqrt(v["hs"] * 9.81 * v["tp"] ** 2 / (2 * np.pi)))
+            cs.append(v["setup"] / wave_scale(v["hs"], v["tp"]))
     return round(float(np.median(cs)), 4) if cs else None
 
 
@@ -507,7 +515,7 @@ def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames, coefs=None):
     tide = np.array([info[f]["tide"] for f in pair_frame])
     hs = np.array([info[f]["hs"] for f in pair_frame])
     tp = np.array([info[f]["tp"] for f in pair_frame])
-    phi = np.sqrt(hs * 9.81 * tp ** 2 / (2 * np.pi))
+    phi = wave_scale(hs, tp)
     ok = np.isfinite(phi) & np.isfinite(tide)
     groups = cell_groups(pair_cell[ok])
     if coefs is None:
@@ -2579,6 +2587,18 @@ def main():
     timing_record, timing_lines = water_level_timing_record(frames, load_stats.get("level_time_offset", {}))
     for line in timing_lines:
         print(line)
+    # Which setup model placed the lines, when the contours say (extract_elevation_contours.py
+    # --setup-model stockdon writes setup_model; the station's C rows carry no such column, and
+    # their log and _info.json stay as they were)
+    setup_models = None
+    if "setup_model" in load_stats:
+        setup_models = {}
+        for f in set(frames.tolist()):
+            t = load_stats["setup_model"].get(f, "") or "c (no setup_model)"
+            setup_models[t] = setup_models.get(t, 0) + 1
+        setup_models = dict(sorted(setup_models.items()))
+        print("Setup model       : " + ", ".join(f"{t} {n} frame(s)" for t, n in setup_models.items())
+              + " (setup_model.py)")
     print()
 
     dem, count, spread, e0, n0, ncols, nrows = build_grid(
@@ -2715,6 +2735,9 @@ def main():
         # when the levels were taken (water_level_timing_record): only for contours made with
         # extract_elevation_contours.py --timing-mode other than legacy
         **({"water_level_timing": timing_record} if timing_record else {}),
+        # which setup model placed the lines (setup_model.py), only when the contours carry the
+        # setup_model column (--setup-model stockdon): {its tag: frames}
+        **({"setup_model": setup_models} if setup_models is not None else {}),
         # <stem>_sigma.asc: what it is (sigma_grid) and its median / p90 over the cells with one
         "sigma": {"file": "_sigma.asc",
                   "definition": "1.25 x (16-84 percentile spread / 2) / sqrt(frames): the standard error of "

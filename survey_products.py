@@ -282,6 +282,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from setup_model import G, setup_c, wave_scale          # noqa: E402,F401  the setup formula, once (G: as before)
 
 # Station (NUC) defaults; every one can be overridden on the command line.
 DEFAULT_OUTPUT_ROOT = Path("/mnt/I2Rgus_Data/survey_products")
@@ -307,7 +308,6 @@ LABELS = ("INDEPENDENT", "CROSS-VALIDATED", "PARTLY-CIRCULAR", "CIRCULAR")   # b
 # SETUP_FITS (where it was fitted decides which comparisons are CIRCULAR). A new C is changed in all
 # three places and given its own SETUP_FITS entry.
 SETUP_COEF = 0.037
-G = 9.81
 # Where each setup coefficient in use was fitted. A comparison with that
 # survey cannot test the setup (nor the overall level the setup sets). The
 # survey is recognised by its CONTENT (sha256), not only its file name: a
@@ -611,17 +611,19 @@ def overlap_note(seconds):
 # merge, the plan view) carry a version number in their signature instead
 # (bumped when their code changes) and record this script's sha256.
 STEP_SCRIPTS = {
-    "forcing": ["historical_forcing.py"],
+    "forcing": ["historical_forcing.py", "setup_model.py"],
     "pointing": ["horizon_check.py", "pointing_check.py", "estimate_eo_rotation.py"],
     "detect": ["detect_original_view.py", "waterline_detector_v5.py", "extract_elevation_contours.py",
-               "georectify.py", "view_reproject.py", "compare_dem_survey.py", "timex_timing.py"],
-    "detect_live": ["georectify.py", "extract_elevation_contours.py", "timex_timing.py"],
+               "georectify.py", "view_reproject.py", "compare_dem_survey.py", "timex_timing.py",
+               "setup_model.py"],
+    "detect_live": ["georectify.py", "extract_elevation_contours.py", "timex_timing.py", "setup_model.py"],
     "merge": [],
     "filter": ["waterline_consistency.py", "waterline_track.py"],
-    "dem": ["dem_from_contours.py", "waterline_track.py", "asc_to_geotiff.py", "dem_figure.py", "dem_map.py"],
+    "dem": ["dem_from_contours.py", "waterline_track.py", "asc_to_geotiff.py", "dem_figure.py", "dem_map.py",
+            "setup_model.py"],
     "map": ["daily_elevation_map.py"],
-    "map_plan": ["compare_dem_survey.py", "survey_compare.py"],
-    "compare": ["survey_compare.py", "compare_dem_survey.py", "compare_rtk.py", "asc_to_geotiff.py"],
+    "map_plan": ["compare_dem_survey.py", "survey_compare.py", "setup_model.py"],
+    "compare": ["survey_compare.py", "compare_dem_survey.py", "compare_rtk.py", "asc_to_geotiff.py", "setup_model.py"],
 }
 
 # Horizontal CRS written into the GeoTIFFs (--geotiff-epsg). The grids are in
@@ -1740,8 +1742,9 @@ def iso_utc(ep):
 
 
 def setup_m(hs, tp, coef):
-    """Wave setup C*sqrt(Hs*L0), L0 = g*Tp^2/(2*pi): extract_elevation_contours.py --setup-coef."""
-    return coef * np.sqrt(float(hs) * 9.81 * float(tp) ** 2 / (2 * np.pi))
+    """Wave setup C*sqrt(Hs*L0), L0 = g*Tp^2/(2*pi): extract_elevation_contours.py --setup-coef
+    (setup_model.setup_c; hs, tp may be the text of a contour row)."""
+    return setup_c(float(hs), float(tp), coef)
 
 
 def live_forcing_figure(path, ep, lv, hs_ok, coef, plan):
@@ -3447,7 +3450,9 @@ def apply_setup(src, dst, cam, coef, skip_days=()):
     setups = {}
     with open(src, newline="") as fi, open(str(dst) + ".tmp", "w", newline="") as fo:
         rd = csv.DictReader(fi)
-        fields = [k for k in rd.fieldnames if k not in ("setup_correction_m", "beach_elevation_navd88")]
+        # the slope-aware model's columns (the cron's SETUP_MODEL="stockdon") go too: these rows get C's setup
+        fields = [k for k in rd.fieldnames if k not in ("setup_correction_m", "beach_elevation_navd88",
+                                                        "setup_beta_f", "setup_model")]
         st["had_setup"] = "setup_correction_m" in rd.fieldnames
         if "offshore_hs_m" not in rd.fieldnames or "offshore_tp_s" not in rd.fieldnames:
             raise StepFailed(f"{src}: no offshore_hs_m / offshore_tp_s columns (the cron ran without --waves?)")
@@ -3518,7 +3523,7 @@ def implied_c(setup, hs, tp):
         s, h, p = float(setup), float(hs), float(tp)
     except (TypeError, ValueError):
         return None
-    x = np.sqrt(h * G * p ** 2 / (2 * np.pi))
+    x = wave_scale(h, p)
     return s / x if x > 0.05 else None
 
 
@@ -7920,7 +7925,7 @@ def compared_frames_scale(plan, name, cam):
                     except ValueError:
                         continue
                     if hs == hs and tp == tp:
-                        x[k] = float(np.sqrt(hs * G * tp ** 2 / (2 * np.pi)))
+                        x[k] = float(wave_scale(hs, tp))
     except OSError:
         return None, 0
     return (float(np.median(list(x.values()))), len(x)) if x else (None, 0)
@@ -10942,6 +10947,17 @@ def main():
              f"not this script's default C = {SETUP_COEF}: the live waterlines and these products would carry "
              f"different setups. Change SETUP_COEF in survey_products.py, historical_forcing.py and the cron "
              f"together (with a SETUP_FITS entry saying where the new C was fitted)")
+    # the cron's opt-in slope-aware setup (SETUP_MODEL="stockdon", setup_model.py): read here only, not in
+    # cron_settings (whose keys go into forcing.json); these products keep C's setup either way
+    try:
+        cron_model = next((m.group(1) for m in (re.match(r'^\s*SETUP_MODEL="?([A-Za-z]*)"?', ln) for ln in
+                                                Path(args.live_cron).read_text().splitlines()) if m), "")
+    except OSError:
+        cron_model = ""
+    if cron_model == "stockdon":
+        warn(f"the station's cron ({args.live_cron}) runs the slope-aware setup (SETUP_MODEL=\"stockdon\"): its live "
+             f"DEMs carry Stockdon's setup, these products C = {args.setup_coef}'s (a live date's rows are recomputed "
+             f"with C), so the two differ by the models' difference")
     if args.date:
         res = build_date(args.date, cfg, srv, args, steps)
         return EXIT_CODES.get(res, 1)
