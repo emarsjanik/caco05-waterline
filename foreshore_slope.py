@@ -44,7 +44,8 @@ from pathlib import Path
 
 import numpy as np
 
-G = 9.81
+# Stockdon et al. (2006) setup and swash, and L0: setup_model.py holds them, once
+from setup_model import G, deep_water_wavelength, stockdon_setup, stockdon_swash     # noqa: F401
 
 
 def read_ascii_grid(path):
@@ -143,20 +144,6 @@ def surface_slope(dem, cell, window):
                 continue
             out[r, c] = float(np.hypot(coef[0], coef[1]))
     return out
-
-
-def stockdon_swash(H0, T0, beta):
-    """Significant swash height, Stockdon et al. (2006) Eqs. 11-12."""
-    L0 = G * T0 ** 2 / (2 * np.pi)
-    Sinc = 0.75 * beta * np.sqrt(H0 * L0)
-    SIG = 0.06 * np.sqrt(H0 * L0)
-    return np.sqrt(Sinc ** 2 + SIG ** 2)
-
-
-def stockdon_setup(H0, T0, beta):
-    """Shoreline setup, Stockdon et al. (2006) Eq. 10."""
-    L0 = G * T0 ** 2 / (2 * np.pi)
-    return 0.35 * beta * np.sqrt(H0 * L0)
 
 
 def main():
@@ -269,7 +256,7 @@ def main():
 
     if args.wave_height is not None and args.wave_period is not None:
         med = float(np.median(valid))
-        L0 = G * args.wave_period ** 2 / (2 * np.pi)
+        L0 = deep_water_wavelength(args.wave_period)
         xi = med / np.sqrt(args.wave_height / L0)
         setup = stockdon_setup(args.wave_height, args.wave_period, med)
         S = stockdon_swash(args.wave_height, args.wave_period, med)

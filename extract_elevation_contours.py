@@ -58,6 +58,9 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
+from setup_model import (SETUP_MODELS, STOCKDON_SETUP_K, EvolvingSlope, deshoal_depth, model_tag,
+                         setup_c, stockdon_frame)
+
 
 DEFAULT_PROCESSED_DIR = "/mnt/I2Rgus_Data/waterline/processed"
 DEFAULT_OUTPUT = "/mnt/I2Rgus_Data/waterline/contour_points.csv"
@@ -269,6 +272,38 @@ def load_wave_archive(path):
     tp = df.dropna(subset=[tcol]).sort_values("epoch")
     return (hs["epoch"].to_numpy(float), hs[hcol].to_numpy(float),
             tp["epoch"].to_numpy(float), tp[tcol].to_numpy(float))
+
+
+def stockdon_setups(output_rows, args, wave_tag):
+    """
+    The slope-aware setup of every frame with a wave height and period (--setup-model stockdon;
+    setup_model.py has the model, the deshoaling question and the fallback): Stockdon et al. (2006)
+    k * beta_f * sqrt(H0 * L0), beta_f measured on the DEM nearest the frame's day over its swash band
+    (still water + setup +/- S/2, iterated), else C / k. Called after the wave columns are appended,
+    so a row's last two values are its offshore_hs_m and offshore_tp_s.
+    -> {'frames': {source_file: (setup m, beta_f, source)}, 'tag', 'how', 'lines'}.
+    """
+    k = args.setup_stockdon_k
+    depth, how = deshoal_depth(args.setup_deshoal_depth, wave_tag)
+    fallback = args.setup_coef / k
+    slopes = EvolvingSlope(args.setup_slope_dem)
+    frames, why = {}, defaultdict(int)
+    for r in output_rows:
+        if r[0] in frames or r[-2] == "" or r[-1] == "":
+            continue
+        fs, why_none = slopes.for_epoch(r[3])
+        frames[r[0]] = stockdon_frame(r[6], r[-2], r[-1], fs, fallback, k, depth, why_none=why_none)
+        why[frames[r[0]][2]] += 1
+    betas = [v[1] for v in frames.values() if v[2] == "dem"]
+    lines = [f"Foreshore slope          : from {slopes.what}: "
+             + (f"{len(betas)} frame(s), beta_f median {np.median(betas):.3f} (p10-p90 "
+                f"{np.percentile(betas, 10):.3f}-{np.percentile(betas, 90):.3f})" if betas else "no frame")]
+    fell = {w: n for w, n in why.items() if w != "dem"}
+    if fell:
+        lines.append(f"{'WARNING' if not betas else 'NOTE'}: {sum(fell.values())} frame(s) took the fallback "
+                     f"slope beta_f = C/k = {fallback:.3f} (the C model's setup): "
+                     + ", ".join(f"{w} {n}" for w, n in sorted(fell.items())))
+    return {"frames": frames, "tag": model_tag(k, depth), "how": how, "lines": lines}
 
 
 def nearest_within(epochs, values, epoch, max_gap_s):
@@ -813,6 +848,31 @@ def main():
                              "Adds setup_correction_m and beach_elevation_navd88 columns, "
                              "which georectify.py and dem_from_contours.py then use; "
                              "tide_elevation_navd88 stays the water level.")
+    parser.add_argument("--setup-model", choices=SETUP_MODELS, default="c",
+                        help="Which setup --setup-coef applies (setup_model.py). 'c' (default, the "
+                             "station's): C*sqrt(Hs*L0) as above. 'stockdon' (opt-in; the station "
+                             "stays on 'c' until evaluate_setup_model.py favours it on the surveys): "
+                             "Stockdon et al. (2006) k*beta_f*sqrt(H0*L0), with the foreshore slope "
+                             "beta_f measured for each frame on the evolving DEM "
+                             "(--setup-slope-dem) over its swash band, and H0 the deep-water height "
+                             "(--setup-deshoal-depth). A frame the DEM cannot serve takes beta_f = "
+                             "C/k, i.e. the C model's setup. Adds the columns setup_beta_f and "
+                             "setup_model.")
+    parser.add_argument("--setup-slope-dem", default=None,
+                        help="With --setup-model stockdon (required there): the DEM the foreshore "
+                             "slope is measured on. A folder of dated DEMs (dem_from_contours.py "
+                             "--series-dir, the cron's archive/dems): each frame takes the one whose "
+                             "window is centred nearest its day, within 7 days. Or one DEM "
+                             "(<stem> or <stem>_dem.asc) for every frame.")
+    parser.add_argument("--setup-stockdon-k", type=float, default=STOCKDON_SETUP_K,
+                        help="With --setup-model stockdon: the setup coefficient k (default 0.35, "
+                             "Stockdon et al. 2006 Eq. 10; evaluate_setup_model.py refits it).")
+    parser.add_argument("--setup-deshoal-depth", default="auto",
+                        help="With --setup-model stockdon: the depth (m) the wave heights are "
+                             "deshoaled from to Stockdon's deep-water H0 (linear theory, H0 = Hs/Ks). "
+                             "'auto' (default): 21 m for the ADCP currency (waves_marconi.csv "
+                             "hs_best, historical_forcing.py's waves), none for a raw buoy file; "
+                             "'none': H0 = Hs.")
     parser.add_argument("--vertical-datum-offset", type=float, default=0.0,
                          help="Meters to ADD to every tide elevation, converting the tide "
                               "model's vertical datum (mean sea level or a geoid, for global "
@@ -825,6 +885,21 @@ def main():
                               "modelled rather than measured value. Defaults to 0.0, which "
                               "is almost certainly WRONG -- see the warning printed if unset.")
     args = parser.parse_args()
+    if args.setup_model == "stockdon" and (args.setup_coef is None or not args.waves
+                                           or not args.setup_slope_dem):
+        print("ERROR: --setup-model stockdon needs --setup-coef (the C of the frames the DEM cannot "
+              "serve, and the switch that turns the setup on), --waves and --setup-slope-dem.")
+        sys.exit(1)
+    if args.setup_model == "stockdon":
+        # checked before any frame is read, not after the whole archive has been
+        try:
+            deshoal_depth(args.setup_deshoal_depth, "")
+        except ValueError:
+            print(f"ERROR: --setup-deshoal-depth {args.setup_deshoal_depth!r}: 'auto', 'none' or metres.")
+            sys.exit(1)
+        if not args.setup_stockdon_k > 0:
+            print(f"ERROR: --setup-stockdon-k {args.setup_stockdon_k}: must be above 0.")
+            sys.exit(1)
 
     using_gnssr = looks_like_gnssr_spline(args.tide_model_csv)
 
@@ -1075,20 +1150,39 @@ def main():
             # get no correction and a blank setup column, so they can be
             # told apart from a genuine zero.
             no_waves = set()
+            slope_aware = None
+            if args.setup_model == "stockdon":
+                slope_aware = stockdon_setups(output_rows, args, wave_tag)
             for r in output_rows:
                 hs, tp = r[-2], r[-1]
-                if hs != "" and tp != "":
-                    setup = args.setup_coef * np.sqrt(float(hs) * 9.81 * float(tp) ** 2 / (2 * np.pi))
+                if slope_aware is not None:
+                    # the slope-aware model's setup and the slope it used (setup_model.py)
+                    s = slope_aware["frames"].get(r[0])
+                    if s is not None:
+                        r.extend([round(s[0], 4), round(r[6] + s[0], 4), round(s[1], 4), slope_aware["tag"]])
+                    else:
+                        no_waves.add(r[0])
+                        r.extend(["", r[6], "", slope_aware["tag"]])
+                elif hs != "" and tp != "":
+                    setup = setup_c(float(hs), float(tp), args.setup_coef)
                     r.extend([round(float(setup), 4), round(r[6] + float(setup), 4)])
                 else:
                     no_waves.add(r[0])
                     r.extend(["", r[6]])
             header += ["setup_correction_m", "beach_elevation_navd88"]
-            setups = [r[-2] for r in output_rows if r[-2] != ""]
-            print(f"Setup correction         : C = {args.setup_coef}, "
+            if slope_aware is not None:
+                header += ["setup_beta_f", "setup_model"]
+            isu = header.index("setup_correction_m")
+            setups = [r[isu] for r in output_rows if r[isu] != ""]
+            what = (f"C = {args.setup_coef}" if slope_aware is None else
+                    f"slope-aware (Stockdon et al. 2006, k = {args.setup_stockdon_k:g}; {slope_aware['how']})")
+            print(f"Setup correction         : {what}, "
                   + (f"{min(setups):.3f}-{max(setups):.3f} m" if setups else "none applied")
                   + (f"; {len(no_waves)} frame(s) without wave height+period left uncorrected"
                      if no_waves else ""))
+            if slope_aware is not None:
+                for line in slope_aware["lines"]:
+                    print(line)
         # Which wave columns tagged the frames, on every row (as
         # water_level_source names the level): the last column, so every
         # positional index above is unchanged. A '#' header line is not an

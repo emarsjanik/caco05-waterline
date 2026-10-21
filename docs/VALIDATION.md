@@ -672,7 +672,9 @@ source, how well it is verified, its limits, and how to re-check it on the NUC.
 where `eta_still` is the still-water level (GNSS-R on the live station, the ADCP for the 2025
 dates), `Hs` the offshore significant wave height and `Tp` the peak period of the frame
 (`extract_elevation_contours.py --setup-coef`; `survey_products.apply_setup` uses the same
-formula and rounding). **Value: C = 0.037** (`waterline_timex_cron.sh` SETUP_COEF; the same
+formula and rounding; since Oct 2026 the formula exists once, in `setup_model.py`, which every
+module that uses it calls, bit-identical to the copies it replaced: `test_setup_model.py`).
+**Value: C = 0.037** (`waterline_timex_cron.sh` SETUP_COEF; the same
 value in `survey_products.py` and `historical_forcing.py`, checked by a test). Not changed by
 this PR.
 
@@ -690,7 +692,8 @@ wavelength from the peak period, and `beta_f` the foreshore beach slope. (For ve
 dissipative beaches, Iribarren number below 0.3, they give `R2% = 0.043 sqrt(H0 L0)`
 instead; Marconi's foreshore is not in that range: at beta_f 0.1, Hs 1 m, Tp 8 s the
 Iribarren number is ~1.0.) The repository implements the same equations in
-`foreshore_slope.py` and `gnssr_qc.py`.
+`setup_model.py` (`stockdon_setup`, `stockdon_swash`; `foreshore_slope.py` and the opt-in
+slope-aware setup below use them) and in `gnssr_qc.py` (its QC allowance, slope fixed at 0.10).
 
 **What our C means.** Our form is Stockdon's setup with `C = 0.35 * beta_f`. C = 0.037 implies
 **beta_f = 0.037 / 0.35 = 0.106 (about 1:9.5)**. The real 7-day DEM of 29 Sep - 5 Oct 2026
@@ -808,6 +811,37 @@ Read the printed curve, the near-best band and the verdict. It offers a C to app
 C = 0 and the C in use both lie outside the band and the minimum is not flat. Adopt a new C
 only if it holds over several weeks of different waves; then change it in all three places
 (the cron, `survey_products.py`, `historical_forcing.py`) and give it a SETUP_FITS entry.
+
+**The slope-aware alternative (opt-in; the station stays on C).** `setup_model.py` also holds
+Stockdon's own form, `setup = k * beta_f * sqrt(H0 * L0)` with k = 0.35 (Eq. 10), selected by
+`extract_elevation_contours.py --setup-model stockdon` or, on the station, by
+`SETUP_MODEL="stockdon"` in `waterline_timex_cron.sh` (default `""`: C, unchanged). What it does:
+
+* `beta_f` is measured for each frame on the dated 7-day DEM of `archive/dems` nearest its day
+  (within 7 days), as the median slope (5 x 5 plane fits, `foreshore_slope.surface_slope`) of the
+  DEM cells inside the frame's swash band, still water + setup +/- S/2 (Stockdon's definition of the
+  foreshore slope, over the region of significant swash), iterated three passes as
+  `foreshore_slope.py --iterate` does. One value per frame: the contours are tagged in pixel space,
+  before their ground positions are known.
+* `H0` is Stockdon's DEEP-WATER height. The station's Hs is the ADCP's at 21 m (`hs_best`), so it
+  is deshoaled with linear theory, `H0 = Hs / Ks`: Ks at 21 m is 0.97 (Tp 6 s), 0.92 (8 s), 0.913
+  (9 s, its minimum), 0.94 (12 s), so H0 is 0.7-9.5% above Hs over Tp 5-14 s and sqrt(H0 L0)
+  0.3-4.7% above sqrt(Hs L0) [SYNTH, `test_setup_model.py`]. Refraction is not undone (no wave
+  direction or offshore bathymetry here). The raw-buoy currency is taken as deep water.
+  `--setup-deshoal-depth none` uses Hs as it is.
+* A frame no DEM can serve (none within 7 days, fewer than 20 cells in its band, or a slope
+  outside 0.01-0.30) keeps `beta_f = C / k` (0.106): C's setup, up to the deshoaling. The rows
+  carry `setup_beta_f` and `setup_model`; the extractor prints the slopes used and how many
+  frames fell back and why; the DEM's `_info.json` names the model (only for such contours: the
+  station's C rows and their DEM records are unchanged).
+* `survey_products.py` keeps C whatever the cron says (its live rows are recomputed with C, the
+  two slope-aware columns dropped), and warns when the cron runs `stockdon`.
+
+| check | data | result | reproduce |
+|---|---|---|---|
+| One formula: every replaced copy against the expression as written before | [SYNTH] Hs 0-6 m by 0.01, Tp 1-25 s by 0.1, 3000 random pairs, 0 / NaN / negative Hs, four C | the same bits everywhere; the extractor's rows the old expression's text; `--setup-model c` the same file, byte for byte | `python3 test_setup_model.py` |
+| Slope-aware rows | [SYNTH] a 0.08 plane DEM; a two-slope beach (0.13 above +0.5 m, 0.06 below) | `setup_beta_f` 0.08, setup = 0.35 x 0.08 x sqrt(H0 L0) to the 0.1 mm rounding; high water 0.130, low water 0.060; no DEM: every frame C/k with a WARNING | same |
+
 
 ### 4.2 GNSS-R water level onto NAVD88: +0.349 m
 

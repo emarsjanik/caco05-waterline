@@ -244,6 +244,21 @@ DEM_SERIES="$BASE/archive/dems"
 # survey_products.py and historical_forcing.py carry the same C (their
 # SETUP_COEF): change all three together.
 SETUP_COEF="0.037"
+# Which setup model SETUP_COEF switches on (setup_model.py). "" (the default,
+# the station's since 6 Oct 2026): C*sqrt(Hs*L0) above. "stockdon" (opt-in,
+# NOT the station's): Stockdon et al. (2006) k*beta_f*sqrt(H0*L0), with the
+# foreshore slope beta_f measured for each frame on the dated DEM of
+# DEM_SERIES nearest its day (within 7 days), over the frame's swash band,
+# and H0 the Hs deshoaled from 21 m to deep water; a frame no DEM serves
+# keeps C's setup (beta_f = SETUP_COEF/k). Switch only when
+# evaluate_setup_model.py, run on the survey-date products, recommends it
+# (it refits C and k against the RTK and lidar surveys with leave-one-
+# survey-out cross-validation). SETUP_STOCKDON_K: k, "" = the paper's 0.35
+# (or the k evaluate_setup_model.py recommends). Every DEM changes with the
+# model, and survey_products.py keeps C (its products are recomputed with
+# SETUP_COEF whatever this says).
+SETUP_MODEL=""
+SETUP_STOCKDON_K=""
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
@@ -427,6 +442,14 @@ else
 
     setup_arg=""
     [ -n "$SETUP_COEF" ] && [ -n "$waves_arg" ] && setup_arg="--setup-coef $SETUP_COEF"
+    # the opt-in slope-aware setup (SETUP_MODEL above); an unknown value keeps C's
+    if [ -n "$setup_arg" ] && [ "$SETUP_MODEL" = "stockdon" ]; then
+        setup_arg="$setup_arg --setup-model stockdon --setup-slope-dem $DEM_SERIES"
+        [ -n "$SETUP_STOCKDON_K" ] && setup_arg="$setup_arg --setup-stockdon-k $SETUP_STOCKDON_K"
+        log "setup: slope-aware (SETUP_MODEL=stockdon, k ${SETUP_STOCKDON_K:-0.35}), foreshore slope from $DEM_SERIES"
+    elif [ -n "$SETUP_MODEL" ] && [ "$SETUP_MODEL" != "c" ] && [ "$SETUP_MODEL" != "stockdon" ]; then
+        log "WARNING: SETUP_MODEL=\"$SETUP_MODEL\" is not \"\", \"c\" or \"stockdon\": the setup stays C*sqrt(Hs*L0)"
+    fi
     # GNSS-R QC report and plot (the contour and runup stages apply the
     # same QC themselves through $qc_arg).
     if [ -f "$GAUGE_CSV" ]; then

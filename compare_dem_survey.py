@@ -53,6 +53,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from asc_to_geotiff import read_asc, write_geotiff          # noqa: E402
 from dem_from_contours import write_ascii_grid               # noqa: E402
+from setup_model import wave_scale                           # noqa: E402
 
 
 def read_tiff(path):
@@ -186,7 +187,7 @@ def waves_vs_datum(off, hs, tp, tide):
     a = the part waves do not explain (datum, common bias), b = setup/swash.
     Also the trend against water level. Returns (a, b, phi, has_waves).
     """
-    phi = np.sqrt(hs * 9.81 * tp ** 2 / (2 * np.pi))         # sqrt(Hs L0), m
+    phi = wave_scale(hs, tp)                                  # sqrt(Hs L0), m (setup_model.py)
     w = np.isfinite(phi)
     a = b = np.nan
     spread_phi = float(np.ptp(phi[w])) if w.any() else 0.0

@@ -50,7 +50,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-G = 9.81
+from setup_model import G, deep_water_wavelength     # noqa: F401  L0: the setup formula, once
 
 
 def read_ascii_grid(path):
@@ -88,7 +88,7 @@ def h0_from_runup(dz, beta, T0):
     physically impossible and indicates an error in the elevation or
     the datum -- returns NaN rather than a number.
     """
-    L0 = G * np.asarray(T0, float) ** 2 / (2 * np.pi)
+    L0 = deep_water_wavelength(np.asarray(T0, float))
     beta = np.asarray(beta, float)
     k = 0.35 * beta + 0.5 * np.sqrt(0.563 * beta ** 2 + 0.004)
     dz = np.asarray(dz, float)
