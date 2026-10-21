@@ -42,6 +42,7 @@ python3 test_dem_day_test.py                     # ends "all DEM day-test tests 
 python3 test_timing_mode.py                      # ends "all timing-mode tests passed" (section 2.7)
 python3 test_georectify.py                       # ends "all georectify tests passed" (section 3.5, re-pin)
 python3 test_validation_stats.py                 # ends "all validation statistics tests passed" (section 2.4a)
+python3 test_pointing_daily.py                   # ends "all pointing_daily tests passed" (section 4.6b)
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
@@ -56,7 +57,11 @@ for 2025-03-06 (c2). The live 2026-09-29 date keeps its forcing (the live forcin
 of the station's own rows, minutes) only if the new rule leaves out other days than the detection
 on disk did; then its DEM, plan view and comparisons. The GeoTIFFs are then tagged EPSG:6348
 (section 4.8), and a further run skips every step. (PR #87's own note, that its pull reran only
-the plan-view map and the comparisons, was checked on a 2026-09-29 build then.)
+the plan-view map and the comparisons, was checked on a 2026-09-29 build then.) The per-day pointing
+log and its opt-in correction (`pointing_daily.py`, section 4.6b) add nothing to a step's signature
+unless `--correct-pointing` is given. `survey_compare.py` gains `--camera-eo-day`, which only a
+corrected build passes; its new sha256 reruns a default build's comparisons and plan-view map once,
+with the same numbers.
 
 `view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file's
 only change since this PR is the in-front-of-camera test of 20 Oct 2026 (section 3.5, re-pin;
@@ -1784,6 +1789,151 @@ than the series, or more than 7 days from its nearest DEM, keep C's setup.
   match's `turn_sigma`, `runner_up_inliers`, `runner_up_d`); the step prints each day's why under
   its table.
 
+### 4.6b Per-day pointing: the live log and the opt-in correction (`pointing_daily.py`)
+
+* **Why.** Section 4.6 measures each day's turn and leaves a turned day out; the live cron
+  measures nothing and grids every frame with one calibration. The coastal-imaging practice
+  is to measure the turn on static land features in each image and to update the pointing with
+  it (Rodriguez-Padilla et al. 2020; Pearre & Puleo 2009). At Sisal, stabilisation cut the
+  shoreline position error by about 40% (Arriaga et al. 2022). View angles also drift with the sun
+  (Bouvier et al. 2019), which a day-by-day record can test here.
+* **What changed, and what did not.**
+  * `pointing_daily.py` (new). It has the gates, the corrected pointing and the live log; its
+    docstring gives each rule and its evidence. The gates are: a matched reading (not ambiguous),
+    40 or more inliers, `turn_sigma` 4 or more, inliers spread 180 px or more, a turn of 2.5 deg or
+    less, not UNCONFIRMED and not the reference day. The first three are `survey_products.py`'s own
+    constants.
+  * `--correct-pointing` adds two gates of the day, both at `MATCH_ERR_DEG` (0.1 deg):
+    * **A turn of more than 0.1 deg** in pan, tilt or roll. A smaller one is within the match's own
+      error against another day, so that day is at rest and is gridded as by default. `turn_sigma`
+      does not include this error: real at-rest matches read 4.9-18.5. The corrected days are
+      therefore the turned ones: the days the default leaves out or keeps as a 'small change'.
+    * **The pointing held through the day.** The turn is measured on one probe frame (nearest
+      17:00 UTC) and maps every row of the UTC day. The pointing step therefore also matches the
+      day's first and last photos of the detection against the same reference. Each must pass the
+      gates and read the probe's turn within 0.1 deg. A day the camera turned or came back during
+      is not corrected. Neither is a day whose first or last photo cannot be read (fog, rain): it
+      stays left out when the default leaves it out, and the README gives the reason. These extra
+      matches run only with the option, and only on days that would otherwise be corrected.
+  * The compare step's C = 0 sensitivity re-projects a corrected day's lines with that day's EO
+    (`survey_compare.py --camera-eo-day`), not the calibration's. Otherwise it would undo the
+    correction and count the difference as setup effect.
+  * The corrected EO is the calibration's position with its angles plus the measured change. This
+    is exact for `pointing_check.measure`. It is written next to the waterlines it mapped, and no
+    pinned file is edited.
+  * `survey_products.py --correct-pointing` is **opt-in**. It builds only in a root named
+    `<root>_pointing-corrected`, refuses a blind date and refuses `--eo`. It detects a passing day
+    instead of leaving it out and maps its rows with that day's pointing. Every other day is handled
+    as in a default build. The README has a KNOWN CAVEATS line `POINTING CORRECTED PER DAY` and a
+    camera line. Provenance has `pointing_check.pointing_correction`, the record the detection's
+    stamp keeps.
+  * **Default builds are unchanged.** Without the option no signature gains a key, and the compare
+    command is the same. The new `survey_compare.py` reruns the comparisons and the plan-view map
+    once, with the same numbers. The default README and provenance gain no line or key, and the
+    default detection leaves out the same days (`test_pointing_daily.py`).
+  * The live cron (step 7b, `POINTING_LOG_ENABLE=1`) **only logs**. It writes
+    `archive/pointing_daily_<cam>.json`, its own reference frame in
+    `archive/pointing_daily_reference/<cam>/` and one `pointing <cam> <day>: ...` line per day in
+    `logs/timex_cron.log`, with no WARNING unless the script itself fails. The live calibrations are
+    used as they are. Nothing is written to `calibration/pointing/`, where `owg.sh`'s hourly monitor
+    reads its bank.
+* **[SYNTH] Recovery** (`test_pointing_daily.py`; `pointing_daily.py --self-test`; c2's lens and
+  live EO, a synthetic scene).
+  * Planted turns of 0.05 to 2 deg were read back to under 0.001 deg (4,570-4,900 inliers; the same on
+    Python 3.11 / OpenCV 5.0 and on the station floor, Python 3.8 / OpenCV 4.5.1 / numpy 1.17).
+  * Waterline points at 56-397 m sat 0.09 / 2.08 / 4.98 / 3.63 m (median) off with the calibration,
+    up to 56 m at range. Corrected, they sat 0.001 m off (0.010 m at most).
+  * c1's measured storm pan (-1.214/+0.004/+0.030 deg), planted on c2: the live-era build put that
+    day's lines 1.9 m (median) off uncorrected and within 4 mm with `--correct-pointing`. Every
+    other row was identical to the default build's. The historical path behaved the same way, with
+    the day no longer in `--skip-days`.
+  * The corrected rows are string for string what `georectify.py` gives with the day's EO file.
+    Every other row is unchanged, byte for byte.
+  * Not corrected:
+    * an unturned frame (`turn_sigma` 1.2-1.6);
+    * dirt on the window that wins the match ('ambiguous', `turn_sigma` 1.5-1.9);
+    * a scene too faint to match ('ok' at zero turn, `turn_sigma` 3.1);
+    * a 3.0 deg turn (measured and logged, but over the limit).
+  * Two copies of one image match with no noise at all and read a zero turn as many standard errors
+    from none. The live-log test therefore gives each synthetic frame its own sensor noise, as a
+    camera does.
+* **[NUC] Evaluation, step by step.** Nothing here is validated on real photos yet.
+  1. After the pull, run both of these:
+     ```
+     python3 test_pointing_daily.py               # ends "all pointing_daily tests passed" (~35 s on the floor venv)
+     python3 pointing_daily.py --self-test --image archive/images_timex/<a clear c2 timex>.jpg   # ends PASS
+     ```
+     The second plants the same turns on a real c2 frame (no scipy needed) and recovers them.
+  2. **The live log**, after the next cron run:
+     ```
+     grep "^pointing c" logs/timex_cron.log | tail
+     ```
+     * If it says `no reference`, the calibration's own day (2025-11-13) is no longer in the archive.
+       Give a clear day whose pointing is the calibration's:
+       `python3 pointing_daily.py --camera c1 --reference-day <day>`. A day a survey-product pointing
+       table reads 'matches' against the calibration day is one.
+     * Then backfill the storm:
+       ```
+       python3 pointing_daily.py --camera c1 c2 --days 2026-09-20 2026-10-10
+       ```
+       (~3 frames a camera-day; time it). Expect c1 26-28 Sep at about -1.2 deg of pan ('MOVED')
+       where the survey product measured -1.214 deg on 27 Sep, and back by 29 Sep. If the land was
+       unread on 26 and 28 Sep, the log says 'no reading' for those days.
+     * The log's `d_deg` should agree with each survey build's `pointing/pointing_<cam>.csv` within
+       ~0.1 deg on days both read: the same matcher, other frames and another reference.
+     * `range_deg`, the spread between one day's frames, is the diurnal-drift test. Spreads over
+       ~0.1 deg on sunny days and not on overcast ones would be the thermal drift of Bouvier et al.
+       (2019).
+  3. **The correction against surveys.** Compare each date three ways, each in its own root: the
+     default product (already in the default root), the corrected one, and every day kept
+     uncorrected (the before/after on the same frames).
+     ```
+     R=/mnt/I2Rgus_Data/survey_products            # the default products: already built there
+     for D in 2025-01-23 2025-03-06 2026-09-29; do
+         python3 survey_products.py --date $D --correct-pointing --output-root ${R}_pointing-corrected
+         python3 survey_products.py --date $D --keep-moved-days --output-root ${R}_keepmoved
+     done
+     ```
+     * A 2025 date reruns its detection in each new root (~38 min for 2025-01-23 and ~20 min for
+       2025-03-06, section 1). Start after ~21:30 local.
+     * 2025-01-23 and 2025-03-06 compare with INDEPENDENT lidar. The 2026-09-29 window (26 Sep -
+       2 Oct) holds the c1 storm. Its RTK is CIRCULAR for C, but C is the same in all three builds,
+       so their difference tests the pointing alone.
+     * Read the corrected README's `POINTING CORRECTED PER DAY` line: which days, by how much, on
+       which frames, and how far their lines moved. Its 'NOT corrected' list gives, for each day
+       measured to differ, the gate that kept it out (for example, the pointing did not hold
+       through the day).
+     * Only turned days are corrected (over 0.1 deg). On a date with no such day, the corrected
+       build's waterlines are the default's, row for row. The README line then says 'no day passed
+       the gates'.
+     * Compare per camera in `compare/` the DEM - survey median and NMAD of the three, and the
+       waterlines - survey of the corrected days against the other days.
+  4. **Decision.** Make the correction the default only if both hold on the INDEPENDENT surveys:
+     * the corrected DEM - survey (median, NMAD, per camera) is no worse than the default's;
+     * a corrected day's waterlines - survey agree with the unturned days' within their NMAD, where
+       the same days uncorrected (`_keepmoved`) do not.
+
+     An independent date with no corrected day gives no evidence either way, because its two
+     builds are the same. The rule is read only on the independent dates that have a corrected day.
+     If none has one, the rule cannot be applied and the correction stays opt-in. The storm window
+     (2026-09-29) then shows only that the correction is consistent with its own survey.
+
+     Until then it stays opt-in. A live correction would follow only after this, and as its own
+     change.
+* **Not corrected, by design.**
+  * The window's constant offset against the calibration: the sea horizon's +0.5 to +0.9 deg of
+    tilt on the 2026 cameras (section 4.6) may be the lens model. The correction aligns each day
+    with the reference frame's pointing, taken as the calibration's, as the pointing step does.
+  * Days nothing could read: they stay left out, as by default.
+  * The detector's search. Only the georectification is corrected. A historical era's search
+    envelope is placed with `--eo`, and the live crop is fixed. Both are the calibration's, padded by
+    0.03 / 0.06 of the frame height (~61 / ~123 px). That is ~1.4 / ~2.7 deg of tilt for c1
+    (fy ~2573 px) and ~1.0 / ~1.9 deg for c2 (fy ~3681 px). On a corrected day tilted ~1 deg or
+    more, or rolled so that the band's ends move as far, part of the waterline band can fall
+    outside the search, and the detector can follow another edge. c1's +1.17 m lines already sit
+    ~33 px below its envelope floor at the calibration (`waterline_consistency.py`). The gates still
+    allow up to 2.5 deg, so read such a day's lines in the comparison before trusting them.
+
 ### 4.7 Detector edge position
 
 * The detector places its line where a water pixel has foam around it. In the fixture this is
@@ -1942,6 +2092,10 @@ copy of today's pictures made before the pull (section 1).
   gives the edge numbers and inliers per day. The NUC's edge numbers are 3-frame medians, where
   the storm values above are single 17:00 frames. Why c1 turned ~1.2 deg on 26-28 Sep 2026 and
   was back by 29 Sep (wind load, or a slip reset) is not known.
+* **The per-day pointing correction on real photos.** `--correct-pointing` and the live log
+  (section 4.6b) are checked on synthetic turns only. Their evaluation is the three-root comparison
+  of section 4.6b on the Jan and Mar 2025 lidar dates and the 2026 storm window, which only the NUC
+  can run. Until it is done the correction stays opt-in and the live cron only logs.
 * **Window dirt in a storm.** The zero-turn guard (`turn_sigma` under 4.0 shows nothing) rests on
   synthetic drops on real frames and on real cross-day matches of one camera's storm frames (c2 26-28
   Sep against 7 Oct and against each other; section 4.6); real
@@ -1996,24 +2150,30 @@ copy of today's pictures made before the pull (section 1).
 * Aarninkhof, S.G.J., Turner, I.L., Dronkers, T.D.T., Caljouw, M., Nipius, L., 2003. A
   video-based technique for mapping intertidal beach bathymetry. Coastal Engineering 49(4),
   275-289.
+* Arriaga, J., Medellin, G., Ojeda, E., Salles, P., 2022. Shoreline detection accuracy from video
+  monitoring systems. Journal of Marine Science and Engineering 10(1), 95.
+  https://doi.org/10.3390/jmse10010095
+* Bouvier, C., Balouin, Y., Castelle, B., Holman, R., 2019. Modelling camera viewing angle
+  deviation to improve nearshore video monitoring. Coastal Engineering 147, 99-106.
 * Carlstein, E., 1986. The use of subseries values for estimating the variance of a general
   statistic from a stationary sequence. Annals of Statistics 14(3), 1171-1179 (non-overlapping
   blocks, as resampled here).
 * Davison, A.C., Hinkley, D.V., 1997. Bootstrap Methods and their Application. Cambridge
   University Press (section 3.8: resampling clustered data).
+* Hart-Davis, M.G., Piccioni, G., Dettmering, D., Schwatke, C., Passaro, M., Seitz, F., 2021.
+  EOT20: a global ocean tide model from multi-mission satellite altimetry. Earth System Science
+  Data 13, 3869-3884.
+* Holman, R.A., Stanley, J., 2007. The history and technical capabilities of Argus. Coastal
+  Engineering 54(6-7), 477-491.
 * Lahiri, S.N., 2003. Resampling Methods for Dependent Data. Springer (non-overlapping and
   moving blocks).
 * Liang, K.-Y., Zeger, S.L., 1986. Longitudinal data analysis using generalized linear models.
   Biometrika 73(1), 13-22.
 * Parente, P.M.D.C., Santos Silva, J.M.C., 2016. Quantile regression with clustered data.
   Journal of Econometric Methods 5(1), 1-15.
-* Rolstad, C., Haug, T., Denby, B., 2009. Spatially integrated geodetic glacier mass balance and
-  its uncertainty based on geostatistical analysis. Journal of Glaciology 55(192), 666-680.
-* Hart-Davis, M.G., Piccioni, G., Dettmering, D., Schwatke, C., Passaro, M., Seitz, F., 2021.
-  EOT20: a global ocean tide model from multi-mission satellite altimetry. Earth System Science
-  Data 13, 3869-3884.
-* Holman, R.A., Stanley, J., 2007. The history and technical capabilities of Argus. Coastal
-  Engineering 54(6-7), 477-491.
+* Pearre, N.S., Puleo, J.A., 2009. Quantifying seasonal shoreline variability at Rehoboth Beach,
+  Delaware, using automated imaging techniques. Journal of Coastal Research 25(4), 900-914.
+  https://doi.org/10.2112/08-1029.1
 * Plant, N.G., Holland, K.T., Puleo, J.A., 2002. Analysis of the scale of errors in nearshore
   bathymetric data. Marine Geology 191(1-2), 71-86.
 * Plant, N.G., Holman, R.A., 1997. Intertidal beach profile estimation using video images.
@@ -2021,6 +2181,11 @@ copy of today's pictures made before the pull (section 1).
 * Plant, N.G., Aarninkhof, S.G.J., Turner, I.L., Kingston, K.S., 2007. The performance of
   shoreline detection models applied to video imagery. Journal of Coastal Research 23(3),
   658-670.
+* Rodriguez-Padilla, I., Castelle, B., Marieu, V., Morichon, D., 2020. A simple and efficient
+  image stabilization method for coastal monitoring video systems. Remote Sensing 12(1), 70.
+  https://doi.org/10.3390/rs12010070
+* Rolstad, C., Haug, T., Denby, B., 2009. Spatially integrated geodetic glacier mass balance and
+  its uncertainty based on geostatistical analysis. Journal of Glaciology 55(192), 666-680.
 * Stockdon, H.F., Holman, R.A., Howd, P.A., Sallenger, A.H., 2006. Empirical parameterization
   of setup, swash, and runup. Coastal Engineering 53(7), 573-588.
   https://doi.org/10.1016/j.coastaleng.2005.12.005

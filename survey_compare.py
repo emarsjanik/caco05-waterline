@@ -124,8 +124,10 @@ transects that start at +1.2 m check the upper beach only).
 When the lines carry a setup, the same comparison is repeated WITHOUT it
 (C = 0) as a sensitivity: each line at its still-water level and, with
 --camera-eo, re-projected onto that lower plane as a C = 0 build would
-place it (same detections), per camera. Lines at still water move
-seaward and some leave the survey, so the effect of the setup is read
+place it (same detections), per camera; a day whose lines were mapped
+with its own pointing (survey_products.py --correct-pointing) with that
+day's EO (--camera-eo-day), not the calibration's. Lines at still water
+move seaward and some leave the survey, so the effect of the setup is read
 on the SAME frames (points) both ways ('paired'), and the ones that drop
 out are counted. The setup coefficient is the least certain step; this
 shows how much of the answer it carries.
@@ -599,7 +601,9 @@ def without_setup(cont, cams):
     (tide_elevation_navd88) and, where the camera's calibration and the line's pixels are known,
     re-projected onto that lower plane (georectify.pixel_to_ground), i.e. a little seaward,
     where the beach is lower too. Without the calibration the lines keep their positions and
-    only lose the setup, which overstates the change.
+    only lose the setup, which overstates the change. A camera's "eo_by_day" ({UTC day: EO},
+    --camera-eo-day): the lines of those days (by capture_epoch, else capture_time_utc) with
+    that day's EO, the pointing they were mapped with.
     -> (contours dict like cont, how)
     """
     from georectify import pixel_to_ground
@@ -607,7 +611,7 @@ def without_setup(cont, cams):
     c0["Z"] = cont["Zt"].copy()
     c0["beach"] = np.zeros(len(cont["Z"]), bool)
     E, N = cont["E"].copy(), cont["N"].copy()
-    moved, kept = 0, 0
+    moved, kept, own = 0, 0, []
     for cam in sorted(set(cont["cam"].tolist())):
         m = (cont["cam"] == cam) & np.isfinite(cont["Zt"])
         c = (cams or {}).get(cam)
@@ -618,6 +622,14 @@ def without_setup(cont, cams):
         X, Y = pixel_to_ground(cont["U"][ok], cont["V"][ok], cont["Zt"][ok], c["io"], c["eo"])
         E[ok], N[ok] = X, Y
         moved += int(ok.sum())
+        for day, eo_d in sorted((c.get("eo_by_day") or {}).items()):
+            t0 = (date.fromisoformat(day) - date(1970, 1, 1)).days * 86400.0
+            on = ok & np.isfinite(cont["epoch"])
+            on[on] = (cont["epoch"][on] >= t0) & (cont["epoch"][on] < t0 + 86400.0)
+            on |= ok & ~np.isfinite(cont["epoch"]) & (cont["day"] == day)
+            if on.any():
+                E[on], N[on] = pixel_to_ground(cont["U"][on], cont["V"][on], cont["Zt"][on], c["io"], eo_d)
+                own.append(f"{cam} {day}")
     c0["E"], c0["N"] = E, N
     good = np.isfinite(E) & np.isfinite(N) & np.isfinite(c0["Z"])
     for k in POINT_KEYS:
@@ -632,6 +644,9 @@ def without_setup(cont, cams):
     else:
         how = ("lines kept in place with the setup removed (no --camera-eo or no pixel columns): this "
                "overstates the change; a C = 0 build would also move each line a little seaward")
+    if own:
+        how += (f"; the days mapped with their own pointing ({', '.join(own)}) with that day's EO "
+                f"(--camera-eo-day), not the calibration")
     return c0, how
 
 
@@ -646,6 +661,18 @@ def parse_cam_specs(specs, what):
             sys.exit(f"{what}: expected cam=PATH, got '{s}'")
         k, v = s.split("=", 1)
         out[k.strip()] = Path(v.strip())
+    return out
+
+
+def parse_cam_day_specs(specs, what):
+    """CAM:DAY=PATH (DAY YYYY-MM-DD) -> {cam: {day: Path}}."""
+    out = {}
+    for s in specs or []:
+        k, _, v = s.partition("=")
+        cam, _, day = k.partition(":")
+        if not (v and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day.strip())):
+            sys.exit(f"{what}: expected CAM:YYYY-MM-DD=PATH, got '{s}'")
+        out.setdefault(cam.strip(), {})[day.strip()] = Path(v.strip())
     return out
 
 
@@ -2431,9 +2458,10 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             spread=None, count=None, envelope_source=None, min_cover=0.5, tolerance=1.0,
             epsg=DEFAULT_EPSG, plot=True, transect_tolerance=TRANSECT_TOLERANCE,
             transect_split=TRANSECT_SPLIT, transect_min_points=TRANSECT_MIN_POINTS, eo_dirs=None,
-            synthetic=None, block_m=ALONGSHORE_BLOCK_M):
+            synthetic=None, block_m=ALONGSHORE_BLOCK_M, camera_eo_day=None):
     """
     Compares a DEM with a survey and writes the outputs. camera_eo / camera_io: {cam: path};
+    camera_eo_day: {cam: {UTC day: path}}, the EO a day's lines were mapped with (--camera-eo-day);
     eo_dirs: folders where the files an EO's notes name (a carried correction's fit) are looked for;
     synthetic: a note when the DEM was built from SYNTHETIC test photos (printed on every output).
     block_m: the length of the stretches of the shore the intervals resample (dem_intervals).
@@ -2478,9 +2506,19 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         print(f"photo dates       : {photo_dates[0]} to {photo_dates[1]} (from {info_p.name})")
 
     cams = load_cameras(camera_eo or {}, camera_io or {}) if camera_eo else {}
+    from georectify import load_extrinsics
+    for cam, days_ in sorted((camera_eo_day or {}).items()):
+        if cam not in cams:
+            sys.exit(f"--camera-eo-day {cam}: give its calibration with --camera-eo too")
+        for d_, p_ in days_.items():
+            if not Path(p_).exists():
+                sys.exit(f"--camera-eo-day {cam}:{d_}: {p_} not found")
+        cams[cam]["eo_by_day"] = {d_: load_extrinsics(p_) for d_, p_ in sorted(days_.items())}
     for cam, c in sorted(cams.items()):
         print(f"camera {cam:11s}: EO {Path(c['eo_path']).name}, IO "
-              f"{Path(c['io_path']).name if c['io_path'] else 'not found (footprint not used)'}")
+              f"{Path(c['io_path']).name if c['io_path'] else 'not found (footprint not used)'}"
+              + (f"; its own pointing on {', '.join(c['eo_by_day'])} (--camera-eo-day: the C = 0 lines)"
+                 if c.get("eo_by_day") else ""))
     if cams:
         camera_xy = tuple(np.mean([c["eo"][:2] for c in cams.values()], axis=0))
         camera_source = "from the EO files given"
@@ -3390,6 +3428,11 @@ def main():
     ap.add_argument("--camera-eo", nargs="+", default=None, metavar="CAM=PATH",
                     help="the EO files the DEM was built with: camera footprints, position, and "
                          "the label checks (e.g. c1=calibration/CACO03_c1_20250123_EO.yaml)")
+    ap.add_argument("--camera-eo-day", nargs="+", default=None, metavar="CAM:DAY=PATH",
+                    help="the EO a UTC day's lines were mapped with, other than --camera-eo's (survey_products.py "
+                         "--correct-pointing: waterlines/<cam>/pointing_corrected_eo/): the C = 0 sensitivity "
+                         "re-projects those days' lines with it (e.g. c1:2026-09-27=c1_2026-09-27_pointing_corrected_"
+                         "EO.yaml)")
     ap.add_argument("--camera-io", nargs="+", default=None, metavar="CAM=PATH",
                     help="lens files (default: the EO's setup IO, else CACO05_<cam>_20240801_IO.yaml)")
     ap.add_argument("--spread", default=None, help="STEM_spread.asc (default: next to the DEM)")
@@ -3445,7 +3488,7 @@ def main():
             tolerance=args.tolerance, epsg=args.epsg, plot=not args.no_plot,
             transect_tolerance=args.transect_tolerance, transect_split=args.transect_split,
             transect_min_points=args.transect_min_points, eo_dirs=args.eo_dirs, synthetic=args.synthetic,
-            block_m=args.block_m)
+            block_m=args.block_m, camera_eo_day=parse_cam_day_specs(args.camera_eo_day, "--camera-eo-day"))
     return 0
 
 
