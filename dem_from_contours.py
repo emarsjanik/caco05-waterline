@@ -53,6 +53,11 @@ hold; with --max-day-offset also each camera-day left out with its
 offset, and the day test's first-pass and final offsets) and the page
 dem_out_dem.png, drawn by dem_figure.py. To redraw the page from those
 files without rebuilding: python3 dem_figure.py dem_out
+With --loess (off by default) also dem_out_loess.asc, a second surface
+from the same points by scale-controlled quadratic loess, and its
+prediction error dem_out_loess_err.asc (with _loess_nmse and _loess_skill;
+dem_loess.py, Plant, Holland & Puleo 2002). No figure draws it and nothing
+above depends on it.
 
 THE DAY TEST (--max-day-offset) is iterative: the camera-day furthest
 over the limit from the DEM of the other days is left out, the others
@@ -2030,6 +2035,17 @@ def main():
                          "facets. See fine_dem().")
     ap.add_argument("--fine-window", default="4,1",
                     help="Fine DEM neighbourhood, metres 'alongshore,cross-shore' (default 4,1)")
+    ap.add_argument("--loess", action="store_true",
+                    help="Also write <stem>_loess.asc, a quadratic loess surface of the same points on the "
+                         "DEM's grid with explicit smoothing scales (Plant, Holland & Puleo 2002), and its "
+                         "prediction error <stem>_loess_err.asc (m), normalised error _loess_nmse.asc and skill "
+                         "_loess_skill.asc. Off by default. The DEM's grids, its page and the series copy are "
+                         "the same with it as without; <stem>_info.json gains 'loess'. No figure draws it. "
+                         "Check its error against a survey: python3 dem_loess.py evaluate <stem> <survey>. "
+                         "See dem_loess.py.")
+    ap.add_argument("--loess-scales", default=None,
+                    help="With --loess: half-widths of the loess window, metres 'alongshore,cross-shore' "
+                         "(default 20,5: dem_loess.LOESS_SCALES)")
     ap.add_argument("--fill-gaps", action="store_true",
                     help="Close isolated single-cell holes from neighbours. Off by default: an "
                          "interpolated cell looks identical to a measured one in the output.")
@@ -2045,6 +2061,19 @@ def main():
                     help="Skip the page (<stem>_dem.png). The grids and <stem>_info.json are "
                          "still written; 'python3 dem_figure.py <stem>' draws the page later.")
     args = ap.parse_args()
+    loess_along, loess_across = None, None
+    if args.loess or args.loess_scales:
+        import dem_loess
+        try:
+            loess_along, loess_across = (float(x) for x in (args.loess_scales or "%g,%g" % dem_loess.LOESS_SCALES)
+                                         .split(","))
+            if not (loess_along > 0 and loess_across > 0):
+                raise ValueError
+        except ValueError:
+            ap.error(f"--loess-scales {args.loess_scales!r}: two half-widths in metres, 'alongshore,cross-shore' "
+                     f"(e.g. 20,5)")
+        if not args.loess:
+            ap.error("--loess-scales goes with --loess")
 
     # The page the daily email attaches. Removed before anything else, so
     # no failure below -- no points, a crash, a page that cannot be drawn
@@ -2394,6 +2423,22 @@ def main():
             write_ascii_grid(str(sstem) + "_sigma.asc", sigma, e0, n0, args.cell)
             print(f"series            : {sstem}_{{dem,spread,count,sigma}}.asc (+ _info.json)")
 
+    loess_record = None
+    if args.loess:
+        # opt-in: the same points the DEM was gridded from (every filter above applied), by quadratic loess on
+        # the DEM's own grid, with its prediction error (dem_loess.py). After the DEM's grids are written: no
+        # value of the DEM, nothing on its page and no series file depends on it.
+        import dem_loess
+        print()
+        lo = dem_loess.loess_grid(E, N, Z, frames, e0, n0, ncols, nrows, args.cell, loess_along, loess_across,
+                                  min_frames=args.min_points,
+                                  max_sigma=args.max_spread / 2 if args.max_spread and args.max_spread > 0 else None)
+        for line in dem_loess.summary_lines(lo):
+            print(line)
+        dem_loess.write_grids(str(stem), lo, e0, n0, args.cell)
+        loess_record = dem_loess.info_record(lo)
+        print(f"wrote {stem}_loess.asc   (loess elevation, m NAVD88; and _loess_err, _loess_nmse, _loess_skill)")
+
     # What the page needs and the grids do not hold: dates, frames, filters.
     # Written always, so 'python3 dem_figure.py <stem>' can redraw the page
     # later without a rebuild.
@@ -2442,6 +2487,8 @@ def main():
             **day_record,
         },
     }
+    if loess_record is not None:
+        page_info["loess"] = loess_record        # --loess only: without it info.json is as before
     with open(str(stem) + "_info.json", "w") as f:
         json.dump(page_info, f, indent=1)
     print(f"wrote {stem}_info.json   (dates, frames, filters: for the page)")
@@ -2450,7 +2497,8 @@ def main():
         # <series stem>) credits only the cameras that measured: without it a
         # c1-only week's page said 'seen by c2' and drew a seam
         with open(str(sstem) + "_info.json", "w") as f:
-            json.dump(page_info, f, indent=1)
+            # the series holds no loess grids: its info.json does not name them
+            json.dump({k: v for k, v in page_info.items() if k != "loess"}, f, indent=1)
 
     rc = 0
     if not args.no_plot:
