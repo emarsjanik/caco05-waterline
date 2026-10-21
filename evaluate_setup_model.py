@@ -87,13 +87,32 @@ has). Its numbers: the coefficient fitted on every survey (in-sample), the
 coefficient each survey alone would pick (how stable it is), and LEAVE-
 ONE-SURVEY-OUT: for each survey, the coefficient fitted on the OTHER
 surveys, scored on it. Per survey: frames, bias (mean residual), median,
-RMSE, NMAD, and the median per camera.
+RMSE, NMAD, and the median per camera. A coefficient on the edge of its
+grid is flagged (the optimum may lie beyond it).
+
+A FREE OFFSET PER SURVEY AND CAMERA. Every refit is also made, and scored
+held out, on the residuals less their mean per survey and camera (over at
+least MIN_GROUP frames): what is left is how a line's residual changes with
+the waves within its survey, as dem_from_contours.py --fit-setup reads the
+setup off repeat crossings rather than off a survey. It is needed because
+with a few surveys of one dominant slope each, C and Stockdon differ mostly
+by a scale on each survey's setup: a level offset of a survey or camera
+(the pointing, the still-water datum -- the ADCP's for 2025, GNSS-R's for
+2026 -- a camera's bias) that lines up with the slopes is credited to
+Stockdon by the absolute score. An offset does not touch the free-offset
+score; a wrong wave dependence does.
 
 THE RECOMMENDATION. With 3 or more surveys, Stockdon (k refitted, H0 = Hs
 / Ks: the form fixed beforehand; H0 = Hs is a sensitivity) is recommended
-only when its cross-validated RMSE, averaged over the held-out surveys,
-is at least MARGIN_M below that of the C refit AND it is lower on a
-majority of the held-out surveys; otherwise the station keeps C. With
+only when, against the C refit, each at its leave-one-survey-out
+coefficient and over the frames both keep on the held-out survey:
+  * its RMSE, averaged over the held-out surveys, is at least MARGIN_M
+    below C's AND it is lower on a majority of the held-out surveys; and
+  * with a free offset per survey and camera (each model refitted so),
+    its RMSE averaged over the held-out surveys is below C's AND it is
+    lower on a majority of them;
+a held-out survey on which Stockdon keeps fewer than MIN_KEEP of the
+frames scored counts against it. Otherwise the station keeps C. With
 fewer surveys no recommendation is made (the station keeps C). The C the
 cross-validation favours is printed as information: changing C means
 changing it in all three places (the cron, survey_products.py,
@@ -104,7 +123,10 @@ product in --output-root (<root>/<date>/provenance.json: its cameras'
 calibrations, its waterline file, its DEM and the DEM's _info.json). A
 BLIND date (survey_products.BLIND_DATES, e.g. 2024-10-23, whose survey is
 held for an independent check) is skipped before anything of it is opened:
-its survey row is never resolved, its product never read. A survey row
+its survey row is never resolved, its product never read; so is a row of
+any date whose survey file is NAMED like a survey of a blind date
+(survey_products.held_name), and survey_products.arm_blind_guard refuses,
+in this process, any Python-level open of such a file. A survey row
 without a path is skipped too: this script never looks a survey up by its
 date, the way survey_products.py looks for GCP files.
 
@@ -142,6 +164,7 @@ K_GRID = np.round(np.arange(0.05, 0.80005, 0.005), 3)
 GROSS_M = 1.0
 MIN_KEEP = 0.8
 MIN_FRAMES = 5                 # a survey with fewer scored frames takes no part
+MIN_GROUP = 3                  # a survey x camera with fewer takes no part in the free-offset scores
 # A DSM's local floor: the survey's lowest elevation over FLOOR_BLOCK_M blocks and their eight neighbours
 # (~10 m about a point); the margin is survey_compare.SURVEY_FLOOR_MARGIN (read at run time)
 FLOOR_BLOCK_M = 5.0
@@ -291,10 +314,23 @@ class Survey:
         s, _ = self.setups("c", station_c, station_c)
         r = self.residuals(s)
         ok = np.isfinite(r)
-        self.gross = int((ok & (np.abs(r) > GROSS_M)).sum())
-        self.ref = np.flatnonzero(ok & (np.abs(r) <= GROSS_M))
+        with np.errstate(invalid="ignore"):
+            self.gross = int((ok & (np.abs(r) > GROSS_M)).sum())
+            self.ref = np.flatnonzero(ok & (np.abs(r) <= GROSS_M))
+        self.ref_cams = np.array([self.frames[i]["cam"] for i in self.ref], object)
         self.reached = int(ok.sum())
         self._cache = {}
+
+    def free_offset(self, r):
+        """The residuals of the frames scored less their mean per camera (A FREE OFFSET PER SURVEY AND
+        CAMERA, the docstring), NaN for a camera with fewer than MIN_GROUP finite ones."""
+        r = np.asarray(r, float)
+        out = np.full(r.shape, np.nan)
+        for c in sorted(set(self.ref_cams.tolist())):
+            m = (self.ref_cams == c) & np.isfinite(r)
+            if m.sum() >= MIN_GROUP:
+                out[m] = r[m] - r[m].mean()
+        return out
 
 
 # ---------------------------------------------------------------------
@@ -424,6 +460,9 @@ def load_product(pdir, row, survey_path, calibration_dir, max_points=MAX_POINTS_
         E0.append(Ea[ok]); N0.append(Na[ok]); dE.append(Eb[ok] - Ea[ok]); dN.append(Nb[ok] - Na[ok])
     if not frames:
         return None, "no frame with waves, a calibration and ground positions"
+    if not any(f["tag"] for f in frames):
+        notes.append("no wave_source in the waterline file: the deshoaled Stockdon model takes every frame as deep "
+                     "water (H0 = Hs), the same as the H0 = Hs one")
     cat = lambda xs: np.concatenate(xs) if xs else np.zeros(0)  # noqa: E731
     sv = Survey(row["name"], row["date"], kind, row.get("label") or "", str(survey_path), frames,
                 cat(fi).astype(int), cat(E0), cat(N0), cat(dE), cat(dN), slope, survey, notes)
@@ -454,33 +493,40 @@ def frame_stats(r, cams=None):
     return out
 
 
-def mean_square(sv, family, coef, station_c):
-    """The survey's mean square residual at a model, or inf when it is not admissible there (it keeps
-    fewer than MIN_KEEP of the frames scored)."""
+def mean_square(sv, family, coef, station_c, free=False):
+    """The survey's mean square residual at a model (free: with a free offset per camera), or inf when
+    it is not admissible there (it keeps fewer than MIN_KEEP of the frames scored)."""
     r, _ = sv.score(family, coef, station_c)
     ok = np.isfinite(r)
     if not len(r) or ok.sum() < MIN_KEEP * len(r):
         return np.inf
+    if free:
+        r = sv.free_offset(r)
+        ok = np.isfinite(r)
+        if not ok.any():
+            return np.inf
     return float(np.mean(r[ok] ** 2))
 
 
-def fit(surveys, family, grid, station_c):
+def fit(surveys, family, grid, station_c, free=False):
     """The coefficient of the grid that minimises the mean over `surveys` of their mean square residuals
-    (each survey weighs the same). -> (coefficient or None, objective)."""
+    (each survey weighs the same; free: with a free offset per survey and camera). -> (coefficient or
+    None, objective)."""
     if not surveys:
         return None, np.inf
-    J = np.array([np.mean([mean_square(sv, family, a, station_c) for sv in surveys]) for a in grid])
+    J = np.array([np.mean([mean_square(sv, family, a, station_c, free) for sv in surveys]) for a in grid])
     if not np.isfinite(J).any():
         return None, np.inf
     i = int(np.argmin(J))
     return float(grid[i]), float(J[i])
 
 
-def survey_result(sv, family, coef, station_c):
+def survey_result(sv, family, coef, station_c, free=False):
     r, src = sv.score(family, coef, station_c)
-    cams = [sv.frames[i]["cam"] for i in sv.ref]
-    out = dict(frame_stats(r, cams), coef=coef, frames_scored=int(len(sv.ref)))
-    out["lost"] = int(len(sv.ref) - out["n"])
+    lost = int(len(sv.ref) - np.isfinite(r).sum())
+    out = dict(frame_stats(sv.free_offset(r) if free else r, sv.ref_cams), coef=coef,
+               frames_scored=int(len(sv.ref)))
+    out["lost"] = lost
     if src is not None:
         out["beta_sources"] = src
     return out
@@ -518,9 +564,79 @@ def evaluate(surveys, station_c, c_grid=C_GRID, k_grid=K_GRID):
                                     else {"coef": None, "n": 0, "rmse": None, "bias": None})
         r = [v["rmse"] for v in rec["loso"].values() if v.get("rmse") is not None]
         rec["loso_rmse_mean"] = float(np.mean(r)) if r and len(r) == len(use) else None
+        # the same with a free offset per survey and camera (the docstring)
+        a_free, _ = fit(use, fam, grid, station_c, free=True)
+        fr = rec["free_offset"] = {"all": a_free, "alone": {}, "loso": {}}
+        for sv in use:
+            fr["alone"][sv.name] = fit([sv], fam, grid, station_c, free=True)[0]
+            a_h, _ = fit([o for o in use if o is not sv], fam, grid, station_c, free=True)
+            fr["loso"][sv.name] = (survey_result(sv, fam, a_h, station_c, free=True) if a_h is not None
+                                   else {"coef": None, "n": 0, "rmse": None, "nmad": None})
+        r = [v["rmse"] for v in fr["loso"].values() if v.get("rmse") is not None]
+        fr["loso_rmse_mean"] = float(np.mean(r)) if r and len(r) == len(use) else None
+        # a coefficient on the edge of its grid: the optimum may lie beyond it
+        edge = (float(grid[0]), float(grid[-1]))
+        rec["at_grid_edge"] = [w for w, a in
+                               [("all", a_all)] + [(f"alone {n}", a) for n, a in rec["alone"].items()]
+                               + [(f"loso {n}", v.get("coef")) for n, v in rec["loso"].items()]
+                               + [("free_offset all", a_free)]
+                               + [(f"free_offset alone {n}", a) for n, a in fr["alone"].items()]
+                               + [(f"free_offset loso {n}", v.get("coef")) for n, v in fr["loso"].items()]
+                               if a is not None and a in edge]
         res["refit"][fam] = rec
     res["recommendation"] = recommend(res, use, station_c)
     return res
+
+
+def head_to_head(use, res, station_c, free):
+    """Per held-out survey, the C refit against Stockdon's (H0 = Hs / Ks), each at its leave-one-survey-out
+    coefficient (free: those of the free-offset refits, scored so), over the frames BOTH keep there ->
+    {survey: {n, c_rmse, stockdon_rmse, stockdon_keeps} or None when a coefficient is missing}."""
+    cr, sr = res["refit"]["c"], res["refit"]["stockdon"]
+    if free:
+        cr, sr = cr["free_offset"], sr["free_offset"]
+    out = {}
+    for sv in use:
+        a_c, a_s = cr["loso"][sv.name].get("coef"), sr["loso"][sv.name].get("coef")
+        if a_c is None or a_s is None:
+            out[sv.name] = None
+            continue
+        rc, _ = sv.score("c", a_c, station_c)
+        rs, _ = sv.score("stockdon", a_s, station_c)
+        keeps = bool(len(rs)) and bool(np.isfinite(rs).sum() >= MIN_KEEP * len(rs))
+        both = np.isfinite(rc) & np.isfinite(rs)
+        rc, rs = np.where(both, rc, np.nan), np.where(both, rs, np.nan)
+        if free:
+            rc, rs = sv.free_offset(rc), sv.free_offset(rs)
+        m = np.isfinite(rc) & np.isfinite(rs)
+        out[sv.name] = {"n": int(m.sum()),
+                        "c_rmse": float(np.sqrt(np.mean(rc[m] ** 2))) if m.any() else None,
+                        "stockdon_rmse": float(np.sqrt(np.mean(rs[m] ** 2))) if m.any() else None,
+                        "stockdon_keeps": keeps}
+    return out
+
+
+def verdict(h2h, n_use, margin):
+    """One test of THE RECOMMENDATION over head_to_head's surveys -> (passed, text, numbers)."""
+    scored = {n: v for n, v in h2h.items() if v is not None and v["n"]}
+    wins = [n for n, v in sorted(scored.items()) if v["stockdon_keeps"] and v["stockdon_rmse"] < v["c_rmse"]]
+    weak = sorted(n for n, v in scored.items() if not v["stockdon_keeps"])
+    nums = {"per_survey": h2h, "stockdon_better_on": wins, "stockdon_keeps_too_few_on": weak}
+    if len(scored) < n_use:
+        return False, (f"scored on {len(scored)} of the {n_use} held-out surveys (a coefficient or the frames both "
+                       f"models keep are missing on the others)"), nums
+    rc = float(np.mean([v["c_rmse"] for v in scored.values()]))
+    rs = float(np.mean([v["stockdon_rmse"] for v in scored.values()]))
+    gain = rc - rs
+    nums.update(c_rmse_mean=rc, stockdon_rmse_mean=rs, gain_m=gain)
+    ok = (gain >= margin if margin > 0 else gain > 0) and len(wins) * 2 > n_use
+    need = f"at least {margin:g} m" if margin > 0 else "below C's"
+    text = (f"RMSE {rs:.3f} m against C's {rc:.3f} m ({gain:+.3f} m; it needs {need}), lower on {len(wins)} of "
+            f"{n_use} held-out surveys (it needs a majority); frames compared "
+            + ", ".join(f"{n} {v['n']}" for n, v in sorted(scored.items()))
+            + (f"; Stockdon keeps fewer than {MIN_KEEP:g} of the frames scored on {', '.join(weak)} (a loss)"
+               if weak else ""))
+    return ok, text, nums
 
 
 def recommend(res, use, station_c):
@@ -530,23 +646,21 @@ def recommend(res, use, station_c):
         out["why"].append(f"{len(use)} survey(s) with at least {MIN_FRAMES} frames scored; a recommendation needs "
                           f"{MIN_SURVEYS} (each held out in turn): the station keeps C")
         return out
-    c, s = res["refit"]["c"], res["refit"]["stockdon"]
-    if c["loso_rmse_mean"] is None or s["loso_rmse_mean"] is None:
-        out["why"].append("a refit could not be scored on every held-out survey: the station keeps C")
-        return out
-    wins = [n for n in c["loso"] if s["loso"][n].get("rmse") is not None and c["loso"][n].get("rmse") is not None
-            and s["loso"][n]["rmse"] < c["loso"][n]["rmse"]]
-    gain = c["loso_rmse_mean"] - s["loso_rmse_mean"]
-    out.update(gain_m=gain, stockdon_better_on=wins)
-    if gain >= MARGIN_M and len(wins) * 2 > len(use):
-        out["model"], out["k"] = "stockdon", s["all"]
-        out["why"].append(f"cross-validated RMSE {s['loso_rmse_mean']:.3f} m against C's {c['loso_rmse_mean']:.3f} m "
-                          f"({gain:+.3f} m, at least {MARGIN_M:g} m), lower on {len(wins)} of {len(use)} held-out "
-                          f"surveys")
+    ok_abs, t_abs, n_abs = verdict(head_to_head(use, res, station_c, False), len(use), MARGIN_M)
+    ok_free, t_free, n_free = verdict(head_to_head(use, res, station_c, True), len(use), 0.0)
+    out.update(absolute=n_abs, free_offset=n_free, gain_m=n_abs.get("gain_m"),
+               stockdon_better_on=n_abs["stockdon_better_on"])
+    out["why"].append(f"cross-validated, absolute: Stockdon's {t_abs}" + ("" if ok_abs else ": NOT MET"))
+    out["why"].append(f"cross-validated, a free offset per survey and camera (the wave dependence): Stockdon's "
+                      f"{t_free}" + ("" if ok_free else ": NOT MET"))
+    if ok_abs and ok_free:
+        out["model"], out["k"] = "stockdon", res["refit"]["stockdon"]["all"]
+    elif ok_abs:
+        out["why"].append("Stockdon's absolute gain does not hold with a free offset per survey and camera: it is in "
+                          "the surveys' levels (where the pointing, the still-water datum or a camera's bias can put "
+                          "it), not in how the lines follow the waves within a survey. The station keeps C")
     else:
-        out["why"].append(f"Stockdon's cross-validated RMSE {s['loso_rmse_mean']:.3f} m against C's "
-                          f"{c['loso_rmse_mean']:.3f} m ({gain:+.3f} m; it needs {MARGIN_M:g} m or more) and lower on "
-                          f"{len(wins)} of {len(use)} held-out surveys (it needs a majority): the station keeps C")
+        out["why"].append("the station keeps C")
     return out
 
 
@@ -596,18 +710,29 @@ def report(res, root):
                      + by_camera(r)
                      + ("   beta_f of its frames: " + ", ".join(f"{k} {v}" for k, v in sorted(src.items()))
                         if src else ""))
-    L += ["", "REFITS (one coefficient each)"]
+    L += ["", "REFITS (one coefficient each; 'EDGE': on the edge of its grid, the optimum may lie beyond)"]
     for fam, rec in res["refit"].items():
+        edge = set(rec.get("at_grid_edge") or ())
+        E = lambda w: " EDGE" if w in edge else ""  # noqa: E731
+        fr = rec["free_offset"]
         L.append(f"  {rec['what']}")
-        L.append(f"      fitted on every survey (in-sample): {rec['all']}; each survey alone: "
-                 + ", ".join(f"{n} {rec['alone'][n]}" for n in names))
+        L.append(f"      fitted on every survey (in-sample): {rec['all']}{E('all')}; each survey alone: "
+                 + ", ".join(f"{n} {rec['alone'][n]}{E('alone ' + n)}" for n in names))
         L.append("      LEAVE-ONE-SURVEY-OUT (fitted on the others, scored on it):  coef   n  bias  median  RMSE  NMAD")
         for n in names:
             r = rec["loso"][n]
             L.append(f"      {n:<24} {str(r.get('coef')):>6} {r.get('n', 0):4d}  {f3(r.get('bias'))}  "
                      f"{f3(r.get('median'))}  {f3(r.get('rmse'), False)}  {f3(r.get('nmad'), False)}"
-                     + (f"  (lost {r['lost']})" if r.get("lost") else "") + by_camera(r))
+                     + (f"  (lost {r['lost']})" if r.get("lost") else "") + by_camera(r) + E("loso " + n))
         L.append(f"      cross-validated RMSE, mean over the held-out surveys: {f3(rec['loso_rmse_mean'], False)} m")
+        L.append(f"      WITH A FREE OFFSET PER SURVEY AND CAMERA: in-sample {fr['all']}{E('free_offset all')}; each "
+                 f"survey alone: " + ", ".join(f"{n} {fr['alone'][n]}{E('free_offset alone ' + n)}" for n in names))
+        L.append("        held out (fitted on the others, scored on it):              coef   n  RMSE  NMAD")
+        for n in names:
+            r = fr["loso"][n]
+            L.append(f"      {n:<24}                                    {str(r.get('coef')):>6} {r.get('n', 0):4d}  "
+                     f"{f3(r.get('rmse'), False)}  {f3(r.get('nmad'), False)}" + E("free_offset loso " + n))
+        L.append(f"        cross-validated RMSE, mean over the held-out surveys: {f3(fr['loso_rmse_mean'], False)} m")
     rec = res["recommendation"]
     L += ["", "RECOMMENDATION"]
     if rec["model"] == "stockdon":
@@ -643,6 +768,7 @@ def main(argv=None):
                     help=f"the station's C (default survey_products.SETUP_COEF, {sp.SETUP_COEF})")
     ap.add_argument("--json", default=None, help="write every number here")
     args = ap.parse_args(argv)
+    sp.arm_blind_guard()       # no file named like a held survey (BLIND_DATES) is opened by this run
     rows = sp.read_table(args.surveys, sp.SURVEY_FIELDS)
     root = Path(args.output_root)
     surveys = []
@@ -660,6 +786,10 @@ def main(argv=None):
             continue
         if not row.get("path"):
             print(f"  {tag}: no path in {Path(args.surveys).name}: skipped (never looked up by its date)")
+            continue
+        if sp.held_name(Path(row["path"]).name):
+            print(f"  {tag}: {Path(row['path']).name} is named like a survey of a BLIND date "
+                  f"(survey_products.BLIND_DATES): skipped, never opened")
             continue
         hits = sp.resolve_file(row["path"], args.survey_dirs)
         if not hits:

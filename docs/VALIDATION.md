@@ -853,24 +853,34 @@ floor within ~10 m, i.e. its water edge), lines more than 1 m off at C = 0.037 l
 detection failures. It reports, per survey, bias, median, RMSE and NMAD of the per-frame residuals
 for C = 0, C = 0.037 (CIRCULAR on the 2026-09-29 RTK, which it was fitted to), Stockdon's own k =
 0.35 (no fit), and the refits: in-sample, each survey alone, and LEAVE-ONE-SURVEY-OUT (each survey
-scored with the coefficient fitted on the others). It recommends Stockdon (k refitted, H0 = Hs/Ks,
-fixed beforehand; H0 = Hs is a sensitivity) only when, with 3 or more surveys, its cross-validated
-RMSE is at least 0.01 m below C's and lower on a majority of the held-out surveys; otherwise the
-station keeps C. The BLIND 2024-10-23 row is skipped before anything of it is opened; a survey row
-without a path is never looked up by its date.
+scored with the coefficient fitted on the others), each also WITH A FREE OFFSET PER SURVEY AND
+CAMERA (the residuals less their mean: only how the lines follow the waves within a survey). That
+second score is needed because with a few surveys of one dominant slope each, C and Stockdon differ
+mostly by a scale on each survey's setup, so a level offset of a survey (pointing, the still-water
+datum: ADCP in 2025, GNSS-R in 2026; a camera's bias) that lines up with the slopes is credited to
+Stockdon by the absolute score. It recommends Stockdon (k refitted, H0 = Hs/Ks, fixed beforehand;
+H0 = Hs is a sensitivity) only when, with 3 or more surveys, against the C refit held out and over
+the frames both keep, its cross-validated RMSE is at least 0.01 m below C's and lower on a majority
+of the held-out surveys, AND with the free offset its cross-validated RMSE is below C's and lower on
+a majority; otherwise the station keeps C. A coefficient on the edge of its grid is flagged. The
+BLIND 2024-10-23 row is skipped before anything of it is opened, and so is any row whose survey file
+is named like a survey of that date (the run also arms `survey_products.arm_blind_guard`); a survey
+row without a path is never looked up by its date.
 
 | check | data | result | reproduce |
 |---|---|---|---|
 | Truth C = 0.045 on beaches of slope 0.13, 0.07, 0.10 (two DSMs, one RTK transect file; real c1 calibration) | [SYNTH] | C refit 0.045 in-sample and held out on each; held-out RMSE 0.016-0.019 m; Stockdon's cross-validated RMSE 0.145 m against C's 0.018 m: keep C | `python3 test_evaluate_setup_model.py` |
 | Truth Stockdon k = 0.35 (H0 deshoaled) on the same beaches | [SYNTH] | k refit 0.35 (held out 0.35-0.355); the paper's k 0.013-0.018 m RMSE; H0 = Hs needs k 0.365; C's cross-validated RMSE 0.133 m against 0.016 m: switch, with the cron lines | same |
-| Survey floor, gross failures, BLIND | [SYNTH] | lines below a DSM's water edge (-0.5 m) or the transects' lowest shot are not scored; two lines planted 1.5 m low: 2 gross failures; the blind row's survey file and product never opened (audit hook) | same |
+| Truth C = 0.037, each survey's lines offset in level with its slope (+0.10 m on the 0.13 beach, -0.08 m on the 0.07 one) | [SYNTH] | absolute: Stockdon 0.065 m against C's 0.080 m, lower on 2 of 3 (it alone would switch); free offset: Stockdon 0.045 m against C's 0.019 m, C held out 0.037-0.038: keep C. Jan held out = the fit on Mar and the RTK alone, every model; no DEM: every frame C / k | same |
+| Survey floor, gross failures, BLIND | [SYNTH] | lines below a DSM's water edge (-0.5 m) or the transects' lowest shot are not scored; two lines planted 1.5 m low: 2 gross failures; the blind row's survey file and product never opened, nor another date's survey file named like a survey of the blind date (audit hook) | same |
 | Two surveys only | [SYNTH] | no recommendation, keep C | same |
 
 **[NUC] Run it** once the survey-date products are built (each with its DEM):
 ```
 python3 evaluate_setup_model.py --json /mnt/I2Rgus_Data/survey_products/setup_model_eval.json
 ```
-Read the LEAVE-ONE-SURVEY-OUT tables and the RECOMMENDATION. To switch, set
+Read the LEAVE-ONE-SURVEY-OUT tables (absolute and with a free offset) and the RECOMMENDATION's
+two tests. To switch, set
 `SETUP_MODEL="stockdon"` and `SETUP_STOCKDON_K="<k>"` in the cron as the report prints; the
 next run re-tags every contour row (the cron re-extracts the whole archive) and builds its DEMs
 with it; the dated copies already in `archive/dems` stay as they were built (they are the slopes'

@@ -20,6 +20,17 @@ into the photo:
     the k refit finds 0.35 (and the paper's k scores near the noise), the
     C refit does worse held out, and the recommendation is Stockdon with
     that k;
+  * truth C = 0.037, but each survey's lines carry a level offset that
+    lines up with its slope (+0.10 m on the 0.13 beach, -0.08 m on the
+    0.07 one: a pointing or still-water datum error): Stockdon wins the
+    absolute cross-validation, loses it with a free offset per survey and
+    camera, and the recommendation is to keep C; each held-out coefficient
+    is the fit on the other two surveys (a run on those two alone); with
+    no DEM in a product every Stockdon frame takes C / k (the not-deshoaled
+    one then IS the station's C);
+  * one test of the recommendation: a mean gain AND a majority of the
+    held-out surveys, a survey on which Stockdon keeps too few frames
+    counted against it, every survey scored;
   * two surveys only: no recommendation, the station keeps C;
   * two planted gross failures (lines 1.5 m off) are counted and left out;
     lines whose plane lies below the DSM's water edge or the transects'
@@ -28,7 +39,8 @@ into the photo:
     at, equals georectify.pixel_to_ground at that plane;
   * a BLIND date (2024-10-23, survey_products.BLIND_DATES) in the table,
     with a product folder and a survey file: neither is opened (an audit
-    hook watches every open of this process);
+    hook watches every open of this process); nor is a survey file of
+    another date's row NAMED like a survey of the blind date;
   * the --json record and the exit codes (0 a report, 4 nothing scored).
 
 STATION FILES. None are read (the calibration files of this repository give
@@ -86,11 +98,12 @@ def write_asc(path, grid_ns, xll, yll, cell):
             f.write(" ".join("%.4f" % (v if np.isfinite(v) else -9999.0) for v in r) + "\n")
 
 
-def make_product(root, sdir, date, name, beta, truth, kind, seed, gross=0, dsm_edge=None, low=()):
+def make_product(root, sdir, date, name, beta, truth, kind, seed, gross=0, dsm_edge=None, low=(), offset=0.0):
     """One synthetic survey-date product (provenance, waterlines, DEM) and its survey file.
     truth: ('c', C) or ('stockdon', k). The beach: z = beta * (E0 - E), E0 40 m east of the camera. The first
     `gross` lines are planted 1.5 m LOW (a detection on the wet sand far seaward of the water's edge); `low`: the
-    still-water levels of the last frames (low tides, below a survey's floor)."""
+    still-water levels of the last frames (low tides, below a survey's floor); `offset`: added to every line
+    (a level error of the survey date, not a setup)."""
     from view_reproject import ground_to_pixel
     from georectify import pixel_to_ground
     io_, eo_ = camera()
@@ -113,7 +126,7 @@ def make_product(root, sdir, date, name, beta, truth, kind, seed, gross=0, dsm_e
         else:
             h0 = float(sm.deshoal(hs, tp, 21.0))
             s_true = float(sm.stockdon_setup(h0, tp, beta, truth[1]))
-        z_line = sw + s_true + float(rng.normal(0, 0.02)) + (-1.5 if i < gross else 0.0)
+        z_line = sw + s_true + float(rng.normal(0, 0.02)) + (-1.5 if i < gross else 0.0) + offset
         e_line = e0 - z_line / beta
         N = nc + np.arange(5.0, 100.0, 0.25)
         U, V, ok = ground_to_pixel(np.full(len(N), e_line), N, np.full(len(N), z_line), io_, eo_)
@@ -165,14 +178,15 @@ def make_product(root, sdir, date, name, beta, truth, kind, seed, gross=0, dsm_e
             "survey_date": date, "label": "INDEPENDENT", "why": "synthetic"}
 
 
-def fixture(d, truth, gross=0):
+def fixture(d, truth, gross=0, offsets=(0.0, 0.0, 0.0)):
     root, sdir = Path(d) / "products", Path(d) / "surveys"
     sdir.mkdir(parents=True)
     root.mkdir()
-    rows = [make_product(root, sdir, "2031-01-23", "jan_dsm", 0.13, truth, "dsm", 1, gross=gross),
+    rows = [make_product(root, sdir, "2031-01-23", "jan_dsm", 0.13, truth, "dsm", 1, gross=gross,
+                         offset=offsets[0]),
             make_product(root, sdir, "2031-03-06", "mar_dsm", 0.07, truth, "dsm", 2, dsm_edge=-0.5,
-                         low=(-1.1, -1.0, -0.95)),
-            make_product(root, sdir, "2031-09-29", "rtk", 0.10, truth, "transects", 3)]
+                         low=(-1.1, -1.0, -0.95), offset=offsets[1]),
+            make_product(root, sdir, "2031-09-29", "rtk", 0.10, truth, "transects", 3, offset=offsets[2])]
     # a BLIND date: its row, a survey file and a product folder, none of which may be opened
     (sdir / "held_blind_points.csv").write_text("Name,Easting,Northing,Elevation\n")
     (root / "2024-10-23" / "waterlines").mkdir(parents=True)
@@ -180,6 +194,11 @@ def fixture(d, truth, gross=0):
     (root / "2024-10-23" / "waterlines" / "contour_points_ground_filtered.csv").write_text("x\n")
     rows.append({"date": "2024-10-23", "name": "oct_points", "path": "held_blind_points.csv", "survey_type": "points",
                  "survey_date": "2024-10-23", "label": "PARTLY-CIRCULAR", "why": "held"})
+    # a row of a date with a product whose survey file is NAMED like a survey of the blind date (a stand-in,
+    # written here): never opened either
+    (sdir / "2024-10-23_lookalike_GCP.csv").write_text("Name,Easting,Northing,Elevation\n")
+    rows.append({"date": "2031-09-29", "name": "lookalike", "path": "2024-10-23_lookalike_GCP.csv",
+                 "survey_type": "points", "survey_date": "2031-09-29", "label": "INDEPENDENT", "why": "synthetic"})
     table = Path(d) / "surveys.csv"
     with open(table, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["date", "name", "path", "survey_type", "survey_date", "label", "why"])
@@ -228,6 +247,9 @@ def test_truth_c(d):
     check(rc == 0 and "2024-10-23 oct_points: BLIND" in out and not blind_opened,
           f"the BLIND row is skipped and nothing of it is opened ({len(OPENED)} files opened, "
           f"{len(blind_opened)} of the blind date)")
+    check("2031-09-29 lookalike: 2024-10-23_lookalike_GCP.csv is named like a survey of a BLIND date" in out
+          and not any("lookalike" in p for p in OPENED),
+          "a row of another date whose survey file is named like a survey of the blind date: skipped, never opened")
     sv = {s["name"]: s for s in res.get("surveys", [])}
     check(set(sv) == {"jan_dsm", "mar_dsm", "rtk"} and all(s["used"] for s in sv.values()),
           "three surveys scored: " + ", ".join(f"{k} {v['scored']} of {v['frames']}" for k, v in sorted(sv.items())))
@@ -277,6 +299,57 @@ def test_truth_stockdon(d):
     check(f'SETUP_MODEL="stockdon" and SETUP_STOCKDON_K="{rec["k"]:g}"' in out, "the report names the cron lines")
 
 
+def test_offsets(d):
+    print("truth C = 0.037, each survey's lines offset in level with its slope (+0.10 m at 0.13, -0.08 m at 0.07)")
+    root, sdir, table = fixture(Path(d) / "offsets", ("c", 0.037), offsets=(0.10, -0.08, 0.0))
+    rc, out, res = run_eval(root, sdir, table)
+    rec = res["recommendation"]
+    ab, fr = rec["absolute"], rec["free_offset"]
+    check(rc == 0 and ab.get("gain_m", 0) >= 0.01 and len(ab["stockdon_better_on"]) >= 2,
+          f"the absolute cross-validation alone would switch: Stockdon {ab.get('stockdon_rmse_mean', 0):.3f} m "
+          f"against C's {ab.get('c_rmse_mean', 0):.3f} m, lower on {len(ab['stockdon_better_on'])} of 3")
+    cf = res["refit"]["c"]["free_offset"]
+    check(fr.get("gain_m", 1) < 0 and all(abs(v["coef"] - 0.037) <= 0.003 for v in cf["loso"].values()),
+          f"with a free offset per survey and camera Stockdon loses ({fr.get('stockdon_rmse_mean', 0):.3f} m against "
+          f"C's {fr.get('c_rmse_mean', 0):.3f} m) and C held out is the truth: "
+          + ", ".join(f"{k} {v['coef']}" for k, v in sorted(cf["loso"].items())))
+    check(rec["model"] == "c" and "Keep the station's model" in out and "does not hold with a free offset" in out,
+          "keep C, and the report says why")
+    # each held-out coefficient is the fit on the other two surveys
+    rc2, _out2, res2 = run_eval(root, sdir, table, ["--dates", "2031-03-06", "2031-09-29"])
+    pairs = [(fam, res["refit"][fam]["loso"]["jan_dsm"]["coef"], res2["refit"][fam]["all"]) for fam in res["refit"]]
+    pairs += [(fam + " free offset", res["refit"][fam]["free_offset"]["loso"]["jan_dsm"]["coef"],
+               res2["refit"][fam]["free_offset"]["all"]) for fam in res["refit"]]
+    check(rc2 == 0 and all(a == b for _f, a, b in pairs) and
+          any(a != res["refit"][f.split()[0]]["all"] for f, a, _b in pairs[:3]),
+          "jan held out = the fit on mar and rtk alone: " + ", ".join(f"{f} {a}/{b}" for f, a, b in pairs))
+    # no DEM in a product: C / k for every Stockdon frame
+    (root / "2031-01-23" / "dem" / "2031-01-23_dem.asc").unlink()
+    rc3, out3, res3 = run_eval(root, sdir, table, ["--dates", "2031-01-23"])
+    paper = res3["fixed"]["Stockdon k = 0.35, H0 = Hs/Ks (the paper)"]["per_survey"]["jan_dsm"]
+    station = res3["fixed"]["C = 0.037 (the station's)"]["per_survey"]["jan_dsm"]
+    h0 = res3["refit"]["stockdon_h0hs"]["in_sample"]["jan_dsm"]
+    check(rc3 == 0 and "no DEM in the product" in out3 and paper.get("beta_sources") == {"no DEM in the product": 30}
+          and abs(h0["rmse"] - station["rmse"]) < 1e-9 and abs(h0["bias"] - station["bias"]) < 1e-9,
+          f"no DEM: every frame beta_f = C / k; H0 = Hs then gives the station's C at any k (RMSE {h0['rmse']:.4f} m "
+          f"= {station['rmse']:.4f} m)")
+
+
+def test_verdict():
+    print("one test of the recommendation (evaluate_setup_model.verdict): mean gain, majority, frames kept")
+    import evaluate_setup_model as ev
+    v = lambda c, s, keeps=True: {"n": 20, "c_rmse": c, "stockdon_rmse": s, "stockdon_keeps": keeps}  # noqa: E731
+    ok1, _t1, _n1 = ev.verdict({"a": v(0.08, 0.05), "b": v(0.08, 0.05), "c": v(0.02, 0.03)}, 3, 0.01)
+    ok2, t2, n2 = ev.verdict({"a": v(0.08, 0.05), "b": v(0.08, 0.05, False), "c": v(0.02, 0.03)}, 3, 0.01)
+    ok3, _t3, _n3 = ev.verdict({"a": v(0.20, 0.05), "b": v(0.02, 0.03), "c": v(0.02, 0.03)}, 3, 0.01)
+    ok4, _t4, _n4 = ev.verdict({"a": v(0.08, 0.05), "b": None, "c": v(0.02, 0.03)}, 3, 0.01)
+    ok5, _t5, _n5 = ev.verdict({"a": v(0.03, 0.029), "b": v(0.03, 0.029), "c": v(0.02, 0.03)}, 3, 0.0)
+    check(ok1 and not ok2 and n2["stockdon_better_on"] == ["a"] and "on b (a loss)" in t2 and not ok3 and not ok4
+          and not ok5,
+          "lower on 2 of 3 by 0.02 m: met; the same with b keeping too few frames: b is a loss; a large gain on 1 "
+          "of 3: no majority; a survey not scored: not met; lower on 2 of 3 but higher on average: not met")
+
+
 def test_py38():
     print("Python 3.8 syntax")
     import ast
@@ -302,6 +375,8 @@ def main():
         test_two_planes()
         test_truth_c(d)
         test_truth_stockdon(d)
+        test_offsets(d)
+        test_verdict()
         test_py38()
     finally:
         if not args.keep:
