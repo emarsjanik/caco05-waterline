@@ -22,7 +22,10 @@ it is meant to and nothing else:
     not a whole number is a WARNING in the log and removes nothing; 08 is
     8 days (not a bad octal number);
   * a folder that could not be removed is counted as left, with a WARNING,
-    not as removed.
+    not as removed -- also one rm emptied but could not remove (emptying
+    it made it new again, and a second find no longer counted it);
+  * a folder reaching the limit while rm runs is neither removed nor
+    counted (one cut-off time for every find): no false WARNING.
 
 HOW. The function is taken from the cron's own text (so the test runs what
 the station runs) and called by bash on a scratch tree in a temporary
@@ -180,6 +183,48 @@ def test_not_removed(d):
           and "removed 0 frame folder(s)" in log
           and "WARNING: debug images: 3 frame folder(s) 7 or more days old could not be removed" in log,
           f"counted again afterwards: 0 removed, a WARNING for the 3 left ({log.strip()!r})")
+    # an rm that empties each folder but cannot remove the folder itself (DEBUG_DIR not writable by
+    # the job, or a subfolder of another user): emptying a folder makes it new again, and a second
+    # find counting the old folders no longer saw it -- logged as removed, no WARNING
+    d = d.parent / "emptied"
+    d.mkdir()
+    dbg, out = tree(d)
+    fake = d / "bin"
+    fake.mkdir()
+    (fake / "rm").write_text('#!/bin/sh\nshift\nfor p in "$@"; do find "$p" -mindepth 1 -delete; done\nexit 1\n')
+    (fake / "rm").chmod(0o755)
+    rc, log = run_prune(d, dbg, "7", path_prefix=str(fake))
+    left = {p.name for p in dbg.iterdir()}
+    check(rc == 0 and {FRAME_OLD, FRAME_SPACES, FRAME_LINKED} <= left
+          and not any((dbg / n / "energy_final.png").exists() for n in (FRAME_OLD, FRAME_SPACES))
+          and (out / "keepme" / "precious.txt").read_text() == "must survive\n"
+          and "removed 0 frame folder(s)" in log
+          and "WARNING: debug images: 3 frame folder(s) 7 or more days old could not be removed" in log,
+          f"emptied but still there: 0 removed, a WARNING for the 3 left ({log.strip()!r})")
+
+
+def test_limit_reached_during_rm(d):
+    print("prune_debug_images: a folder reaching the limit while rm runs")
+    d = Path(d) / "race"
+    d.mkdir()
+    dbg = d / "debug"
+    edge = "1728316800.Mon.Oct.07_16_00_00.GMT.2024.CACO05.c2.timex"
+    for name in (FRAME_OLD, edge):
+        (dbg / name).mkdir(parents=True)
+    fake = d / "bin"
+    fake.mkdir()
+    (fake / "rm").write_text(f'#!/bin/sh\nsleep 3\nexec {shutil.which("rm")} "$@"\n')   # a slow rm
+    (fake / "rm").chmod(0o755)
+    age(dbg / FRAME_OLD, 10)
+    age(dbg / edge, 7 - 2 / 86400)          # 2 s short of 7 days when the function starts, 7 days after rm
+    rc, log = run_prune(d, dbg, "7", path_prefix=str(fake))
+    left = sorted(p.name for p in dbg.iterdir())
+    # each find measured the age from its own start, so a recount after the 3 s rm found the edge
+    # folder old, never tried: 'removed 0' and a WARNING (the station status WARN for that run)
+    check(rc == 0 and left == [edge] and "removed 1 frame folder(s) 7 or more days old" in log
+          and "WARNING" not in log,
+          f"one cut-off for every find: the old folder removed, the other left for the next run, "
+          f"no WARNING ({log.strip()!r})")
 
 
 def test_cron_calls_it():
@@ -207,6 +252,7 @@ def main():
         test_linked_folder(d)
         test_settings(d)
         test_not_removed(d)
+        test_limit_reached_during_rm(d)
     finally:
         if not args.keep:
             shutil.rmtree(d, ignore_errors=True)

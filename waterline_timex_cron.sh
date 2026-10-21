@@ -268,9 +268,9 @@ log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
 
 # The detector's debug images (see DEBUG_KEEP_DAYS): removes the frame
 # folders directly in folder $1 last changed $2 or more days ago, by their
-# modification time (find -mtime +N matches N+1 or more whole days old,
-# hence $2 - 1), and logs how many went -- and, with a WARNING, how many
-# could not (counted again afterwards, not assumed gone).
+# modification time, and logs how many went -- and, with a WARNING, how many
+# could not (each folder found is looked for again afterwards, not assumed
+# gone).
 #   * Only folders named as the detector names them (debug_directory(): the
 #     photo's name without its extension, an Argus epoch of 10 digits and a
 #     dot first, e.g. 1727712000.Mon.Sep.30_16_00_00.GMT.2024.CACO05.c1.timex),
@@ -283,8 +283,21 @@ log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
 #     arithmetic on it failed with a message on the job's stderr only, and
 #     nothing was pruned, run after run, with no word in the log). A whole
 #     number is read in base 10: bash reads 08 or 09 as a bad octal number.
+#   * One cut-off time, $2 days before now, taken once and used by both
+#     finds (! -newermt: last changed at or before it; the same folders
+#     -mtime +($2 - 1) matches). With -mtime each find measured the age from
+#     its own start, so a folder that reached the limit while rm was running
+#     was counted as left but never tried: a false WARNING (the station
+#     status WARN for that run) and one fewer logged as removed.
+#   * What is left is counted from the list the first find returned, each
+#     folder looked for again by its name. A second find missed a folder rm
+#     had emptied but could not remove (DEBUG_DIR not writable by the job, a
+#     subfolder of another user): emptying it makes it new again, so it was
+#     logged as removed, with no WARNING. The list is only counted, a line
+#     at a time (a frame name never holds a newline); rm is handed the
+#     names by find itself.
 prune_debug_images() {
-    local dir="$1" keep="$2" age n_old n_left
+    local dir="$1" keep="$2" cut old p n_old=0 n_left=0
     local frame='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].*'
     if [ -z "$keep" ] || [ ! -d "$dir" ]; then
         return 0
@@ -293,13 +306,18 @@ prune_debug_images() {
         log "WARNING: DEBUG_KEEP_DAYS='$keep' is not a whole number of days: debug images NOT pruned"
         return 0
     fi
-    age=$((10#$keep - 1))
-    n_old=$(find -H "$dir" -mindepth 1 -maxdepth 1 -type d -name "$frame" -mtime +$age 2>/dev/null | wc -l)
-    if [ "$n_old" -eq 0 ]; then
+    cut=$(( $(date +%s) - 10#$keep * 86400 ))
+    old=$(find -H "$dir" -mindepth 1 -maxdepth 1 -type d -name "$frame" ! -newermt "@$cut" 2>/dev/null)
+    if [ -z "$old" ]; then
         return 0
     fi
-    find -H "$dir" -mindepth 1 -maxdepth 1 -type d -name "$frame" -mtime +$age -exec rm -rf {} + 2>/dev/null
-    n_left=$(find -H "$dir" -mindepth 1 -maxdepth 1 -type d -name "$frame" -mtime +$age 2>/dev/null | wc -l)
+    find -H "$dir" -mindepth 1 -maxdepth 1 -type d -name "$frame" ! -newermt "@$cut" -exec rm -rf {} + 2>/dev/null
+    while IFS= read -r p; do
+        n_old=$((n_old + 1))
+        if [ -e "$p" ]; then
+            n_left=$((n_left + 1))
+        fi
+    done <<< "$old"
     log "debug images: removed $((n_old - n_left)) frame folder(s) $keep or more days old"
     if [ "$n_left" -gt 0 ]; then
         log "WARNING: debug images: $n_left frame folder(s) $keep or more days old could not be removed (permissions?)"
