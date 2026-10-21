@@ -215,7 +215,7 @@ def before_ref(override=None):
         return None, None, None
     entry = entry or switch
     note = None
-    if entry == switch and (git("log", "-1", "--format=%s", switch) or "").strip() != SWITCH_SUBJECT:
+    if switch and entry == switch and (git("log", "-1", "--format=%s", switch) or "").strip() != SWITCH_SUBJECT:
         note = (f"{switch[:7]}, which added timex_timing.py, is not the switch commit as written (a squash?), "
                 f"so its changes may hold other branches' too")
     return ref, entry, note
