@@ -5320,7 +5320,7 @@ SCRIPTS = ["survey_products.py", "historical_forcing.py", "detect_original_view.
            "dem_figure.py", "asc_to_geotiff.py", "daily_elevation_map.py", "survey_compare.py",
            "pointing_check.py", "horizon_check.py", "estimate_eo_rotation.py", "view_reproject.py",
            "compare_dem_survey.py", "compare_rtk.py", "marconi_water_level.py", "timex_timing.py",
-           "dem_loess.py"]
+           "dem_loess.py", "setup_model.py", "pointing_daily.py"]
 
 _SOFTWARE = {}
 

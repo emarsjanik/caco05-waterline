@@ -43,6 +43,11 @@ python3 test_timing_mode.py                      # ends "all timing-mode tests p
 python3 test_georectify.py                       # ends "all georectify tests passed" (section 3.5, re-pin)
 python3 test_validation_stats.py                 # ends "all validation statistics tests passed" (section 2.4a)
 python3 test_pointing_daily.py                   # ends "all pointing_daily tests passed" (section 4.6b)
+python3 test_cron_debug_prune.py                 # ends "all cron debug-prune tests passed"
+python3 test_setup_model.py                      # ends "all setup model tests passed" (section 4.1)
+python3 test_evaluate_setup_model.py             # ends "all setup-model evaluation tests passed" (section 4.1)
+python3 test_dem_loess.py                        # ends "all loess DEM tests passed" (section 2.8)
+python3 test_georectify_uncertainty.py           # ends "all georectification uncertainty tests passed" (section 4.10)
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
