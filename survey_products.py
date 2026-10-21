@@ -618,10 +618,11 @@ STEP_SCRIPTS = {
     "detect_live": ["georectify.py", "extract_elevation_contours.py", "setup_model.py"],
     "merge": [],
     "filter": ["waterline_consistency.py", "waterline_track.py"],
-    "dem": ["dem_from_contours.py", "waterline_track.py", "asc_to_geotiff.py", "dem_figure.py", "dem_map.py"],
+    "dem": ["dem_from_contours.py", "waterline_track.py", "asc_to_geotiff.py", "dem_figure.py", "dem_map.py",
+            "setup_model.py"],
     "map": ["daily_elevation_map.py"],
-    "map_plan": ["compare_dem_survey.py", "survey_compare.py"],
-    "compare": ["survey_compare.py", "compare_dem_survey.py", "compare_rtk.py", "asc_to_geotiff.py"],
+    "map_plan": ["compare_dem_survey.py", "survey_compare.py", "setup_model.py"],
+    "compare": ["survey_compare.py", "compare_dem_survey.py", "compare_rtk.py", "asc_to_geotiff.py", "setup_model.py"],
 }
 
 # Horizontal CRS written into the GeoTIFFs (--geotiff-epsg). The grids are in

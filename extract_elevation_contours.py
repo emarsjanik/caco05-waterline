@@ -289,11 +289,15 @@ def stockdon_setups(output_rows, args, wave_tag):
     slopes = EvolvingSlope(args.setup_slope_dem)
     frames, why = {}, defaultdict(int)
     for r in output_rows:
-        if r[0] in frames or r[-2] == "" or r[-1] == "":
+        # a Tp of 0 (or a setup that is not a number) is a frame without waves, left uncorrected
+        if r[0] in frames or r[-2] == "" or r[-1] == "" or not float(r[-1]) > 0:
             continue
         fs, why_none = slopes.for_epoch(r[3])
-        frames[r[0]] = stockdon_frame(r[6], r[-2], r[-1], fs, fallback, k, depth, why_none=why_none)
-        why[frames[r[0]][2]] += 1
+        st = stockdon_frame(r[6], r[-2], r[-1], fs, fallback, k, depth, why_none=why_none)
+        if not np.isfinite(st[0]):
+            continue
+        frames[r[0]] = st
+        why[st[2]] += 1
     betas = [v[1] for v in frames.values() if v[2] == "dem"]
     lines = [f"Foreshore slope          : from {slopes.what}: "
              + (f"{len(betas)} frame(s), beta_f median {np.median(betas):.3f} (p10-p90 "
@@ -897,8 +901,8 @@ def main():
         except ValueError:
             print(f"ERROR: --setup-deshoal-depth {args.setup_deshoal_depth!r}: 'auto', 'none' or metres.")
             sys.exit(1)
-        if not args.setup_stockdon_k > 0:
-            print(f"ERROR: --setup-stockdon-k {args.setup_stockdon_k}: must be above 0.")
+        if not 0 < args.setup_stockdon_k < float("inf"):
+            print(f"ERROR: --setup-stockdon-k {args.setup_stockdon_k}: must be a finite number above 0.")
             sys.exit(1)
 
     using_gnssr = looks_like_gnssr_spline(args.tide_model_csv)

@@ -68,6 +68,7 @@ REQUIRED_SCRIPTS = [
     "dem_from_contours.py",
     "dem_figure.py",
     "daily_elevation_map.py",
+    "setup_model.py",
 ]
 
 REQUIRED_CALIBRATION = [

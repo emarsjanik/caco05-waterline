@@ -25,8 +25,10 @@ WHAT.
     (to 1e-10, same NaN cells); a plane gives its slope.
   * The slope-aware frame (stockdon_frame): a plane DEM gives its slope and
     Stockdon's setup; a two-slope beach gives the upper slope at high water
-    and the lower at low water; no DEM, too few band cells and a slope
-    outside BETA_RANGE fall back to C / k (C's setup, up to the deshoaling).
+    and the lower at low water, and at still water on the break the upper
+    one (the band is still water + setup +/- S/2); no DEM, too few band
+    cells and a slope outside BETA_RANGE fall back to C / k (C's setup, up
+    to the deshoaling).
   * EvolvingSlope: the dated DEM nearest a frame's day, none beyond 7 days,
     one DEM by stem or file, a missing one.
   * The extractor: --setup-model c (the default) writes what it wrote
@@ -388,6 +390,12 @@ def test_stockdon_frame():
           and s_hi[0] > s_lo[0],
           f"a two-slope beach: high water beta_f {s_hi[1]:.3f} (upper face 0.13), low water {s_lo[1]:.3f} "
           f"(terrace 0.06): setups {s_hi[0]:.3f} / {s_lo[0]:.3f} m")
+    # still water AT the break, Hs 1.5 m, Tp 10 s: still water + setup +/- S/2 lies on the upper face; centred on
+    # still water, or +/- S wide, the band would reach down onto the terrace (0.069 / 0.087)
+    s_br = sm.stockdon_frame(0.5, 1.5, 10.0, fs2, fb, k, None)
+    check(s_br[2] == "dem" and abs(s_br[1] - 0.13) < 0.005,
+          f"the swash band is still water + setup +/- S/2: still water at the break, beta_f {s_br[1]:.3f} "
+          f"(the upper face's 0.13)")
     s_none = sm.stockdon_frame(0.3, 1.2, 9.0, None, fb, k, None, why_none="no DEM within 7 days")
     check(s_none[2] == "no DEM within 7 days" and s_none[1] == fb
           and abs(s_none[0] - float(sm.setup_c(1.2, 9.0, C))) < 1e-12,
@@ -523,7 +531,9 @@ def test_extract(d):
     for extra, what in ((["--setup-model", "stockdon"], "no --setup-slope-dem"),
                         (["--setup-model", "stockdon", "--setup-slope-dem", sd, "--setup-deshoal-depth", "deep"],
                          "a bad --setup-deshoal-depth"),
-                        (["--setup-model", "stockdon", "--setup-slope-dem", sd, "--setup-stockdon-k", "0"], "k = 0")):
+                        (["--setup-model", "stockdon", "--setup-slope-dem", sd, "--setup-stockdon-k", "0"], "k = 0"),
+                        (["--setup-model", "stockdon", "--setup-slope-dem", sd, "--setup-stockdon-k", "inf"],
+                         "k = inf")):
         out = d / "refused.csv"
         rc, log = run(base + extra + ["--output", out], d)
         check(rc == 1 and "ERROR" in log and not out.exists() and "Found" not in log,
