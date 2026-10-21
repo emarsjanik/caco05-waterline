@@ -8680,14 +8680,18 @@ def write_provenance(plan, args, state, final=True):
                       "why": (head or {}).get("why") or s["why"], "status": status, "reason": r.get("reason"),
                       "current": bool(cur),
                       "photo_dates_used": lab.get("photo_dates_used"),
-                      "headline": ({k: head.get(k) for k in ("n", "median", "nmad", "rmse", "mean", "p5", "p95",
-                                                             "dem_cells", "dem_cells_compared", "points",
-                                                             "points_compared", "time_gap", "by_camera",
-                                                             "waterlines", "days_outside_photo_window",
-                                                             "days_from_photo_window_middle", "photo_dates",
-                                                             "dem_cells_compared_partial_cover",
-                                                             "points_outside_dem", "points_in_empty_dem_cells",
-                                                             "vertical_datum_note")}
+                      # the waterlines without their 'strata' (survey_compare's report-only tables, which
+                      # stay in NAME_comparison.json beside its 'intervals', neither copied here)
+                      "headline": ({k: ({kk: vv for kk, vv in head[k].items() if kk != "strata"}
+                                        if k == "waterlines" and isinstance(head.get(k), dict) else head.get(k))
+                                    for k in ("n", "median", "nmad", "rmse", "mean", "p5", "p95",
+                                              "dem_cells", "dem_cells_compared", "points",
+                                              "points_compared", "time_gap", "by_camera",
+                                              "waterlines", "days_outside_photo_window",
+                                              "days_from_photo_window_middle", "photo_dates",
+                                              "dem_cells_compared_partial_cover",
+                                              "points_outside_dem", "points_in_empty_dem_cells",
+                                              "vertical_datum_note")}
                                    if head else None)})
     stamps = {}
     for p in sorted((out / "logs" / "stamps").glob("*.json")) if (out / "logs" / "stamps").exists() else []:

@@ -140,10 +140,11 @@ DEM cells are not independent values: they share frames, and a frame's
 error (its water level, setup, pointing) lies along its whole line. So
 the headline's n says how many cells were compared, not how much they are
 worth. The INTERVAL line under the headline and the UNCERTAINTY table give
-95% intervals of the median, mean and RMSE by a BLOCK BOOTSTRAP (Kunsch
-1989; Lahiri 2003): the compared cells or points are cut into stretches
-along the shore (along: perpendicular to the DEM's mean slope) and the
-stretches, not the cells, are drawn with replacement 1000 times. A
+95% intervals of the median, mean and RMSE by a BLOCK BOOTSTRAP of
+non-overlapping blocks (Carlstein 1986; Lahiri 2003): the compared cells
+or points are cut into stretches along the shore (along: perpendicular to
+the survey's mean slope where compared) and the stretches, not the cells,
+are drawn with replacement 1000 times. A
 stretch is as long as the residuals stay correlated along the shore --
 their correlogram (1 - semivariance / variance by distance apart, the
 residual variogram of DEM error analysis, e.g. Rolstad et al. 2009) shows
@@ -167,11 +168,16 @@ per frame (the median of its points on the survey; per range band, one per
 frame and band), so that every frame weighs the same -- with 95% intervals
 from resampling CAMERA-DAYS (a cluster bootstrap, Davison & Hinkley 1997
 sec. 3.8: a day's frames share its water level, setup and pointing).
-flood - ebb and highest - lowest third of Hs, with intervals, pooled and
-per camera, test two steps directly: a line older than its water level
-reads high on the flood and low on the ebb (the timing error), and a setup
-coefficient too large reads high in big waves. On a week of photos there
-are often fewer than 5 camera-days on the survey, and then no interval.
+flood - ebb, taken WITHIN each camera-day that holds both stages (so a
+day's own error cancels) and with intervals over those camera-days, pooled
+and per camera, tests the timing error: a line older than its water level
+reads high on the flood and low on the ebb. The flood and ebb rows pool
+different days and carry their errors. highest - lowest third of Hs (a
+setup coefficient too large reads high in big waves) is between days by
+construction (Hs hardly changes within a day), so an error of whole days
+that falls on the big- or small-wave days reads the same way. On a week of
+photos there are often fewer than 5 camera-days on the survey, and then
+no interval.
 
 OUTPUT (in --output-dir):
   NAME_dem_minus_survey.asc / .tif   (dsm only) the difference grid
@@ -952,17 +958,18 @@ def _bearing(ue, un):
     return round(float(np.degrees(np.arctan2(ue, un))) % 180.0, 1) % 180.0
 
 
-def alongshore_axis(dem, xll, ytop, cell):
+def alongshore_axis(E, N, Z):
     """
-    The direction along the shore, as a unit vector (east, north): perpendicular to the DEM's mean
-    downslope direction (the gradient of a plane fitted to its cells by least squares; the beach falls
-    across the shore). A DEM with less slope than 1:200 has no direction to give, and the long axis of
-    its cells is used instead. -> (east, north, how)
+    The direction along the shore, as a unit vector (east, north): perpendicular to the SURVEY's mean
+    downslope direction where it is compared (the gradient of a plane fitted by least squares to the
+    survey's elevations Z at the compared positions E, N; the beach falls across the shore). The survey,
+    not the DEM under test: a camera's offset in the DEM would tilt or flatten the plane. Less slope
+    than 1:200 gives no direction (the positions span little across the shore, or the survey is flat
+    there), and the long axis of the positions is used instead. -> (east, north, how)
     """
-    rr, cc = np.nonzero(np.isfinite(dem))
-    E = xll + (cc + 0.5) * cell
-    N = ytop - (rr + 0.5) * cell
-    Z = dem[rr, cc]
+    E, N, Z = np.asarray(E, float), np.asarray(N, float), np.asarray(Z, float)
+    ok = np.isfinite(E) & np.isfinite(N) & np.isfinite(Z)
+    E, N, Z = E[ok], N[ok], Z[ok]
     if len(Z) >= 3:
         A = np.c_[E - E.mean(), N - N.mean(), np.ones(len(Z))]
         coef = np.linalg.lstsq(A, Z, rcond=None)[0]
@@ -970,14 +977,15 @@ def alongshore_axis(dem, xll, ytop, cell):
         if g > 0.005:
             ue, un = -coef[1] / g, coef[0] / g
             bearing = _bearing(ue, un)
-            return float(ue), float(un), (f"perpendicular to the DEM's mean slope (1:{1 / g:.0f}, a plane fitted to "
-                                          f"its cells): along {bearing:.0f} deg")
+            return float(ue), float(un), (f"perpendicular to the survey's mean slope (1:{1 / g:.0f}, a plane fitted "
+                                          f"to it where compared): along {bearing:.0f} deg")
     if len(Z) >= 2 and (np.ptp(E) > 0 or np.ptp(N) > 0):
         w, v = np.linalg.eigh(np.cov(np.vstack([E, N])))
         ue, un = v[0, -1], v[1, -1]
         bearing = _bearing(ue, un)
-        return float(ue), float(un), f"the long axis of the DEM's cells (the DEM is nearly flat): along {bearing:.0f} deg"
-    return 0.0, 1.0, "north (too few DEM cells to tell)"
+        return float(ue), float(un), (f"the long axis of the compared positions (no clear slope from a plane fitted "
+                                      f"to the survey there): along {bearing:.0f} deg")
+    return 0.0, 1.0, "north (too few compared positions to tell)"
 
 
 def alongshore_blocks(E, N, axis, block_m=ALONGSHORE_BLOCK_M):
@@ -1030,13 +1038,15 @@ def block_intervals(d, blocks, unit, block_what, level=CI_LEVEL, n_boot=BOOT_N, 
     """
     95% intervals of the median, mean and RMSE of d when the values come in BLOCKS that share an error
     (stretches of the shore, camera-days): the blocks, not the values, are drawn with replacement, as
-    many as there are, n_boot times (a block bootstrap: Kunsch 1989, Ann. Statist. 17:1217; Lahiri 2003,
-    Resampling Methods for Dependent Data; for clusters, Davison & Hinkley 1997, Bootstrap Methods and
-    their Application, sec. 3.8), and each interval is the 2.5-97.5 percentile of the resamples' values.
+    many as there are, n_boot times (a bootstrap of non-overlapping blocks: Carlstein 1986, Ann. Statist.
+    14:1171; Lahiri 2003, Resampling Methods for Dependent Data, which also covers the moving blocks of
+    Kunsch 1989; for clusters, Davison & Hinkley 1997, Bootstrap Methods and their Application, sec. 3.8),
+    and each interval is the 2.5-97.5 percentile of the resamples' values.
     Values that err together stay together, so the interval is as wide as the blocks' disagreement,
     not as narrow as n independent values would make it. The effective sample size is the number of
     independent values that would scatter the mean as much: var(d) / var(resampled means), at most n
-    (n_eff ~ n: the values are as good as independent; n_eff ~ the blocks: a block is one value).
+    (n_eff ~ n: the values are as good as independent; n_eff ~ the blocks: a block is one value; n when
+    the values do not scatter at all, their ratio then being rounding noise).
     block_what: what a block is, as counted ('camera-day(s)'). -> dict (n, blocks, n_effective, median_ci, mean_ci,
     rmse_ci, rough, ...), or with 'note' instead of the intervals when there are too few blocks.
     """
@@ -1057,7 +1067,7 @@ def block_intervals(d, blocks, unit, block_what, level=CI_LEVEL, n_boot=BOOT_N, 
         rec[k + "_ci"] = [float(np.percentile(reps[good, j], lo)), float(np.percentile(reps[good, j], hi))]
     vb = float(np.var(reps[good, 1], ddof=1)) if good.sum() > 1 else 0.0
     vd = float(np.var(d, ddof=1)) if len(d) > 1 else 0.0
-    rec["n_effective"] = float(min(len(d), vd / vb)) if vb > 0 else float(len(d))
+    rec["n_effective"] = float(min(len(d), vd / vb)) if vb > 0 and vd > 1e-20 else float(len(d))
     rec["rough"] = len(keys) < FEW_CI_BLOCKS
     return rec
 
@@ -1084,6 +1094,49 @@ def block_contrast(d, blocks, a, b, level=CI_LEVEL, n_boot=BOOT_N, seed=BOOT_SEE
     rec["ci"] = [float(np.percentile(diff[good], 50.0 * (1 - level))),
                  float(np.percentile(diff[good], 50.0 * (1 + level)))] if good.sum() >= 20 else None
     rec["rough"] = rec["blocks"] < FEW_CI_BLOCKS
+    return rec
+
+
+def within_block_contrast(d, blocks, a, b, block_what="camera-day(s) with both", level=CI_LEVEL, n_boot=BOOT_N,
+                          seed=BOOT_SEED):
+    """
+    median(d[a]) - median(d[b]) taken WITHIN each block (camera-day) that holds values of both groups,
+    and the median of those differences over the blocks, with a 95% interval from resampling them
+    (block_intervals, one difference per block). An error all of a block's values share (a camera-day's
+    water level, setup, pointing, a bad day) cancels in its own difference, however the two groups are
+    spread over the blocks. The difference of the pooled medians (block_contrast) carries such errors
+    into the contrast whenever one group falls more on some days than on others -- and the tide's stage
+    in daylight moves by ~50 min of phase a day, so it does. Blocks holding only one group are left out
+    (counted). -> dict (difference_m: the median over the blocks, mean_m, ci, mean_ci, n_a, n_b, blocks,
+    blocks_one_group, per_block, rough or note), or None when a group is empty.
+    """
+    d = np.asarray(d, float)
+    ok = np.isfinite(d)
+    a, b = np.asarray(a, bool) & ok, np.asarray(b, bool) & ok
+    if not a.any() or not b.any():
+        return None
+    blocks = np.asarray(blocks).astype(str)
+    keys = sorted(set(blocks[a | b].tolist()))
+    per = []
+    for k in keys:
+        ma, mb = a & (blocks == k), b & (blocks == k)
+        if ma.any() and mb.any():
+            per.append({"block": k, "n_a": int(ma.sum()), "n_b": int(mb.sum()),
+                        "difference_m": float(np.median(d[ma]) - np.median(d[mb]))})
+    rec = {"method": "within each block holding both groups: median(a) - median(b); the median of those over the "
+                     "blocks, its interval from resampling them",
+           "difference_m": None, "mean_m": None, "n_a": sum(p["n_a"] for p in per), "n_b": sum(p["n_b"] for p in per),
+           "blocks": len(per), "blocks_one_group": len(keys) - len(per), "level": level, "per_block": per}
+    if not per:
+        rec["note"] = f"no {block_what}"
+        return rec
+    diffs = np.array([p["difference_m"] for p in per])
+    rec["difference_m"], rec["mean_m"] = float(np.median(diffs)), float(diffs.mean())
+    iv = block_intervals(diffs, np.arange(len(per)), "blocks", block_what, level, n_boot, seed)
+    if iv.get("note"):
+        rec["note"] = iv["note"]
+        return rec
+    rec["ci"], rec["mean_ci"], rec["rough"] = iv["median_ci"], iv["mean_ci"], iv["rough"]
     return rec
 
 
@@ -1173,9 +1226,12 @@ def dem_intervals(d, E, N, cam, dist, axis, axis_how, unit, block_m=ALONGSHORE_B
     rec = {"method": f"block bootstrap: the compared {unit} resampled in stretches along the shore, {BOOT_N} times; "
                      f"{100 * CI_LEVEL:.0f}% percentile intervals; n_effective = var(values) / var(resampled means)",
            "alongshore": axis_how, "block_m": length, "block_m_min": block_m, "correlation_length_m": corr_len,
-           "correlogram": gram, "alongshore_span_m": span,
+           # False: too few pairs of values (or no scatter) to measure the correlation at all -- a correlation
+           # length of None then means 'not measured', not 'correlated over the whole stretch'
+           "correlation_measured": bool(gram), "correlogram": gram, "alongshore_span_m": span,
            # how many independent stretches the compared values make, from the correlogram alone: the span along
-           # the shore over the correlation length (at least 1); None when the length is not known
+           # the shore over the correlation length (at least 1); None when the length is not known, or 0 (the
+           # values look independent from the shortest lag: as many as there are values)
            "independent_stretches": (max(1.0, span / corr_len) if corr_len else None), "rows": rows}
     lines = ["", f"UNCERTAINTY OF THE STATISTICS ({100 * CI_LEVEL:.0f}% intervals: the compared {unit} resampled in "
                  f"{length:.0f} m stretches along the shore, {BOOT_N} times)",
@@ -1218,21 +1274,36 @@ def interval_headline(iv_rec, what):
     """
     The INTERVAL line under the HEADLINE, from dem_intervals' record: the 95% interval of the overall
     median and RMSE, how many stretches were resampled and the effective sample size; or, with too few
-    stretches, why there is none and how many independent stretches the compared values make.
+    stretches, why there is none and how many independent stretches the compared values make. Where the
+    correlation could not be measured, or the values look independent from the shortest lag, it says
+    so, as the UNCERTAINTY paragraph does.
     """
     r0 = iv_rec["rows"][0]
+    gram, corr_len = iv_rec.get("correlogram"), iv_rec["correlation_length_m"]
+    if not gram:
+        why = ("; too few pairs of values to measure how far their errors are correlated: the stretches are "
+               "resampled as if independent")
+    elif corr_len is None:
+        why = ("; the errors are correlated over the whole stretch compared, so this interval is too narrow"
+               if r0.get("median_ci") else "; the errors stay correlated over the whole stretch compared: about "
+                                           "one independent stretch")
+    elif corr_len == 0:
+        why = (f"; the errors look independent from the shortest distance apart compared "
+               f"({gram[0]['lag_m'][0]:.0f}-{gram[0]['lag_m'][1]:.0f} m): effective n about the {r0['n']} {what}"
+               if not r0.get("median_ci") else "")
+    else:
+        why = ""
     if r0.get("median_ci"):
         return ("INTERVAL   : "
                 f"{100 * CI_LEVEL:.0f}%: median {interval_text(r0, 'median_ci')} m, RMSE [{r0['rmse_ci'][0]:.3f}, "
                 f"{r0['rmse_ci'][1]:.3f}] m ({r0['blocks']} stretches of {iv_rec['block_m']:.0f} m along the shore "
-                f"resampled; effective n ~{r0['n_effective']:.0f} of {r0['n']} {what}"
-                + ("; the errors are correlated over the whole stretch compared, so this interval is too narrow"
-                   if iv_rec["correlation_length_m"] is None else "") + ": UNCERTAINTY below)")
+                f"resampled; effective n ~{r0['n_effective']:.0f} of {r0['n']} {what}" + why
+                + ": UNCERTAINTY below)")
     return ("INTERVAL   : " + f"none: {r0.get('note')}"
             + (f"; the {r0['n']} {what} span {iv_rec['alongshore_span_m']:.0f} m along the shore and their errors "
-               f"stay correlated over ~{iv_rec['correlation_length_m']:.0f} m: about "
+               f"stay correlated over ~{corr_len:.0f} m: about "
                f"{iv_rec['independent_stretches']:.0f} independent stretch(es)"
-               if iv_rec.get("independent_stretches") else "") + " (UNCERTAINTY below)")
+               if iv_rec.get("independent_stretches") else "") + why + " (UNCERTAINTY below)")
 
 
 # ---------------------------------------------------------------------
@@ -1923,10 +1994,14 @@ def waterline_strata(d, frame, cam, rng_m, rate_of, hs_of, block_of, stage_rate=
     one value per frame and band. Stage: flood where the frame's water level rises faster than
     stage_rate m/h, ebb where it falls faster, slack between (no rate: not staged). Waves: offshore Hs in
     thirds of the compared frames (the cut points are reported). Intervals by camera-day blocks
-    (block_intervals): a day's frames share its water-level, wave-setup and pointing errors.
-    Two contrasts with intervals test the method directly: flood - ebb (a line older than its water
-    level reads high on the flood and low on the ebb: the timing error, review B1) and the highest
-    third of Hs - the lowest (a setup coefficient too large or too small reads high or low in big waves).
+    (block_intervals): a day's frames share its water-level, wave-setup and pointing errors, so the
+    flood and ebb rows, pooling different days, carry those days' errors too.
+    Two contrasts with intervals test the method: flood - ebb WITHIN camera-days (a line older than its
+    water level reads high on the flood and low on the ebb: the timing error, review B1;
+    within_block_contrast, so a day's own error cancels however the stages fall on the days), and the
+    highest third of Hs - the lowest (a setup coefficient too large or too small reads high or low in big
+    waves; block_contrast of the pooled thirds: between days by construction, Hs hardly changing within
+    a day, so an error of whole days that falls on the big- or small-wave days reads the same way).
     d, frame, cam, rng_m: per value (a frame, a line point or a (frame, survey point) pair).
     -> (record for the json, lines for the report) or (None, []) when nothing was compared.
     """
@@ -1967,6 +2042,7 @@ def waterline_strata(d, frame, cam, rng_m, rate_of, hs_of, block_of, stage_rate=
         row("hs", f"Hs <= {cuts[0]:.2f} m", lo_hs, fmed, fblk)
         row("hs", f"Hs {cuts[0]:.2f}-{cuts[1]:.2f} m", hsok & (fhs > cuts[0]) & (fhs <= cuts[1]), fmed, fblk)
         row("hs", f"Hs > {cuts[1]:.2f} m", hi_hs, fmed, fblk)
+    both_stages = "camera-day(s) with both stages"
     band = np.digitize(rng_m, DISTANCE_BINS[1:-1])
     bk, bmed, bfirst = group_median(d, np.char.add(np.char.add(frame, "|"), band.astype(str)))
     bband = band[bfirst]
@@ -1978,13 +2054,15 @@ def waterline_strata(d, frame, cam, rng_m, rate_of, hs_of, block_of, stage_rate=
            "intervals": f"{100 * CI_LEVEL:.0f}%, {BOOT_N} resamples of the camera-days (block_intervals)",
            "stage_rate_m_per_h": stage_rate, "frames_without_rate": int((~np.isfinite(frate)).sum()),
            "frames_without_hs": int((~hsok).sum()), "hs_tercile_cuts_m": cuts,
-           "rows": rows, "flood_minus_ebb": block_contrast(fmed, fblk, flood, ebb),
+           "rows": rows, "flood_minus_ebb": within_block_contrast(fmed, fblk, flood, ebb, both_stages),
            "high_minus_low_hs": (block_contrast(fmed, fblk, hi_hs, lo_hs) if cuts else None)}
-    # the same contrasts camera by camera: an error of one camera (snow on its lens, its pointing) that falls
-    # more on one stage or one wave height than the other would otherwise read as the method's
+    # the same contrasts camera by camera: the cameras' timing need not be the same, and an error of one camera
+    # (snow on its lens, its pointing) that falls more on one wave height than the other would otherwise read
+    # as the method's
     cams_ = sorted(set(fcam.tolist()))
     if len(cams_) > 1:
-        rec["by_camera"] = {c: {"flood_minus_ebb": block_contrast(fmed, fblk, flood & (fcam == c), ebb & (fcam == c)),
+        rec["by_camera"] = {c: {"flood_minus_ebb": within_block_contrast(fmed, fblk, flood & (fcam == c),
+                                                                         ebb & (fcam == c), both_stages),
                                 "high_minus_low_hs": (block_contrast(fmed, fblk, hi_hs & (fcam == c), lo_hs & (fcam == c))
                                                       if cuts else None)} for c in cams_}
     lines = ["", f"  WATERLINES BY TIDE STAGE, WAVES AND RANGE (one value per frame: the median of its values on the "
@@ -2008,25 +2086,50 @@ def waterline_strata(d, frame, cam, rng_m, rate_of, hs_of, block_of, stage_rate=
     if rec["frames_without_rate"]:
         lines.append(f"  {rec['frames_without_rate']} frame(s) without a water-level rate (no capture_epoch, or no frame "
                      f"within 75 min) are in 'all frames' only")
-    for key, what, why in (("flood_minus_ebb", "flood - ebb", "a line older than its water level reads high on the "
-                            "flood and low on the ebb (the timing error, review B1)"),
-                           ("high_minus_low_hs", "highest - lowest third of Hs", "a setup coefficient too large "
-                            "reads high in big waves, too small low")):
-        c = rec[key]
-        if not c:
-            continue
-        ci = c.get("ci")
-        per_cam = [(cc_, v_[key]) for cc_, v_ in sorted((rec.get("by_camera") or {}).items()) if v_.get(key)]
+    if any(r["group_type"] == "stage" for r in rows):
         lines += ["  " + ln for ln in textwrap.wrap(
-            f"{what}: {c['difference_m']:+.3f} m "
+            "The flood, ebb and slack rows pool different camera-days, and so the errors of those days (a bad day, "
+            "a pointing drift): they describe, they do not test the timing. flood - ebb below is taken within "
+            "camera-days.", 100)]
+
+    def num(v_):
+        return "-" if v_ is None else f"{v_:+.3f}"
+    c = rec["flood_minus_ebb"]
+    if c:
+        ci = c.get("ci")
+        per_cam = [(cc_, v_["flood_minus_ebb"]) for cc_, v_ in sorted((rec.get("by_camera") or {}).items())
+                   if v_.get("flood_minus_ebb")]
+        lines += ["  " + ln for ln in textwrap.wrap(
+            f"flood - ebb within camera-days: {num(c['difference_m'])} m "
+            + (f"[{ci[0]:+.3f}, {ci[1]:+.3f}]" if ci else "(no interval: " + (c.get("note") or "too few resamples") + ")")
+            + f" (median over the {c['blocks']} camera-day(s) holding both stages, {c['n_a']} / {c['n_b']} frames; "
+            + f"{c['blocks_one_group']} camera-day(s) of one stage left out"
+            + ("; rough: few days" if c.get("rough") else "") + ")"
+            + ("; by camera " + ", ".join(
+                f"{cc_} {num(v_['difference_m'])}" + (f" [{v_['ci'][0]:+.3f}, {v_['ci'][1]:+.3f}]" if v_.get("ci") else "")
+                + f" ({v_['blocks']} day(s))" for cc_, v_ in per_cam) if per_cam else "")
+            + ": a line older than its water level reads high on the flood and low on the ebb (the timing error, "
+              "review B1); a camera-day's own error (its water level, setup, pointing) cancels in its difference. "
+            + ("An interval that excludes 0 says the difference is more than the camera-days' scatter." if ci else ""),
+            100)]
+    c = rec["high_minus_low_hs"]
+    if c:
+        ci = c.get("ci")
+        per_cam = [(cc_, v_["high_minus_low_hs"]) for cc_, v_ in sorted((rec.get("by_camera") or {}).items())
+                   if v_.get("high_minus_low_hs")]
+        lines += ["  " + ln for ln in textwrap.wrap(
+            f"highest - lowest third of Hs: {c['difference_m']:+.3f} m "
             + (f"[{ci[0]:+.3f}, {ci[1]:+.3f}]" if ci else "(no interval: " + (c.get("note") or "too few resamples") + ")")
             + f" ({c['n_a']} / {c['n_b']} frames, {c['blocks']} camera-days"
             + ("; rough: few days" if c.get("rough") else "") + ")"
             + ("; by camera " + ", ".join(
                 f"{cc_} {v_['difference_m']:+.3f}" + (f" [{v_['ci'][0]:+.3f}, {v_['ci'][1]:+.3f}]" if v_.get("ci") else "")
                 + f" ({v_['n_a']} / {v_['n_b']})" for cc_, v_ in per_cam) if per_cam else "")
-            + f": {why}. "
-            + ("An interval that excludes 0 says the difference is more than the days' scatter." if ci else ""), 100)]
+            + ": a setup coefficient too large reads high in big waves, too small low. Between days by construction "
+              "(Hs hardly changes within a day): an error of whole days (a bad day, a pointing drift) that falls on "
+              "the big- or small-wave days reads the same way. "
+            + ("An interval that excludes 0 says the difference is more than the days' random scatter, not that it "
+               "is the setup's." if ci else ""), 100)]
     return rec, lines
 
 
@@ -2573,7 +2676,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         d = diff[cmp_]
         zref = sv[cmp_]
         ivr, ivc = np.nonzero(cmp_)                   # the compared cells' centres, for the intervals
-        iv_E, iv_N = xll + (ivc + 0.5) * cell, ytop - (ivr + 0.5) * cell
+        iv_E, iv_N, iv_Z = xll + (ivc + 0.5) * cell, ytop - (ivr + 0.5) * cell, zref
         cam_v = cam_grid[cmp_]
         dist_v = dist_grid[cmp_]
         part_v = cmp_part[cmp_]
@@ -2658,7 +2761,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                 d_all, grids["spread"][ri, ci] if "spread" in grids else None,
                 grids["count"][ri, ci] if "count" in grids else None))
         d = diffp[ok]
-        iv_E, iv_N, cam_v, dist_v = pts["E"][ok], pts["N"][ok], camp[ok], distp[ok]
+        iv_E, iv_N, iv_Z, cam_v, dist_v = pts["E"][ok], pts["N"][ok], pts["Z"][ok], camp[ok], distp[ok]
         what = "points"
         # every point, compared or not, with why
         pp = out / f"{name}_points.csv"
@@ -2720,7 +2823,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     iv_rec, iv_lines, ci_line = None, [], []
     if s_all["n"]:
         try:
-            axis = alongshore_axis(dem, xll, ytop, cell)
+            axis = alongshore_axis(iv_E, iv_N, iv_Z)
             iv_rec, iv_lines = dem_intervals(d, iv_E, iv_N, np.asarray(cam_v), np.asarray(dist_v, float),
                                              axis[:2], axis[2], what, block_m)
             ci_line = _wrap_text(interval_headline(iv_rec, what), 100, "             ")

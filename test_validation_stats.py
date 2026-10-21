@@ -13,11 +13,14 @@ WHAT.
     and their intervals cover the truth where the plain n-value interval
     does not; the residuals' correlogram finds how far a planted error
     runs along the shore; the direction along the shore is perpendicular
-    to the DEM's slope;
+    to the survey's slope where compared;
   * the waterline strata: a planted water-level timing error (lines high
     on the flood, low on the ebb) and a planted wave dependence come back
     with intervals that exclude 0, none planted gives intervals over 0,
-    and a range dependence shows by range band;
+    and a range dependence shows by range band; a pointing drift while the
+    daylight frames move from ebb to flood (no timing error) leaves the
+    within-camera-day flood - ebb at 0, where pooled medians read it as
+    timing; slack frames, Hs thirds and camera-days on the local day;
   * a whole comparison: the INTERVAL line, the UNCERTAINTY table and the
     strata are in the text and the json, the figure and the CSV still
     drawn and written as before; intervals, or the frames' rates and Hs
@@ -142,6 +145,8 @@ def test_block_intervals():
           f"4 blocks: no interval, said ({r3['note']})")
     r4 = sc.block_intervals(block[:120], lab[:120], "cells", "block(s)")
     check(r4.get("rough") is True and "median_ci" in r4, "8 blocks: an interval, marked rough")
+    r5 = sc.block_intervals(np.full(10, 0.2), np.arange(10), "points", "block(s)")
+    check(r5["n_effective"] == 10, f"values that do not scatter: n_eff {r5['n_effective']:.0f} of 10, not rounding noise")
     # coverage: the truth (0) inside the 95% interval of the mean
     cover_b = cover_n = 0
     sims = 150
@@ -169,6 +174,24 @@ def test_contrast():
     c0 = sc.block_contrast(np.repeat(rng.normal(0, 0.05, 12), 10) + rng.normal(0, 0.02, 120), day, a, ~a)
     check(c0["ci"][0] < 0 < c0["ci"][1], f"none planted: the interval holds 0 ({c0['ci'][0]:+.3f}, {c0['ci'][1]:+.3f})")
     check(sc.block_contrast(d, day, a, np.zeros(120, bool)) is None, "an empty group: None")
+    big = np.repeat(rng.normal(0, 0.3, 12), 10) + np.where(a, 0.1, -0.1) + rng.normal(0, 0.02, 120)
+    cb = sc.block_contrast(big, day, a, ~a)
+    check((cb["ci"][1] - cb["ci"][0]) / 2 < 0.1,
+          f"days with 0.3 m errors, both groups on every day: the two groups drawn from the same days (half-width "
+          f"{(cb['ci'][1] - cb['ci'][0]) / 2:.3f} m, against ~0.15 m with independent draws for the two)")
+    w = sc.within_block_contrast(big, day, a, ~a)
+    check(abs(w["difference_m"] - 0.2) < 0.03 and w["ci"][0] > 0.15 and w["blocks"] == 12
+          and w["blocks_one_group"] == 0 and len(w["per_block"]) == 12,
+          f"within blocks: {w['difference_m']:+.3f} m [{w['ci'][0]:+.3f}, {w['ci'][1]:+.3f}] over 12 blocks, the day "
+          f"errors gone")
+    one = (day < 3) | a                                       # days 0-2 hold only group a
+    w2 = sc.within_block_contrast(big, day, a, ~a & ~one)
+    check(w2["blocks"] == 9 and w2["blocks_one_group"] == 3, "blocks holding one group only: left out, counted")
+    w3 = sc.within_block_contrast(big, day, a & (day < 2), ~a & (day >= 2))
+    check(w3["blocks"] == 0 and w3["difference_m"] is None and "ci" not in w3 and w3["note"],
+          f"no block holds both groups: no difference, said ({w3['note']})")
+    w4 = sc.within_block_contrast(big, day, a & (day < 4), ~a & (day < 4))
+    check(w4["blocks"] == 4 and "ci" not in w4 and "only 4" in w4["note"], f"4 blocks: no interval ({w4['note']})")
 
 
 def test_correlogram():
@@ -188,18 +211,46 @@ def test_correlogram():
     check(L3 is not None and 6 < L3 < 24, f"5000 values (a fixed subset of 2000 used): ~{L3:.0f} m for 12 m stretches")
 
 
+def test_dem_intervals():
+    print("survey_compare.dem_intervals / interval_headline: the stretch length and the INTERVAL line")
+    rng = np.random.RandomState(6)
+
+    def iv(d, N):
+        n = len(d)
+        return sc.dem_intervals(np.asarray(d, float), np.zeros(n), np.asarray(N, float), np.array(["c1"] * n),
+                                np.full(n, 120.0), (0.0, 1.0), "north", "cells")[0]
+    N = np.arange(0.0, 2000.0, 2.0)
+    r = iv(np.repeat(rng.normal(0, 0.2, 10), 100) + rng.normal(0, 0.02, 1000), N)     # 200 m stretches
+    check(r["correlation_length_m"] is not None and r["correlation_length_m"] > 60
+          and r["block_m"] == r["correlation_length_m"] and r["rows"][0]["blocks"] == int(np.ptp(N) // r["block_m"]) + 1,
+          f"errors shared over 200 m: the stretches resampled are as long as the correlation, "
+          f"{r['block_m']:.0f} m (not the 50 m floor), {r['rows'][0]['blocks']} of them")
+    sparse = iv(rng.normal(0.1, 0.05, 10), np.arange(10) * 40.0)
+    hs = sc.interval_headline(sparse, "points")
+    check(not sparse["correlation_measured"] and sparse["rows"][0].get("median_ci") and "too narrow" not in hs
+          and "too few pairs" in hs,
+          "10 points 40 m apart: the correlation cannot be measured, and the INTERVAL line says so (not 'too narrow')")
+    ind = iv(rng.normal(0, 0.2, 300), np.linspace(0.0, 190.0, 300))
+    hi = sc.interval_headline(ind, "cells")
+    check(ind["correlation_length_m"] == 0.0 and "median_ci" not in ind["rows"][0] and "look independent" in hi
+          and "effective n about the 300 cells" in hi,
+          "independent errors over 190 m (4 stretches, no interval): the INTERVAL line says they look independent")
+
+
 def test_alongshore_axis():
-    print("survey_compare.alongshore_axis: along the shore = across the DEM's slope")
+    print("survey_compare.alongshore_axis: along the shore = across the survey's slope where compared")
     cell, xll, ytop = 2.0, 420000.0, 4638600.0
     rr, cc = np.mgrid[0:150, 0:30]
-    E, N = xll + (cc + 0.5) * cell, ytop - (rr + 0.5) * cell
-    ue, un, how = sc.alongshore_axis(3.0 - 0.05 * (E - xll), xll, ytop, cell)
-    check(abs(un) > 0.999 and "1:20" in how and "along 0 deg" in how, f"falling east: along the shore is north ({how})")
+    E, N = (xll + (cc + 0.5) * cell).ravel(), (ytop - (rr + 0.5) * cell).ravel()
+    ue, un, how = sc.alongshore_axis(E, N, 3.0 - 0.05 * (E - xll))
+    check(abs(un) > 0.999 and "1:20" in how and "along 0 deg" in how and "survey" in how,
+          f"falling east: along the shore is north ({how})")
     a = np.radians(60.0)                                      # falling toward the bearing 60 deg
-    ue, un, how = sc.alongshore_axis(3.0 - 0.08 * ((E - xll) * np.sin(a) + (N - ytop) * np.cos(a)), xll, ytop, cell)
+    ue, un, how = sc.alongshore_axis(E, N, 3.0 - 0.08 * ((E - xll) * np.sin(a) + (N - ytop) * np.cos(a)))
     check("along 150 deg" in how, f"falling toward 60 deg: along 150 deg ({how})")
-    ue, un, how = sc.alongshore_axis(np.full(E.shape, 1.0), xll, ytop, cell)
-    check(abs(un) > 0.99 and "long axis" in how, f"a flat DEM, 300 m N by 60 m E: its long axis ({how})")
+    ue, un, how = sc.alongshore_axis(E, N, np.full(E.shape, 1.0))
+    check(abs(un) > 0.99 and "long axis" in how and "flat" not in how,
+          f"no slope, 300 m N by 60 m E: the long axis, without calling the beach flat ({how})")
 
 
 # ---------------------------------------------------------------------
@@ -228,6 +279,26 @@ def strata_frames(days=10, stage=0.0, hs_slope=0.0, seed=1):
     return np.array(d), np.array(fr), np.array(cam), np.array(rng_m), rate_of, hs_of, block_of
 
 
+def drift_frames(days=10, drift=0.02, seed=4):
+    """Two cameras, 12 frames a day each; on day i the first 1 + i frames on the flood (+0.5 m/h), the
+    rest on the ebb (-0.5 m/h); each frame's value: drift x i (a pointing drift, the same for both
+    stages) + a small camera-day error + noise. No timing error. -> as strata_frames"""
+    rng = np.random.RandomState(seed)
+    d, fr, cam, rng_m = [], [], [], []
+    rate_of, hs_of, block_of = {}, {}, {}
+    for day in range(days):
+        for c in ("c1", "c2"):
+            day_err = drift * day + rng.normal(0, 0.005)
+            for k in range(12):
+                f = f"d{day}{c}f{k}"
+                rate_of[f], hs_of[f], block_of[f] = (0.5 if k <= day else -0.5), 0.5 + 0.1 * day, f"{c} 2026-10-{day + 1:02d}"
+                d.append(day_err + rng.normal(0, 0.01))
+                fr.append(f)
+                cam.append(c)
+                rng_m.append(120.0)
+    return np.array(d), np.array(fr), np.array(cam), np.array(rng_m), rate_of, hs_of, block_of
+
+
 def test_strata():
     print("survey_compare.waterline_strata: tide stage, waves and range, with intervals")
     import dem_from_contours as dfc
@@ -246,12 +317,17 @@ def test_strata():
     check(all(abs(bc[c]["flood_minus_ebb"]["difference_m"] - 0.2) < 0.04 and bc[c]["flood_minus_ebb"]["ci"][0] > 0
               for c in ("c1", "c2")), "the same camera by camera")
     txt = "\n".join(lines)
-    check("WATERLINES BY TIDE STAGE, WAVES AND RANGE" in txt and "flood - ebb: +0." in txt
+    check("WATERLINES BY TIDE STAGE, WAVES AND RANGE" in txt and "flood - ebb within camera-days: +0." in txt
           and "slack" not in rows, "printed; no slack frame, no slack row")
     d0, fr0, cam0, rg0, ro0, ho0, bo0 = strata_frames(stage=0.0, seed=2)
     rec0, _ = sc.waterline_strata(d0, fr0, cam0, rg0, ro0, ho0, bo0)
-    ci0 = rec0["flood_minus_ebb"]["ci"]
-    check(ci0[0] < 0 < ci0[1], f"none planted: flood - ebb interval over 0 ({ci0[0]:+.3f}, {ci0[1]:+.3f})")
+    held, sims = 0, 100
+    for k in range(sims):
+        dk, frk, _, _, rok, _, bok = strata_frames(stage=0.0, seed=100 + k)
+        fl = np.array([rok[f] > 0 for f in frk])
+        ck = sc.within_block_contrast(dk, np.array([bok[f] for f in frk]), fl, ~fl, n_boot=400, seed=k)["ci"]
+        held += ck[0] <= 0 <= ck[1]
+    check(held >= 0.88 * sims, f"none planted, {sims} simulations: the flood - ebb interval holds 0 {held}% of the time")
     dh, frh, camh, rgh, roh, hoh, boh = strata_frames(hs_slope=0.2, seed=3)
     rech, _ = sc.waterline_strata(dh, frh, camh, rgh, roh, hoh, boh)
     hl = rech["high_minus_low_hs"]
@@ -275,6 +351,48 @@ def test_strata():
     check(recn["flood_minus_ebb"] is None and recn["frames_without_rate"] == len(ro0)
           and "without a water-level rate" in "\n".join(linesn),
           "no capture epoch (no rates): no stage rows, said")
+    # slack: |dz/dt| within STAGE_RATE
+    ro_s = dict(ro0)
+    slow = [f for f in sorted(ro_s)[:30]]
+    for i, f in enumerate(slow):
+        ro_s[f] = 0.05 if i % 2 else -0.05
+    recs, _ = sc.waterline_strata(d0, fr0, cam0, rg0, ro_s, ho0, bo0)
+    rws = {r["group"]: r for r in recs["rows"]}
+    check(rws.get("slack", {}).get("frames") == 30 and rws["flood"]["frames"] + rws["ebb"]["frames"] == len(ro0) - 30,
+          "frames at +/-0.05 m/h are slack, not flood or ebb")
+    # Hs in thirds of the frames
+    fh = np.array([ho0[f] for f in sorted(set(fr0.tolist()))])
+    hsr = [r for r in rec0["rows"] if r["group_type"] == "hs"]
+    check(np.allclose(rec0["hs_tercile_cuts_m"], np.percentile(fh, [100.0 / 3, 200.0 / 3]))
+          and len(hsr) == 3 and all(0.25 * len(fh) <= r["frames"] <= 0.42 * len(fh) for r in hsr),
+          f"Hs cut at the frames' thirds ({', '.join(str(r['frames']) for r in hsr)} of {len(fh)} frames)")
+    # no timing error, but the days drift (pointing) while the daylight frames move from the ebb to the flood
+    dd, frd, camd, rgd, rod, hod, bod = drift_frames()
+    recd, linesd = sc.waterline_strata(dd, frd, camd, rgd, rod, hod, bod)
+    rwd = {r["group"]: r for r in recd["rows"]}
+    fed = recd["flood_minus_ebb"]
+    fm = np.array([rod[f] > 0 for f in frd])
+    pooled = sc.block_contrast(dd, np.array([bod[f] for f in frd]), fm, ~fm)
+    check(rwd["flood"]["median"] - rwd["ebb"]["median"] > 0.03 and pooled["ci"][0] > 0,
+          f"a 0.02 m/day drift, the frames moving from ebb to flood: the pooled flood - ebb reads "
+          f"{pooled['difference_m']:+.3f} m [{pooled['ci'][0]:+.3f}, {pooled['ci'][1]:+.3f}] (the days' error)")
+    check(abs(fed["difference_m"]) < 0.015 and fed["ci"][0] < 0 < fed["ci"][1] and fed["blocks"] == 20
+          and all(v["flood_minus_ebb"]["ci"][0] < 0 < v["flood_minus_ebb"]["ci"][1] for v in recd["by_camera"].values()),
+          f"... within camera-days it holds 0: {fed['difference_m']:+.3f} m [{fed['ci'][0]:+.3f}, {fed['ci'][1]:+.3f}] "
+          f"over 20 camera-days, and camera by camera")
+    txd = "\n".join(linesd)
+    check("flood - ebb within camera-days" in txd and "pool different camera-days" in txd
+          and "Between days by construction" in txd,
+          "the text says the stage rows pool days, the contrast is within camera-days, the Hs one between days")
+    # the camera-day is the local day: frames either side of local midnight (04:00 UTC in EDT)
+    t1 = datetime(2026, 10, 2, 3, 30, tzinfo=timezone.utc).timestamp()
+    cont = {"frame": np.array(["fa", "fa", "fb", "fc"]), "epoch": np.array([t1, t1, t1 + 3600, np.nan]),
+            "Zt": np.array([1.0, 1.0, 1.5, 1.2]), "hs": np.array([0.8, 0.8, 0.9, 0.7]),
+            "cam": np.array(["c1", "c1", "c1", "c2"]), "day": np.array(["2026-10-02"] * 4)}
+    rate_of, hs_of, block_of = sc.frame_properties(cont)
+    check(block_of == {"fa": "c1 2026-10-01", "fb": "c1 2026-10-02", "fc": "c2 2026-10-02"}
+          and abs(rate_of["fa"] - 0.5) < 1e-9 and np.isnan(rate_of["fc"]) and hs_of["fb"] == 0.9,
+          f"23:30 and 00:30 local fall on two camera-days, a frame without an epoch on its UTC day ({block_of})")
 
 
 # ---------------------------------------------------------------------
@@ -350,7 +468,7 @@ def test_compare(d):
     st = h["waterlines"]["strata"]
     fe = st["flood_minus_ebb"]
     check(abs(fe["difference_m"] - 0.2) < 0.02 and fe["ci"][0] > 0.15 and fe["blocks"] == 20
-          and "WATERLINES BY TIDE STAGE" in txt,
+          and "WATERLINES BY TIDE STAGE" in txt and "flood - ebb within camera-days" in txt,
           f"lines 0.1 m high on the flood, low on the ebb, against the lidar: flood - ebb {fe['difference_m']:+.3f} m "
           f"[{fe['ci'][0]:+.3f}, {fe['ci'][1]:+.3f}] over {fe['blocks']} camera-days")
     js = json.loads((out / "long_comparison.json").read_text())
@@ -630,6 +748,12 @@ def test_dem_day_block_se(d):
           and len(list((d / "s1").glob("*_sigma_day.asc"))) == 1 and "day-block SE" in log1,
           f"days sharing a 0.05 m error: the day-block SE {np.median(sd[ok] / s[ok]):.1f} x the independent one "
           f"(median, {int(ok.sum())} cells); in the series copy too; logged")
+    rc2, _ = run([HERE / "dem_from_contours.py", g, d / "day", "--no-plot", "--last-days", "7",
+                  "--series-dir", d / "s1"], d)
+    check(rc2 == 0 and not (d / "day_sigma_day.asc").exists() and not list((d / "s1").glob("*_sigma_day.asc"))
+          and (d / "day_sigma.asc").exists(),
+          "the same stem rebuilt without it: the earlier _sigma_day.asc (and its series copy) removed, not left "
+          "for dem_change.py to read")
 
 
 def test_dem_change(d):
@@ -688,6 +812,20 @@ def test_dem_change(d):
     rc5, log5, _, _ = change("noday", "--day-block-lod")
     check(rc5 == 0 and "not judged: no B_sigma_day.asc" in log5 and "--day-block-se" in log5,
           "a DEM without _sigma_day.asc: not judged, and how to make it")
+    # day-block SEs far below the map's: the LoD stays the map's (the floor); cells of one day (NaN) not judged
+    sA_, sB_ = read_asc(d / "A_sigma.keep"), read_asc(d / "B_sigma.asc")
+    sA_[:3] = np.nan
+    write_asc(d / "A_sigma_day.asc", 0.01 * sA_, *hdr)
+    write_asc(d / "B_sigma_day.asc", 0.01 * sB_,
+              *[float(x.split()[1]) for x in (d / "B_sigma.asc").read_text().splitlines()[2:5]])
+    rc8, log8, _, diff8 = change("tiny", "--day-block-lod", "--min-lod", "0")
+    blk8 = log8[log8.index("DAY-BLOCK LEVEL OF DETECTION"):] if "DAY-BLOCK" in log8 else ""
+    judged = int((np.isfinite(diff8) & np.isfinite(sA_) & np.isfinite(sB_)).sum())
+    n_cmp = int(np.isfinite(diff8).sum())
+    check(rc8 == 0 and "1.00 x the map's" in blk8 and 0 < judged < n_cmp
+          and f"cells judged          : {judged} of the {n_cmp} compared ({n_cmp - judged} rest on one day" in blk8,
+          f"a _sigma_day.asc at 1% of the map's SE: the LoD stays the map's (1.00 x); {judged} of {n_cmp} cells judged, "
+          f"the {n_cmp - judged} with no day-block SE not")
     # --series --rebuild: the reference rebuilt gets --day-block-se itself
     g = ground(d / "gall.csv", 14, day_bias=0.04, seed=4)
     rc6, log6 = run([HERE / "dem_from_contours.py", g, d / "win", "--no-plot", "--last-days", "7", "--series-dir",
@@ -737,6 +875,7 @@ def main():
         test_block_intervals()
         test_contrast()
         test_correlogram()
+        test_dem_intervals()
         test_alongshore_axis()
         test_strata()
         test_compare(d)

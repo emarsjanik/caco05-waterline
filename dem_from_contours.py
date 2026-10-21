@@ -2113,7 +2113,8 @@ def main():
                     help="Also write <stem>_sigma_day.asc (and its --series-dir copy): each cell's standard "
                          "error when the crossings of one day share an error (day_block_sigma), for "
                          "dem_change.py --day-block-lod. Off by default; no other grid, number or page "
-                         "changes (<stem>_info.json gains 'sigma_day').")
+                         "changes (<stem>_info.json gains 'sigma_day'). Without it an earlier build's "
+                         "<stem>_sigma_day.asc is removed.")
     args = ap.parse_args()
 
     # The page the daily email attaches. Removed before anything else, so
@@ -2469,6 +2470,9 @@ def main():
     write_ascii_grid(str(stem) + "_sigma.asc", sigma, e0, n0, args.cell)
     if sigma_day is not None:
         write_ascii_grid(str(stem) + "_sigma_day.asc", sigma_day, e0, n0, args.cell)
+    elif Path(str(stem) + "_sigma_day.asc").exists():
+        # an earlier --day-block-se build's: it is not this DEM's, and dem_change.py --day-block-lod would read it
+        Path(str(stem) + "_sigma_day.asc").unlink()
     if source is not None:
         write_ascii_grid(str(stem) + "_source.asc", source.astype(float), e0, n0, args.cell,
                          nodata=0.0)
@@ -2495,6 +2499,8 @@ def main():
             write_ascii_grid(str(sstem) + "_sigma.asc", sigma, e0, n0, args.cell)
             if sigma_day is not None:
                 write_ascii_grid(str(sstem) + "_sigma_day.asc", sigma_day, e0, n0, args.cell)
+            elif Path(str(sstem) + "_sigma_day.asc").exists():
+                Path(str(sstem) + "_sigma_day.asc").unlink()
             print(f"series            : {sstem}_{{dem,spread,count,sigma{',sigma_day' if sigma_day is not None else ''}}}.asc "
                   f"(+ _info.json)")
 

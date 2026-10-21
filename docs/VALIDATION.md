@@ -435,15 +435,31 @@ number changes.
 
 * `survey_compare.py`: an `INTERVAL` line under the `HEADLINE` and an `UNCERTAINTY` table:
   95% intervals of the median, mean and RMSE of DEM - survey (overall, per camera, per distance
-  band) by a block bootstrap of stretches along the shore, a stretch as long as the residuals'
-  correlogram says they stay correlated (at least `--block-m`, 50 m), and the effective sample
-  size. Fewer than 5 stretches: no interval, and how many independent stretches there are. If
-  the intervals cannot be computed the comparison goes on without them (`INTERVAL : not
-  computed (...)`, `intervals: null` in the json); the same holds for the strata.
+  band) by a block bootstrap of stretches along the shore (along: across the survey's mean slope
+  where compared, a plane fitted to the survey, not to the DEM under test), a stretch as long as
+  the residuals' correlogram says they stay correlated (at least `--block-m`, 50 m), and the
+  effective sample size. Fewer than 5 stretches: no interval, and how many independent stretches
+  there are. If the intervals cannot be computed the comparison goes on without them (`INTERVAL :
+  not computed (...)`, `intervals: null` in the json); the same holds for the strata.
+* **For the station's surveys so far DEM - survey gets no interval.** The Jan and Mar 2025 lidars
+  hold ~4 and ~3 independent stretches, the 2026-09-29 RTK shots one 50 m stretch. A percentile
+  interval from resampling 2-4 blocks is the spread of 2-4 numbers (4 blocks give only 35 distinct
+  resamples), so none is given, and the `INTERVAL` line says how many independent stretches the
+  comparison holds instead. A t interval on so few is not given either: the count itself comes from
+  a noisy correlogram of 160-250 cells. The waterlines' flood - ebb rests on 2 (Jan 2025) and 3
+  (2026 RTK) camera-days that hold both stages: no interval either. A survey that runs further
+  along the shore, or more camera-days on it, gets one.
 * With `--contours`: `WATERLINES BY TIDE STAGE, WAVES AND RANGE`, one value per frame, by flood /
   ebb / slack (dz/dt beyond +/-0.1 m/h, as the DEM log's residual diagnostic), Hs thirds and range
-  from the camera, with intervals from resampling camera-days; flood - ebb and highest - lowest Hs
-  third with intervals, pooled and per camera (the timing error and the setup error).
+  from the camera, with intervals from resampling camera-days. The timing test is flood - ebb
+  WITHIN each camera-day that holds both stages (its median over those camera-days, with an
+  interval from resampling them; pooled and per camera): a day's own error (its water level,
+  pointing, a bad day) cancels in its difference. The flood and ebb rows pool different days and
+  carry those days' errors; the daylight hours move by ~50 min of tide phase a day, so the stage
+  mix changes from day to day, and the difference of the pooled rows is not a timing test. Highest
+  - lowest Hs third (the setup error) is between days by construction (Hs hardly changes within a
+  day): an error of whole days that falls on the big- or small-wave days reads the same way. The
+  strata stay in `NAME_comparison.json`; survey_products.py's provenance.json does not copy them.
 * `dem_change.py` reads each DEM's `<stem>_sigma.asc` (the same formula, so the same LoD to the
   file's 4 decimals) and says so; `--day-block-lod` (report only) prints the LoD from the
   day-block SE of `dem_from_contours.py --day-block-se` (`<stem>_sigma_day.asc`).
@@ -462,13 +478,13 @@ number changes.
 | what | data | number | reproduce here | check on the NUC |
 |---|---|---|---|---|
 | Figure, CSV and difference grid of a comparison, before and after | [REAL] Jan 2025 lidar, 2026-09-29 RTK, DEMs built here from the NUC's contour files | byte for byte the same (`cmp`); the txt only gains lines, the json keeps every key and value | run `survey_compare.py` of `42e3e86` and of this branch on the same inputs | `cmp` a rebuilt `compare/*_comparison.png` with the copy made before the pull |
-| Jan 2025 lidar, DEM - survey | [REAL] | 163 cells over 178 m along the shore; residual correlation +0.74 at 0-5 m, +0.58 at 20-40 m, -0.05 at 40-80 m: ~50 m, so ~4 independent stretches and no interval | `survey_compare.py` as in survey_products.py, on a DEM from the filtered rows | the `INTERVAL` line of `compare/2025-01-23_jan_lidar_comparison.txt` |
-| Mar 2025 lidar, DEM - survey | [REAL] | 249 cells over 285 m; correlation +0.22 to +0.33 out to 40-80 m, -0.03 at 80-160 m: ~84 m, ~3 stretches, no interval (with 50 m stretches regardless of the correlation it gave median -0.29 m [-0.46, -0.17], too narrow) | as above | the same for 2025-03-06 |
-| Jan 2025 waterlines by stage | [REAL] | flood -0.152 m (22 frames), ebb -1.704 m (9): flood - ebb +1.55 m [-0.39, +1.80] over 7 camera-days; c1 +1.48, c2 +0.80 m (per camera too few days for an interval). The ebb frames carry c1's snow error (-1.8 m, section 2.1): read with the camera split | as above | the `WATERLINES BY TIDE STAGE` block |
-| 2026-09-29 RTK waterlines | [REAL] | 16 frames on 4 camera-days: no interval; flood - ebb +0.016 m (7 / 7 frames) | as above | - |
+| Jan 2025 lidar, DEM - survey | [REAL] | 163 cells over 179 m along the shore (across the survey's 1:9 slope: along 174 deg; a plane fitted to the DEM, flattened by c1's -1.8 m cells, gave 1:217); residual correlation +0.74 at 0-5 m, +0.56 at 20-40 m, -0.04 at 40-80 m: ~50 m, so ~4 independent stretches and no interval | `survey_compare.py` as in survey_products.py, on a DEM from the filtered rows | the `INTERVAL` line of `compare/2025-01-23_jan_lidar_comparison.txt` |
+| Mar 2025 lidar, DEM - survey | [REAL] | 249 cells over 285 m (survey slope 1:17, along 164 deg); correlation +0.22 to +0.32 out to 40-80 m, -0.03 at 80-160 m: ~84 m, ~3 stretches, no interval (with 50 m stretches regardless of the correlation it gave median -0.29 m [-0.46, -0.17], too narrow) | as above | the same for 2025-03-06 |
+| Jan 2025 waterlines by stage | [REAL] | flood -0.152 m (22 frames), ebb -1.704 m (9). The pooled rows differ by +1.55 m because 7 of the 9 ebb frames are from 2025-01-22, a bad day on both cameras (c1 -1.90 m, c2 -1.72 m that day): a day error, not timing, and the camera split does not remove it (c2's ebb frames are that day too). Within camera-days only 2 hold both stages: flood - ebb -0.028 m (c1 2025-01-22 -0.083 m, c2 2025-01-21 +0.027 m), no interval | as above | the `WATERLINES BY TIDE STAGE` block |
+| 2026-09-29 RTK waterlines | [REAL] | 16 frames on 4 camera-days: no interval; flood - ebb within camera-days +0.009 m over the 3 camera-days that hold both stages (5 / 7 frames; c1 -0.09 m on 2, c2 +0.03 m on 1) | as above | - |
 | Day-block SE, live window 26 Sep - 2 Oct 2026 | [REAL] | 946 cells of 2+ days: median 1.0 x the independent SE, p90 1.6 x, a tenth at 0 (days cancelling by chance; dem_change never takes it below the independent SE); 216 cells of one day have none | `dem_from_contours.py ... --day-block-se` | `DEM_DAY_BLOCK_LOD=1` in the cron for a few weeks; read the `DAY-BLOCK LEVEL OF DETECTION` block of the log |
 | Change 28-30 Sep vs 1-2 Oct 2026 | [REAL] | 48 cells; the map's LoD median 0.154 m; day-block LoD on the 22 cells of 2+ days in both 0.142 m, 1.12 x the map's on those cells; 12 of their 14 significant cells stay significant; `_diff` / `_sig` byte for byte the same with and without `--day-block-lod` | `dem_change.py --a A --b B --day-block-lod` | as above |
-| The statistics and labels by construction | [SYNTH] | resamples spelled out equal the fast ones to 1e-12; 20 blocks of shared errors give n_eff 20 of 300; the block interval holds the truth 94% of 150 simulations, the n-value one 46%; a planted 60 m error comes back as ~40 m of correlation; a planted 0.1 m timing error as flood - ebb +0.20 m [+0.19, +0.21]; one crossing per day gives the independent SE exactly | `python3 test_validation_stats.py` | the same |
+| The statistics and labels by construction | [SYNTH] | resamples spelled out equal the fast ones to 1e-12; 20 blocks of shared errors give n_eff 20 of 300; the block interval holds the truth 94% of 150 simulations, the n-value one 46%; a planted 60 m error comes back as ~40 m of correlation; a planted 0.1 m timing error as flood - ebb +0.20 m [+0.20, +0.21]; with no timing error, a 0.02 m/day pointing drift while the daylight frames move from ebb to flood reads +0.07 m [+0.03, +0.11] from the pooled medians and -0.002 m [-0.004, +0.003] within camera-days; one crossing per day gives the independent SE exactly | `python3 test_validation_stats.py` | the same |
 
 The intervals hold the errors that differ from one stretch of the shore (or one camera-day) to
 the next. An error every cell shares (the GNSS-R datum, the setup coefficient, a camera's pointing
@@ -1474,7 +1490,7 @@ only if it holds over several weeks of different waves; then change it in all th
 | Filter: threshold / window / bins | max(0.75 m, 4 x robust scatter) / +/-3 d, exp(-dt/1 d) / 32 px | `waterline_consistency.py` | section 2.1 |
 | Survey floor margin | 0.10 m above each transect's lowest shot | `survey_compare.py` SURVEY_FLOOR_MARGIN | section 4.1 |
 | Intervals of DEM - survey | stretches >= 50 m (`--block-m`), as long as the residual correlation stays above 0.1; >= 5 stretches; 1000 resamples, seed 1 | `survey_compare.py` ALONGSHORE_BLOCK_M, RHO_GONE, MIN_CI_BLOCKS | section 2.4a (text and json only) |
-| Waterline strata | flood / ebb beyond +/-0.1 m/h; Hs thirds; intervals by camera-day, >= 5 | `survey_compare.py` STAGE_RATE | section 2.4a (text and json only) |
+| Waterline strata | flood / ebb beyond +/-0.1 m/h, flood - ebb within camera-days; Hs thirds; intervals by camera-day, >= 5 | `survey_compare.py` STAGE_RATE | section 2.4a (text and json only) |
 | Change: day-block LoD | report only, off (`--day-block-lod`; cron `DEM_DAY_BLOCK_LOD`) | `dem_change.py` | section 2.4a |
 
 ---
@@ -1586,11 +1602,13 @@ copy of today's pictures made before the pull (section 1).
 * Aarninkhof, S.G.J., Turner, I.L., Dronkers, T.D.T., Caljouw, M., Nipius, L., 2003. A
   video-based technique for mapping intertidal beach bathymetry. Coastal Engineering 49(4),
   275-289.
+* Carlstein, E., 1986. The use of subseries values for estimating the variance of a general
+  statistic from a stationary sequence. Annals of Statistics 14(3), 1171-1179 (non-overlapping
+  blocks, as resampled here).
 * Davison, A.C., Hinkley, D.V., 1997. Bootstrap Methods and their Application. Cambridge
   University Press (section 3.8: resampling clustered data).
-* Kunsch, H.R., 1989. The jackknife and the bootstrap for general stationary observations.
-  Annals of Statistics 17(3), 1217-1241.
-* Lahiri, S.N., 2003. Resampling Methods for Dependent Data. Springer.
+* Lahiri, S.N., 2003. Resampling Methods for Dependent Data. Springer (non-overlapping and
+  moving blocks).
 * Liang, K.-Y., Zeger, S.L., 1986. Longitudinal data analysis using generalized linear models.
   Biometrika 73(1), 13-22.
 * Parente, P.M.D.C., Santos Silva, J.M.C., 2016. Quantile regression with clustered data.
