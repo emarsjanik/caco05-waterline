@@ -53,8 +53,9 @@ Usage:
 Writes dem_out_{dem,spread,count,sigma}.asc (_sigma: the standard error of
 each cell's median, sigma_grid; _source.asc with --interpolate-edge;
 _sigma_obs.asc with --sigma-obs: the SE with the errors a cell's
-crossings share, observation_sigma_grid), dem_out_info.json (dates,
-frames per camera and
+crossings share, observation_sigma_grid; _sigma_day.asc with
+--day-block-se: the same SE when a day's crossings share an error,
+day_block_sigma), dem_out_info.json (dates, frames per camera and
 what the filters left out -- what the page needs and the grids do not
 hold; with --max-day-offset also each camera-day left out with its
 offset, and the day test's first-pass and final offsets) and the page
@@ -1989,6 +1990,70 @@ def sigma_grid(dem, spread, count):
         return np.where(ok, 1.25 * (spread / 2.0) / np.sqrt(np.maximum(count, 1)), np.nan)
 
 
+def day_block_sigma(E, N, Z, frames, day_of, cell, e0, n0, ncols, nrows, dem, spread, count):
+    """
+    The standard error of each cell's elevation when the crossings of one DAY share an error
+    (<stem>_sigma_day.asc, --day-block-se; dem_change.py --day-block-lod reads it), m.
+
+    WHY. sigma_grid (<stem>_sigma.asc) treats a cell's n crossings as n independent values. The
+    frames of one day share that day's water-level error, its wave setup (one Hs and Tp for hours)
+    and, per camera, its pointing, so a day's crossings tend to sit on the same side of the cell
+    value: the median is then worth fewer than n values, and a change judged on the independent SE
+    is called significant too easily.
+
+    HOW. The cluster-robust (sandwich) variance of a median, with the days as the clusters (Liang &
+    Zeger 1986, Biometrika 73:13; for medians and quantiles, Parente & Santos Silva 2016, J.
+    Econometric Methods 5:1): each crossing votes +1 if it lies above the cell value, -1 below
+    (0 on it); the votes of one day are added up, S_d; and
+
+        SE_day = 1.25 x (spread / 2) x sqrt( k / (k - 1) x sum_d S_d^2 ) / n
+
+    over the cell's k days and n crossings, with the same sigma (spread / 2) and the same 1.25 as
+    sigma_grid. A day whose crossings scatter both ways adds little; a day whose crossings all sit
+    on one side adds its whole count. With one crossing per day it is sigma_grid's SE again
+    (exactly, for an odd n), and with k equal days, each day's crossings all on one side, it is
+    1.25 sigma / sqrt(k - 1): k values, not n (the k / (k - 1) is the usual small-sample factor).
+
+    The samples are build_grid's (one per cell and frame, the median of the frame's points there)
+    on the same grid; day_of maps a frame to its day (the local day, as the day test). Only cells
+    with a value and crossings on 2 or more days (NaN elsewhere: one day has no between-day scatter
+    to measure). Like sigma_grid it leaves out an error EVERY day shares (the water-level datum, the
+    setup coefficient), and it is noisy where k is small (2-3 days in a 7-day window): days whose
+    votes cancel by chance give it 0 (on the real 26 Sep - 2 Oct 2026 window: median 1.0, p90 1.6
+    times sigma_grid's SE, a tenth of the cells at 0), which is why dem_change.py never lets it fall
+    below sigma_grid's. It estimates the shared-day part; it does not replace --min-lod's floor.
+    -> grid like dem
+    """
+    out = np.full(nrows * ncols, np.nan)
+    if not len(E):
+        return out.reshape(nrows, ncols)
+    flat = ((N - n0) / cell).astype(np.int64) * ncols + ((E - e0) / cell).astype(np.int64)
+    names, fid = np.unique(frames, return_inverse=True)
+    key = flat * len(names) + fid
+    o = np.argsort(key, kind="stable")
+    ks, zs = key[o], Z[o]
+    starts = np.flatnonzero(np.r_[True, ks[1:] != ks[:-1]])
+    ends = np.r_[starts[1:], len(ks)]
+    samp = np.array([np.median(zs[a:b]) for a, b in zip(starts, ends)])
+    s_cell = ks[starts] // len(names)
+    days, s_day = np.unique([day_of.get(f, "?") for f in names[ks[starts] % len(names)]], return_inverse=True)
+    dem_f, spread_f, count_f = dem.ravel(), spread.ravel(), count.ravel()
+    with np.errstate(invalid="ignore"):
+        vote = np.sign(samp - dem_f[s_cell])
+    have = np.isfinite(vote)
+    cd = s_cell[have] * len(days) + s_day[have]                 # (cell, day)
+    u, inv = np.unique(cd, return_inverse=True)
+    S = np.bincount(inv, weights=vote[have])
+    u_cell = u // len(days)
+    q = np.bincount(u_cell, weights=S ** 2, minlength=nrows * ncols)
+    k = np.bincount(u_cell, minlength=nrows * ncols).astype(float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ok = np.isfinite(dem_f) & np.isfinite(spread_f) & (k >= 2) & (count_f >= 2)
+        se = 1.25 * (spread_f / 2.0) * np.sqrt(k / (k - 1.0) * q) / np.maximum(count_f, 1)
+    out[ok] = se[ok]
+    return out.reshape(nrows, ncols)
+
+
 def write_ascii_grid(path, grid, e0, n0, cell, nodata=-9999.0):
     """ESRI ASCII grid -- readable by QGIS, ArcGIS, GDAL, MATLAB."""
     flipped = np.flipud(grid)  # ASCII grids run north to south
@@ -2330,6 +2395,12 @@ def main():
     ap.add_argument("--no-plot", action="store_true",
                     help="Skip the page (<stem>_dem.png). The grids and <stem>_info.json are "
                          "still written; 'python3 dem_figure.py <stem>' draws the page later.")
+    ap.add_argument("--day-block-se", action="store_true",
+                    help="Also write <stem>_sigma_day.asc (and its --series-dir copy): each cell's standard "
+                         "error when the crossings of one day share an error (day_block_sigma), for "
+                         "dem_change.py --day-block-lod. Off by default; no other grid, number or page "
+                         "changes (<stem>_info.json gains 'sigma_day'). Without it an earlier build's "
+                         "<stem>_sigma_day.asc is removed.")
     args = ap.parse_args()
     loess_along, loess_across = None, None
     if args.loess or args.loess_scales:
@@ -2676,6 +2747,33 @@ def main():
             print("NOTE: --sigma-obs: no cell has an observation sigma; _sigma_obs.asc not written")
             sigma_obs = None
             obs_record["file"] = None
+    # --day-block-se: the SE when a day's crossings share an error (day_block_sigma), opt-in
+    sigma_day, sigma_day_rec = None, None
+    if args.day_block_se:
+        # the frames' epochs: loaded above for the frame-level analyses, else read here
+        finfo = info if (args.fit_setup or args.max_day_offset or args.max_frame_offset or not args.no_diagnostics) \
+            else load_frame_info(args.contour_csv)
+        utc_day = dict(zip(frames, dates))
+        day_of = {f: (local_day(finfo[f]["epoch"]) if f in finfo and np.isfinite(finfo[f]["epoch"])
+                      else utc_day.get(f, "?")) for f in set(frames.tolist())}
+        sigma_day = day_block_sigma(E, N, Z, frames, day_of, args.cell, e0, n0, ncols, nrows, dem, spread, count)
+        both_ = np.isfinite(sigma_day) & np.isfinite(sigma) & (sigma > 0)
+        sigma_day_rec = {"file": "_sigma_day.asc",
+                         "definition": "1.25 x (spread / 2) x sqrt(k / (k - 1) x sum over days of S_d^2) / n, S_d the "
+                                       "sum of the day's crossings' signs about the cell value: the cluster-robust SE "
+                                       "of the cell median with the (local) days as clusters, on cells with a value "
+                                       "and 2 or more days (day_block_sigma); for dem_change.py --day-block-lod",
+                         "cells": int(np.isfinite(sigma_day).sum()),
+                         "cells_one_day": int((np.isfinite(sigma) & ~np.isfinite(sigma_day)).sum()),
+                         "median_m": round(float(np.nanmedian(sigma_day)), 4) if np.isfinite(sigma_day).any() else None,
+                         "ratio_to_sigma_median": (round(float(np.median(sigma_day[both_] / sigma[both_])), 3)
+                                                   if both_.any() else None)}
+        if sigma_day_rec["median_m"] is not None:
+            print(f"day-block SE      : median {sigma_day_rec['median_m']:.3f} m on {sigma_day_rec['cells']} cell(s) of 2+ "
+                  f"days, {sigma_day_rec['ratio_to_sigma_median'] or float('nan'):.2f} x the SE above (median); "
+                  f"{sigma_day_rec['cells_one_day']} cell(s) of one day have none (--day-block-se, day_block_sigma)")
+        else:
+            print("day-block SE      : no cell has crossings on 2 or more days (--day-block-se)")
 
     source = None
     if args.interpolate_edge:
@@ -2715,6 +2813,11 @@ def main():
     write_ascii_grid(str(stem) + "_sigma.asc", sigma, e0, n0, args.cell)
     if sigma_obs is not None:
         write_ascii_grid(str(stem) + "_sigma_obs.asc", sigma_obs, e0, n0, args.cell)
+    if sigma_day is not None:
+        write_ascii_grid(str(stem) + "_sigma_day.asc", sigma_day, e0, n0, args.cell)
+    elif Path(str(stem) + "_sigma_day.asc").exists():
+        # an earlier --day-block-se build's: it is not this DEM's, and dem_change.py --day-block-lod would read it
+        Path(str(stem) + "_sigma_day.asc").unlink()
     if source is not None:
         write_ascii_grid(str(stem) + "_source.asc", source.astype(float), e0, n0, args.cell,
                          nodata=0.0)
@@ -2725,6 +2828,8 @@ def main():
     print(f"wrote {stem}_sigma.asc   (standard error of the cell median, m: repeatability only)")
     if sigma_obs is not None:
         print(f"wrote {stem}_sigma_obs.asc (SE with the errors the crossings share, m: --sigma-obs)")
+    if sigma_day is not None:
+        print(f"wrote {stem}_sigma_day.asc (standard error with a day's crossings sharing an error, m)")
 
     sstem = None
     if args.series_dir:
@@ -2741,7 +2846,12 @@ def main():
             write_ascii_grid(str(sstem) + "_sigma.asc", sigma, e0, n0, args.cell)
             if sigma_obs is not None:
                 write_ascii_grid(str(sstem) + "_sigma_obs.asc", sigma_obs, e0, n0, args.cell)
-            print(f"series            : {sstem}_{{dem,spread,count,sigma}}.asc (+ _info.json)")
+            if sigma_day is not None:
+                write_ascii_grid(str(sstem) + "_sigma_day.asc", sigma_day, e0, n0, args.cell)
+            elif Path(str(sstem) + "_sigma_day.asc").exists():
+                Path(str(sstem) + "_sigma_day.asc").unlink()
+            print(f"series            : {sstem}_{{dem,spread,count,sigma{',sigma_day' if sigma_day is not None else ''}}}.asc "
+                  f"(+ _info.json)")
 
     loess_record = None
     if args.loess:
@@ -2793,6 +2903,8 @@ def main():
                                 "rows do not carry",
                   "median_m": round(float(np.nanmedian(sigma)), 4) if np.isfinite(sigma).any() else None,
                   "p90_m": round(float(np.nanpercentile(sigma, 90)), 4) if np.isfinite(sigma).any() else None},
+        # <stem>_sigma_day.asc (--day-block-se only): the day-block SE (day_block_sigma); absent without it
+        **({"sigma_day": sigma_day_rec} if sigma_day_rec is not None else {}),
         # reporting only: residuals against the tide's stage and Hs (residual_diagnostic) and the
         # c1 - c2 offset in shared cells (camera_offset, None with one camera); {} with --no-diagnostics
         "diagnostics": diagnostics,
