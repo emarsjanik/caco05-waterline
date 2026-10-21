@@ -5090,6 +5090,9 @@ def test_gcpfree_b(d):
               and all(v == f"{pb['out'] / 'dem' / '2024-10-23_gcpfree'}_{k}" for k, v in dfiles.items()),
               "B's provenance.json names B's own DEM grids (dem/2024-10-23_gcpfree_dem, _spread, _count), never A's "
               f"names ({dfiles.get('dem')})")
+        check("dem/          2024-10-23_gcpfree_dem/_spread/_count/_sigma .asc and .tif" in rdb,
+              "B's README FILES names the _sigma grid too (dem_from_contours.sigma_grid), which dem/ and --share "
+              "carry")
         gf = provb["blind"]["gcpfree"]
         check("EXPOSURE (stated by the people who made this procedure" in rdb and "A minus the Jan 2025 solution" in rdb
               and "ORDER (what decides B, and A): procedure pinned" in rdb and "outcome rule 'per-camera' pre-registered"

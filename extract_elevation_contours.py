@@ -215,14 +215,21 @@ def looks_like_gnssr_spline(path):
 # buoy archive whenever waves_marconi.csv is missing (owg.sh stopped, or a
 # copy of the repository without it), and nothing said so; every contour
 # row now names its wave columns (wave_source) and a WARNING is printed
-# when they are not this currency. The kinds, told apart by the columns:
+# when they are the raw buoy's (a NOTE for the other kinds that are not
+# this currency). The kinds, told apart by the columns:
 #   marconi     hs_best / tp_s             -- the currency C was fitted in
 #   adcp_equiv  wvht_m / dpd_s + hs_sigma_m -- historical_forcing.py's
 #               waves.csv: ADCP-equivalent Hs (C's Hs currency); its Tp is
 #               ADCP-equivalent, not 44008's (historical_forcing.py's report
 #               gives the setup bias that implies)
-#   buoy        wvht_m / dpd_s              -- fetch_buoy_waves.py, the raw
-#               offshore buoy: NOT the currency C was fitted in
+#   buoy        wvht_m / dpd_s + apd_s      -- fetch_buoy_waves.py, the raw
+#               offshore buoy (its archive always has apd_s): NOT the
+#               currency C was fitted in
+#   unknown     wvht_m / dpd_s, neither     -- a file the columns do not
+#               name, e.g. process_chelsea.py's adcp_waves.csv (the ADCP's
+#               own wh_4061 / peak period, which an earlier version of this
+#               rule called the raw buoy and warned about): a NOTE, no
+#               WARNING
 WAVE_CURRENCY_FITTED = "marconi:hs_best/tp_s"
 
 
@@ -230,12 +237,17 @@ def wave_columns(columns):
     """
     The (height, period) columns load_wave_archive reads from a wave file
     with these column names, and the file's currency tag
-    ('<kind>:<height>/<period>', see WAVE_CURRENCY_FITTED).
+    ('<kind>:<height>/<period>', see WAVE_CURRENCY_FITTED). The raw buoy is
+    recognised by fetch_buoy_waves.py's apd_s column, not by wvht_m / dpd_s
+    alone: other writers use those two names too (process_chelsea.py's
+    ADCP record), and calling them the raw buoy put a false WARNING in
+    their logs.
     """
     columns = set(columns)
     if "hs_best" in columns:          # marconi_waves.py's local best estimate
         return "hs_best", "tp_s", "marconi:hs_best/tp_s"
-    kind = "adcp_equiv" if "hs_sigma_m" in columns else "buoy"
+    kind = ("adcp_equiv" if "hs_sigma_m" in columns else
+            "buoy" if "apd_s" in columns else "unknown")
     return "wvht_m", "dpd_s", f"{kind}:wvht_m/dpd_s"
 
 
@@ -249,6 +261,12 @@ def wave_currency_note(tag):
         return False, (f"{tag} -- ADCP-equivalent Hs (the setup coefficient's Hs currency) but "
                        f"ADCP-equivalent Tp, not the NDBC 44008 peak period C was fitted with "
                        f"(historical_forcing.py's report gives the setup bias that implies)")
+    if tag.startswith("unknown:"):
+        return False, (f"{tag} -- a wave file its columns do not name (not fetch_buoy_waves.py's raw "
+                       f"buoy archive, no apd_s; not historical_forcing.py's waves.csv, no hs_sigma_m), "
+                       f"e.g. process_chelsea.py's adcp_waves.csv (the ADCP's own Hs and peak period): "
+                       f"not known to be the currency the setup coefficient was fitted in "
+                       f"({WAVE_CURRENCY_FITTED})")
     return False, (f"{tag} -- NOT the currency the setup coefficient was fitted in "
                    f"({WAVE_CURRENCY_FITTED}): raw offshore buoy Hs/Tp overstate sheltered "
                    f"south-west seas, so the setup (and the --max-hs filter) differ")
@@ -792,8 +810,8 @@ def main():
                              "frames (whose waterline sits above still water by the wave "
                              "setup) can be left out of the DEM, and wave_source: which "
                              "columns of which kind of file tagged them (a WARNING when it "
-                             "is not the currency the setup coefficient was fitted in; see "
-                             "WAVE_CURRENCY_FITTED).")
+                             "is the raw buoy, a NOTE for another currency than the one the "
+                             "setup coefficient was fitted in; see WAVE_CURRENCY_FITTED).")
     parser.add_argument("--wave-max-gap-minutes", type=float, default=90.0,
                         help="Largest gap to the nearest wave record before a frame's wave "
                              "columns are left blank (default 90; the buoy reports every "
@@ -1056,6 +1074,9 @@ def main():
                   + (f": the setup with C = {args.setup_coef} is NOT the station's calibrated setup"
                      if args.setup_coef else "")
                   + ". Was archive/waves_marconi.csv (owg.sh / marconi_waves.py) missing?")
+        elif not fitted and wave_tag.startswith("unknown:"):
+            print(f"NOTE: the wave file's kind is not known from its columns, so not known to be the "
+                  f"currency C was fitted in ({WAVE_CURRENCY_FITTED}); see the line above.")
         elif not fitted:
             print(f"NOTE: wave period currency differs from the one C was fitted in "
                   f"({WAVE_CURRENCY_FITTED}); see the line above.")

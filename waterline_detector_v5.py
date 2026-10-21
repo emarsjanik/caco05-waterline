@@ -1902,9 +1902,11 @@ def process_image(image_path):
         # Per-camera band contrast. Distinct from the check above:
         # that one measures the crop the detector analyses against a
         # global floor, this one applies a CAMERA-SPECIFIC floor to the
-        # same region. Fog can leave global contrast looking normal
-        # (a fogged C1 frame scored 31.8 globally, 5.3 in-band) so this
-        # catches what the global test cannot.
+        # same region (the same crop_contrast; only the floors differ,
+        # and the global one is 0.0, off, since v6.9). Fog can leave
+        # WHOLE-IMAGE contrast looking normal (a fogged C1 frame scored
+        # 31.8 on the whole image, 5.3 in-band), which is why both
+        # measure the crop.
         band_floor = getattr(data.profile, "band_contrast_floor", 0.0)
         if band_floor > 0.0 and crop_contrast < band_floor:
             print(f"DISCARDED (band contrast {crop_contrast:.1f} < {band_floor} floor for "
