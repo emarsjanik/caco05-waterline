@@ -45,6 +45,20 @@ Options:
                           timestamp (default: 60)
     --include-stale       include matches beyond --max-gap-minutes anyway
                           (flagged in output) instead of skipping them
+    --timing-mode MODE    legacy (default) or mid: when in the exposure the
+                          level is taken (timex_timing.py)
+
+WATER-LEVEL TIMING (timex_timing.py). In the default, legacy, mode a
+frame's level is taken at its file-name epoch, as always. With
+--timing-mode mid (or TIMING_MODE=mid) the level, the waves and the
+stale-gap check are taken at the middle of the exposure: epoch +
+TIMEX_MID_OFFSET_S (300 s) for a timex, + 0 s for a snap. capture_time_utc
+and capture_epoch stay the file-name time, so nothing that joins on them
+changes; each row then also says, in a last column level_time_offset_s,
+how many seconds later its level was taken. A detection is only used in
+the mode it was detected in (its Timing_Mode column; none = legacy): a
+blended legacy line given a mid-exposure level is 11.5 min behind it,
+worse than either mode, so such files are left out and counted.
 """
 
 import argparse
@@ -57,6 +71,10 @@ from datetime import datetime, timezone
 from collections import defaultdict
 import numpy as np
 import pandas as pd
+
+import timex_timing
+from setup_model import (SETUP_MODELS, STOCKDON_SETUP_K, EvolvingSlope, deshoal_depth, model_tag,
+                         setup_c, stockdon_frame)
 
 
 DEFAULT_PROCESSED_DIR = "/mnt/I2Rgus_Data/waterline/processed"
@@ -204,20 +222,125 @@ def looks_like_gnssr_spline(path):
     return False
 
 
+# THE WAVE "CURRENCY" OF THE SETUP COEFFICIENT. C (waterline_timex_cron.sh
+# SETUP_COEF = 0.037) was fitted on contours tagged from
+# archive/waves_marconi.csv (marconi_waves.py, USE_MARCONI_WAVES=1):
+# offshore_hs_m = hs_best, which is ADCP wh_4061 currency (camera wave
+# models trained on that ADCP, buoys converted to it), offshore_tp_s = tp_s
+# (NDBC 44008 peak period). The same formula on another Hs is another
+# setup: the raw 44008 wvht_m overstates sheltered south-west seas, and the
+# DEM moves ~0.06 m per 0.01 of effective C. The cron falls back to the raw
+# buoy archive whenever waves_marconi.csv is missing (owg.sh stopped, or a
+# copy of the repository without it), and nothing said so; every contour
+# row now names its wave columns (wave_source) and a WARNING is printed
+# when they are the raw buoy's (a NOTE for the other kinds that are not
+# this currency). The kinds, told apart by the columns:
+#   marconi     hs_best / tp_s             -- the currency C was fitted in
+#   adcp_equiv  wvht_m / dpd_s + hs_sigma_m -- historical_forcing.py's
+#               waves.csv: ADCP-equivalent Hs (C's Hs currency); its Tp is
+#               ADCP-equivalent, not 44008's (historical_forcing.py's report
+#               gives the setup bias that implies)
+#   buoy        wvht_m / dpd_s + apd_s      -- fetch_buoy_waves.py, the raw
+#               offshore buoy (its archive always has apd_s): NOT the
+#               currency C was fitted in
+#   unknown     wvht_m / dpd_s, neither     -- a file the columns do not
+#               name, e.g. process_chelsea.py's adcp_waves.csv (the ADCP's
+#               own wh_4061 / peak period, which an earlier version of this
+#               rule called the raw buoy and warned about): a NOTE, no
+#               WARNING
+WAVE_CURRENCY_FITTED = "marconi:hs_best/tp_s"
+
+
+def wave_columns(columns):
+    """
+    The (height, period) columns load_wave_archive reads from a wave file
+    with these column names, and the file's currency tag
+    ('<kind>:<height>/<period>', see WAVE_CURRENCY_FITTED). The raw buoy is
+    recognised by fetch_buoy_waves.py's apd_s column, not by wvht_m / dpd_s
+    alone: other writers use those two names too (process_chelsea.py's
+    ADCP record), and calling them the raw buoy put a false WARNING in
+    their logs.
+    """
+    columns = set(columns)
+    if "hs_best" in columns:          # marconi_waves.py's local best estimate
+        return "hs_best", "tp_s", "marconi:hs_best/tp_s"
+    kind = ("adcp_equiv" if "hs_sigma_m" in columns else
+            "buoy" if "apd_s" in columns else "unknown")
+    return "wvht_m", "dpd_s", f"{kind}:wvht_m/dpd_s"
+
+
+def wave_currency_note(tag):
+    """One line on a wave_source tag against the currency C was fitted in:
+    (is_fitted_currency, text)."""
+    if tag == WAVE_CURRENCY_FITTED:
+        return True, (f"{tag} -- the currency the setup coefficient was fitted in "
+                      f"(hs_best: ADCP wh_4061 Hs; tp_s: NDBC 44008 peak period)")
+    if tag.startswith("adcp_equiv:"):
+        return False, (f"{tag} -- ADCP-equivalent Hs (the setup coefficient's Hs currency) but "
+                       f"ADCP-equivalent Tp, not the NDBC 44008 peak period C was fitted with "
+                       f"(historical_forcing.py's report gives the setup bias that implies)")
+    if tag.startswith("unknown:"):
+        return False, (f"{tag} -- a wave file its columns do not name (not fetch_buoy_waves.py's raw "
+                       f"buoy archive, no apd_s; not historical_forcing.py's waves.csv, no hs_sigma_m), "
+                       f"e.g. process_chelsea.py's adcp_waves.csv (the ADCP's own Hs and peak period): "
+                       f"not known to be the currency the setup coefficient was fitted in "
+                       f"({WAVE_CURRENCY_FITTED})")
+    return False, (f"{tag} -- NOT the currency the setup coefficient was fitted in "
+                   f"({WAVE_CURRENCY_FITTED}): raw offshore buoy Hs/Tp overstate sheltered "
+                   f"south-west seas, so the setup (and the --max-hs filter) differ")
+
+
 def load_wave_archive(path):
     """
     Reads the offshore wave archive written by fetch_buoy_waves.py, or the
     hourly Marconi best estimate written by marconi_waves.py.
     Returns (epochs_hs, hs, epochs_tp, tp), each sorted by time, with
     rows lacking a value dropped separately for height and period.
+    Which columns are read: wave_columns().
     """
     df = pd.read_csv(path)
     # marconi_waves.py's local best estimate (hs_best, tp_s) or the raw buoy
-    hcol, tcol = ("hs_best", "tp_s") if "hs_best" in df else ("wvht_m", "dpd_s")
+    hcol, tcol, _tag = wave_columns(df.columns)
     hs = df.dropna(subset=[hcol]).sort_values("epoch")
     tp = df.dropna(subset=[tcol]).sort_values("epoch")
     return (hs["epoch"].to_numpy(float), hs[hcol].to_numpy(float),
             tp["epoch"].to_numpy(float), tp[tcol].to_numpy(float))
+
+
+def stockdon_setups(output_rows, args, wave_tag):
+    """
+    The slope-aware setup of every frame with a wave height and period (--setup-model stockdon;
+    setup_model.py has the model, the deshoaling question and the fallback): Stockdon et al. (2006)
+    k * beta_f * sqrt(H0 * L0), beta_f measured on the DEM nearest the frame's day over its swash band
+    (still water + setup +/- S/2, iterated), else C / k. Called after the wave columns are appended,
+    so a row's last two values are its offshore_hs_m and offshore_tp_s.
+    -> {'frames': {source_file: (setup m, beta_f, source)}, 'tag', 'how', 'lines'}.
+    """
+    k = args.setup_stockdon_k
+    depth, how = deshoal_depth(args.setup_deshoal_depth, wave_tag)
+    fallback = args.setup_coef / k
+    slopes = EvolvingSlope(args.setup_slope_dem)
+    frames, why = {}, defaultdict(int)
+    for r in output_rows:
+        # a Tp of 0 (or a setup that is not a number) is a frame without waves, left uncorrected
+        if r[0] in frames or r[-2] == "" or r[-1] == "" or not float(r[-1]) > 0:
+            continue
+        fs, why_none = slopes.for_epoch(r[3])
+        st = stockdon_frame(r[6], r[-2], r[-1], fs, fallback, k, depth, why_none=why_none)
+        if not np.isfinite(st[0]):
+            continue
+        frames[r[0]] = st
+        why[st[2]] += 1
+    betas = [v[1] for v in frames.values() if v[2] == "dem"]
+    lines = [f"Foreshore slope          : from {slopes.what}: "
+             + (f"{len(betas)} frame(s), beta_f median {np.median(betas):.3f} (p10-p90 "
+                f"{np.percentile(betas, 10):.3f}-{np.percentile(betas, 90):.3f})" if betas else "no frame")]
+    fell = {w: n for w, n in why.items() if w != "dem"}
+    if fell:
+        lines.append(f"{'WARNING' if not betas else 'NOTE'}: {sum(fell.values())} frame(s) took the fallback "
+                     f"slope beta_f = C/k = {fallback:.3f} (the C model's setup): "
+                     + ", ".join(f"{w} {n}" for w, n in sorted(fell.items())))
+    return {"frames": frames, "tag": model_tag(k, depth), "how": how, "lines": lines}
 
 
 def nearest_within(epochs, values, epoch, max_gap_s):
@@ -735,10 +858,14 @@ def main():
                              "materially affects that camera. Pre-v6.7 output has no flag and "
                              "is treated as signal-bearing either way.")
     parser.add_argument("--waves", default=None,
-                        help="Offshore wave archive from fetch_buoy_waves.py. Adds "
+                        help="Offshore wave archive from fetch_buoy_waves.py (or "
+                             "marconi_waves.py's waves_marconi.csv). Adds "
                              "offshore_hs_m and offshore_tp_s to every point, so rough-water "
                              "frames (whose waterline sits above still water by the wave "
-                             "setup) can be left out of the DEM.")
+                             "setup) can be left out of the DEM, and wave_source: which "
+                             "columns of which kind of file tagged them (a WARNING when it "
+                             "is the raw buoy, a NOTE for another currency than the one the "
+                             "setup coefficient was fitted in; see WAVE_CURRENCY_FITTED).")
     parser.add_argument("--wave-max-gap-minutes", type=float, default=90.0,
                         help="Largest gap to the nearest wave record before a frame's wave "
                              "columns are left blank (default 90; the buoy reports every "
@@ -758,6 +885,31 @@ def main():
                              "Adds setup_correction_m and beach_elevation_navd88 columns, "
                              "which georectify.py and dem_from_contours.py then use; "
                              "tide_elevation_navd88 stays the water level.")
+    parser.add_argument("--setup-model", choices=SETUP_MODELS, default="c",
+                        help="Which setup --setup-coef applies (setup_model.py). 'c' (default, the "
+                             "station's): C*sqrt(Hs*L0) as above. 'stockdon' (opt-in; the station "
+                             "stays on 'c' until evaluate_setup_model.py favours it on the surveys): "
+                             "Stockdon et al. (2006) k*beta_f*sqrt(H0*L0), with the foreshore slope "
+                             "beta_f measured for each frame on the evolving DEM "
+                             "(--setup-slope-dem) over its swash band, and H0 the deep-water height "
+                             "(--setup-deshoal-depth). A frame the DEM cannot serve takes beta_f = "
+                             "C/k, i.e. the C model's setup. Adds the columns setup_beta_f and "
+                             "setup_model.")
+    parser.add_argument("--setup-slope-dem", default=None,
+                        help="With --setup-model stockdon (required there): the DEM the foreshore "
+                             "slope is measured on. A folder of dated DEMs (dem_from_contours.py "
+                             "--series-dir, the cron's archive/dems): each frame takes the one whose "
+                             "window is centred nearest its day, within 7 days. Or one DEM "
+                             "(<stem> or <stem>_dem.asc) for every frame.")
+    parser.add_argument("--setup-stockdon-k", type=float, default=STOCKDON_SETUP_K,
+                        help="With --setup-model stockdon: the setup coefficient k (default 0.35, "
+                             "Stockdon et al. 2006 Eq. 10; evaluate_setup_model.py refits it).")
+    parser.add_argument("--setup-deshoal-depth", default="auto",
+                        help="With --setup-model stockdon: the depth (m) the wave heights are "
+                             "deshoaled from to Stockdon's deep-water H0 (linear theory, H0 = Hs/Ks). "
+                             "'auto' (default): 21 m for the ADCP currency (waves_marconi.csv "
+                             "hs_best, historical_forcing.py's waves), none for a raw buoy file; "
+                             "'none': H0 = Hs.")
     parser.add_argument("--vertical-datum-offset", type=float, default=0.0,
                          help="Meters to ADD to every tide elevation, converting the tide "
                               "model's vertical datum (mean sea level or a geoid, for global "
@@ -769,7 +921,34 @@ def main():
                               "uncorrected GNSS-R). NOAA's VDatum tool is an alternative but gives a "
                               "modelled rather than measured value. Defaults to 0.0, which "
                               "is almost certainly WRONG -- see the warning printed if unset.")
+    parser.add_argument("--timing-mode", default=None, choices=timex_timing.TIMING_MODES,
+                        help="When in the exposure each frame's water level is taken (timex_timing.py). "
+                             "legacy (the default): at the file-name epoch, the exposure's start, as "
+                             "always. mid: the level, the waves and the stale-gap check at epoch + "
+                             f"{timex_timing.TIMEX_MID_OFFSET_S} s for a timex (mid-exposure; + 0 s for a "
+                             "snap), for detections made with waterline_detector_v5.py --timing-mode mid "
+                             "(no temporal blend). Detections of the other mode are left out and counted. "
+                             "Default: the TIMING_MODE environment variable, else legacy.")
     args = parser.parse_args()
+    try:
+        timing = timex_timing.timing_mode(args.timing_mode)
+    except ValueError as e:
+        parser.error(str(e))
+    if args.setup_model == "stockdon" and (args.setup_coef is None or not args.waves
+                                           or not args.setup_slope_dem):
+        print("ERROR: --setup-model stockdon needs --setup-coef (the C of the frames the DEM cannot "
+              "serve, and the switch that turns the setup on), --waves and --setup-slope-dem.")
+        sys.exit(1)
+    if args.setup_model == "stockdon":
+        # checked before any frame is read, not after the whole archive has been
+        try:
+            deshoal_depth(args.setup_deshoal_depth, "")
+        except ValueError:
+            print(f"ERROR: --setup-deshoal-depth {args.setup_deshoal_depth!r}: 'auto', 'none' or metres.")
+            sys.exit(1)
+        if not 0 < args.setup_stockdon_k < float("inf"):
+            print(f"ERROR: --setup-stockdon-k {args.setup_stockdon_k}: must be a finite number above 0.")
+            sys.exit(1)
 
     using_gnssr = looks_like_gnssr_spline(args.tide_model_csv)
 
@@ -825,9 +1004,14 @@ def main():
         sys.exit(1)
 
     print(f"Found {len(shoreline_files)} processed shoreline file(s) in {processed_dir}")
+    print(f"Water-level time         : {timex_timing.describe(timing, level_only=True)}")
     print()
 
     output_rows = []
+    # Per frame: the epoch its water level (and waves) were taken at --
+    # the file-name epoch in legacy mode -- and its offset from it.
+    level_epoch_of, level_offset_of = {}, {}
+    skipped_other_mode = defaultdict(int)
     used, skipped_no_epoch, skipped_no_camera, skipped_stale = 0, 0, 0, 0
     dropped_no_signal = 0
     skipped_all_no_signal = 0
@@ -850,8 +1034,17 @@ def main():
             skipped_no_camera += 1
             continue
 
+        # A line is given a level only in the timing mode it was detected
+        # in: the level time and the blend go together (timex_timing.py).
+        det_mode = timex_timing.detection_timing_mode(path)
+        if det_mode != timing:
+            skipped_other_mode[det_mode] += 1
+            continue
+
+        level_offset = timex_timing.level_time_offset_s(path.name, timing)
+        level_epoch = epoch + level_offset
         elevation, spread, gap_minutes = interpolate_tide(
-            epoch, tide_timestamps, tide_levels, tide_spreads
+            level_epoch, tide_timestamps, tide_levels, tide_spreads
         )
         elevation_navd88 = elevation + args.vertical_datum_offset
 
@@ -939,7 +1132,16 @@ def main():
                 round(sharp, 4) if not np.isnan(sharp) else "",
                 source_label,
             ])
+        level_epoch_of[path.stem] = level_epoch
+        level_offset_of[path.stem] = level_offset
         used += 1
+
+    if skipped_other_mode:
+        for mode, n in sorted(skipped_other_mode.items()):
+            print(f"WARNING: {n} detection(s) made in timing mode {mode!r} left out: this run takes the "
+                  f"level in mode {timing!r}, and a line gets a level only in the mode it was detected "
+                  f"in (timex_timing.py). Point --processed-dir at that mode's detections, or use "
+                  f"--timing-mode {mode}.")
 
     if not output_rows:
         print("No contour points produced -- check water-level source coverage and file naming.")
@@ -991,12 +1193,31 @@ def main():
     # positional index used above (r[1], r[2], ...) is unchanged.
     if args.waves:
         ep_hs, hs, ep_tp, tp = load_wave_archive(args.waves)
+        hcol, tcol, wave_tag = wave_columns(pd.read_csv(args.waves, nrows=0).columns)
+        fitted, note = wave_currency_note(wave_tag)
+        print(f"Wave file                : {args.waves} (columns {hcol}, {tcol})")
+        print(f"Wave currency            : {note}")
+        if not fitted and wave_tag.startswith("buoy:"):
+            print(f"WARNING: the frames are tagged with the raw buoy waves ({wave_tag}), not the "
+                  f"currency the setup coefficient was fitted in ({WAVE_CURRENCY_FITTED})"
+                  + (f": the setup with C = {args.setup_coef} is NOT the station's calibrated setup"
+                     if args.setup_coef else "")
+                  + ". Was archive/waves_marconi.csv (owg.sh / marconi_waves.py) missing?")
+        elif not fitted and wave_tag.startswith("unknown:"):
+            print(f"NOTE: the wave file's kind is not known from its columns, so not known to be the "
+                  f"currency C was fitted in ({WAVE_CURRENCY_FITTED}); see the line above.")
+        elif not fitted:
+            print(f"NOTE: wave period currency differs from the one C was fitted in "
+                  f"({WAVE_CURRENCY_FITTED}); see the line above.")
         gap_s = args.wave_max_gap_minutes * 60.0
         per_frame = {}
         for r in output_rows:
             if r[0] not in per_frame:
-                h = nearest_within(ep_hs, hs, r[3], gap_s)
-                t = nearest_within(ep_tp, tp, r[3], gap_s)
+                # the waves at the time the level was taken (the file-name
+                # epoch in legacy mode, mid-exposure in mid mode)
+                t_level = level_epoch_of.get(r[0], r[3])
+                h = nearest_within(ep_hs, hs, t_level, gap_s)
+                t = nearest_within(ep_tp, tp, t_level, gap_s)
                 per_frame[r[0]] = ("" if h is None else round(h, 2),
                                    "" if t is None else round(t, 1))
             r.extend(per_frame[r[0]])
@@ -1007,24 +1228,64 @@ def main():
             # get no correction and a blank setup column, so they can be
             # told apart from a genuine zero.
             no_waves = set()
+            slope_aware = None
+            if args.setup_model == "stockdon":
+                slope_aware = stockdon_setups(output_rows, args, wave_tag)
             for r in output_rows:
                 hs, tp = r[-2], r[-1]
-                if hs != "" and tp != "":
-                    setup = args.setup_coef * np.sqrt(float(hs) * 9.81 * float(tp) ** 2 / (2 * np.pi))
+                if slope_aware is not None:
+                    # the slope-aware model's setup and the slope it used (setup_model.py)
+                    s = slope_aware["frames"].get(r[0])
+                    if s is not None:
+                        r.extend([round(s[0], 4), round(r[6] + s[0], 4), round(s[1], 4), slope_aware["tag"]])
+                    else:
+                        no_waves.add(r[0])
+                        r.extend(["", r[6], "", slope_aware["tag"]])
+                elif hs != "" and tp != "":
+                    setup = setup_c(float(hs), float(tp), args.setup_coef)
                     r.extend([round(float(setup), 4), round(r[6] + float(setup), 4)])
                 else:
                     no_waves.add(r[0])
                     r.extend(["", r[6]])
             header += ["setup_correction_m", "beach_elevation_navd88"]
-            setups = [r[-2] for r in output_rows if r[-2] != ""]
-            print(f"Setup correction         : C = {args.setup_coef}, "
+            if slope_aware is not None:
+                header += ["setup_beta_f", "setup_model"]
+            isu = header.index("setup_correction_m")
+            setups = [r[isu] for r in output_rows if r[isu] != ""]
+            what = (f"C = {args.setup_coef}" if slope_aware is None else
+                    f"slope-aware (Stockdon et al. 2006, k = {args.setup_stockdon_k:g}; {slope_aware['how']})")
+            print(f"Setup correction         : {what}, "
                   + (f"{min(setups):.3f}-{max(setups):.3f} m" if setups else "none applied")
                   + (f"; {len(no_waves)} frame(s) without wave height+period left uncorrected"
                      if no_waves else ""))
+            if slope_aware is not None:
+                for line in slope_aware["lines"]:
+                    print(line)
+        # Which wave columns tagged the frames, on every row (as
+        # water_level_source names the level): the last column, so every
+        # positional index above is unchanged. A '#' header line is not an
+        # option -- georectify.py and the other readers take the first line
+        # as the column names -- and the rows carry it on through the
+        # consistency filter and georectify.py to dem_from_contours.py,
+        # which records it in <stem>_info.json.
+        for r in output_rows:
+            r.append(wave_tag)
+        header += ["wave_source"]
         tagged = [v[0] for v in per_frame.values() if v[0] != ""]
         print(f"Offshore waves           : {len(tagged)}/{len(per_frame)} frame(s) tagged"
               + (f", Hs {min(tagged):.2f}-{max(tagged):.2f} m, "
                  f"median {float(np.median(tagged)):.2f} m" if tagged else ""))
+
+    # Outside legacy mode every row says when its level was taken, as the
+    # last column (so every positional index above, and wave_source's
+    # place before it, are unchanged); legacy rows are exactly as before.
+    if timing != "legacy":
+        for r in output_rows:
+            r.append(level_offset_of[r[0]])
+        header += [timex_timing.LEVEL_OFFSET_COLUMN]
+        offsets = sorted(set(level_offset_of[r[0]] for r in output_rows))
+        print(f"Water-level time         : {timing}: level (and waves) taken at capture_epoch + "
+              + ", ".join(f"{o} s" for o in offsets) + f" ({timex_timing.LEVEL_OFFSET_COLUMN})")
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1072,6 +1333,9 @@ def main():
                 print(f"      ... and {len(low_coverage_detail) - 8} more")
     print(f"Skipped (tide gap > {args.max_gap_minutes:.0f} min): {skipped_stale}"
           + ("" if not args.include_stale else " -- included anyway (see --include-stale)"))
+    if skipped_other_mode:
+        print(f"Skipped (detected in another timing mode than {timing}): "
+              + ", ".join(f"{n} {m}" for m, n in sorted(skipped_other_mode.items())))
     print()
     print(f"Wrote {len(output_rows)} contour point(s) from {used} frame(s) to {output_path}")
     print()

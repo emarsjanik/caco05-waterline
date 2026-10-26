@@ -124,8 +124,10 @@ transects that start at +1.2 m check the upper beach only).
 When the lines carry a setup, the same comparison is repeated WITHOUT it
 (C = 0) as a sensitivity: each line at its still-water level and, with
 --camera-eo, re-projected onto that lower plane as a C = 0 build would
-place it (same detections), per camera. Lines at still water move
-seaward and some leave the survey, so the effect of the setup is read
+place it (same detections), per camera; a day whose lines were mapped
+with its own pointing (survey_products.py --correct-pointing) with that
+day's EO (--camera-eo-day), not the calibration's. Lines at still water
+move seaward and some leave the survey, so the effect of the setup is read
 on the SAME frames (points) both ways ('paired'), and the ones that drop
 out are counted. The setup coefficient is the least certain step; this
 shows how much of the answer it carries.
@@ -135,13 +137,59 @@ NMAD of one value is 0, which would read as perfect agreement), and any
 group with fewer than 10 is marked as not an estimate (for the lines:
 fewer than 10 frames, or 10 distinct survey points).
 
+UNCERTAINTY (text and json only; the figure is unchanged). Neighbouring
+DEM cells are not independent values: they share frames, and a frame's
+error (its water level, setup, pointing) lies along its whole line. So
+the headline's n says how many cells were compared, not how much they are
+worth. The INTERVAL line under the headline and the UNCERTAINTY table give
+95% intervals of the median, mean and RMSE by a BLOCK BOOTSTRAP of
+non-overlapping blocks (Carlstein 1986; Lahiri 2003): the compared cells
+or points are cut into stretches along the shore (along: perpendicular to
+the survey's mean slope where compared) and the stretches, not the cells,
+are drawn with replacement 1000 times. A
+stretch is as long as the residuals stay correlated along the shore --
+their correlogram (1 - semivariance / variance by distance apart, the
+residual variogram of DEM error analysis, e.g. Rolstad et al. 2009) shows
+where the correlation falls to 0.1 -- and never shorter than --block-m
+(50 m). The effective sample size is the number of independent values
+that would scatter the mean as much (var of the values / var of the
+resampled means); with fewer than 5 stretches there is no interval, and
+the report says how many independent stretches the comparison holds (on
+the 2025 lidars about 3-4: their 160-250 cells span 180-290 m and stay
+correlated over ~50-85 m). What no resampling of one survey can hold: an
+error every cell shares (the water-level datum, the setup coefficient, a
+camera's pointing over the whole window) moves the median, not its
+interval.
+
+STRATA (--contours; text and json only). The waterlines are also split by
+the TIDE'S STAGE (flood: the frame's still-water level rising faster than
+0.1 m/h, from the levels of the frames either side, as the DEM log's own
+residual diagnostic; ebb: falling; slack between), by offshore Hs in
+thirds of the compared frames, and by range from the camera -- one value
+per frame (the median of its points on the survey; per range band, one per
+frame and band), so that every frame weighs the same -- with 95% intervals
+from resampling CAMERA-DAYS (a cluster bootstrap, Davison & Hinkley 1997
+sec. 3.8: a day's frames share its water level, setup and pointing).
+flood - ebb, taken WITHIN each camera-day that holds both stages (so a
+day's own error cancels) and with intervals over those camera-days, pooled
+and per camera, tests the timing error: a line older than its water level
+reads high on the flood and low on the ebb. The flood and ebb rows pool
+different days and carry their errors. highest - lowest third of Hs (a
+setup coefficient too large reads high in big waves) is between days by
+construction (Hs hardly changes within a day), so an error of whole days
+that falls on the big- or small-wave days reads the same way. On a week of
+photos there are often fewer than 5 camera-days on the survey, and then
+no interval.
+
 OUTPUT (in --output-dir):
   NAME_dem_minus_survey.asc / .tif   (dsm only) the difference grid
   NAME_points.csv     (points only) every point, the DEM value, the
                       difference, and why a point was not compared
-  NAME_comparison.txt the label, warnings, headline and tables
-  NAME_comparison.csv one row per statistic group
-  NAME_comparison.json the headline (for survey_products.py --summary)
+  NAME_comparison.txt the label, warnings, headline and tables (with the
+                      intervals and the strata above)
+  NAME_comparison.csv one row per statistic group (as before: no intervals)
+  NAME_comparison.json the headline (for survey_products.py --summary);
+                      'intervals' and waterlines 'strata' hold the above
   NAME_comparison.png one page: map, histogram, median by elevation
                       band, headline and label
 
@@ -220,6 +268,27 @@ TRANSECT_TOLERANCE, TRANSECT_SPLIT, TRANSECT_MIN_POINTS = 2.0, 15.0, 3
 # refit, Oct 2026: 0.1-0.2 m margins gave the same answer).
 SURVEY_FLOOR_MARGIN = 0.10
 FULL_COVER = 0.999               # a DEM cell the survey covers entirely (8 x 8 sub-cells)
+# UNCERTAINTY (block_intervals): 95% intervals by resampling BLOCKS of values that share an error -- DEM
+# cells and survey points in stretches along the shore, the waterlines' frames by camera-day -- BOOT_N times,
+# from a fixed seed (the same numbers on every run). A stretch is as long as the residuals stay correlated
+# along the shore (their correlogram, alongshore_correlogram: where the correlation falls to RHO_GONE), and
+# never shorter than ALONGSHORE_BLOCK_M (--block-m). On the real comparisons of Oct 2026 the residuals
+# decorrelate by ~50 m (Jan 2025 lidar) and ~85 m (Mar 2025 lidar). Fewer blocks than MIN_CI_BLOCKS: no
+# interval (it would be the spread of 2-4 numbers); fewer than FEW_CI_BLOCKS: given, marked rough.
+CI_LEVEL = 0.95
+BOOT_N = 1000
+BOOT_SEED = 1
+ALONGSHORE_BLOCK_M = 50.0
+MIN_CI_BLOCKS = 5
+FEW_CI_BLOCKS = 10
+RHO_GONE = 0.1
+LAG_BINS = (0, 5, 10, 20, 40, 80, 160, 320, 640, 1280)     # alongshore lag bins of the correlogram, m
+MIN_LAG_PAIRS = 30
+CORRELOGRAM_MAX_VALUES = 2000      # more compared values than this: the correlogram uses a fixed random subset
+# STRATA of the waterlines (waterline_strata): a frame is on the FLOOD when its water level rises faster than
+# this (m/h), on the EBB when it falls faster, else SLACK -- dem_from_contours.DIAG_STAGE_RATE, the DEM log's
+# own split -- with the rate from the levels of the frames either side (dem_from_contours.water_level_rates).
+STAGE_RATE = 0.1
 VERTICAL_UNKNOWN = ("vertical datum not stated in the survey file; assumed NAVD88 (geoid model "
                     "unknown; GEOID12B and GEOID18 differ by a few cm here)")
 
@@ -532,7 +601,9 @@ def without_setup(cont, cams):
     (tide_elevation_navd88) and, where the camera's calibration and the line's pixels are known,
     re-projected onto that lower plane (georectify.pixel_to_ground), i.e. a little seaward,
     where the beach is lower too. Without the calibration the lines keep their positions and
-    only lose the setup, which overstates the change.
+    only lose the setup, which overstates the change. A camera's "eo_by_day" ({UTC day: EO},
+    --camera-eo-day): the lines of those days (by capture_epoch, else capture_time_utc) with
+    that day's EO, the pointing they were mapped with.
     -> (contours dict like cont, how)
     """
     from georectify import pixel_to_ground
@@ -540,7 +611,7 @@ def without_setup(cont, cams):
     c0["Z"] = cont["Zt"].copy()
     c0["beach"] = np.zeros(len(cont["Z"]), bool)
     E, N = cont["E"].copy(), cont["N"].copy()
-    moved, kept = 0, 0
+    moved, kept, own = 0, 0, []
     for cam in sorted(set(cont["cam"].tolist())):
         m = (cont["cam"] == cam) & np.isfinite(cont["Zt"])
         c = (cams or {}).get(cam)
@@ -551,6 +622,14 @@ def without_setup(cont, cams):
         X, Y = pixel_to_ground(cont["U"][ok], cont["V"][ok], cont["Zt"][ok], c["io"], c["eo"])
         E[ok], N[ok] = X, Y
         moved += int(ok.sum())
+        for day, eo_d in sorted((c.get("eo_by_day") or {}).items()):
+            t0 = (date.fromisoformat(day) - date(1970, 1, 1)).days * 86400.0
+            on = ok & np.isfinite(cont["epoch"])
+            on[on] = (cont["epoch"][on] >= t0) & (cont["epoch"][on] < t0 + 86400.0)
+            on |= ok & ~np.isfinite(cont["epoch"]) & (cont["day"] == day)
+            if on.any():
+                E[on], N[on] = pixel_to_ground(cont["U"][on], cont["V"][on], cont["Zt"][on], c["io"], eo_d)
+                own.append(f"{cam} {day}")
     c0["E"], c0["N"] = E, N
     good = np.isfinite(E) & np.isfinite(N) & np.isfinite(c0["Z"])
     for k in POINT_KEYS:
@@ -565,6 +644,9 @@ def without_setup(cont, cams):
     else:
         how = ("lines kept in place with the setup removed (no --camera-eo or no pixel columns): this "
                "overstates the change; a C = 0 build would also move each line a little seaward")
+    if own:
+        how += (f"; the days mapped with their own pointing ({', '.join(own)}) with that day's EO "
+                f"(--camera-eo-day), not the calibration")
     return c0, how
 
 
@@ -579,6 +661,18 @@ def parse_cam_specs(specs, what):
             sys.exit(f"{what}: expected cam=PATH, got '{s}'")
         k, v = s.split("=", 1)
         out[k.strip()] = Path(v.strip())
+    return out
+
+
+def parse_cam_day_specs(specs, what):
+    """CAM:DAY=PATH (DAY YYYY-MM-DD) -> {cam: {day: Path}}."""
+    out = {}
+    for s in specs or []:
+        k, _, v = s.partition("=")
+        cam, _, day = k.partition(":")
+        if not (v and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day.strip())):
+            sys.exit(f"{what}: expected CAM:YYYY-MM-DD=PATH, got '{s}'")
+        out.setdefault(cam.strip(), {})[day.strip()] = Path(v.strip())
     return out
 
 
@@ -882,11 +976,382 @@ def _repeatability_groups(d, spread, count):
 
 
 # ---------------------------------------------------------------------
+# Uncertainty of the statistics: block bootstrap
+# ---------------------------------------------------------------------
+
+def _bearing(ue, un):
+    """The bearing (deg from north, 0-180: a direction, not a way) of the vector (east, north), to 0.1 deg
+    (north is 0, never 179.99... from a rounding error of the fit)."""
+    return round(float(np.degrees(np.arctan2(ue, un))) % 180.0, 1) % 180.0
+
+
+def alongshore_axis(E, N, Z):
+    """
+    The direction along the shore, as a unit vector (east, north): perpendicular to the SURVEY's mean
+    downslope direction where it is compared (the gradient of a plane fitted by least squares to the
+    survey's elevations Z at the compared positions E, N; the beach falls across the shore). The survey,
+    not the DEM under test: a camera's offset in the DEM would tilt or flatten the plane. Less slope
+    than 1:200 gives no direction (the positions span little across the shore, or the survey is flat
+    there), and the long axis of the positions is used instead. -> (east, north, how)
+    """
+    E, N, Z = np.asarray(E, float), np.asarray(N, float), np.asarray(Z, float)
+    ok = np.isfinite(E) & np.isfinite(N) & np.isfinite(Z)
+    E, N, Z = E[ok], N[ok], Z[ok]
+    if len(Z) >= 3:
+        A = np.c_[E - E.mean(), N - N.mean(), np.ones(len(Z))]
+        coef = np.linalg.lstsq(A, Z, rcond=None)[0]
+        g = float(np.hypot(coef[0], coef[1]))
+        if g > 0.005:
+            ue, un = -coef[1] / g, coef[0] / g
+            bearing = _bearing(ue, un)
+            return float(ue), float(un), (f"perpendicular to the survey's mean slope (1:{1 / g:.0f}, a plane fitted "
+                                          f"to it where compared): along {bearing:.0f} deg")
+    if len(Z) >= 2 and (np.ptp(E) > 0 or np.ptp(N) > 0):
+        w, v = np.linalg.eigh(np.cov(np.vstack([E, N])))
+        ue, un = v[0, -1], v[1, -1]
+        bearing = _bearing(ue, un)
+        return float(ue), float(un), (f"the long axis of the compared positions (no clear slope from a plane fitted "
+                                      f"to the survey there): along {bearing:.0f} deg")
+    return 0.0, 1.0, "north (too few compared positions to tell)"
+
+
+def alongshore_blocks(E, N, axis, block_m=ALONGSHORE_BLOCK_M):
+    """The stretch of the shore, block_m long, each position falls in (integers along `axis`)."""
+    s = np.asarray(E, float) * axis[0] + np.asarray(N, float) * axis[1]
+    return np.floor((s - np.nanmin(s)) / block_m).astype(int) if len(s) else np.zeros(0, int)
+
+
+def block_draws(n_blocks, n_boot=BOOT_N, seed=BOOT_SEED):
+    """How many times each block is drawn in each resample: (n_boot x n_blocks) counts, each row
+    n_blocks draws with replacement, from a fixed seed."""
+    rng = np.random.RandomState(seed)
+    picks = rng.randint(0, n_blocks, (n_boot, n_blocks))
+    out = np.zeros((n_boot, n_blocks))
+    for r in range(n_boot):
+        out[r] = np.bincount(picks[r], minlength=n_blocks)
+    return out
+
+
+def boot_stats(d, blk, draws, chunk_values=2000000):
+    """
+    Median, mean and RMSE of the values d in every resample: draws (n_boot x n_blocks) says how many
+    times each block is drawn, blk (an integer per value) which block a value is in. The median is that
+    of the resample spelled out (each value repeated as often as its block was drawn: np.median of it,
+    the two middle values averaged on an even count), found from cumulative weights over the values
+    sorted once. -> (n_boot x 3) array; NaN rows for a resample that drew none of these values.
+    """
+    d = np.asarray(d, float)
+    o = np.argsort(d, kind="stable")
+    ds, bs = d[o], np.asarray(blk)[o]
+    out = np.full((draws.shape[0], 3), np.nan)
+    if not len(ds):
+        return out
+    step = max(1, int(chunk_values // len(ds)))
+    for r0 in range(0, draws.shape[0], step):
+        w = draws[r0:r0 + step][:, bs]                    # weight of each sorted value, per resample
+        tot = w.sum(axis=1)
+        cw = np.cumsum(w, axis=1)
+        has = tot > 0
+        lo = np.argmax(cw > np.floor((tot - 1) / 2.0)[:, None], axis=1)
+        hi = np.argmax(cw > np.floor(tot / 2.0)[:, None], axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out[r0:r0 + step, 0] = np.where(has, 0.5 * (ds[lo] + ds[hi]), np.nan)
+            out[r0:r0 + step, 1] = np.where(has, w.dot(ds) / tot, np.nan)
+            out[r0:r0 + step, 2] = np.where(has, np.sqrt(w.dot(ds ** 2) / tot), np.nan)
+    return out
+
+
+def block_intervals(d, blocks, unit, block_what, level=CI_LEVEL, n_boot=BOOT_N, seed=BOOT_SEED):
+    """
+    95% intervals of the median, mean and RMSE of d when the values come in BLOCKS that share an error
+    (stretches of the shore, camera-days): the blocks, not the values, are drawn with replacement, as
+    many as there are, n_boot times (a bootstrap of non-overlapping blocks: Carlstein 1986, Ann. Statist.
+    14:1171; Lahiri 2003, Resampling Methods for Dependent Data, which also covers the moving blocks of
+    Kunsch 1989; for clusters, Davison & Hinkley 1997, Bootstrap Methods and their Application, sec. 3.8),
+    and each interval is the 2.5-97.5 percentile of the resamples' values.
+    Values that err together stay together, so the interval is as wide as the blocks' disagreement,
+    not as narrow as n independent values would make it. The effective sample size is the number of
+    independent values that would scatter the mean as much: var(d) / var(resampled means), at most n
+    (n_eff ~ n: the values are as good as independent; n_eff ~ the blocks: a block is one value; n when
+    the values do not scatter at all, their ratio then being rounding noise).
+    block_what: what a block is, as counted ('camera-day(s)'). -> dict (n, blocks, n_effective, median_ci, mean_ci,
+    rmse_ci, rough, ...), or with 'note' instead of the intervals when there are too few blocks.
+    """
+    d = np.asarray(d, float)
+    blocks = np.asarray(blocks)
+    ok = np.isfinite(d)
+    d, blocks = d[ok], blocks[ok]
+    keys, blk = np.unique(blocks.astype(str), return_inverse=True) if len(d) else (np.zeros(0), np.zeros(0, int))
+    rec = {"n": int(len(d)), "unit": unit, "blocks": int(len(keys)), "block": block_what, "level": level,
+           "resamples": n_boot}
+    if len(keys) < MIN_CI_BLOCKS:
+        rec["note"] = f"only {len(keys)} {block_what}, and an interval needs {MIN_CI_BLOCKS}"
+        return rec
+    reps = boot_stats(d, blk, block_draws(len(keys), n_boot, seed))
+    good = np.isfinite(reps[:, 0])
+    lo, hi = 50.0 * (1 - level), 50.0 * (1 + level)
+    for k, j in (("median", 0), ("mean", 1), ("rmse", 2)):
+        rec[k + "_ci"] = [float(np.percentile(reps[good, j], lo)), float(np.percentile(reps[good, j], hi))]
+    vb = float(np.var(reps[good, 1], ddof=1)) if good.sum() > 1 else 0.0
+    vd = float(np.var(d, ddof=1)) if len(d) > 1 else 0.0
+    rec["n_effective"] = float(min(len(d), vd / vb)) if vb > 0 and vd > 1e-20 else float(len(d))
+    rec["rough"] = len(keys) < FEW_CI_BLOCKS
+    return rec
+
+
+def block_contrast(d, blocks, a, b, level=CI_LEVEL, n_boot=BOOT_N, seed=BOOT_SEED):
+    """median(d[a]) - median(d[b]) with a 95% interval from the same block bootstrap as block_intervals
+    (both groups resampled together, block by block: a camera-day holds frames of both). a, b: masks.
+    -> dict (difference, ci, n_a, n_b, blocks, resamples_with_both) or None when a group is empty."""
+    d = np.asarray(d, float)
+    ok = np.isfinite(d)
+    a, b = np.asarray(a, bool) & ok, np.asarray(b, bool) & ok
+    if not a.any() or not b.any():
+        return None
+    keys, blk = np.unique(np.asarray(blocks).astype(str), return_inverse=True)
+    rec = {"difference_m": float(np.median(d[a]) - np.median(d[b])), "n_a": int(a.sum()), "n_b": int(b.sum()),
+           "blocks": int(len(set(blk[a | b].tolist()))), "level": level}
+    if rec["blocks"] < MIN_CI_BLOCKS:
+        rec["note"] = f"only {rec['blocks']} camera-day(s), and an interval needs {MIN_CI_BLOCKS}"
+        return rec
+    draws = block_draws(len(keys), n_boot, seed)
+    diff = boot_stats(d[a], blk[a], draws)[:, 0] - boot_stats(d[b], blk[b], draws)[:, 0]
+    good = np.isfinite(diff)
+    rec["resamples_with_both"] = int(good.sum())
+    rec["ci"] = [float(np.percentile(diff[good], 50.0 * (1 - level))),
+                 float(np.percentile(diff[good], 50.0 * (1 + level)))] if good.sum() >= 20 else None
+    rec["rough"] = rec["blocks"] < FEW_CI_BLOCKS
+    return rec
+
+
+def within_block_contrast(d, blocks, a, b, block_what="camera-day(s) with both", level=CI_LEVEL, n_boot=BOOT_N,
+                          seed=BOOT_SEED):
+    """
+    median(d[a]) - median(d[b]) taken WITHIN each block (camera-day) that holds values of both groups,
+    and the median of those differences over the blocks, with a 95% interval from resampling them
+    (block_intervals, one difference per block). An error all of a block's values share (a camera-day's
+    water level, setup, pointing, a bad day) cancels in its own difference, however the two groups are
+    spread over the blocks. The difference of the pooled medians (block_contrast) carries such errors
+    into the contrast whenever one group falls more on some days than on others -- and the tide's stage
+    in daylight moves by ~50 min of phase a day, so it does. Blocks holding only one group are left out
+    (counted). -> dict (difference_m: the median over the blocks, mean_m, ci, mean_ci, n_a, n_b, blocks,
+    blocks_one_group, per_block, rough or note), or None when a group is empty.
+    """
+    d = np.asarray(d, float)
+    ok = np.isfinite(d)
+    a, b = np.asarray(a, bool) & ok, np.asarray(b, bool) & ok
+    if not a.any() or not b.any():
+        return None
+    blocks = np.asarray(blocks).astype(str)
+    keys = sorted(set(blocks[a | b].tolist()))
+    per = []
+    for k in keys:
+        ma, mb = a & (blocks == k), b & (blocks == k)
+        if ma.any() and mb.any():
+            per.append({"block": k, "n_a": int(ma.sum()), "n_b": int(mb.sum()),
+                        "difference_m": float(np.median(d[ma]) - np.median(d[mb]))})
+    rec = {"method": "within each block holding both groups: median(a) - median(b); the median of those over the "
+                     "blocks, its interval from resampling them",
+           "difference_m": None, "mean_m": None, "n_a": sum(p["n_a"] for p in per), "n_b": sum(p["n_b"] for p in per),
+           "blocks": len(per), "blocks_one_group": len(keys) - len(per), "level": level, "per_block": per}
+    if not per:
+        rec["note"] = f"no {block_what}"
+        return rec
+    diffs = np.array([p["difference_m"] for p in per])
+    rec["difference_m"], rec["mean_m"] = float(np.median(diffs)), float(diffs.mean())
+    iv = block_intervals(diffs, np.arange(len(per)), "blocks", block_what, level, n_boot, seed)
+    if iv.get("note"):
+        rec["note"] = iv["note"]
+        return rec
+    rec["ci"], rec["mean_ci"], rec["rough"] = iv["median_ci"], iv["mean_ci"], iv["rough"]
+    return rec
+
+
+def alongshore_correlogram(d, s_along, max_values=CORRELOGRAM_MAX_VALUES, seed=BOOT_SEED):
+    """
+    How the errors are correlated along the shore: for pairs of compared values binned by their distance
+    along the shore (LAG_BINS), the semivariance gamma = mean of (d_i - d_j)^2 / 2 and the correlation
+    1 - gamma / var(d) (the empirical variogram of the residuals, e.g. Rolstad et al. 2009, J. Glaciol.
+    55:666, for DEM errors). Over max_values values a fixed random subset is used.
+    -> (list of {lag_m: [lo, hi], pairs, correlation}, correlation length or None): the length is where
+    the correlation first falls to RHO_GONE, interpolated between the bins' (geometric) centres; 0 when
+    the shortest bin is already there; None when it never falls that low inside the compared stretch
+    (the errors are correlated over all of it).
+    """
+    d, s_along = np.asarray(d, float), np.asarray(s_along, float)
+    ok = np.isfinite(d) & np.isfinite(s_along)
+    d, s_along = d[ok], s_along[ok]
+    if len(d) > max_values:
+        keep = np.sort(np.random.RandomState(seed).choice(len(d), max_values, replace=False))
+        d, s_along = d[keep], s_along[keep]
+    v = float(np.var(d)) if len(d) > 1 else 0.0
+    if v <= 0:
+        return [], None
+    edges = np.asarray(LAG_BINS, float)
+    gsum = np.zeros(len(edges) - 1)
+    npair = np.zeros(len(edges) - 1)
+    for i in range(len(d) - 1):
+        lag = np.abs(s_along[i + 1:] - s_along[i])
+        k = np.digitize(lag, edges) - 1
+        use = (k >= 0) & (k < len(gsum))
+        gsum += np.bincount(k[use], weights=0.5 * (d[i + 1:][use] - d[i]) ** 2, minlength=len(gsum))
+        npair += np.bincount(k[use], minlength=len(gsum))
+    out = []
+    for j in range(len(gsum)):
+        if npair[j] >= MIN_LAG_PAIRS:
+            out.append({"lag_m": [float(edges[j]), float(edges[j + 1])], "pairs": int(npair[j]),
+                        "correlation": float(1.0 - gsum[j] / npair[j] / v)})
+    if not out:
+        return out, None
+    centre = [np.sqrt(max(r["lag_m"][0], 1.0) * r["lag_m"][1]) for r in out]
+    rho = [r["correlation"] for r in out]
+    if rho[0] <= RHO_GONE:
+        return out, 0.0
+    for k in range(1, len(out)):
+        if rho[k] <= RHO_GONE:
+            t = (rho[k - 1] - RHO_GONE) / (rho[k - 1] - rho[k])
+            return out, float(centre[k - 1] + t * (centre[k] - centre[k - 1]))
+    return out, None
+
+
+def interval_text(r, what="median_ci"):
+    """'[lo, hi]' of an interval record's key, or '[-]' when there is none."""
+    ci = r.get(what)
+    return f"[{ci[0]:+.3f}, {ci[1]:+.3f}]" if ci else "[-]"
+
+
+def dem_intervals(d, E, N, cam, dist, axis, axis_how, unit, block_m=ALONGSHORE_BLOCK_M):
+    """
+    95% intervals of DEM - survey, overall, per camera and per distance band, the compared cells (or
+    points) resampled in stretches along the shore (block_intervals). Neighbouring DEM cells are not
+    independent -- they share frames, and a frame's error (its water level, setup, pointing) lies along
+    its whole line -- so a statistic over n cells is worth fewer than n values. How far the errors stay
+    correlated is read off the residuals themselves (alongshore_correlogram: where their correlation
+    falls to RHO_GONE), and a stretch is that long, but never shorter than block_m. Where the residuals
+    stay correlated over the whole compared stretch there is no length to take: block_m is used and the
+    report says the intervals are too narrow. -> (record for the json, lines for the report)
+    """
+    d = np.asarray(d, float)
+    s_along = np.asarray(E, float) * axis[0] + np.asarray(N, float) * axis[1]
+    gram, corr_len = alongshore_correlogram(d, s_along)
+    length = float(max(block_m, corr_len)) if corr_len is not None else float(block_m)
+    blocks = alongshore_blocks(E, N, axis, length)
+    what = f"stretch(es) of {length:.0f} m along the shore"
+    groups = [("overall", "all", np.ones(len(d), bool))]
+    groups += [("camera", c, cam == c) for c in sorted(set(np.asarray(cam).tolist()))]
+    for lo, hi in zip(DISTANCE_BINS, DISTANCE_BINS[1:]):
+        m = (dist >= lo) & (dist < hi)
+        if m.any():
+            groups.append(("distance", f"{lo:.0f}-{hi:.0f} m" if hi < 1e8 else f">{lo:.0f} m", m))
+    rows = []
+    for gt, g, m in groups:
+        if np.isfinite(d[m]).any():
+            st = stats(d[m])
+            rows.append(dict(block_intervals(d[m], blocks[m], unit, what), group_type=gt, group=g,
+                             median=st["median"], mean=st["mean"], rmse=st["rmse"]))
+    span = float(np.ptp(s_along[np.isfinite(d)])) if np.isfinite(d).any() else 0.0
+    rec = {"method": f"block bootstrap: the compared {unit} resampled in stretches along the shore, {BOOT_N} times; "
+                     f"{100 * CI_LEVEL:.0f}% percentile intervals; n_effective = var(values) / var(resampled means)",
+           "alongshore": axis_how, "block_m": length, "block_m_min": block_m, "correlation_length_m": corr_len,
+           # False: too few pairs of values (or no scatter) to measure the correlation at all -- a correlation
+           # length of None then means 'not measured', not 'correlated over the whole stretch'
+           "correlation_measured": bool(gram), "correlogram": gram, "alongshore_span_m": span,
+           # how many independent stretches the compared values make, from the correlogram alone: the span along
+           # the shore over the correlation length (at least 1); None when the length is not known, or 0 (the
+           # values look independent from the shortest lag: as many as there are values)
+           "independent_stretches": (max(1.0, span / corr_len) if corr_len else None), "rows": rows}
+    lines = ["", f"UNCERTAINTY OF THE STATISTICS ({100 * CI_LEVEL:.0f}% intervals: the compared {unit} resampled in "
+                 f"{length:.0f} m stretches along the shore, {BOOT_N} times)",
+             f"  {'':>16s} {unit:>7s} {'blocks':>6s} {'n_eff':>6s} {'median':>7s} {'[95% interval]':>18s} "
+             f"{'RMSE':>6s} {'[95% interval]':>16s}"]
+    for r in rows:
+        lines.append(f"  {r['group']:>16s} {r['n']:>7d} {r['blocks']:>6d} "
+                     + (f"{r['n_effective']:>6.0f} " if r.get("n_effective") is not None else f"{'-':>6s} ")
+                     + f"{r['median']:>+7.3f} {interval_text(r, 'median_ci'):>18s} {r['rmse']:>6.3f} "
+                     + (f"{'[%.3f, %.3f]' % tuple(r['rmse_ci']):>16s}" if r.get("rmse_ci") else f"{'[-]':>16s}")
+                     + ("  (rough: few blocks)" if r.get("rough") else "")
+                     + (f"  (no interval: {r['blocks']} block(s))" if r.get("note") else ""))
+    txt = f"along the shore: {axis_how}. "
+    if gram:
+        txt += (f"The residuals' correlation along the shore (1 - semivariance / variance, by distance apart): "
+                + ", ".join(f"{g['correlation']:+.2f} at {g['lag_m'][0]:.0f}-{g['lag_m'][1]:.0f} m" for g in gram) + ". ")
+    if not gram:
+        txt += (f"Too few pairs of {unit} to measure how far their errors are correlated along the shore: the "
+                f"{block_m:g} m stretches are resampled as if independent. ")
+    elif corr_len is None:
+        txt += (f"It does not fall to {RHO_GONE:g} inside the compared stretch: the errors are correlated over all "
+                f"of it, the {block_m:g} m stretches resampled are NOT independent, and these intervals are too "
+                f"narrow. ")
+    elif corr_len > block_m:
+        txt += f"It falls to {RHO_GONE:g} at ~{corr_len:.0f} m: stretches that long are resampled. "
+    else:
+        txt += (f"It falls to {RHO_GONE:g} within ~{max(corr_len, 1.0):.0f} m, inside the {block_m:g} m stretches "
+                f"resampled. ")
+    if rec["independent_stretches"] is not None:
+        txt += (f"The {unit} compared span {span:.0f} m along the shore: about {rec['independent_stretches']:.0f} "
+                f"independent stretch(es), however many {unit} there are. ")
+    txt += ("The intervals hold the errors that differ from one stretch of the shore to the next. An error every "
+            "cell shares -- the water-level datum, the setup coefficient, a camera's pointing over the whole window "
+            "-- is the same in every resample: it moves the median, not its interval.")
+    lines += ["  " + ln for ln in textwrap.wrap(txt, 100)]
+    return rec, lines
+
+
+def interval_headline(iv_rec, what):
+    """
+    The INTERVAL line under the HEADLINE, from dem_intervals' record: the 95% interval of the overall
+    median and RMSE, how many stretches were resampled and the effective sample size; or, with too few
+    stretches, why there is none and how many independent stretches the compared values make. Where the
+    correlation could not be measured, or the values look independent from the shortest lag, it says
+    so, as the UNCERTAINTY paragraph does.
+    """
+    r0 = iv_rec["rows"][0]
+    gram, corr_len = iv_rec.get("correlogram"), iv_rec["correlation_length_m"]
+    if not gram:
+        why = ("; too few pairs of values to measure how far their errors are correlated: the stretches are "
+               "resampled as if independent")
+    elif corr_len is None:
+        why = ("; the errors are correlated over the whole stretch compared, so this interval is too narrow"
+               if r0.get("median_ci") else "; the errors stay correlated over the whole stretch compared: about "
+                                           "one independent stretch")
+    elif corr_len == 0:
+        why = (f"; the errors look independent from the shortest distance apart compared "
+               f"({gram[0]['lag_m'][0]:.0f}-{gram[0]['lag_m'][1]:.0f} m): effective n about the {r0['n']} {what}"
+               if not r0.get("median_ci") else "")
+    else:
+        why = ""
+    if r0.get("median_ci"):
+        return ("INTERVAL   : "
+                f"{100 * CI_LEVEL:.0f}%: median {interval_text(r0, 'median_ci')} m, RMSE [{r0['rmse_ci'][0]:.3f}, "
+                f"{r0['rmse_ci'][1]:.3f}] m ({r0['blocks']} stretches of {iv_rec['block_m']:.0f} m along the shore "
+                f"resampled; effective n ~{r0['n_effective']:.0f} of {r0['n']} {what}" + why
+                + ": UNCERTAINTY below)")
+    return ("INTERVAL   : " + f"none: {r0.get('note')}"
+            + (f"; the {r0['n']} {what} span {iv_rec['alongshore_span_m']:.0f} m along the shore and their errors "
+               f"stay correlated over ~{corr_len:.0f} m: about "
+               f"{iv_rec['independent_stretches']:.0f} independent stretch(es)"
+               if iv_rec.get("independent_stretches") else "") + why + " (UNCERTAINTY below)")
+
+
+# ---------------------------------------------------------------------
 # The label
 # ---------------------------------------------------------------------
 
 def _rank(label):
     return LABELS.index(label) if label in LABELS else 0
+
+
+def suggested_label(label, findings):
+    """
+    The label the checks suggest: the worst of the label passed and every finding's suggestion
+    (audit_label: a comparison is never better than its weakest step). A finding can only make it
+    worse, never better, and a suggestion that is not one of LABELS (None: a note) is ignored.
+    """
+    worst = label
+    for sug, _, _ in findings:
+        if sug and _rank(sug) > _rank(worst):
+            worst = sug
+    return worst
 
 
 def _date_from_name(name):
@@ -959,6 +1424,20 @@ def same_survey(name, survey_path, dirs=()):
     return bool(q and q.resolve() != s.resolve() and file_sha256(q) == file_sha256(s))
 
 
+# A survey file as the notes of a fit name it ('fitted to <survey>': fit_eo_to_survey.py writes its file name)
+SURVEY_FILE = re.compile(r"\.(tif|tiff|asc|csv|txt|laz|las|xyz|dat)$", re.IGNORECASE)
+
+
+def names_file(word):
+    """
+    Does the word after 'fitted to' in a note name a file? Yes for a survey file name (SURVEY_FILE:
+    fit_eo_to_survey.py writes Path(survey).name), a path, or a file stem without its extension (the
+    station's surveys all carry an underscore: 2025005FA_Marconi_Jan_YSMP_Lidar_DSM_25cm,
+    2026-09-29_Marconi_Checkshots); no for a word of a sentence ('fitted to the Jan 2025 lidar': 'the').
+    """
+    return bool(SURVEY_FILE.search(word)) or "/" in word or "\\" in word or "_" in word
+
+
 def pointing_lineage(eo_path, dirs=(), _depth=0):
     """
     Where a camera pointing came from, following the files its notes name.
@@ -968,6 +1447,8 @@ def pointing_lineage(eo_path, dirs=(), _depth=0):
         EO>' in its notes: the change a survey fit made, CARRIED to another period. Such a pointing
         is as survey-derived as the fit it came from, so the fit file is read in turn (looked for
         next to the EO, then in `dirs`) for the survey it was fitted to.
+    A 'fitted to X' whose X is not a file name (names_file: 'fitted to the Jan 2025 lidar') names no
+    survey that can be checked: that link is unresolved, like one that names none.
     -> {"survey_fit": bool, "fitted_to": [survey names], "chain": [file names],
         "unresolved": [why the survey of a link is not known], "notes": all notes read}
     """
@@ -981,9 +1462,16 @@ def pointing_lineage(eo_path, dirs=(), _depth=0):
     if direct:
         out["survey_fit"] = True
         ft = [x.rstrip(".,;:)'\"") for x in re.findall(r"fitted to (\S+)", notes)]
-        if ft:
-            out["fitted_to"] += ft
-        else:
+        # 'fitted to the Jan 2025 lidar' (a note written by hand) names no file: which survey is not known,
+        # as if it named none -- never a fit to 'another survey' called 'the'
+        files_ = [x for x in ft if names_file(x)]
+        for x in ft:
+            if x not in files_:
+                out["unresolved"].append(f"{p.name} says it was fitted to '{x} ...', not a file name: which survey "
+                                         f"is not known")
+        if files_:
+            out["fitted_to"] += files_
+        elif not ft:
             out["unresolved"].append(f"{p.name} is a survey fit (fit_eo_to_survey.py naming) and does not "
                                      f"say which survey")
     if carried:
@@ -1020,6 +1508,9 @@ def lineage_text(lin):
 # survey fit that does not say which survey): survey_products.py lets a reason written in
 # surveys.csv overrule it. 'note': no downgrade.
 KINDS = ("chain", "rule", "note")
+# provenance.json keys that hold sentences, not file names (the calibration history note, how a step was done,
+# why, the table's notes): a survey named there is a mention, not a file the step used
+PROSE_KEY = re.compile(r"(^|[._\]])(history|how|why|note|notes|text|statement|reason|what)(\[\d+\])?$")
 
 
 def dem_setup(dem_path, dem_info=None):
@@ -1116,6 +1607,7 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
     gcp_file = survey_type == "points" and re.search(r"target|gcp", sname, re.I)
     gcp_date = _date_from_name(sname) if gcp_file else None
     look = list(dirs) + [HERE / "calibration"]
+    cal_flag = False                  # a camera's calibration found to rest on these points (date or notes)
     for cam, c in sorted((cams or {}).items()):
         p = Path(c["eo_path"])
         lin = pointing_lineage(p, look)
@@ -1128,6 +1620,15 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
                                       + ("carries a correction fitted to" if len(lin["chain"]) > 1 else
                                          "was fitted to")
                                       + f" this survey{via} (notes: '{textwrap.shorten(notes, 170)}')", "chain"))
+        elif named and gcp_file:
+            # calibration targets named by the calibration (solved from them?): the pointing would rest on these
+            # points, the elevations still come from water levels -- PARTLY-CIRCULAR, as the date rule below and
+            # the label's definition (LABELS, the docstring) say
+            cal_flag = True
+            found.append(("PARTLY-CIRCULAR", f"{cam} calibration {p.name} names these calibration targets in its "
+                                             f"notes (solved from them?): the pointing would rest on them, the "
+                                             f"elevations still come from water levels -> PARTLY-CIRCULAR "
+                                             f"('{textwrap.shorten(notes, 150)}')", "rule"))
         elif named:
             found.append(("CIRCULAR", f"{cam} calibration {p.name} names this survey in its notes (was it "
                                       f"fitted to it?): '{textwrap.shorten(notes, 170)}'", "rule"))
@@ -1142,6 +1643,7 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
         eo_date = _date_from_name(p.name)
         hist = history_note(p)
         if survey_type == "points" and eo_date and (eo_date == survey_date or eo_date == gcp_date):
+            cal_flag = True
             found.append(("PARTLY-CIRCULAR", f"{cam} calibration {p.name} is dated the day of these "
                           f"points ({eo_date}): if it was solved from them, the pointing is fitted to "
                           f"them (elevations still come from water levels) -> PARTLY-CIRCULAR"
@@ -1154,7 +1656,7 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
         found.append(("PARTLY-CIRCULAR", f"{sname} looks like calibration targets (GCPs): if the "
                       f"cameras' calibration was solved from these points, the comparison is "
                       f"PARTLY-CIRCULAR (no --camera-eo to check)", "rule"))
-    elif gcp_file and not any(f[0] == "PARTLY-CIRCULAR" for f in found):
+    elif gcp_file and not cal_flag:
         found.append((None, f"{sname} looks like calibration targets (GCPs), but no camera EO "
                             f"given is dated {gcp_date or 'their day'}: not the calibration's own points", "note"))
     if envelope_source:
@@ -1179,10 +1681,16 @@ def audit_label(label, survey_path, survey_type, survey_date, cams, envelope_sou
             k = key.lower()
             if "compar" in k or not (sname in val or (len(sstem) > 6 and sstem in val)):
                 continue
+            # a file a step used (an envelope's survey, a fit's) is what the chain did; a SENTENCE that mentions the
+            # survey (a history note, a 'how') may say it was not used ('independent of ...'): the same suggestion,
+            # as a rule that can misfire (survey_products.py lets a reason in surveys.csv overrule it)
+            prose = PROSE_KEY.search(k) is not None
+            kind = "rule" if prose else "chain"
+            in_text = " (in a sentence, not as a file the step used: was it used?)" if prose else ""
             if "envelope" in k:
-                found.append(("PARTLY-CIRCULAR", f"provenance {pj.name}: {key} = {val}", "chain"))
+                found.append(("PARTLY-CIRCULAR", f"provenance {pj.name}: {key} = {val}{in_text}", kind))
             elif re.search(r"calib|pointing|fit|(^|[._\[])eo([._\]]|$)", k):
-                found.append(("CIRCULAR", f"provenance {pj.name}: {key} = {val}", "chain"))
+                found.append(("CIRCULAR", f"provenance {pj.name}: {key} = {val}{in_text}", kind))
             else:
                 found.append((None, f"provenance {pj.name} names this survey at {key}", "note"))
         if not envelope_source:
@@ -1461,6 +1969,195 @@ def elevation_range(z):
     p5, med, p95 = np.percentile(z, [5, 50, 95])
     return {"n": int(len(z)), "min": float(z.min()), "p5": float(p5), "median": float(med),
             "p95": float(p95), "max": float(z.max())}
+
+
+def group_median(vals, keys):
+    """The median of vals for each distinct key. -> (keys, medians, index of each key's first value)."""
+    vals, keys = np.asarray(vals, float), np.asarray(keys)
+    o = np.argsort(keys, kind="stable")
+    ks, vs = keys[o], vals[o]
+    if not len(ks):
+        return ks, np.zeros(0), np.zeros(0, int)
+    starts = np.flatnonzero(np.r_[True, ks[1:] != ks[:-1]])
+    ends = np.r_[starts[1:], len(ks)]
+    return ks[starts], np.array([np.median(vs[a:b]) for a, b in zip(starts, ends)]), o[starts]
+
+
+def frame_properties(cont):
+    """
+    What each frame of the waterlines read was taken in, for the strata: {frame: dz/dt of its water level,
+    m/h} (dem_from_contours.water_level_rates: from the still-water levels of the frames either side,
+    every frame read, not only those compared; NaN without a capture_epoch), {frame: offshore Hs, m} and
+    {frame: its camera-day, the block the intervals resample (the local day, as the DEM's day test; the
+    UTC day of capture_time_utc without an epoch)}. -> (rate_of, hs_of, block_of)
+    """
+    from dem_from_contours import water_level_rates, local_day
+    names, first = np.unique(np.asarray(cont["frame"]).astype(str), return_index=True)
+    ep, zt, hs = cont["epoch"][first], cont["Zt"][first], cont["hs"][first]
+    info = {f: {"epoch": float(e), "tide": float(z)} for f, e, z in zip(names.tolist(), ep, zt)}
+    rate_of = water_level_rates(info) if info else {}
+    hs_of = {f: float(h) for f, h in zip(names.tolist(), hs)}
+    block_of = {}
+    for f, e, k in zip(names.tolist(), ep, first):
+        block_of[f] = f"{cont['cam'][k]} {local_day(e) if np.isfinite(e) else cont['day'][k]}"
+    return rate_of, hs_of, block_of
+
+
+def camera_range(E, N, cam, cams=None):
+    """Distance (m) of each position from the camera that saw it: its EO position with --camera-eo,
+    else the tower's (TOWER_EN; c1 and c2 stand within ~2 m of each other)."""
+    xy = {c: tuple(v["eo"][:2]) for c, v in (cams or {}).items()}
+    cam = np.asarray(cam).tolist()
+    cx = np.array([xy.get(c, TOWER_EN)[0] for c in cam], float)
+    cy = np.array([xy.get(c, TOWER_EN)[1] for c in cam], float)
+    return np.hypot(np.asarray(E, float) - cx, np.asarray(N, float) - cy)
+
+
+def waterline_strata(d, frame, cam, rng_m, rate_of, hs_of, block_of, stage_rate=STAGE_RATE):
+    """
+    Waterline - survey by the TIDE'S STAGE, the WAVES and the RANGE from the camera, with 95% intervals.
+    Each frame gives ONE value, the median of its values on the survey (a frame's points share one water
+    level and one detection, and pooled points weigh a frame by its line's length), and per range band
+    one value per frame and band. Stage: flood where the frame's water level rises faster than
+    stage_rate m/h, ebb where it falls faster, slack between (no rate: not staged). Waves: offshore Hs in
+    thirds of the compared frames (the cut points are reported). Intervals by camera-day blocks
+    (block_intervals): a day's frames share its water-level, wave-setup and pointing errors, so the
+    flood and ebb rows, pooling different days, carry those days' errors too.
+    Two contrasts with intervals test the method: flood - ebb WITHIN camera-days (a line older than its
+    water level reads high on the flood and low on the ebb: the timing error, review B1;
+    within_block_contrast, so a day's own error cancels however the stages fall on the days), and the
+    highest third of Hs - the lowest (a setup coefficient too large or too small reads high or low in big
+    waves; block_contrast of the pooled thirds: between days by construction, Hs hardly changing within
+    a day, so an error of whole days that falls on the big- or small-wave days reads the same way).
+    d, frame, cam, rng_m: per value (a frame, a line point or a (frame, survey point) pair).
+    -> (record for the json, lines for the report) or (None, []) when nothing was compared.
+    """
+    d = np.asarray(d, float)
+    ok = np.isfinite(d)
+    if not ok.any():
+        return None, []
+    frame = np.asarray(frame).astype(str)[ok]
+    cam = np.asarray(cam).astype(str)[ok]
+    rng_m = np.asarray(rng_m, float)[ok]
+    d = d[ok]
+    fk, fmed, first = group_median(d, frame)
+    fcam = cam[first]
+    fblk = np.array([block_of.get(f, f"{c} ?") for f, c in zip(fk.tolist(), fcam.tolist())])
+    frate = np.array([rate_of.get(f, np.nan) for f in fk.tolist()], float)
+    fhs = np.array([hs_of.get(f, np.nan) for f in fk.tolist()], float)
+    rows = []
+
+    def row(kind, name, m, vals, blks):
+        if not m.any():
+            return
+        r = dict({"group_type": kind, "group": name, "frames": int(m.sum()),
+                  "camera_days": int(len(set(blks[m].tolist())))}, **stats(vals[m]))
+        r["interval"] = block_intervals(vals[m], blks[m], "frames", "camera-day(s)")
+        rows.append(r)
+    row("all", "all frames", np.ones(len(fk), bool), fmed, fblk)
+    with np.errstate(invalid="ignore"):
+        flood, ebb = frate > stage_rate, frate < -stage_rate
+        slack = np.abs(frate) <= stage_rate
+    row("stage", "flood", flood, fmed, fblk)
+    row("stage", "ebb", ebb, fmed, fblk)
+    row("stage", "slack", slack, fmed, fblk)
+    hsok = np.isfinite(fhs)
+    cuts, lo_hs, hi_hs = None, None, None
+    if hsok.sum() >= 3 and np.ptp(fhs[hsok]) > 0:
+        cuts = [float(x) for x in np.percentile(fhs[hsok], [100.0 / 3, 200.0 / 3])]
+        lo_hs, hi_hs = hsok & (fhs <= cuts[0]), hsok & (fhs > cuts[1])
+        row("hs", f"Hs <= {cuts[0]:.2f} m", lo_hs, fmed, fblk)
+        row("hs", f"Hs {cuts[0]:.2f}-{cuts[1]:.2f} m", hsok & (fhs > cuts[0]) & (fhs <= cuts[1]), fmed, fblk)
+        row("hs", f"Hs > {cuts[1]:.2f} m", hi_hs, fmed, fblk)
+    both_stages = "camera-day(s) with both stages"
+    band = np.digitize(rng_m, DISTANCE_BINS[1:-1])
+    bk, bmed, bfirst = group_median(d, np.char.add(np.char.add(frame, "|"), band.astype(str)))
+    bband = band[bfirst]
+    bblk = np.array([block_of.get(f, f"{c} ?") for f, c in zip(frame[bfirst].tolist(), cam[bfirst].tolist())])
+    for i, (lo, hi) in enumerate(zip(DISTANCE_BINS, DISTANCE_BINS[1:])):
+        row("range", f"{lo:.0f}-{hi:.0f} m" if hi < 1e8 else f">{lo:.0f} m", bband == i, bmed, bblk)
+    rec = {"unit": "one value per frame (the median of its values on the survey); per range band, one per "
+                   "frame and band",
+           "intervals": f"{100 * CI_LEVEL:.0f}%, {BOOT_N} resamples of the camera-days (block_intervals)",
+           "stage_rate_m_per_h": stage_rate, "frames_without_rate": int((~np.isfinite(frate)).sum()),
+           "frames_without_hs": int((~hsok).sum()), "hs_tercile_cuts_m": cuts,
+           "rows": rows, "flood_minus_ebb": within_block_contrast(fmed, fblk, flood, ebb, both_stages),
+           "high_minus_low_hs": (block_contrast(fmed, fblk, hi_hs, lo_hs) if cuts else None)}
+    # the same contrasts camera by camera: the cameras' timing need not be the same, and an error of one camera
+    # (snow on its lens, its pointing) that falls more on one wave height than the other would otherwise read
+    # as the method's
+    cams_ = sorted(set(fcam.tolist()))
+    if len(cams_) > 1:
+        rec["by_camera"] = {c: {"flood_minus_ebb": within_block_contrast(fmed, fblk, flood & (fcam == c),
+                                                                         ebb & (fcam == c), both_stages),
+                                "high_minus_low_hs": (block_contrast(fmed, fblk, hi_hs & (fcam == c), lo_hs & (fcam == c))
+                                                      if cuts else None)} for c in cams_}
+    lines = ["", f"  WATERLINES BY TIDE STAGE, WAVES AND RANGE (one value per frame: the median of its values on the "
+                 f"survey;", f"  {100 * CI_LEVEL:.0f}% intervals by resampling camera-days, {BOOT_N} times: a day's "
+                 f"frames share its water level, setup and pointing)",
+             f"  {'':>18s} {'frames':>6s} {'days':>5s} {'median':>7s} {'[95% interval]':>18s} {'NMAD':>6s} "
+             f"{'RMSE':>6s} {'[95% interval]':>16s}"]
+    head_of = {"stage": f"  stage (dz/dt beyond +/-{stage_rate:g} m/h):", "hs": "  offshore Hs (thirds of the frames):",
+               "range": "  range from the camera (m):"}
+    seen = set()
+    for r in rows:
+        if r["group_type"] in head_of and r["group_type"] not in seen:
+            seen.add(r["group_type"])
+            lines.append(head_of[r["group_type"]])
+        iv = r["interval"]
+        lines.append(f"  {r['group']:>18s} {r['frames']:>6d} {r['camera_days']:>5d} {r['median']:>+7.3f} "
+                     f"{interval_text(iv, 'median_ci'):>18s} {fv(r['nmad'], '{:.3f}'):>6s} {r['rmse']:>6.3f} "
+                     + (f"{'[%.3f, %.3f]' % tuple(iv['rmse_ci']):>16s}" if iv.get("rmse_ci") else f"{'[-]':>16s}")
+                     + ("  (few)" if r["frames"] < MIN_BAND_N else "")
+                     + ("  (rough: few days)" if iv.get("rough") else ""))
+    if rec["frames_without_rate"]:
+        lines.append(f"  {rec['frames_without_rate']} frame(s) without a water-level rate (no capture_epoch, or no frame "
+                     f"within 75 min) are in 'all frames' only")
+    if any(r["group_type"] == "stage" for r in rows):
+        lines += ["  " + ln for ln in textwrap.wrap(
+            "The flood, ebb and slack rows pool different camera-days, and so the errors of those days (a bad day, "
+            "a pointing drift): they describe, they do not test the timing. flood - ebb below is taken within "
+            "camera-days.", 100)]
+
+    def num(v_):
+        return "-" if v_ is None else f"{v_:+.3f}"
+    c = rec["flood_minus_ebb"]
+    if c:
+        ci = c.get("ci")
+        per_cam = [(cc_, v_["flood_minus_ebb"]) for cc_, v_ in sorted((rec.get("by_camera") or {}).items())
+                   if v_.get("flood_minus_ebb")]
+        lines += ["  " + ln for ln in textwrap.wrap(
+            f"flood - ebb within camera-days: {num(c['difference_m'])} m "
+            + (f"[{ci[0]:+.3f}, {ci[1]:+.3f}]" if ci else "(no interval: " + (c.get("note") or "too few resamples") + ")")
+            + f" (median over the {c['blocks']} camera-day(s) holding both stages, {c['n_a']} / {c['n_b']} frames; "
+            + f"{c['blocks_one_group']} camera-day(s) of one stage left out"
+            + ("; rough: few days" if c.get("rough") else "") + ")"
+            + ("; by camera " + ", ".join(
+                f"{cc_} {num(v_['difference_m'])}" + (f" [{v_['ci'][0]:+.3f}, {v_['ci'][1]:+.3f}]" if v_.get("ci") else "")
+                + f" ({v_['blocks']} day(s))" for cc_, v_ in per_cam) if per_cam else "")
+            + ": a line older than its water level reads high on the flood and low on the ebb (the timing error, "
+              "review B1); a camera-day's own error (its water level, setup, pointing) cancels in its difference. "
+            + ("An interval that excludes 0 says the difference is more than the camera-days' scatter." if ci else ""),
+            100)]
+    c = rec["high_minus_low_hs"]
+    if c:
+        ci = c.get("ci")
+        per_cam = [(cc_, v_["high_minus_low_hs"]) for cc_, v_ in sorted((rec.get("by_camera") or {}).items())
+                   if v_.get("high_minus_low_hs")]
+        lines += ["  " + ln for ln in textwrap.wrap(
+            f"highest - lowest third of Hs: {c['difference_m']:+.3f} m "
+            + (f"[{ci[0]:+.3f}, {ci[1]:+.3f}]" if ci else "(no interval: " + (c.get("note") or "too few resamples") + ")")
+            + f" ({c['n_a']} / {c['n_b']} frames, {c['blocks']} camera-days"
+            + ("; rough: few days" if c.get("rough") else "") + ")"
+            + ("; by camera " + ", ".join(
+                f"{cc_} {v_['difference_m']:+.3f}" + (f" [{v_['ci'][0]:+.3f}, {v_['ci'][1]:+.3f}]" if v_.get("ci") else "")
+                + f" ({v_['n_a']} / {v_['n_b']})" for cc_, v_ in per_cam) if per_cam else "")
+            + ": a setup coefficient too large reads high in big waves, too small low. Between days by construction "
+              "(Hs hardly changes within a day): an error of whole days (a bad day, a pointing drift) that falls on "
+              "the big- or small-wave days reads the same way. "
+            + ("An interval that excludes 0 says the difference is more than the days' random scatter, not that it "
+               "is the setup's." if ci else ""), 100)]
+    return rec, lines
 
 
 # ---------------------------------------------------------------------
@@ -1761,11 +2458,13 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
             spread=None, count=None, envelope_source=None, min_cover=0.5, tolerance=1.0,
             epsg=DEFAULT_EPSG, plot=True, transect_tolerance=TRANSECT_TOLERANCE,
             transect_split=TRANSECT_SPLIT, transect_min_points=TRANSECT_MIN_POINTS, eo_dirs=None,
-            synthetic=None):
+            synthetic=None, block_m=ALONGSHORE_BLOCK_M, camera_eo_day=None):
     """
     Compares a DEM with a survey and writes the outputs. camera_eo / camera_io: {cam: path};
+    camera_eo_day: {cam: {UTC day: path}}, the EO a day's lines were mapped with (--camera-eo-day);
     eo_dirs: folders where the files an EO's notes name (a carried correction's fit) are looked for;
     synthetic: a note when the DEM was built from SYNTHETIC test photos (printed on every output).
+    block_m: the length of the stretches of the shore the intervals resample (dem_intervals).
     Returns the headline (also written as NAME_comparison.json).
     """
     t0 = time.time()
@@ -1807,9 +2506,19 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         print(f"photo dates       : {photo_dates[0]} to {photo_dates[1]} (from {info_p.name})")
 
     cams = load_cameras(camera_eo or {}, camera_io or {}) if camera_eo else {}
+    from georectify import load_extrinsics
+    for cam, days_ in sorted((camera_eo_day or {}).items()):
+        if cam not in cams:
+            sys.exit(f"--camera-eo-day {cam}: give its calibration with --camera-eo too")
+        for d_, p_ in days_.items():
+            if not Path(p_).exists():
+                sys.exit(f"--camera-eo-day {cam}:{d_}: {p_} not found")
+        cams[cam]["eo_by_day"] = {d_: load_extrinsics(p_) for d_, p_ in sorted(days_.items())}
     for cam, c in sorted(cams.items()):
         print(f"camera {cam:11s}: EO {Path(c['eo_path']).name}, IO "
-              f"{Path(c['io_path']).name if c['io_path'] else 'not found (footprint not used)'}")
+              f"{Path(c['io_path']).name if c['io_path'] else 'not found (footprint not used)'}"
+              + (f"; its own pointing on {', '.join(c['eo_by_day'])} (--camera-eo-day: the C = 0 lines)"
+                 if c.get("eo_by_day") else ""))
     if cams:
         camera_xy = tuple(np.mean([c["eo"][:2] for c in cams.values()], axis=0))
         camera_source = "from the EO files given"
@@ -1828,6 +2537,13 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
         rlo = min(lo_, w0) if (lo_ and w0) else (None if w0 else lo_)
         rhi = max(hi_, w1) if (hi_ and w1) else (None if w1 else hi_)
         cont = read_contours(contours, rlo, rhi)
+        # each frame's water-level rate, Hs and camera-day, from every frame read (the strata, below).
+        # Report only: if they cannot be read the strata are left out, never the comparison
+        try:
+            frame_props = frame_properties(cont)
+        except (ImportError, KeyError, ValueError, TypeError, IndexError) as exc:
+            frame_props = None
+            print(f"waterline strata  : not computed ({exc!r})")
         inside = np.ones(len(cont["E"]), bool)
         if lo_:
             inside &= cont["day"] >= lo_
@@ -1856,10 +2572,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     findings = audit_label(label, survey_path, survey_type, survey_date, cams, envelope_source,
                            dem_path, dirs=eo_dirs or (), dem_info=dem_info)
     outside, from_mid, gap_text = time_gap(survey_date, photo_dates)
-    worst = label
-    for sug, _, _ in findings:
-        if sug and _rank(sug) > _rank(worst):
-            worst = sug
+    worst = suggested_label(label, findings)
     warn_lines = []
     if worst != label:
         warn_lines.append(f"DOWNGRADE WARNING: passed {label}, but the checks below suggest "
@@ -2000,6 +2713,8 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                          f"{100 * (m & cmp_).sum() / max(m.sum(), 1):>5.0f}%")
         d = diff[cmp_]
         zref = sv[cmp_]
+        ivr, ivc = np.nonzero(cmp_)                   # the compared cells' centres, for the intervals
+        iv_E, iv_N, iv_Z = xll + (ivc + 0.5) * cell, ytop - (ivr + 0.5) * cell, zref
         cam_v = cam_grid[cmp_]
         dist_v = dist_grid[cmp_]
         part_v = cmp_part[cmp_]
@@ -2084,6 +2799,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                 d_all, grids["spread"][ri, ci] if "spread" in grids else None,
                 grids["count"][ri, ci] if "count" in grids else None))
         d = diffp[ok]
+        iv_E, iv_N, iv_Z, cam_v, dist_v = pts["E"][ok], pts["N"][ok], pts["Z"][ok], camp[ok], distp[ok]
         what = "points"
         # every point, compared or not, with why
         pp = out / f"{name}_points.csv"
@@ -2140,6 +2856,20 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     else:
         hl = f"no {what} to compare -- the DEM and the survey do not overlap"
         print(f"HEADLINE          : {hl}")
+    # how far to trust the headline: intervals from stretches of the shore resampled (dem_intervals).
+    # Report only: if they cannot be computed the comparison goes on without them (and says so)
+    iv_rec, iv_lines, ci_line = None, [], []
+    if s_all["n"]:
+        try:
+            axis = alongshore_axis(iv_E, iv_N, iv_Z)
+            iv_rec, iv_lines = dem_intervals(d, iv_E, iv_N, np.asarray(cam_v), np.asarray(dist_v, float),
+                                             axis[:2], axis[2], what, block_m)
+            ci_line = _wrap_text(interval_headline(iv_rec, what), 100, "             ")
+        except (ValueError, TypeError, KeyError, IndexError, MemoryError, np.linalg.LinAlgError) as exc:
+            iv_rec, iv_lines = None, []
+            ci_line = [f"INTERVAL   : not computed ({exc!r})"]
+        head["intervals"] = iv_rec
+        print(ci_line[0] if len(ci_line) == 1 else " ".join(x.strip() for x in ci_line))
     cams_ok = [r for r in rows if r["group_type"] == "camera" and str(r["group"]).startswith("c")
                and r["n"] >= MIN_BAND_N]
     by_cam = []
@@ -2154,7 +2884,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                                   f"below)", 100, "             ")
             print(by_cam[0])
     k_hl = 5 if synthetic else 4
-    lines[k_hl:k_hl] = ["", f"HEADLINE   : DEM - survey {hl}"] + by_cam + [
+    lines[k_hl:k_hl] = ["", f"HEADLINE   : DEM - survey {hl}"] + ci_line + by_cam + [
                   "             positive = DEM too HIGH; NMAD = 1.4826 x median |d - median| "
                   "(robust sd)", ""]
     table(lines, "OVERALL", [r for r in rows if r["group_type"] == "overall"], what)
@@ -2170,6 +2900,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
     table(lines, "BY THE DEM'S OWN SPREAD (16-84 percentile of its frames)",
           [r for r in rows if r["group_type"] == "dem_spread"], what)
     table(lines, "BY THE DEM'S FRAMES PER CELL", [r for r in rows if r["group_type"] == "dem_frames"], what)
+    lines += iv_lines
 
     # -- waterlines against the survey
     wl_rows = []
@@ -2326,6 +3057,22 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                          f"on the survey points, not on the number of values"
                          + (f" -- TOO FEW (fewer than {MIN_BAND_N} survey points): not an estimate"
                             if all_r[0]["survey_points"] < MIN_BAND_N else ""))
+        # the same values by the tide's stage, the waves and the range, one per frame, with intervals
+        strata = None
+        try:
+            if frame_props is not None:
+                if unit == "frames":
+                    # one value per frame already; its range: the median over its points on the transects
+                    pr = camera_range(cont["E"], cont["N"], cont["cam"], cams)
+                    fk_, fr_rng, _ = group_median(pr[okw], np.asarray(cont["frame"])[okw].astype(str))
+                    rng_of = dict(zip(fk_.tolist(), fr_rng.tolist()))
+                    rng_v = np.array([rng_of.get(str(f), np.nan) for f in per["frame"]], float)
+                else:
+                    rng_v = camera_range(cont["E"], cont["N"], cont["cam"], cams)
+                strata, st_lines = waterline_strata(dw, per["frame"], per["cam"], rng_v, *frame_props)
+                lines += st_lines
+        except (KeyError, ValueError, TypeError, IndexError) as exc:
+            print(f"waterline strata  : not computed ({exc!r})")
         head["waterlines"] = {"file": str(contours), "points": int(len(cont["E"])),
                               "points_on_survey": int(okw.sum()), "elevation_used": col,
                               "setup": setup_mode, "method": method, "how": how_w, "unit": unit,
@@ -2338,6 +3085,7 @@ def compare(dem_path, survey_path, survey_type, label, why, name=None, output_di
                                                                       "survey_points") if k in r} for r in bands_w]}
         if sp_col and all_r:
             head["waterlines"]["survey_points"] = all_r[0]["survey_points"]
+        head["waterlines"]["strata"] = strata
         if floor_sum is not None:
             head["waterlines"]["above_survey_floor"] = floor_sum
         # when and under what waves each camera's compared frames were taken (a camera difference is
@@ -2680,6 +3428,11 @@ def main():
     ap.add_argument("--camera-eo", nargs="+", default=None, metavar="CAM=PATH",
                     help="the EO files the DEM was built with: camera footprints, position, and "
                          "the label checks (e.g. c1=calibration/CACO03_c1_20250123_EO.yaml)")
+    ap.add_argument("--camera-eo-day", nargs="+", default=None, metavar="CAM:DAY=PATH",
+                    help="the EO a UTC day's lines were mapped with, other than --camera-eo's (survey_products.py "
+                         "--correct-pointing: waterlines/<cam>/pointing_corrected_eo/): the C = 0 sensitivity "
+                         "re-projects those days' lines with it (e.g. c1:2026-09-27=c1_2026-09-27_pointing_corrected_"
+                         "EO.yaml)")
     ap.add_argument("--camera-io", nargs="+", default=None, metavar="CAM=PATH",
                     help="lens files (default: the EO's setup IO, else CACO05_<cam>_20240801_IO.yaml)")
     ap.add_argument("--spread", default=None, help="STEM_spread.asc (default: next to the DEM)")
@@ -2712,6 +3465,10 @@ def main():
     ap.add_argument("--synthetic", default=None, metavar="NOTE",
                     help="the DEM was built from SYNTHETIC test photos (e.g. the test fixture): every output "
                          "says so ('SYNTHETIC FIXTURE: tests the pipeline, not the beach') with this note")
+    ap.add_argument("--block-m", type=float, default=ALONGSHORE_BLOCK_M,
+                    help=f"the length (m) of the stretches of the shore the intervals of DEM - survey resample "
+                         f"(default {ALONGSHORE_BLOCK_M:g}; the report says when neighbouring stretches err together, "
+                         f"i.e. when they are too short). Text and json only")
     ap.add_argument("--no-plot", action="store_true")
     args = ap.parse_args()
 
@@ -2730,7 +3487,8 @@ def main():
             count=args.count, envelope_source=args.envelope_source, min_cover=args.min_cover,
             tolerance=args.tolerance, epsg=args.epsg, plot=not args.no_plot,
             transect_tolerance=args.transect_tolerance, transect_split=args.transect_split,
-            transect_min_points=args.transect_min_points, eo_dirs=args.eo_dirs, synthetic=args.synthetic)
+            transect_min_points=args.transect_min_points, eo_dirs=args.eo_dirs, synthetic=args.synthetic,
+            block_m=args.block_m, camera_eo_day=parse_cam_day_specs(args.camera_eo_day, "--camera-eo-day"))
     return 0
 
 

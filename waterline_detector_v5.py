@@ -2,9 +2,37 @@
 # =====================================================================
 #
 #  USGS ARGUS SHORELINE DETECTOR
-#  Version 6.9
+#  Version 6.10
 #
 #  CHANGES IN THIS VERSION:
+#    - TIMING MODE (--timing-mode, or the TIMING_MODE environment
+#      variable; timex_timing.py). The default, "legacy", is v6.9 exactly:
+#      the temporal blend on and the timex bias of
+#      calibration/timex_bias_legacy.json, which holds the built-in v6.8
+#      values (the built-in ones are used if that file is missing, or
+#      with a WARNING if it cannot be read).
+#      "mid" is one half of the water-level timing fix (known finding
+#      C-B1); extract_elevation_contours.py --timing-mode mid is the other
+#      half, and the cron sets both from one line:
+#        * the blend is OFF. It is recursive (the stored previous line is
+#          itself blended), so a line trails mid-exposure by 0, 9, 11.7,
+#          ... up to 12.9 min along a chain of frames; a causal blend
+#          cannot be made lag-free;
+#        * the timex bias comes from calibration/timex_bias_mid.json,
+#          which recalibrate_timing.py derives on the NUC from the ground
+#          truth re-detected with the blend off. The v6.8 values were
+#          fitted with the blend on, on 11 Sep frames that were all on the
+#          flood, and absorbed ~2.8 px (c1) / ~2.6 px (c2) of blend lag:
+#          with the blend off they would over-correct. Without that file a
+#          mid timex run refuses to start, for any camera it has photos of
+#          whose bias is on (detect_original_view.py's one camera, bias
+#          off, runs);
+#        * every row of a mid detection CSV says so (Timing_Mode = mid),
+#          so the contour step never gives it a level of the other mode.
+#      The snap corrections are unchanged in mid mode (also fitted with
+#      the blend on; nothing re-derives them).
+#
+#  CHANGES IN V6.9:
 #    - PER-CAMERA BAND CONTRAST FLOOR (CameraProfile.band_contrast_floor).
 #      Whole-image contrast does not detect fog: a fogged C1 frame
 #      scored global std 31.8 -- higher than many clear frames --
@@ -15,11 +43,17 @@
 #      Sep 13 is the day whose C1 detections correlate with tide at
 #      -0.01 against Sep 11's +0.97.
 #    - C1 floor set to 8.0 (rejects 8 of 25 Sep 13 frames, 1 of 25
-#      from Sep 12, none of the other 58). C2 left at 0.0/disabled:
-#      at the same threshold it rejects nothing at all, which is
-#      consistent EITHER with its crop genuinely holding contrast in
-#      fog OR with 8.0 being wrong for that crop. No fogged C2 frame
-#      has been identified to calibrate against, so no value is set.
+#      from Sep 12, none of the other 58). C2 floor set to 6.0, NOT
+#      calibrated: at C1's 8.0 it rejects nothing at all (so 6.0
+#      rejects none of those frames either), which is consistent
+#      EITHER with its crop genuinely holding contrast in fog OR with
+#      8.0 being wrong for that crop. No fogged C2 frame has been
+#      identified to calibrate against. (This note used to say C2 was
+#      left at 0.0/disabled; the value in the profile is 6.0.)
+#    - The whole-crop IMAGE_CONTRAST_FLOOR (6 since v6.8) set to 0.0,
+#      i.e. OFF. It measured the same cropped greyscale as the
+#      per-camera floors, so at 6 it rejected nothing that C1's 8.0
+#      and C2's 6.0 do not reject already.
 #    - This is a PARTIAL fix. The surviving Sep 13 frames sit just
 #      above the threshold and are likely degraded too, so expect C1's
 #      pooled tide correlation to improve from +0.38 rather than reach
@@ -42,6 +76,7 @@
 #      20 -> 45 (three dusk frames at 13.5/19.0/32.9 were passing while
 #      the next-brightest usable frame was 74.0), IMAGE_CONTRAST_FLOOR
 #      12 -> 6 (C1 legitimately runs 9.3-38.6 and was being rejected).
+#      (v6.9 then turned it off, 6 -> 0, for the per-camera floors.)
 #
 #  CHANGES IN V6.7:
 #    - ABSOLUTE SIGNAL FLOOR. The confidence metric is computed per
@@ -261,8 +296,10 @@ from pathlib import Path
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
+import timex_timing
 
-VERSION = "6.9"
+
+VERSION = "6.10"
 PROGRAM_NAME = "USGS Waterline Detector"
 
 SOURCE_FOLDER = "/mnt/I2Rgus_Data/ImageProducts"
@@ -385,6 +422,10 @@ MIN_SIGNAL_COLUMN_FRACTION = 0.60
 #     is absolute, cheap, and low for fog/flat/washed-out scenes while
 #     high for a beach with water, foam and sand. A featureless grey
 #     test frame scores ~3; a normal beach frame scores ~50+.
+#
+#     0.0 = OFF (since v6.9; it was 6). The same measure is applied
+#     per camera instead (CameraProfile.band_contrast_floor: C1 8.0,
+#     C2 6.0), so this global floor would reject nothing more.
 IMAGE_CONTRAST_FLOOR = 0.0
 
 SAVE_DEBUG_IMAGES = True
@@ -576,9 +617,9 @@ class CameraProfile:
     #
     # The value is PER CAMERA and does not transfer: each crop covers a
     # different region with different content. C1 is set from data
-    # (see below); C2 is left disabled because no fogged C2 frame has
-    # yet been identified to calibrate against, and guessing a
-    # threshold risks discarding good data.
+    # (see below); C2 is set to 6.0 but NOT calibrated, because no
+    # fogged C2 frame has yet been identified to calibrate against.
+    # 0.0 (this default) disables the test for a camera.
     band_contrast_floor: float = 0.0
 
 
@@ -750,13 +791,15 @@ CAMERAS = {
             (0.848, -102.88),
             (0.949, -143.00),
         ),
-        # Disabled deliberately. At C1's threshold of 8.0 this camera
-        # rejects ZERO frames across all 108, including on Sep 13 when
-        # C2 was also hazy -- so either C2's crop genuinely holds more
-        # contrast in fog (more water and dune texture in view), or 8.0
-        # is simply not calibrated for this crop. Both are consistent
-        # with the data, so no value is set until a fogged C2 frame
-        # exists to calibrate against.
+        # 6.0, NOT calibrated (this comment used to say the floor was
+        # disabled and no value set; 6.0 is what runs). At C1's
+        # threshold of 8.0 this camera rejects ZERO frames across all
+        # 108, including on Sep 13 when C2 was also hazy, so 6.0
+        # rejects none of them either -- so either C2's crop genuinely
+        # holds more contrast in fog (more water and dune texture in
+        # view), or 8.0 is simply not calibrated for this crop. Both
+        # are consistent with the data; recalibrate once a fogged C2
+        # frame exists to calibrate against.
         band_contrast_floor=6.0,
         bias_correction_points_timex=(
             # TIMEX correction, from 13 ground-truth frames (Sep 11)
@@ -1691,8 +1734,16 @@ TEMPORAL_MAX_GAP_MINUTES = 35.0
 # tide -- an error of opposite sign on rising and falling tides that
 # reads as scatter in the DEM. --no-temporal-filter switches it off so
 # the effect can be measured before the default is changed (the bias
-# corrections were fitted with the blend on).
+# corrections were fitted with the blend on). --timing-mode mid switches
+# it off too, together with the timex bias fitted with it off (see the
+# v6.10 notes at the top and timex_timing.py).
 TEMPORAL_FILTER_ENABLED = True
+
+# The timing mode (timex_timing.py): "legacy" (v6.9 exactly) or "mid".
+# Set by apply_cli_overrides from --timing-mode or TIMING_MODE.
+TIMING_MODE = timex_timing.DEFAULT_TIMING_MODE
+# Where this run's timex bias corrections came from (printed in the banner).
+TIMEX_BIAS_SOURCE = "built-in (v6.8 values)"
 
 
 def temporal_filter(shoreline, camera_name, epoch=None):
@@ -1794,14 +1845,21 @@ def export_csv(data, shoreline, confidence, peak_sharpness=None, column_has_sign
     bias correction -- a relative data-quality indicator, not a
     calibrated pixel-uncertainty value (see refine_subpixel()'s
     docstring).
+
+    "Timing_Mode" (last, only when TIMING_MODE is not "legacy") names the
+    timing mode the line was detected in, e.g. "mid": no temporal blend,
+    the mode's own timex bias. extract_elevation_contours.py gives a line
+    a water level only in the mode it was detected in. Legacy output has
+    no such column, exactly as before.
     """
     if not EXPORT_CSV:
         return
     csv_name = Path(OUTPUT_FOLDER) / (Path(data.filename).stem + ".csv")
+    timing = [] if TIMING_MODE == "legacy" else [TIMING_MODE]
     with open(csv_name, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Column", "Row", "Confidence", "Row_Precise", "Peak_Sharpness",
-                         "Has_Signal"])
+                         "Has_Signal"] + ([timex_timing.TIMING_COLUMN] if timing else []))
         for x in range(len(shoreline)):
             precise_row = float(shoreline[x]) + data.crop_top
             full_image_row = int(round(precise_row))
@@ -1815,7 +1873,7 @@ def export_csv(data, shoreline, confidence, peak_sharpness=None, column_has_sign
             # and the ground-truth files both use full-image pixels. (Only
             # correct by luck before, while every crop_left was 0.)
             writer.writerow([x + data.crop_left, full_image_row, float(confidence[x]), precise_row,
-                             sharpness, has_sig])
+                             sharpness, has_sig] + timing)
 
 
 def export_overlay(data, shoreline):
@@ -1889,9 +1947,11 @@ def process_image(image_path):
         # Per-camera band contrast. Distinct from the check above:
         # that one measures the crop the detector analyses against a
         # global floor, this one applies a CAMERA-SPECIFIC floor to the
-        # same region. Fog can leave global contrast looking normal
-        # (a fogged C1 frame scored 31.8 globally, 5.3 in-band) so this
-        # catches what the global test cannot.
+        # same region (the same crop_contrast; only the floors differ,
+        # and the global one is 0.0, off, since v6.9). Fog can leave
+        # WHOLE-IMAGE contrast looking normal (a fogged C1 frame scored
+        # 31.8 on the whole image, 5.3 in-band), which is why both
+        # measure the crop.
         band_floor = getattr(data.profile, "band_contrast_floor", 0.0)
         if band_floor > 0.0 and crop_contrast < band_floor:
             print(f"DISCARDED (band contrast {crop_contrast:.1f} < {band_floor} floor for "
@@ -2054,6 +2114,9 @@ def print_banner():
     print("Debug Folder :", DEBUG_FOLDER)
     print("Images per run:", "ALL (no cap)" if IMAGES_PER_RUN is None else IMAGES_PER_RUN)
     print("Confidence discard threshold:", CONFIDENCE_DISCARD_THRESHOLD)
+    print("Timing mode  :", timex_timing.describe(TIMING_MODE))
+    print("Temporal blend:", "on" if TEMPORAL_FILTER_ENABLED else "off")
+    print("Timex bias   :", TIMEX_BIAS_SOURCE if "timex" in IMAGE_SUFFIX.lower() else "not used (snap)")
     print()
 
 
@@ -2067,6 +2130,7 @@ def apply_cli_overrides():
     """
     global SOURCE_FOLDER, INPUT_FOLDER, OUTPUT_FOLDER, DEBUG_FOLDER, IMAGE_SUFFIX
     global TEMPORAL_FILTER_ENABLED, MIN_SIGNAL_COLUMN_FRACTION, CONFIDENCE_DISCARD_THRESHOLD
+    global TIMING_MODE, TIMEX_BIAS_SOURCE
 
     parser = argparse.ArgumentParser(
         description="USGS Argus shoreline detector. All arguments are optional; "
@@ -2127,6 +2191,20 @@ def apply_cli_overrides():
                         help='Keep only columns in this range of the image width, per camera, '
                              'e.g. "c2=0:0.7" or "c1=0:0.9,c2=0.1:0.7". Columns outside are '
                              'flagged Has_Signal=0 and so dropped from contours and the DEM.')
+    parser.add_argument("--timing-mode", default=None, choices=timex_timing.TIMING_MODES,
+                        help="Water-level timing (timex_timing.py). legacy (the default): as v6.9, "
+                             "the temporal blend on and the timex bias of "
+                             "calibration/timex_bias_legacy.json (the built-in v6.8 values). mid: "
+                             "the blend off and the timex bias of calibration/timex_bias_mid.json "
+                             "(recalibrate_timing.py), for extract_elevation_contours.py "
+                             "--timing-mode mid, which takes the level at mid-exposure; every row "
+                             "of the CSV then says Timing_Mode=mid. Default: the TIMING_MODE "
+                             "environment variable, else legacy.")
+    parser.add_argument("--timex-bias-file", default=None,
+                        help="The timing mode's timex bias file to use instead of "
+                             "calibration/timex_bias_<mode>.json (its 'mode' must be the run's). "
+                             "Timex corrections only; --bias-correction-file and "
+                             "--no-bias-correction still override it.")
     args = parser.parse_args()
 
     if args.image_suffix:
@@ -2144,10 +2222,51 @@ def apply_cli_overrides():
         TEMPORAL_FILTER_ENABLED = False
         print("TEMPORAL FILTER DISABLED (--no-temporal-filter).")
 
+    # Timing mode: the blend and the timex bias go TOGETHER (timex_timing.py).
+    # The explicit bias options below still override the mode's file.
+    try:
+        TIMING_MODE = timex_timing.timing_mode(args.timing_mode)
+    except ValueError as e:
+        parser.error(str(e))
+    unreadable = None
+    try:
+        points, bias_path = timex_timing.load_timex_bias(TIMING_MODE, args.timex_bias_file)
+    except (ValueError, OSError) as e:
+        # The legacy file holds the built-in values, so an unreadable one
+        # costs a WARNING, never the station's detections. Any other is
+        # refused: there is nothing to fall back on.
+        if TIMING_MODE != "legacy" or args.timex_bias_file:
+            parser.error(str(e))
+        points, bias_path, unreadable = None, timex_timing.timex_bias_path("legacy"), str(e)
+        print(f"WARNING: timex bias file unreadable ({unreadable}); the built-in v6.8 values are used, "
+              f"which are the values it should hold.")
+    # cameras whose timex bias would still be the built-in (blend-on) one in a mid run
+    timex_bias_missing = set()
+    if points is not None:
+        for cam, pts in points.items():
+            key = f"CACO05_{cam.upper()}"
+            CAMERAS[key] = replace(CAMERAS[key], bias_correction_points_timex=pts)
+        TIMEX_BIAS_SOURCE = str(bias_path)
+    elif args.timex_bias_file:
+        parser.error(f"--timex-bias-file {bias_path}: not found")
+    elif TIMING_MODE == "legacy":
+        TIMEX_BIAS_SOURCE = f"built-in (v6.8 values; {bias_path} " + ("unreadable)" if unreadable else "not found)")
+    else:
+        timex_bias_missing = set(CAMERAS)
+        TIMEX_BIAS_SOURCE = f"NONE: {bias_path} not found"
+    if TIMING_MODE != "legacy":
+        TEMPORAL_FILTER_ENABLED = False
+        print(f"TIMING MODE {TIMING_MODE}: temporal blend OFF, timex bias from "
+              f"{bias_path if points is not None else 'nowhere yet'} (--timing-mode / TIMING_MODE).")
+        if "timex" not in IMAGE_SUFFIX.lower():
+            print(f"NOTE: the snap bias corrections are the built-in ones, fitted with the blend on; "
+                  f"timing mode {TIMING_MODE} changes only the timex corrections.")
+
     if args.no_bias_correction:
         for key, profile in CAMERAS.items():
             CAMERAS[key] = replace(profile, bias_correction_points=(),
                                    bias_correction_points_timex=())
+        timex_bias_missing.clear()
         print("BIAS CORRECTION DISABLED for all cameras (--no-bias-correction).")
 
     if args.bias_correction_file:
@@ -2159,6 +2278,7 @@ def apply_cli_overrides():
                 pts = tuple((float(x), float(c)) for x, c in pts)
                 CAMERAS[key] = replace(CAMERAS[key], bias_correction_points=pts,
                                        bias_correction_points_timex=pts)
+                timex_bias_missing.discard(key)
                 print(f"BIAS CORRECTION for {key} from {args.bias_correction_file} ({len(pts)} points).")
 
     if args.min_signal_fraction is not None:
@@ -2194,6 +2314,7 @@ def apply_cli_overrides():
             if ov.get("no_bias"):
                 kw["bias_correction_points"] = ()
                 kw["bias_correction_points_timex"] = ()
+                timex_bias_missing.discard(key)
             if "step" in ov:
                 kw["step_near"], kw["step_far"] = (int(v) for v in ov["step"])
             if "profile_scale" in ov:
@@ -2208,6 +2329,23 @@ def apply_cli_overrides():
                 (x, max(0.0, lo - pad), min(1.0, hi + pad))
                 for x, lo, hi in profile.envelope_points))
         print(f"SEARCH ENVELOPE WIDENED by {pad:.2f} of the crop height (--envelope-pad).")
+
+    # A mid timex run with the built-in timex bias would apply corrections
+    # fitted WITH the blend, which absorbed its lag: refused, not guessed.
+    # Only for a camera this run has photos of: detect_original_view.py
+    # detects one camera with its bias off (--profile-json no_bias), and
+    # the other camera's missing corrections are then no reason to stop.
+    if timex_bias_missing and "timex" in IMAGE_SUFFIX.lower():
+        names = [p.name.upper() for p in Path(SOURCE_FOLDER).rglob(f"*{IMAGE_SUFFIX}")]
+        timex_bias_missing = {k for k in timex_bias_missing
+                              if any(f".{k.split('_')[-1]}." in n for n in names)}
+    if timex_bias_missing and "timex" in IMAGE_SUFFIX.lower():
+        parser.error(f"timing mode {TIMING_MODE} needs its own timex bias corrections, "
+                     f"{timex_timing.timex_bias_path(TIMING_MODE)} (recalibrate_timing.py derives it "
+                     f"on the station from the ground truth, detected with the blend off): the built-in "
+                     f"ones were fitted with the temporal blend on and absorbed ~3 px of its lag "
+                     f"({', '.join(sorted(timex_bias_missing))}). Give --timex-bias-file, or "
+                     f"--no-bias-correction to detect without any.")
 
     return args
 

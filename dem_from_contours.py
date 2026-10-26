@@ -26,8 +26,13 @@ WHAT THIS DEM IS AND IS NOT:
 SOURCES OF ERROR, roughly in order of size:
   * Waterline detection: the largest term, and it varies across the
     frame. The far field is worse than the near field.
-  * Georectification: 0.33 m horizontal RMS against surveyed control,
-    as of the Nov 2025 calibration. Unverified since.
+  * Georectification: on the Nov 2025 solve's own targets, mean 0.33 m
+    and RMS 0.42 m horizontally (in-sample: c1 n=14, c2 n=13, 29-150 m
+    from the cameras); left out one at a time, RMS c1 0.59 m, c2 0.41 m.
+    That does not bound it farther out: the solve's uncertainty grows to
+    metres at 200-400 m (georectify_uncertainty.py, which writes it per
+    pixel to calibration/<cam>_geom_sigma.csv), tan(beta) times that in
+    elevation. Not verified against a survey since Nov 2025.
   * Water level: GNSS-R, a measurement rather than a model.
   * Wave setup: the detected edge sits ABOVE the still-water line by an
     amount that grows with wave height. When the contours carry
@@ -45,13 +50,22 @@ Usage:
         [--cell 2.0] [--min-points 3] [--camera c1|c2|both]
         [--max-spread 0.5] [--fill-gaps] [--start-date ...] [--end-date ...]
 
-Writes dem_out_{dem,spread,count}.asc (and _source.asc with
---interpolate-edge), dem_out_info.json (dates, frames per camera and
+Writes dem_out_{dem,spread,count,sigma}.asc (_sigma: the standard error of
+each cell's median, sigma_grid; _source.asc with --interpolate-edge;
+_sigma_obs.asc with --sigma-obs: the SE with the errors a cell's
+crossings share, observation_sigma_grid; _sigma_day.asc with
+--day-block-se: the same SE when a day's crossings share an error,
+day_block_sigma), dem_out_info.json (dates, frames per camera and
 what the filters left out -- what the page needs and the grids do not
 hold; with --max-day-offset also each camera-day left out with its
 offset, and the day test's first-pass and final offsets) and the page
 dem_out_dem.png, drawn by dem_figure.py. To redraw the page from those
 files without rebuilding: python3 dem_figure.py dem_out
+With --loess (off by default) also dem_out_loess.asc, a second surface
+from the same points by scale-controlled quadratic loess, and its
+prediction error dem_out_loess_err.asc (with _loess_nmse and _loess_skill;
+dem_loess.py, Plant, Holland & Puleo 2002). No figure draws it and nothing
+above depends on it.
 
 THE DAY TEST (--max-day-offset) is iterative: the camera-day furthest
 over the limit from the DEM of the other days is left out, the others
@@ -95,6 +109,8 @@ from pathlib import Path
 
 import numpy as np
 
+from setup_model import wave_scale          # sqrt(Hs*L0): the setup formula, once
+
 
 def carries_setup(text):
     """True when a setup_correction_m cell holds a wave setup: blank is a frame with no
@@ -119,12 +135,16 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     missing_ground = 0
     rough_frames, unknown_hs_frames = set(), set()
     with_setup = 0
+    wave_source_of = {}           # frame -> its wave_source (extract_elevation_contours.py)
+    level_offset_of = {}          # frame -> its level_time_offset_s (None: a legacy row, none)
+    setup_model_of = {}           # frame -> its setup_model (--setup-model stockdon rows only)
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
         if "easting_utm19" not in (reader.fieldnames or []):
             print("ERROR: no 'easting_utm19' column. Run georectify.py on the contour file first.")
             sys.exit(1)
         has_source = "source_file" in (reader.fieldnames or [])
+        has_model = "setup_model" in (reader.fieldnames or [])
         if max_hs is not None and "offshore_hs_m" not in (reader.fieldnames or []):
             print("ERROR: --max-hs needs an 'offshore_hs_m' column. Run "
                   "extract_elevation_contours.py with --waves first.")
@@ -163,6 +183,10 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             cams.append(r["camera"])
             dates.append(day)
             frames.append(r["source_file"] if has_source else f"__point{len(frames)}")
+            wave_source_of.setdefault(frames[-1], r.get("wave_source") or "")
+            level_offset_of.setdefault(frames[-1], r.get("level_time_offset_s"))
+            if has_model:
+                setup_model_of.setdefault(frames[-1], r.get("setup_model") or "")
             try:
                 ucol.append(float(r.get("pixel_column") or "nan"))
             except ValueError:
@@ -175,9 +199,83 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     if stats is not None:
         stats.update(excluded_frames=len(excluded), rough_frames=len(rough_frames),
                      setup_share=with_setup / len(Z) if Z else 0.0,
-                     pixel_column=np.array(ucol, float))
+                     pixel_column=np.array(ucol, float), wave_source=wave_source_of,
+                     level_time_offset=level_offset_of)
+        if has_model:
+            stats.update(setup_model=setup_model_of)
     return (np.array(E), np.array(N), np.array(Z),
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
+
+
+def wave_currency_record(frames_used, wave_source_of, setup_share):
+    """
+    Which wave record tagged the frames this DEM is built from, against the
+    currency the setup coefficient C was fitted in (hs_best of
+    waves_marconi.csv; extract_elevation_contours.WAVE_CURRENCY_FITTED).
+    The station cron falls back to the raw NDBC 44008 archive whenever
+    waves_marconi.csv is missing, and the same C on raw-buoy Hs/Tp is
+    another setup (~0.06 m of DEM per 0.01 of effective C) with another
+    --max-hs filter, so the DEM's log and <stem>_info.json say which one it
+    is. Frames from contours older than the wave_source column count as
+    'unrecorded'. -> (record for _info.json, lines to print): a WARNING
+    when any frame was tagged from the raw buoy and the elevations carry
+    the setup, a NOTE when they do not (only --max-hs used those heights);
+    a NOTE for ADCP-equivalent waves and for a wave file whose kind its
+    columns do not tell ('unknown', e.g. process_chelsea.py's ADCP record).
+    """
+    from extract_elevation_contours import WAVE_CURRENCY_FITTED, wave_currency_note
+    tags = {}
+    for f in set(frames_used.tolist()):
+        t = wave_source_of.get(f, "") or "unrecorded"
+        tags[t] = tags.get(t, 0) + 1
+    rec = {"fitted_currency": WAVE_CURRENCY_FITTED, "frames": dict(sorted(tags.items())),
+           "all_fitted_currency": set(tags) == {WAVE_CURRENCY_FITTED}}
+    lines = ["Wave currency     : " + ", ".join(f"{t} {n} frame(s)" for t, n in sorted(tags.items()))
+             + f" (C was fitted in {WAVE_CURRENCY_FITTED})"]
+    raw = sum(n for t, n in tags.items() if t.startswith("buoy:"))
+    if raw and setup_share > 0:
+        lines.append(f"WARNING: {raw} frame(s) were tagged with the raw buoy waves, not the currency the "
+                     f"setup coefficient was fitted in ({WAVE_CURRENCY_FITTED}): their setup, and the "
+                     f"--max-hs filter, are not the calibrated ones. Was archive/waves_marconi.csv missing "
+                     f"when the contours were extracted?")
+    elif raw:
+        lines.append(f"NOTE: {raw} frame(s) tagged with the raw buoy waves (no setup in these elevations; "
+                     f"--max-hs, if used, judged their buoy Hs)")
+    for t in sorted(tags):
+        if t.startswith(("adcp_equiv:", "unknown:")):
+            lines.append("NOTE: " + wave_currency_note(t)[1])
+    return rec, lines
+
+
+def water_level_timing_record(frames_used, level_offset_of):
+    """
+    When the frames' water levels were taken (extract_elevation_contours.py
+    --timing-mode; timex_timing.py), from their level_time_offset_s column:
+    None when no frame has one -- every legacy contour file, so a legacy
+    DEM's log and <stem>_info.json are as before. Otherwise the frames per
+    offset from the file-name epoch ('legacy' for a frame without one) and
+    a WARNING when the DEM mixes the two: a legacy line is blended and 4-8
+    min older than its level, a mid one is not, so a DEM of both pools two
+    timings. -> (record for _info.json or None, lines to print)
+    """
+    tags = {}
+    for f in set(frames_used.tolist()):
+        v = level_offset_of.get(f)
+        t = "legacy" if v in (None, "") else f"+{int(float(v))} s"
+        tags[t] = tags.get(t, 0) + 1
+    if set(tags) == {"legacy"} or not tags:
+        return None, []
+    # imported only here: a legacy DEM needs nothing the timing switch added
+    from timex_timing import TIMEX_MID_OFFSET_S
+    rec = {"frames": dict(sorted(tags.items())), "mixed": "legacy" in tags,
+           "timex_mid_offset_s": TIMEX_MID_OFFSET_S}
+    lines = ["Water-level time  : " + ", ".join(f"{t} {n} frame(s)" for t, n in sorted(tags.items()))
+             + " after the file-name epoch (extract_elevation_contours.py --timing-mode)"]
+    if rec["mixed"]:
+        lines.append(f"WARNING: {tags['legacy']} frame(s) have their level at the file-name epoch (legacy timing, "
+                     f"temporal blend on) beside frames with it at mid-exposure: this DEM mixes two water-level "
+                     f"timings. Build it from contours of one timing mode.")
+    return rec, lines
 
 
 def latest_date(path, camera=None):
@@ -347,7 +445,7 @@ def carried_setup_coef(info):
     cs = []
     for v in info.values():
         if np.isfinite(v["setup"]) and v["setup"] != 0.0 and v["hs"] > 0 and v["tp"] > 0:
-            cs.append(v["setup"] / np.sqrt(v["hs"] * 9.81 * v["tp"] ** 2 / (2 * np.pi)))
+            cs.append(v["setup"] / wave_scale(v["hs"], v["tp"]))
     return round(float(np.median(cs)), 4) if cs else None
 
 
@@ -423,7 +521,7 @@ def fit_setup_coefficient(pair_cell, pair_frame, info, min_frames, coefs=None):
     tide = np.array([info[f]["tide"] for f in pair_frame])
     hs = np.array([info[f]["hs"] for f in pair_frame])
     tp = np.array([info[f]["tp"] for f in pair_frame])
-    phi = np.sqrt(hs * 9.81 * tp ** 2 / (2 * np.pi))
+    phi = wave_scale(hs, tp)
     ok = np.isfinite(phi) & np.isfinite(tide)
     groups = cell_groups(pair_cell[ok])
     if coefs is None:
@@ -1447,6 +1545,220 @@ def day_test_record(dt, limit, trends):
     }
 
 
+# ---------------------------------------------------------------------
+# Reporting only: what the DEM's residuals say about the water-level
+# timing and the waves. No value of the DEM depends on any of this.
+# ---------------------------------------------------------------------
+
+# The water level's rate of change at a frame, from the levels of the frames either side (both
+# cameras share each capture time): centred when there is a frame within RATE_MAX_GAP_S on both
+# sides, one-sided when on one only, none otherwise (a frame alone at dawn or dusk). Frames come
+# every 30 min, so 75 min allows one missing capture.
+RATE_MAX_GAP_S = 75 * 60
+# A frame (key) needs this many (cell, frame) samples compared to have a residual, as in
+# --max-frame-offset; a camera-day 30, as in the day test.
+DIAG_FRAME_MIN_PAIRS = 10
+DIAG_DAY_MIN_PAIRS = 30
+# Fewest frames, or camera-days, a regression is reported on.
+DIAG_MIN_FRAMES = 10
+DIAG_MIN_DAYS = 4
+# |dz/dt| beyond which a frame counts as flood (rising) or ebb (falling), m/h; between: slack.
+DIAG_STAGE_RATE = 0.1
+
+
+def water_level_rates(info):
+    """{frame: dz/dt of its water level (tide_elevation_navd88), m/h, NaN if no neighbour} from the
+    levels of every frame of the contour file (load_frame_info), not only those in the DEM."""
+    ep = np.array([v["epoch"] for v in info.values()], float)
+    z = np.array([v["tide"] for v in info.values()], float)
+    ok = np.isfinite(ep) & np.isfinite(z)
+    ue, inv = np.unique(ep[ok], return_inverse=True)
+    uz = np.bincount(inv, weights=z[ok]) / np.bincount(inv)      # one level per capture time
+    rate_at = np.full(len(ue), np.nan)
+    if len(ue) >= 2:
+        prev_ok = np.r_[False, np.diff(ue) <= RATE_MAX_GAP_S]
+        next_ok = np.r_[prev_ok[1:], False]
+        i = np.arange(len(ue))
+        lo = np.where(prev_ok, i - 1, i)
+        hi = np.where(next_ok, i + 1, i)
+        dt = ue[hi] - ue[lo]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rate_at = np.where(dt > 0, (uz[hi] - uz[lo]) / dt * 3600.0, np.nan)
+    at = dict(zip(ue.tolist(), rate_at.tolist()))
+    return {f: (at.get(float(v["epoch"]), np.nan) if np.isfinite(v["epoch"]) else np.nan)
+            for f, v in info.items()}
+
+
+def _fit(x, y, min_n):
+    """Least-squares slope of y on x, and Pearson's r, over the finite pairs. -> dict or None."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    if len(x) < min_n or np.ptp(x) == 0:
+        return None
+    slope, icpt = np.polyfit(x, y, 1)
+    r = float(np.corrcoef(x, y)[0, 1]) if np.ptp(y) > 0 else 0.0
+    return {"n": int(len(x)), "slope": round(float(slope), 4), "intercept_m": round(float(icpt), 4),
+            "r": round(r, 3)}
+
+
+def residual_diagnostic(pair_cell, pair_frame, pair_vals, info, cam_of, min_frames):
+    """
+    Do the DEM's residuals follow the tide's stage or the waves? A test of
+    the water-level timing (review B1): each frame's level is the GNSS-R
+    level at the photo's file-name epoch, the START of the ~10-min timex,
+    while the line is the mean over the exposure and the detector blends
+    30% of the previous frame into it. If the line is older (or younger)
+    than its level by L minutes, every frame sits off by L x dz/dt: high on
+    the flood and low on the ebb for an older line. The day test's
+    camera-day drift that follows the spring-neap range would be the same
+    error seen day by day, as the daylight frames fall more on the flood or
+    the ebb. That is the default, legacy, timing; in timing mode mid
+    (timex_timing.py) the level is taken at mid-exposure and the blend is
+    off, so the slope should come out near 0. recalibrate_timing.py
+    compares the two on one window with this diagnostic.
+
+    Per frame: its residual, the median over its (cell, frame) samples of
+    (sample - the median of the OTHER frames in that cell), against the
+    water level's dz/dt at the frame (water_level_rates) and its offshore
+    Hs: least-squares slope, Pearson r and n, per camera and both; and the
+    median residual of flood, ebb and slack frames. A slope against dz/dt
+    in m per (m/h), times 60, is the lag in minutes (positive: the line is
+    older than its level). Per camera-day (local day, as the day test):
+    its offset from the DEM of the other days against the mean signed
+    dz/dt of its frames.
+
+    HOW FAR TO TRUST THE NUMBERS. A frame is measured against the other
+    crossings of the same cells; where those share its stage of the tide
+    its residual, and the slope, come out smaller, and where lines fall in
+    a cell adds noise (synthetic fixtures with a planted 6 min lag gave
+    about 5.5-8 min). The sign, r and the flood/ebb contrast are the test;
+    the minutes are indicative. A camera-day whose frames span a whole
+    tidal cycle has a mean dz/dt near 0, so the day regression says
+    something only where days differ in their flood/ebb mix (what the
+    hypothesis says happens through a week). Nothing is corrected: the numbers are for deciding
+    whether the timing fix (which needs the timex exposure confirmed on the
+    NUC) is worth making: recalibrate_timing.py's pass rule is that both the
+    |slope| and the flood - ebb contrast shrink from legacy to mid.
+    -> (record for <stem>_info.json, lines to print)
+    """
+    rates = water_level_rates(info)
+    fo = LeaveOneOut(pair_cell, pair_vals, pair_frame, min_frames, DIAG_FRAME_MIN_PAIRS).offsets()
+    day_of = {f: f"{cam_of[f]} {local_day(info[f]['epoch'])}" for f in set(pair_frame.tolist())
+              if f in info and np.isfinite(info[f]["epoch"])}
+    have = np.array([f in day_of for f in pair_frame])
+    keys = np.array([day_of.get(f, "") for f in pair_frame])
+    do = LeaveOneOut(pair_cell[have], pair_vals[have], keys[have], min_frames,
+                     DIAG_DAY_MIN_PAIRS).offsets() if have.any() else {}
+    names = sorted(f for f, (o, n) in fo.items() if np.isfinite(o))
+    res = np.array([fo[f][0] for f in names])
+    rate = np.array([rates.get(f, np.nan) for f in names])
+    hs = np.array([info[f]["hs"] if f in info else np.nan for f in names])
+    cam = np.array([cam_of[f] for f in names])
+    day_rates = {}
+    for f, k in day_of.items():
+        if np.isfinite(rates.get(f, np.nan)):
+            day_rates.setdefault(k, []).append(rates[f])
+    rec = {"method": "per frame: median of (frame sample - the other frames' median in the cell) against the "
+                     "water level's dz/dt (m/h, from the levels of the frames either side) and offshore Hs; per "
+                     "camera-day: its offset from the DEM of the other days against the mean signed dz/dt of its "
+                     "frames. Least-squares slope, Pearson r. Slope vs dz/dt x 60 = minutes the line is older than "
+                     "its level. Reporting only: no value of the DEM depends on it",
+           "stage_rate_m_per_h": DIAG_STAGE_RATE, "by_camera": {}}
+    lines = ["Residuals vs tide stage and waves (reporting only; the review's water-level timing test):",
+             "   per frame: median offset from the other frames' cell medians; per camera-day: the day's offset",
+             "   from the other days. Slope vs dz/dt in m per m/h; x 60 = minutes the line lags its level"]
+    for c in sorted(set(cam.tolist())) + ["both"]:
+        m = np.ones(len(names), bool) if c == "both" else cam == c
+        if c == "both" and len(set(cam.tolist())) < 2:
+            continue
+        rr, ra, hh = res[m], rate[m], hs[m]
+        vs_rate, vs_hs = _fit(ra, rr, DIAG_MIN_FRAMES), _fit(hh, rr, DIAG_MIN_FRAMES)
+        with np.errstate(invalid="ignore"):
+            stage = {"flood": ra > DIAG_STAGE_RATE, "ebb": ra < -DIAG_STAGE_RATE,
+                     "slack": np.abs(ra) <= DIAG_STAGE_RATE}
+        by_stage = {k: {"frames": int(v.sum()),
+                        "median_residual_m": round(float(np.median(rr[v])), 4) if v.any() else None}
+                    for k, v in stage.items()}
+        dk = sorted(k for k, (o, n) in do.items() if np.isfinite(o) and (c == "both" or k.split(" ")[0] == c))
+        day_rate = [float(np.mean(day_rates[k])) if k in day_rates else np.nan for k in dk]
+        day_off = [do[k][0] for k in dk]
+        vs_day = _fit(day_rate, day_off, DIAG_MIN_DAYS)
+        rec["by_camera"][c] = {
+            "frames": int(m.sum()), "vs_dzdt": vs_rate, "vs_hs": vs_hs, "by_stage": by_stage,
+            "lag_min": None if vs_rate is None else round(vs_rate["slope"] * 60.0, 1),
+            "days": {k: {"offset_m": round(o, 4), "mean_dzdt_m_per_h": None if not np.isfinite(r) else round(r, 3)}
+                     for k, o, r in zip(dk, day_off, day_rate)},
+            "day_offset_vs_mean_dzdt": vs_day}
+        fl, eb = by_stage["flood"]["median_residual_m"], by_stage["ebb"]["median_residual_m"]
+        txt = f"   {c:<4} {int(m.sum())} frame(s): "
+        txt += (f"vs dz/dt slope {vs_rate['slope']:+.3f} m per m/h (lag {vs_rate['slope'] * 60:+.1f} min), "
+                f"r {vs_rate['r']:+.2f}" if vs_rate else "vs dz/dt: too few frames with a rate")
+        txt += (f"; vs Hs slope {vs_hs['slope']:+.3f} m/m, r {vs_hs['r']:+.2f}" if vs_hs else "; vs Hs: too few frames, or one Hs")
+        lines.append(txt)
+        lines.append(f"        flood {by_stage['flood']['frames']} median "
+                     + ("--" if fl is None else f"{fl:+.3f} m")
+                     + f", ebb {by_stage['ebb']['frames']} median " + ("--" if eb is None else f"{eb:+.3f} m")
+                     + f", slack {by_stage['slack']['frames']}; camera-days: "
+                     + (f"{vs_day['n']}, offset vs mean dz/dt slope {vs_day['slope']:+.3f} m per m/h, "
+                        f"r {vs_day['r']:+.2f}" if vs_day else f"{len(dk)} (too few to fit)"))
+    return rec, lines
+
+
+# Fewest shared cells the c1 - c2 offset is quoted on.
+DIAG_MIN_CELLS = 10
+
+
+def camera_offset(E, N, Z, cams, frames, cell, min_frames):
+    """
+    c1 - c2 in the cells both cameras cross (reporting only, review item
+    11). The cell value pools both cameras' frames in the seam and the
+    overlap, so a bias between the cameras shows there as spread (and
+    blanking), not as an offset. Here, in each cell with at least
+    min_frames frames of EACH camera, the median of c1's frame samples
+    minus the median of c2's (the samples as build_grid makes them, one per
+    cell and frame), then over those cells the median, the NMAD (1.4826 x
+    median absolute deviation) and the 16th-84th percentiles. One number
+    per DEM build, i.e. per window. Nothing is corrected (that needs a
+    validation of which camera is right). -> (record or None, lines)
+    """
+    if len(set(np.unique(cams).tolist()) & {"c1", "c2"}) < 2:
+        return None, []
+    pair_cell, pair_frame = frame_pairs(E, N, frames, cell)
+    names, first = np.unique(frames, return_index=True)     # each frame's elevation and camera
+    at = np.searchsorted(names, pair_frame)
+    v = Z[first][at]
+    ci = np.select([cams[first] == "c1", cams[first] == "c2"], [0, 1], 2)[at]
+    keep = ci < 2
+    key = pair_cell[keep].astype(np.int64) * 2 + ci[keep]
+    v = v[keep]
+    o = np.lexsort((v, key))
+    key, v = key[o], v[o]
+    starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]]) if len(key) else np.zeros(0, int)
+    n = np.diff(np.r_[starts, len(key)])
+    med = (v[starts + (n - 1) // 2] + v[starts + n // 2]) / 2 if len(key) else np.zeros(0)
+    gk, ok = key[starts], n >= max(min_frames, 1)
+    c1 = dict(zip((gk[ok & (gk % 2 == 0)] // 2).tolist(), med[ok & (gk % 2 == 0)].tolist()))
+    c2 = dict(zip((gk[ok & (gk % 2 == 1)] // 2).tolist(), med[ok & (gk % 2 == 1)].tolist()))
+    both = sorted(set(c1) & set(c2))
+    d = np.array([c1[k] - c2[k] for k in both])
+    rec = {"cells": len(both), "min_frames_each": int(min_frames),
+           "method": "per cell with >= min_frames_each frames of each camera: median of c1's frame samples minus "
+                     "median of c2's; over those cells median, NMAD (1.4826 x MAD), 16th and 84th percentiles. "
+                     "Reporting only: no value of the DEM depends on it"}
+    if len(both) >= DIAG_MIN_CELLS:
+        mid = float(np.median(d))
+        rec.update(median_m=round(mid, 4), nmad_m=round(float(1.4826 * np.median(np.abs(d - mid))), 4),
+                   p16_m=round(float(np.percentile(d, 16)), 4), p84_m=round(float(np.percentile(d, 84)), 4))
+        line = (f"Camera offset     : c1 - c2 over {len(both)} shared cell(s) (>= {min_frames} frames of each): "
+                f"median {rec['median_m']:+.3f} m, NMAD {rec['nmad_m']:.3f} m, 16-84% {rec['p16_m']:+.3f} to "
+                f"{rec['p84_m']:+.3f} m (reporting only; the cell values pool both cameras)")
+    else:
+        line = (f"Camera offset     : c1 - c2 not estimated: {len(both)} shared cell(s) with >= {min_frames} frames "
+                f"of each camera (needs {DIAG_MIN_CELLS})")
+    return rec, [line]
+
+
 def interpolate_between_contours(E, N, Z, frames, cell, max_spread, dem, max_edge):
     """
     Fill cells between waterlines by linear interpolation.
@@ -1637,6 +1949,111 @@ def fill_small_gaps(dem, max_iterations=3):
     return out
 
 
+def sigma_grid(dem, spread, count):
+    """
+    The standard error of each cell's elevation (<stem>_sigma.asc), m:
+    SE = 1.25 x (spread / 2) / sqrt(n). The 16-84 percentile spread of a
+    cell's n frame samples is about 2 sigma of one crossing, and the median
+    of n samples has a standard error of about 1.25 sigma / sqrt(n) (1.2533
+    for normal errors) -- the same SE dem_change.py uses for its level of
+    detection. Only cells with a value that rests on their own crossings
+    (finite DEM and spread) and on two or more of them; NaN elsewhere,
+    including cells --interpolate-edge or --fill-gaps filled. One crossing
+    has no scatter to measure: build_grid gives it a spread of 0, and the
+    grid read 0 m there (a perfect cell) when --min-points 1 let such a cell
+    have a value.
+
+    THIN CELLS. The 16-84 spread of a few samples falls short of 2 sigma,
+    so the SE does too: for normal errors (simulated) about 0.6-0.8 of the
+    true standard error of the median at 3-5 frames, 0.9 at 10 and 0.96 at
+    30. dem_change.py, which uses the same SE, compares only cells with 5
+    or more crossings for that reason; here every cell with a value gets
+    one, so read the SE of a cell with few frames (_count) as a lower bound.
+
+    WHAT IT IS NOT. It is the sampling error of the median from the
+    scatter of repeat crossings only: the REPEATABILITY of the cell, not its
+    accuracy. It leaves out every error the crossings of a cell share, which
+    do not average down with n: the water-level datum (the GNSS-R antenna
+    height, +/-0.061 m), the setup coefficient C (~0.06 m of DEM per 0.01
+    of C), the georectification (0.33-0.42 m horizontal in-sample, times
+    the beach slope) and a detector bias. No observation term is added
+    because the inputs are not there: the live rows carry no per-frame
+    water-level sigma (tide_model_spread is 0 for GNSS-R), and the per-pixel
+    horizontal sigma (georectify_uncertainty.py) enters only the opt-in
+    <stem>_sigma_obs.asc (--sigma-obs, observation_sigma_grid), with stated
+    defaults for the other terms; adding a guessed constant here would make
+    the grid look like an accuracy it is not. It also treats the crossings as
+    independent, so it is optimistic where a day's frames share an error.
+    """
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ok = np.isfinite(dem) & np.isfinite(spread) & (count >= 2)
+        return np.where(ok, 1.25 * (spread / 2.0) / np.sqrt(np.maximum(count, 1)), np.nan)
+
+
+def day_block_sigma(E, N, Z, frames, day_of, cell, e0, n0, ncols, nrows, dem, spread, count):
+    """
+    The standard error of each cell's elevation when the crossings of one DAY share an error
+    (<stem>_sigma_day.asc, --day-block-se; dem_change.py --day-block-lod reads it), m.
+
+    WHY. sigma_grid (<stem>_sigma.asc) treats a cell's n crossings as n independent values. The
+    frames of one day share that day's water-level error, its wave setup (one Hs and Tp for hours)
+    and, per camera, its pointing, so a day's crossings tend to sit on the same side of the cell
+    value: the median is then worth fewer than n values, and a change judged on the independent SE
+    is called significant too easily.
+
+    HOW. The cluster-robust (sandwich) variance of a median, with the days as the clusters (Liang &
+    Zeger 1986, Biometrika 73:13; for medians and quantiles, Parente & Santos Silva 2016, J.
+    Econometric Methods 5:1): each crossing votes +1 if it lies above the cell value, -1 below
+    (0 on it); the votes of one day are added up, S_d; and
+
+        SE_day = 1.25 x (spread / 2) x sqrt( k / (k - 1) x sum_d S_d^2 ) / n
+
+    over the cell's k days and n crossings, with the same sigma (spread / 2) and the same 1.25 as
+    sigma_grid. A day whose crossings scatter both ways adds little; a day whose crossings all sit
+    on one side adds its whole count. With one crossing per day it is sigma_grid's SE again
+    (exactly, for an odd n), and with k equal days, each day's crossings all on one side, it is
+    1.25 sigma / sqrt(k - 1): k values, not n (the k / (k - 1) is the usual small-sample factor).
+
+    The samples are build_grid's (one per cell and frame, the median of the frame's points there)
+    on the same grid; day_of maps a frame to its day (the local day, as the day test). Only cells
+    with a value and crossings on 2 or more days (NaN elsewhere: one day has no between-day scatter
+    to measure). Like sigma_grid it leaves out an error EVERY day shares (the water-level datum, the
+    setup coefficient), and it is noisy where k is small (2-3 days in a 7-day window): days whose
+    votes cancel by chance give it 0 (on the real 26 Sep - 2 Oct 2026 window: median 1.0, p90 1.6
+    times sigma_grid's SE, a tenth of the cells at 0), which is why dem_change.py never lets it fall
+    below sigma_grid's. It estimates the shared-day part; it does not replace --min-lod's floor.
+    -> grid like dem
+    """
+    out = np.full(nrows * ncols, np.nan)
+    if not len(E):
+        return out.reshape(nrows, ncols)
+    flat = ((N - n0) / cell).astype(np.int64) * ncols + ((E - e0) / cell).astype(np.int64)
+    names, fid = np.unique(frames, return_inverse=True)
+    key = flat * len(names) + fid
+    o = np.argsort(key, kind="stable")
+    ks, zs = key[o], Z[o]
+    starts = np.flatnonzero(np.r_[True, ks[1:] != ks[:-1]])
+    ends = np.r_[starts[1:], len(ks)]
+    samp = np.array([np.median(zs[a:b]) for a, b in zip(starts, ends)])
+    s_cell = ks[starts] // len(names)
+    days, s_day = np.unique([day_of.get(f, "?") for f in names[ks[starts] % len(names)]], return_inverse=True)
+    dem_f, spread_f, count_f = dem.ravel(), spread.ravel(), count.ravel()
+    with np.errstate(invalid="ignore"):
+        vote = np.sign(samp - dem_f[s_cell])
+    have = np.isfinite(vote)
+    cd = s_cell[have] * len(days) + s_day[have]                 # (cell, day)
+    u, inv = np.unique(cd, return_inverse=True)
+    S = np.bincount(inv, weights=vote[have])
+    u_cell = u // len(days)
+    q = np.bincount(u_cell, weights=S ** 2, minlength=nrows * ncols)
+    k = np.bincount(u_cell, minlength=nrows * ncols).astype(float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ok = np.isfinite(dem_f) & np.isfinite(spread_f) & (k >= 2) & (count_f >= 2)
+        se = 1.25 * (spread_f / 2.0) * np.sqrt(k / (k - 1.0) * q) / np.maximum(count_f, 1)
+    out[ok] = se[ok]
+    return out.reshape(nrows, ncols)
+
+
 def write_ascii_grid(path, grid, e0, n0, cell, nodata=-9999.0):
     """ESRI ASCII grid -- readable by QGIS, ArcGIS, GDAL, MATLAB."""
     flipped = np.flipud(grid)  # ASCII grids run north to south
@@ -1649,6 +2066,193 @@ def write_ascii_grid(path, grid, e0, n0, cell, nodata=-9999.0):
         f.write(f"NODATA_value {nodata}\n")
         for r in flipped:
             f.write(" ".join("%.4f" % (v if np.isfinite(v) else nodata) for v in r) + "\n")
+
+
+# ---------------------------------------------------------------------
+# --sigma-obs: the observation errors a cell's crossings share. Opt-in;
+# no other output depends on it.
+# ---------------------------------------------------------------------
+
+# Water level, m: GNSS-R against the level predicted from the NOAA Chatham gauge, residual RMS
+# 0.12 m on calm Aug-Sep 2026 (the station's own QC, gnssr_qc.py's reference test). An upper
+# bound on the GNSS-R's own error: the transfer from a harbour gauge 30 km away is in it (the
+# published sub-daily GNSS-IR standard is 0.02-0.05 m against a co-located gauge: Larson et al.
+# 2013, Lofgren et al. 2014), and it leaves out the +/-0.061 m of the NAVD88 datum (OPUS,
+# mostly the geoid model: docs/VALIDATION.md 4.2), which every frame shares.
+SIGMA_WL_M = 0.12
+# Wave setup, m: the scatter of Stockdon et al. (2006)'s setup <eta> = 0.35 beta_f sqrt(H0 L0)
+# about the setup measured in its own 10 field experiments, RMSE 0.21 m -- as re-evaluated on
+# that data set by Dalinghaus, Coco & Higuera (2023, NHESS 23, 2157-2169, doi:10.5194/nhess-
+# 23-2157-2023) and quoted as 21 cm by the USGS's parametric setup hindcasts; the full text of
+# Stockdon et al. was not retrievable when this was written, so check it before quoting. The
+# station's C (0.037, fitted to its own RTK) removes the formula's mean bias at this beach, not
+# this scatter about it (setup varies with the slope, which changes with storms: 0.13 in Jan
+# 2025, 0.07 in Mar 2025, VALIDATION 4.1).
+SIGMA_SETUP_M = 0.21
+# A cell's local slope is the least-squares plane through the measured cells of its 3 x 3
+# neighbourhood (itself included), with at least this many of them.
+SLOPE_MIN_CELLS = 4
+
+
+def point_geometry_cov(E, N, Z, cams, ucol, table_dir):
+    """
+    Per point, the horizontal error covariance its georectification
+    carries (sxx, syy, sxy, m^2): its camera's table
+    <table_dir>/<camera>_geom_sigma.csv (georectify_uncertainty.py) at the
+    point's pixel column, its ground range from that camera (the camera's
+    position from the table) and its elevation, interpolated
+    (georectify_uncertainty.geom_cov). NaN for a camera without a table,
+    a point without a pixel column, and a point the table cannot place.
+    The tables describe the live 2025-11-13 calibration: frames
+    georectified with another EO need their own.
+    -> (n x 3 array, {camera: table record}, lines to print)
+    """
+    from georectify_uncertainty import read_geom_sigma, geom_cov
+    out = np.full((len(E), 3), np.nan)
+    ucol = np.full(len(E), np.nan) if ucol is None or len(ucol) != len(E) else np.asarray(ucol, float)
+    tables, lines = {}, []
+    for c in sorted(set(cams.tolist())):
+        path = Path(table_dir) / f"{c}_geom_sigma.csv"
+        m = cams == c
+        if not path.exists():
+            lines.append(f"NOTE: --sigma-obs: no {path} -- {c}'s {int(m.sum())} point(s) get no georectification "
+                         f"term, and cells only {c} crosses no _sigma_obs value (python3 georectify_uncertainty.py "
+                         f"writes it)")
+            continue
+        t = read_geom_sigma(path)
+        tables[c] = t
+        rng = np.hypot(E[m] - t["x"], N[m] - t["y"])
+        out[m] = np.stack(geom_cov(t, ucol[m], rng, Z[m]), 1)
+        placed = int(np.isfinite(out[m, 0]).sum())
+        lines.append(f"Georectification  : {c} {placed} of {int(m.sum())} point(s) placed in {path.name} "
+                     f"({t['provenance'].get('covariance', '?').split(' --')[0]} covariance, solve "
+                     f"{t['provenance'].get('solve', '?').split(' --')[0]})")
+    return out, tables, lines
+
+
+def local_slope(dem, cell):
+    """
+    The DEM's own slope at each cell: dz/dE and dz/dN (m/m) of the
+    least-squares plane through the measured cells of its 3 x 3
+    neighbourhood, itself included (at least SLOPE_MIN_CELLS of them, not
+    all in one line). NaN elsewhere. Rows of `dem` run north, as
+    build_grid makes them.
+    """
+    nr, nc = dem.shape
+    pad = np.pad(dem, 1, mode="constant", constant_values=np.nan)
+    keys = ("n", "x", "y", "xx", "yy", "xy", "z", "xz", "yz")
+    S = {k: np.zeros((nr, nc)) for k in keys}
+    for a in (-1, 0, 1):                         # rows: north
+        for b in (-1, 0, 1):                     # columns: east
+            z = pad[1 + a:1 + a + nr, 1 + b:1 + b + nc]
+            m = np.isfinite(z).astype(float)
+            zz = np.where(m > 0, z, 0.0)
+            dx, dy = b * cell, a * cell
+            S["n"] += m
+            S["x"] += m * dx
+            S["y"] += m * dy
+            S["xx"] += m * dx * dx
+            S["yy"] += m * dy * dy
+            S["xy"] += m * dx * dy
+            S["z"] += zz
+            S["xz"] += zz * dx
+            S["yz"] += zz * dy
+    A = np.stack([np.stack([S["n"], S["x"], S["y"]], -1), np.stack([S["x"], S["xx"], S["xy"]], -1),
+                  np.stack([S["y"], S["xy"], S["yy"]], -1)], -2).reshape(-1, 3, 3)
+    rhs = np.stack([S["z"], S["xz"], S["yz"]], -1).reshape(-1, 3)
+    ok = (np.isfinite(dem) & (S["n"] >= SLOPE_MIN_CELLS)).ravel()
+    ok[ok] = np.abs(np.linalg.det(A[ok])) > 1e-6 * cell ** 4
+    sol = np.full((nr * nc, 3), np.nan)
+    if ok.any():
+        sol[ok] = np.linalg.solve(A[ok], rhs[ok][..., None])[..., 0]
+    return sol[:, 1].reshape(nr, nc), sol[:, 2].reshape(nr, nc)
+
+
+def observation_sigma_grid(dem, sigma, E, N, frames, geo, e0, n0, cell, sigma_wl=SIGMA_WL_M,
+                           sigma_setup=SIGMA_SETUP_M):
+    """
+    <stem>_sigma_obs.asc (--sigma-obs), m: the cell's standard error
+    (sigma_grid) combined with the observation errors its crossings share,
+
+        sqrt(SE^2 + sigma_wl^2 + sigma_setup^2 + g' S g)
+
+    g the gradient of the DEM's local plane (local_slope: |g| = tan beta,
+    the DEM's own slope), S the horizontal error covariance of the
+    georectification at the cell (point_geometry_cov: the mean over the
+    cell's frames of each frame's mean over its points there). g' S g is
+    (tan beta x sigma_x)^2 with sigma_x the horizontal error along the
+    slope: a waterline placed sigma_x off across the slope lands where the
+    beach is tan beta x sigma_x higher or lower than its elevation. The
+    defaults: SIGMA_WL_M (the station's GNSS-R vs gauge QC) and
+    SIGMA_SETUP_M (Stockdon et al. 2006); --sigma-wl and --sigma-setup set
+    others.
+
+    WHY NOT DIVIDED BY sqrt(n). Every frame of a camera is georectified
+    with the same EO, carries the same water-level datum and the same
+    setup coefficient: those errors do not average down over a cell's
+    crossings, and the SE (which does) cannot see them. The random part
+    of the water-level and setup errors also scatters the crossings, so
+    it is in the SE too and counted twice here: with the defaults this
+    is an upper estimate of a cell's error, not a best one. Plant et al.
+    (2002) put an error on every cell of a coastal DEM; this one is meant
+    to be tested against a survey (georectify_uncertainty.py --evaluate),
+    not taken on trust.
+
+    Only cells with an SE (measured, as _sigma.asc), a local slope and a
+    georectification term; NaN elsewhere. -> (grid, record, lines)
+    """
+    nr, ncols = dem.shape
+    cov = np.full((nr * ncols, 3), np.nan)
+    ok = np.all(np.isfinite(geo), axis=1) if geo is not None else np.zeros(len(E), bool)
+    if ok.any():
+        flat = ((N[ok] - n0) / cell).astype(np.int64) * ncols + ((E[ok] - e0) / cell).astype(np.int64)
+        _, fid = np.unique(frames[ok], return_inverse=True)
+        fid = np.asarray(fid).ravel()
+        nf = int(fid.max()) + 1
+        uk, inv = np.unique(flat * nf + fid, return_inverse=True)
+        inv = np.asarray(inv).ravel()
+        cnt = np.bincount(inv).astype(float)
+        per = np.stack([np.bincount(inv, weights=geo[ok, j]) / cnt for j in range(3)], 1)
+        kc = uk // nf
+        nfc = np.bincount(kc, minlength=nr * ncols).astype(float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            cov = np.stack([np.bincount(kc, weights=per[:, j], minlength=nr * ncols) / nfc
+                            for j in range(3)], 1)
+    sxx, syy, sxy = (cov[:, j].reshape(nr, ncols) for j in range(3))
+    gE, gN = local_slope(dem, cell)
+    with np.errstate(invalid="ignore"):
+        var_geo = gE * gE * sxx + gN * gN * syy + 2.0 * gE * gN * sxy
+        have_se = np.isfinite(sigma)
+        good = have_se & np.isfinite(var_geo)
+        out = np.where(good, np.sqrt(sigma ** 2 + sigma_wl ** 2 + sigma_setup ** 2 + np.maximum(var_geo, 0.0)),
+                       np.nan)
+    geo_term = np.sqrt(np.maximum(var_geo[good], 0.0))
+    tanb = np.hypot(gE, gN)[good]
+    no_slope = int((have_se & ~np.isfinite(gE)).sum())
+    no_geo = int((have_se & np.isfinite(gE) & ~np.isfinite(sxx)).sum())
+    q = lambda x, p: round(float(np.percentile(x, p)), 4) if len(x) else None
+    rec = {"file": "_sigma_obs.asc",
+           "definition": "sqrt(SE^2 + sigma_wl^2 + sigma_setup^2 + g' S g): SE the _sigma.asc value; g the gradient "
+                         "of the DEM's least-squares plane over 3 x 3 cells (|g| = tan beta); S the georectification's "
+                         "horizontal error covariance at the cell (calibration/<cam>_geom_sigma.csv, "
+                         "georectify_uncertainty.py), mean over the cell's frames. The observation terms are errors "
+                         "the crossings share, not divided by sqrt(n); their random part is in the SE too, so it is "
+                         "an upper estimate. Test it against a survey: georectify_uncertainty.py --evaluate",
+           "sigma_wl_m": sigma_wl, "sigma_setup_m": sigma_setup, "cells": int(good.sum()),
+           "median_m": q(out[good], 50), "p90_m": q(out[good], 90),
+           "geometry_median_m": q(geo_term, 50), "geometry_p90_m": q(geo_term, 90), "tan_beta_median": q(tanb, 50),
+           "cells_with_se_but_no_value": {"no_local_slope": no_slope, "no_georectification_term": no_geo}}
+    lines = []
+    if good.any():
+        lines.append(f"observation sigma : median {rec['median_m']:.3f} m, p90 {rec['p90_m']:.3f} m on {rec['cells']} "
+                     f"cell(s) (sqrt(SE^2 + water level {sigma_wl:g}^2 + setup {sigma_setup:g}^2 + (tan(beta) x "
+                     f"sigma_x)^2): --sigma-obs, an upper estimate)")
+        lines.append(f"                    georectification term median {rec['geometry_median_m']:.3f} m, p90 "
+                     f"{rec['geometry_p90_m']:.3f} m; tan(beta) median {rec['tan_beta_median']:.3f}")
+    if no_slope or no_geo:
+        lines.append(f"                    no value on {no_slope} cell(s) without a local slope (fewer than "
+                     f"{SLOPE_MIN_CELLS} measured cells around them) and {no_geo} without a georectification term")
+    return out, rec, lines
 
 
 def main():
@@ -1751,6 +2355,17 @@ def main():
                          "facets. See fine_dem().")
     ap.add_argument("--fine-window", default="4,1",
                     help="Fine DEM neighbourhood, metres 'alongshore,cross-shore' (default 4,1)")
+    ap.add_argument("--loess", action="store_true",
+                    help="Also write <stem>_loess.asc, a quadratic loess surface of the same points on the "
+                         "DEM's grid with explicit smoothing scales (Plant, Holland & Puleo 2002), and its "
+                         "prediction error <stem>_loess_err.asc (m), normalised error _loess_nmse.asc and skill "
+                         "_loess_skill.asc. Off by default. The DEM's grids, its page and the series copy are "
+                         "the same with it as without; <stem>_info.json gains 'loess'. No figure draws it. "
+                         "Check its error against a survey: python3 dem_loess.py evaluate <stem> <survey>. "
+                         "See dem_loess.py.")
+    ap.add_argument("--loess-scales", default=None,
+                    help="With --loess: half-widths of the loess window, metres 'alongshore,cross-shore' "
+                         "(default 20,5: dem_loess.LOESS_SCALES)")
     ap.add_argument("--fill-gaps", action="store_true",
                     help="Close isolated single-cell holes from neighbours. Off by default: an "
                          "interpolated cell looks identical to a measured one in the output.")
@@ -1758,10 +2373,48 @@ def main():
                     help="Leave out frames whose file name matches this regular expression "
                          "(repeatable), e.g. 'Jan.22.*[.]c2[.]' -- for frames shown by their "
                          "overlays to have followed something other than the water's edge.")
+    ap.add_argument("--no-diagnostics", action="store_true",
+                    help="Skip the reporting-only diagnostics (residuals against the tide's stage and Hs, "
+                         "the c1 - c2 offset in shared cells). They change no value of the DEM; they are "
+                         "printed and kept in <stem>_info.json (diagnostics).")
+    ap.add_argument("--sigma-obs", action="store_true",
+                    help="Also write <stem>_sigma_obs.asc: the standard error (_sigma.asc) combined with the "
+                         "observation errors a cell's crossings share -- the water level (--sigma-wl), the wave "
+                         "setup (--sigma-setup) and the georectification's horizontal error times the DEM's local "
+                         "slope, from <geom-sigma-dir>/<camera>_geom_sigma.csv (georectify_uncertainty.py). Off by "
+                         "default; no other grid, number or page changes. See observation_sigma_grid().")
+    ap.add_argument("--sigma-wl", type=float, default=SIGMA_WL_M,
+                    help=f"With --sigma-obs: the water-level error, m (default {SIGMA_WL_M:g}: GNSS-R against the "
+                         f"Chatham gauge's transfer, gnssr_qc.py)")
+    ap.add_argument("--sigma-setup", type=float, default=SIGMA_SETUP_M,
+                    help=f"With --sigma-obs: the wave-setup error, m (default {SIGMA_SETUP_M:g}: the scatter of "
+                         f"Stockdon et al. 2006's setup formula)")
+    ap.add_argument("--geom-sigma-dir", default=str(Path(__file__).resolve().parent / "calibration"),
+                    help="With --sigma-obs: the folder of <camera>_geom_sigma.csv (default calibration/ beside "
+                         "this script)")
     ap.add_argument("--no-plot", action="store_true",
                     help="Skip the page (<stem>_dem.png). The grids and <stem>_info.json are "
                          "still written; 'python3 dem_figure.py <stem>' draws the page later.")
+    ap.add_argument("--day-block-se", action="store_true",
+                    help="Also write <stem>_sigma_day.asc (and its --series-dir copy): each cell's standard "
+                         "error when the crossings of one day share an error (day_block_sigma), for "
+                         "dem_change.py --day-block-lod. Off by default; no other grid, number or page "
+                         "changes (<stem>_info.json gains 'sigma_day'). Without it an earlier build's "
+                         "<stem>_sigma_day.asc is removed.")
     args = ap.parse_args()
+    loess_along, loess_across = None, None
+    if args.loess or args.loess_scales:
+        import dem_loess
+        try:
+            loess_along, loess_across = (float(x) for x in (args.loess_scales or "%g,%g" % dem_loess.LOESS_SCALES)
+                                         .split(","))
+            if not (loess_along > 0 and loess_across > 0):
+                raise ValueError
+        except ValueError:
+            ap.error(f"--loess-scales {args.loess_scales!r}: two half-widths in metres, 'alongshore,cross-shore' "
+                     f"(e.g. 20,5)")
+        if not args.loess:
+            ap.error("--loess-scales goes with --loess")
 
     # The page the daily email attaches. Removed before anything else, so
     # no failure below -- no points, a crash, a page that cannot be drawn
@@ -1831,6 +2484,16 @@ def main():
     print(f"extent            : {E.max()-E.min():.1f} m E-W by {N.max()-N.min():.1f} m N-S")
     print()
 
+    # --sigma-obs: each point's georectification error from its camera's table, kept beside the
+    # points through the filters below (geo is None without it)
+    geo, geo_tables = None, {}
+    if args.sigma_obs:
+        geo, geo_tables, lines = point_geometry_cov(E, N, Z, cams, load_stats.get("pixel_column"),
+                                                    args.geom_sigma_dir)
+        for line in lines:
+            print(line)
+        print()
+
     # Runs of a line across the shore (waterline_track.py): the line tracer carrying on along
     # one pixel row out over the water. The survey-date builds' consistency filter drops them
     # already (their files carry the ground); the live cron's filter runs on the photo rows
@@ -1866,9 +2529,10 @@ def main():
         if drop_cs.any():
             k = ~drop_cs
             E, N, Z, cams, dates, frames = E[k], N[k], Z[k], cams[k], dates[k], frames[k]
+            geo = None if geo is None else geo[k]
         print()
 
-    if args.fit_setup or args.max_day_offset or args.max_frame_offset:
+    if args.fit_setup or args.max_day_offset or args.max_frame_offset or not args.no_diagnostics:
         info = load_frame_info(args.contour_csv)
         pair_cell, pair_frame = frame_pairs(E, N, frames, args.cell)
 
@@ -1894,6 +2558,7 @@ def main():
         if bad:
             keep = np.array([f not in bad for f in frames])
             E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
+            geo = None if geo is None else geo[keep]
             print(f"   left out {len(bad)} frame(s), {int((~keep).sum())} point(s)")
             pair_cell, pair_frame = frame_pairs(E, N, frames, args.cell)
         print()
@@ -1943,6 +2608,22 @@ def main():
                 print(line)
         print()
 
+    # Residuals against the tide's stage and the waves, on the frames the day test judges (before it
+    # leaves any day out: the days it would leave out are what the timing hypothesis explains)
+    diagnostics = {}
+    if not args.no_diagnostics:
+        z_of = {}
+        for f, z in zip(frames, Z):
+            z_of.setdefault(f, z)
+        diag, lines = residual_diagnostic(pair_cell, pair_frame, np.array([z_of[f] for f in pair_frame]),
+                                          info, dict(zip(frames, cams)), args.min_points)
+        diag["on"] = "the frames the day test judged (before it left any day out)" if args.max_day_offset \
+            else "the frames of this DEM"
+        diagnostics["residuals"] = diag
+        for line in lines:
+            print(line)
+        print()
+
     if args.max_day_offset:
         epoch = {f: info[f]["epoch"] for f in info}
         cam_of = dict(zip(frames, cams))
@@ -1982,12 +2663,43 @@ def main():
         rejected_days = set(rejected)
         if keep is not None:
             E, N, Z, cams, dates, frames = E[keep], N[keep], Z[keep], cams[keep], dates[keep], frames[keep]
+            geo = None if geo is None else geo[keep]
         print()
         if len(E) == 0:
             print("No points left: the day-consistency test rejected every camera-day "
                   f"({', '.join(sorted(rejected))}). Rerun without --max-day-offset or with a wider window.")
             no_points_page("The day-consistency test rejected every camera-day: nothing to map.", load_stats)
             sys.exit(4)
+
+    # c1 - c2 in the cells both cameras cross, on the frames the DEM is built from (reporting only)
+    if not args.no_diagnostics:
+        cam_rec, lines = camera_offset(E, N, Z, cams, frames, args.cell, args.min_points)
+        diagnostics["camera_offset"] = cam_rec
+        for line in lines:
+            print(line)
+
+    # Which wave record tagged the frames (log and _info.json only, not the page)
+    wave_record, wave_lines = wave_currency_record(frames, load_stats.get("wave_source", {}),
+                                                   load_stats.get("setup_share", 0.0))
+    for line in wave_lines:
+        print(line)
+    # When the levels were taken (log and _info.json only; nothing for legacy contours)
+    timing_record, timing_lines = water_level_timing_record(frames, load_stats.get("level_time_offset", {}))
+    for line in timing_lines:
+        print(line)
+    # Which setup model placed the lines, when the contours say (extract_elevation_contours.py
+    # --setup-model stockdon writes setup_model; the station's C rows carry no such column, and
+    # their log and _info.json stay as they were)
+    setup_models = None
+    if "setup_model" in load_stats:
+        setup_models = {}
+        for f in set(frames.tolist()):
+            t = load_stats["setup_model"].get(f, "") or "c (no setup_model)"
+            setup_models[t] = setup_models.get(t, 0) + 1
+        setup_models = dict(sorted(setup_models.items()))
+        print("Setup model       : " + ", ".join(f"{t} {n} frame(s)" for t, n in setup_models.items())
+              + " (setup_model.py)")
+    print()
 
     dem, count, spread, e0, n0, ncols, nrows = build_grid(
         E, N, Z, args.cell, args.min_points, args.max_spread, frames)
@@ -2014,6 +2726,54 @@ def main():
               f"p90 {np.percentile(valid_spread,90):.3f} m")
         print("                    (repeat crossings of the same cell; this is the DEM's")
         print("                     own repeatability, not its accuracy)")
+
+    # The standard error of each measured cell (sigma_grid), before any cell is interpolated
+    sigma = sigma_grid(dem, spread, count)
+    if np.isfinite(sigma).any():
+        print(f"standard error    : median {np.nanmedian(sigma):.3f} m, p90 {np.nanpercentile(sigma, 90):.3f} m"
+              f"  (1.25 x spread/2 / sqrt(frames): repeatability of the median, not accuracy)")
+    # --sigma-obs: the SE with the observation errors the crossings share (observation_sigma_grid)
+    sigma_obs, obs_record = None, None
+    if args.sigma_obs:
+        sigma_obs, obs_record, lines = observation_sigma_grid(dem, sigma, E, N, frames, geo, e0, n0, args.cell,
+                                                              args.sigma_wl, args.sigma_setup)
+        obs_record["tables"] = {c: {"file": Path(t["path"]).name, "sha256": t["sha256"],
+                                    "covariance": t["provenance"].get("covariance", "").split(" --")[0],
+                                    "solve": t["provenance"].get("solve", "").split(" --")[0]}
+                                for c, t in sorted(geo_tables.items())}
+        for line in lines:
+            print(line)
+        if not np.isfinite(sigma_obs).any():
+            print("NOTE: --sigma-obs: no cell has an observation sigma; _sigma_obs.asc not written")
+            sigma_obs = None
+            obs_record["file"] = None
+    # --day-block-se: the SE when a day's crossings share an error (day_block_sigma), opt-in
+    sigma_day, sigma_day_rec = None, None
+    if args.day_block_se:
+        # the frames' epochs: loaded above for the frame-level analyses, else read here
+        finfo = info if (args.fit_setup or args.max_day_offset or args.max_frame_offset or not args.no_diagnostics) \
+            else load_frame_info(args.contour_csv)
+        utc_day = dict(zip(frames, dates))
+        day_of = {f: (local_day(finfo[f]["epoch"]) if f in finfo and np.isfinite(finfo[f]["epoch"])
+                      else utc_day.get(f, "?")) for f in set(frames.tolist())}
+        sigma_day = day_block_sigma(E, N, Z, frames, day_of, args.cell, e0, n0, ncols, nrows, dem, spread, count)
+        both_ = np.isfinite(sigma_day) & np.isfinite(sigma) & (sigma > 0)
+        sigma_day_rec = {"file": "_sigma_day.asc",
+                         "definition": "1.25 x (spread / 2) x sqrt(k / (k - 1) x sum over days of S_d^2) / n, S_d the "
+                                       "sum of the day's crossings' signs about the cell value: the cluster-robust SE "
+                                       "of the cell median with the (local) days as clusters, on cells with a value "
+                                       "and 2 or more days (day_block_sigma); for dem_change.py --day-block-lod",
+                         "cells": int(np.isfinite(sigma_day).sum()),
+                         "cells_one_day": int((np.isfinite(sigma) & ~np.isfinite(sigma_day)).sum()),
+                         "median_m": round(float(np.nanmedian(sigma_day)), 4) if np.isfinite(sigma_day).any() else None,
+                         "ratio_to_sigma_median": (round(float(np.median(sigma_day[both_] / sigma[both_])), 3)
+                                                   if both_.any() else None)}
+        if sigma_day_rec["median_m"] is not None:
+            print(f"day-block SE      : median {sigma_day_rec['median_m']:.3f} m on {sigma_day_rec['cells']} cell(s) of 2+ "
+                  f"days, {sigma_day_rec['ratio_to_sigma_median'] or float('nan'):.2f} x the SE above (median); "
+                  f"{sigma_day_rec['cells_one_day']} cell(s) of one day have none (--day-block-se, day_block_sigma)")
+        else:
+            print("day-block SE      : no cell has crossings on 2 or more days (--day-block-se)")
 
     source = None
     if args.interpolate_edge:
@@ -2050,6 +2810,14 @@ def main():
     write_ascii_grid(str(stem) + "_spread.asc", spread, e0, n0, args.cell)
     write_ascii_grid(str(stem) + "_count.asc",
                      count.astype(float), e0, n0, args.cell, nodata=0.0)
+    write_ascii_grid(str(stem) + "_sigma.asc", sigma, e0, n0, args.cell)
+    if sigma_obs is not None:
+        write_ascii_grid(str(stem) + "_sigma_obs.asc", sigma_obs, e0, n0, args.cell)
+    if sigma_day is not None:
+        write_ascii_grid(str(stem) + "_sigma_day.asc", sigma_day, e0, n0, args.cell)
+    elif Path(str(stem) + "_sigma_day.asc").exists():
+        # an earlier --day-block-se build's: it is not this DEM's, and dem_change.py --day-block-lod would read it
+        Path(str(stem) + "_sigma_day.asc").unlink()
     if source is not None:
         write_ascii_grid(str(stem) + "_source.asc", source.astype(float), e0, n0, args.cell,
                          nodata=0.0)
@@ -2057,6 +2825,11 @@ def main():
     print(f"wrote {stem}_dem.asc     (elevation, m NAVD88)")
     print(f"wrote {stem}_spread.asc  (16-84 percentile range, m)")
     print(f"wrote {stem}_count.asc   (samples per cell)")
+    print(f"wrote {stem}_sigma.asc   (standard error of the cell median, m: repeatability only)")
+    if sigma_obs is not None:
+        print(f"wrote {stem}_sigma_obs.asc (SE with the errors the crossings share, m: --sigma-obs)")
+    if sigma_day is not None:
+        print(f"wrote {stem}_sigma_day.asc (standard error with a day's crossings sharing an error, m)")
 
     sstem = None
     if args.series_dir:
@@ -2070,7 +2843,31 @@ def main():
             write_ascii_grid(str(sstem) + "_spread.asc", spread, e0, n0, args.cell)
             write_ascii_grid(str(sstem) + "_count.asc", count.astype(float), e0, n0,
                              args.cell, nodata=0.0)
-            print(f"series            : {sstem}_{{dem,spread,count}}.asc (+ _info.json)")
+            write_ascii_grid(str(sstem) + "_sigma.asc", sigma, e0, n0, args.cell)
+            if sigma_obs is not None:
+                write_ascii_grid(str(sstem) + "_sigma_obs.asc", sigma_obs, e0, n0, args.cell)
+            if sigma_day is not None:
+                write_ascii_grid(str(sstem) + "_sigma_day.asc", sigma_day, e0, n0, args.cell)
+            elif Path(str(sstem) + "_sigma_day.asc").exists():
+                Path(str(sstem) + "_sigma_day.asc").unlink()
+            print(f"series            : {sstem}_{{dem,spread,count,sigma{',sigma_day' if sigma_day is not None else ''}}}.asc "
+                  f"(+ _info.json)")
+
+    loess_record = None
+    if args.loess:
+        # opt-in: the same points the DEM was gridded from (every filter above applied), by quadratic loess on
+        # the DEM's own grid, with its prediction error (dem_loess.py). After the DEM's grids are written: no
+        # value of the DEM, nothing on its page and no series file depends on it.
+        import dem_loess
+        print()
+        lo = dem_loess.loess_grid(E, N, Z, frames, e0, n0, ncols, nrows, args.cell, loess_along, loess_across,
+                                  min_frames=args.min_points,
+                                  max_sigma=args.max_spread / 2 if args.max_spread and args.max_spread > 0 else None)
+        for line in dem_loess.summary_lines(lo):
+            print(line)
+        dem_loess.write_grids(str(stem), lo, e0, n0, args.cell)
+        loess_record = dem_loess.info_record(lo)
+        print(f"wrote {stem}_loess.asc   (loess elevation, m NAVD88; and _loess_err, _loess_nmse, _loess_skill)")
 
     # What the page needs and the grids do not hold: dates, frames, filters.
     # Written always, so 'python3 dem_figure.py <stem>' can redraw the page
@@ -2087,6 +2884,30 @@ def main():
         # share of the points whose elevation includes the wave setup
         # (beach_elevation_navd88, extract_elevation_contours.py --setup-coef)
         "setup_share": round(load_stats.get("setup_share", 0.0), 4),
+        # which wave record tagged the frames (extract_elevation_contours.py wave_source), against
+        # the currency the setup coefficient was fitted in: wave_currency_record()
+        "wave_currency": wave_record,
+        # when the levels were taken (water_level_timing_record): only for contours made with
+        # extract_elevation_contours.py --timing-mode other than legacy
+        **({"water_level_timing": timing_record} if timing_record else {}),
+        # which setup model placed the lines (setup_model.py), only when the contours carry the
+        # setup_model column (--setup-model stockdon): {its tag: frames}
+        **({"setup_model": setup_models} if setup_models is not None else {}),
+        # <stem>_sigma.asc: what it is (sigma_grid) and its median / p90 over the cells with one
+        "sigma": {"file": "_sigma.asc",
+                  "definition": "1.25 x (16-84 percentile spread / 2) / sqrt(frames): the standard error of "
+                                "the cell median from repeat crossings (repeatability, not accuracy), on cells "
+                                "with a value and 2 or more frames; short of the true SE on thin cells (about "
+                                "0.6-0.8 of it at 3-5 frames, for normal errors); no "
+                                "observation term (water level, setup, georectification), whose inputs the "
+                                "rows do not carry",
+                  "median_m": round(float(np.nanmedian(sigma)), 4) if np.isfinite(sigma).any() else None,
+                  "p90_m": round(float(np.nanpercentile(sigma, 90)), 4) if np.isfinite(sigma).any() else None},
+        # <stem>_sigma_day.asc (--day-block-se only): the day-block SE (day_block_sigma); absent without it
+        **({"sigma_day": sigma_day_rec} if sigma_day_rec is not None else {}),
+        # reporting only: residuals against the tide's stage and Hs (residual_diagnostic) and the
+        # c1 - c2 offset in shared cells (camera_offset, None with one camera); {} with --no-diagnostics
+        "diagnostics": diagnostics,
         # True: this build wrote <stem>_source.asc (and the page may trust
         # it); False: any _source.asc beside the grids is an older run's.
         "interpolated": source is not None,
@@ -2106,6 +2927,11 @@ def main():
             **day_record,
         },
     }
+    if obs_record is not None:
+        # only with --sigma-obs: <stem>_sigma_obs.asc, what it is and the inputs it was made with
+        page_info["sigma_obs"] = obs_record
+    if loess_record is not None:
+        page_info["loess"] = loess_record        # --loess only: without it info.json is as before
     with open(str(stem) + "_info.json", "w") as f:
         json.dump(page_info, f, indent=1)
     print(f"wrote {stem}_info.json   (dates, frames, filters: for the page)")
@@ -2114,7 +2940,8 @@ def main():
         # <series stem>) credits only the cameras that measured: without it a
         # c1-only week's page said 'seen by c2' and drew a seam
         with open(str(sstem) + "_info.json", "w") as f:
-            json.dump(page_info, f, indent=1)
+            # the series holds no loess grids: its info.json does not name them
+            json.dump({k: v for k, v in page_info.items() if k != "loess"}, f, indent=1)
 
     rc = 0
     if not args.no_plot:

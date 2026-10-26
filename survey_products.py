@@ -65,7 +65,14 @@ stale, and nothing stale is ever reported as current):
             confirm (UNCONFIRMED), is LEFT OUT of the detection and listed
             with what was measured (--keep-moved-days keeps both); if most
             days differ from the reference nothing is left out and a warning
-            says to look. Nothing is dropped silently.
+            says to look. Nothing is dropped silently. OPT-IN: with
+            --correct-pointing (an evaluation, in its own root
+            <root>_pointing-corrected) a day whose matched features pass
+            pointing_daily.py's gates (a turn over MATCH_ERR_DEG, held
+            through the day on its first and last photos) is detected and
+            its waterlines mapped with its own pointing (the calibration
+            turned by the change measured that day) instead; every other
+            day as without it.
   detect    historical eras: detect_original_view.py per camera with the
             station ID, the date's calibration, the search envelope from the
             OTHER survey, the forcing files and --setup-coef (the detector's
@@ -86,7 +93,10 @@ stale, and nothing stale is ever reported as current):
             says so), asc_to_geotiff.py (EPSG:6348, NAD83(2011) / UTM 19N,
             the surveys' frame; NAVD88 EPSG:5703 vertical keys on the DEM),
             and the DEM page by dem_figure.py with the date's own camera
-            positions.
+            positions. --dem-loess (off by default) also writes the
+            scale-controlled loess surface and its prediction error
+            (dem_loess.py; <stem>_loess*.asc/.tif): a second surface beside
+            the DEM, which no figure, comparison or label uses.
   maps      daily_elevation_map.py per camera on the window's photos, and a
             plan view of the filtered waterlines coloured by elevation over
             the survey (or the DEM).
@@ -282,6 +292,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from setup_model import G, setup_c, wave_scale          # noqa: E402,F401  the setup formula, once (G: as before)
 
 # Station (NUC) defaults; every one can be overridden on the command line.
 DEFAULT_OUTPUT_ROOT = Path("/mnt/I2Rgus_Data/survey_products")
@@ -307,7 +318,6 @@ LABELS = ("INDEPENDENT", "CROSS-VALIDATED", "PARTLY-CIRCULAR", "CIRCULAR")   # b
 # SETUP_FITS (where it was fitted decides which comparisons are CIRCULAR). A new C is changed in all
 # three places and given its own SETUP_FITS entry.
 SETUP_COEF = 0.037
-G = 9.81
 # Where each setup coefficient in use was fitted. A comparison with that
 # survey cannot test the setup (nor the overall level the setup sets). The
 # survey is recognised by its CONTENT (sha256), not only its file name: a
@@ -549,6 +559,21 @@ HORIZON_LIMIT_PX = 50
 # nothing shows the camera back). When the days left out are most of the window,
 # the step and the README say so with the count (pointing_majority_note).
 LEFT_OUT_VERDICTS = ("DIFFERENT POINTING", "UNCONFIRMED")
+# OPT-IN per-day pointing CORRECTION (--correct-pointing; pointing_daily.py, whose docstring has the method and the
+# gates). Instead of leaving a turned day out, a day whose matched features pass pointing_daily's gates (MATCH_INLIERS
+# or more, TURN_SIGMA_MIN or more, inliers spread MATCH_SPREAD_TESTED_PX or more, a turn of more than MATCH_ERR_DEG
+# (a smaller one is the match's own error: the day is at rest and gridded as by default) and at most
+# pointing_daily.CORRECT_MAX_DEG, the same turn within MATCH_ERR_DEG on the day's first and last photos (the pointing
+# held through the day: check_pointing matches them too), not UNCONFIRMED, not the reference day) is detected like the
+# others and its waterlines are mapped with its own pointing: the calibration turned by the change the features
+# measured that day, the coastal-imaging practice (Rodriguez-Padilla et al. 2020; Arriaga et al. 2022: ~40% less
+# shoreline error at Sisal). Every other day is as in the default build (a day measured to differ that fails a gate
+# is still left out).
+# OFF by default, so the products stay as they are; a corrected build goes in its own root, <root>_pointing-corrected
+# (pointing_root_problem), so the two can be compared date by date against the same survey (docs/VALIDATION.md
+# 4.6b). No survey enters the correction, so the labels do not change. Not on a BLIND date (its A and B builds are
+# fixed by its protocol) and not with --eo (a GCP-free B is the pre-registered procedure's product as made).
+POINTING_CORRECTED = "pointing-corrected"
 
 # Fewer compared cells or points than this is not an estimate (as survey_compare.py's MIN_BAND_N).
 FEW_N = 10
@@ -611,17 +636,19 @@ def overlap_note(seconds):
 # merge, the plan view) carry a version number in their signature instead
 # (bumped when their code changes) and record this script's sha256.
 STEP_SCRIPTS = {
-    "forcing": ["historical_forcing.py"],
+    "forcing": ["historical_forcing.py", "setup_model.py"],
     "pointing": ["horizon_check.py", "pointing_check.py", "estimate_eo_rotation.py"],
     "detect": ["detect_original_view.py", "waterline_detector_v5.py", "extract_elevation_contours.py",
-               "georectify.py", "view_reproject.py", "compare_dem_survey.py"],
-    "detect_live": ["georectify.py", "extract_elevation_contours.py"],
+               "georectify.py", "view_reproject.py", "compare_dem_survey.py", "timex_timing.py",
+               "setup_model.py"],
+    "detect_live": ["georectify.py", "extract_elevation_contours.py", "timex_timing.py", "setup_model.py"],
     "merge": [],
     "filter": ["waterline_consistency.py", "waterline_track.py"],
-    "dem": ["dem_from_contours.py", "waterline_track.py", "asc_to_geotiff.py", "dem_figure.py", "dem_map.py"],
+    "dem": ["dem_from_contours.py", "waterline_track.py", "asc_to_geotiff.py", "dem_figure.py", "dem_map.py",
+            "setup_model.py"],
     "map": ["daily_elevation_map.py"],
-    "map_plan": ["compare_dem_survey.py", "survey_compare.py"],
-    "compare": ["survey_compare.py", "compare_dem_survey.py", "compare_rtk.py", "asc_to_geotiff.py"],
+    "map_plan": ["compare_dem_survey.py", "survey_compare.py", "setup_model.py"],
+    "compare": ["survey_compare.py", "compare_dem_survey.py", "compare_rtk.py", "asc_to_geotiff.py", "setup_model.py"],
 }
 
 # Horizontal CRS written into the GeoTIFFs (--geotiff-epsg). The grids are in
@@ -736,16 +763,22 @@ GCPFREE_PINS = [
     {"gcpfree_eo.py": "e97c24f045c56f85284499c0145dddca8761c0f94ec3612d92eea1bebf52ec2a",
      "modules": {
          "estimate_eo_rotation.py": "2fbb27b69db3604498b5cfd63739e4ab5ebdbb061e58e2397bc1323956406e72",
-         "georectify.py": "e9f1d2c1872697b1be5d805d2762c40b9e32752251f0e9e6d6cb75f5bc7eba1e",
+         "georectify.py": "96f3f52e5adc4ca033c444ae2affb7377f7bb7eb66f1384f00ec14a8e1108a25",
          "horizon_check.py": "a7eeac44fe21ab1414b98568f235cb6c6e1e1892cee965f9ee88c7923f88c23f",
          "detect_original_view.py": "c807b2f907b4856cda08b21ddcf46c1c0470bd23b7559f990fc21e831a19036a",
-         "view_reproject.py": "2d63650ec558c90f7aada6a223f6dfb6dd61dc55f5998d9a8f0cf737de3cd817"},
+         "view_reproject.py": "aba55fb29a9104103a2884fbf23efb2ed7bdba7d0462773eede8a701e1abca0c"},
      "constants_sha256": "6259cec4a81e4e0d7da96fec2a6ec4430e589b5a5935401ab274f069feee9f96",
-     "pinned": "2026-10-14 (integration review round 1: every run, a trial too, refused until the "
-               "pre-registration's commit is on a remote-tracking branch (pushed), and its messages say 'git push'; "
-               "no gate, threshold, window or rule of the computation changed, the constants are the same). It "
-               "replaces the pins of review rounds 0-2 of 2026-10-14 (2387f2d3857d... the last), under which nothing "
-               "was run outside tests and whose sha256 was not yet sent to the holder"},
+     "pinned": "2026-10-20 (two modules: georectify.py and view_reproject.py test 'in front of the camera' by the "
+               "point's depth along the optical axis, no longer by the sign of the projective scale, which depends "
+               "on the camera's absolute UTM position and lost every point for azimuths of ~95-275 deg; "
+               "georectify.undistort_uv returns NaN where its passes do not converge or beyond the lens model's "
+               "fold. Their outputs are bit-identical for every IO and EO file in calibration/ (calibration A not "
+               "opened), over every pixel of the frame, so nothing the procedure computes changes; gcpfree_eo.py "
+               "and its constants are the same files). It replaces the pin of 2026-10-14 (integration review round "
+               "1: the same gcpfree_eo.py, georectify.py e9f1d2c18726... and view_reproject.py 2d63650ec558...), "
+               "which replaced the pins of review rounds 0-2 (2387f2d3857d... the last). Nothing was run outside "
+               "tests under any of them. The pin is replaced, not appended: a second pin with the same "
+               "gcpfree_eo.py sha256 would never be looked up (gcpfree_pin_of takes the first)"},
 ]
 # gcpfree_eo.py's ROOTS: the station's photo folders a delivery run must use (a B made from other folders is a test of
 # the procedure, never the delivered B)
@@ -1734,8 +1767,9 @@ def iso_utc(ep):
 
 
 def setup_m(hs, tp, coef):
-    """Wave setup C*sqrt(Hs*L0), L0 = g*Tp^2/(2*pi): extract_elevation_contours.py --setup-coef."""
-    return coef * np.sqrt(float(hs) * 9.81 * float(tp) ** 2 / (2 * np.pi))
+    """Wave setup C*sqrt(Hs*L0), L0 = g*Tp^2/(2*pi): extract_elevation_contours.py --setup-coef
+    (setup_model.setup_c; hs, tp may be the text of a contour row)."""
+    return setup_c(float(hs), float(tp), coef)
 
 
 def live_forcing_figure(path, ep, lv, hs_ok, coef, plan):
@@ -1911,6 +1945,8 @@ def check_pointing(plan, cam, photos, args):
             img = cv2.imread(str(probe))
             m = pc.measure(img, [ref], io, min_inliers=MATCH_INLIERS, second=True) if img is not None else None
         r.update(feature_record(m, probe, args.pointing_fail))
+        if getattr(args, "correct_pointing", False):
+            r.update(pointing_day_check(days[day], probe, ref_src, ref, io, r, ref_day, args))
         rows.append(r)
     storms = storm_days_of(plan, days)
     info = {"reference_frame": ref_src.name, "reference_day": ref_day, "reference_kind": ref_kind,
@@ -2782,13 +2818,20 @@ POINTING_VERSION = 11
 
 def pointing_sig(plan, cam, args, photos):
     c = plan["cams"][cam]
-    return {"eo": c["eo_file"], "eo_file": file_sig(c["eo_path"]),
-            "photos": hashlib.sha1("\n".join(p.name for p in photos).encode()).hexdigest(),
-            "frames": args.pointing_frames, "fail": args.pointing_fail, "v": POINTING_VERSION,
-            # the window's storm days (from the forcing's waves): a new wave record reruns the verdicts only
-            # when it changes them
-            "storm_days": storm_days_of(plan, per_day(photos)),
-            "scripts": scripts_sig("pointing")}
+    sig = {"eo": c["eo_file"], "eo_file": file_sig(c["eo_path"]),
+           "photos": hashlib.sha1("\n".join(p.name for p in photos).encode()).hexdigest(),
+           "frames": args.pointing_frames, "fail": args.pointing_fail, "v": POINTING_VERSION,
+           # the window's storm days (from the forcing's waves): a new wave record reruns the verdicts only
+           # when it changes them
+           "storm_days": storm_days_of(plan, per_day(photos)),
+           "scripts": scripts_sig("pointing")}
+    if getattr(args, "correct_pointing", False):
+        # --correct-pointing also matches the first and last photos of a day it would correct (pointing_day_check);
+        # a default build's signature is as it was
+        import pointing_daily
+        sig["day_check"] = {"v": pointing_daily.CORRECTION_VERSION, "rules": pointing_correction_rules(),
+                            "script": script_sha("pointing_daily.py")}
+    return sig
 
 
 def step_pointing(plan, args, state):
@@ -2979,10 +3022,142 @@ def other_pointing_warning(info, lo, where, date=None):
 def skip_days_of(res, args):
     """The days the detection leaves out, from a pointing result and this run's options (None: the
     defaults). A result of the rule before Oct 2026 whose 'most days differ' guard kept every day
-    ('leave_out' False) gives none, as its detection left out none."""
+    ('leave_out' False) gives none, as its detection left out none. With --correct-pointing the days it
+    corrects (pointing_corrections) are detected, not left out."""
     if not res or getattr(args, "keep_moved_days", False) or not res.get("leave_out", True):
         return []
-    return sorted(res.get("different_days") or [])
+    skip = sorted(res.get("different_days") or [])
+    if getattr(args, "correct_pointing", False):
+        fixed = pointing_corrections(res)[0]
+        skip = [d for d in skip if d not in fixed]
+    return skip
+
+
+def pointing_correction_rules():
+    """pointing_daily's gates (correction_rules) with this script's thresholds: MATCH_INLIERS, TURN_SIGMA_MIN and
+    MATCH_SPREAD_TESTED_PX, its own CORRECT_MAX_DEG, and the gates of the day at MATCH_ERR_DEG (a turn over it; the
+    day's other frames within it of the probe's turn)."""
+    import pointing_daily
+    return pointing_daily.correction_rules(MATCH_INLIERS, TURN_SIGMA_MIN, MATCH_SPREAD_TESTED_PX,
+                                           min_turn_deg=MATCH_ERR_DEG, max_day_spread_deg=MATCH_ERR_DEG)
+
+
+def pointing_day_check(day_photos, probe, ref_src, ref, io, row, ref_day, args):
+    """
+    --correct-pointing (pointing_daily.day_held): did the pointing the probe measured hold through the day? For a day
+    whose probe passes every other gate, its first and last photos of the detection (other than the probe and the
+    reference frame) are matched against the same reference; the other days are not corrected, so they are not
+    matched again. -> the columns added to the day's row, feature_time_utc and day_check
+    ([feature_record + time_utc]; [] when the probe is the day's only photo), or {} for a day not checked.
+    """
+    import cv2
+    import pointing_check as pc
+    import pointing_daily
+    if probe is None:
+        return {}
+    rules = {k: v for k, v in pointing_correction_rules().items() if k != "max_day_spread_deg"}
+    if pointing_daily.day_correction(row, rules, ref_day)[0] is None:
+        return {}
+    others = sorted((p for p in day_photos if p.name not in (probe.name, ref_src.name)), key=lambda p: utc_of(p.name))
+    chk = []
+    for p in (others[:1] + others[-1:]) if len(others) > 1 else others:
+        img = cv2.imread(str(p))
+        m = pc.measure(img, [ref], io, min_inliers=MATCH_INLIERS, second=True) if img is not None else None
+        chk.append(dict(feature_record(m, p, args.pointing_fail), time_utc=f"{utc_of(p.name):%H:%M}"))
+    return {"feature_time_utc": f"{utc_of(probe.name):%H:%M}", "day_check": chk}
+
+
+def pointing_corrections(res):
+    """--correct-pointing: the days of a pointing result that pass pointing_daily's gates, {day: the change measured
+    and its match}, and why each other day does not, {day: [why]}; judged against the result's reference day.
+    ({}, {}) without rows."""
+    import pointing_daily
+    if not res or not res.get("rows"):
+        return {}, {}
+    return pointing_daily.window_corrections(res["rows"], pointing_correction_rules(),
+                                             (res.get("info") or {}).get("reference_day"))
+
+
+def corrected_days(dst):
+    """The days a detection mapped with their own pointing (its stamp's pointing_correction; none without it)."""
+    return sorted(((dst or {}).get("pointing_correction") or {}).get("days") or {})
+
+
+def pointing_correction_plan(plan, state, cam, args):
+    """--correct-pointing: what the detection of this camera corrects, from the pointing results it uses
+    (pointing_skip_days has checked they are this window's and this calibration's): {"days": {day: change},
+    "not_corrected": {day: [why]}, "res": the results}; None without the option."""
+    if not getattr(args, "correct_pointing", False):
+        return None
+    res = (state.get("pointing") or {}).get(cam) or load_json(plan["out"] / "pointing" / f"pointing_{cam}.json")
+    corr, why_not = pointing_corrections(res)
+    return {"days": corr, "not_corrected": why_not, "res": res}
+
+
+def pointing_correction_sig(pc_):
+    """The part of a corrected detection's signature that the correction adds: its version, gates, the days and
+    their changes, pointing_daily.py's sha256. Only with --correct-pointing: a default build's signature is as it
+    was, so nothing rebuilds for this code."""
+    import pointing_daily
+    return {"v": pointing_daily.CORRECTION_VERSION, "rules": pointing_correction_rules(),
+            "days": {d: v["d_deg"] for d, v in sorted(pc_["days"].items())}, "script": script_sha("pointing_daily.py")}
+
+
+def correct_pointing_rows(plan, cam, ground, pc_):
+    """--correct-pointing, once the camera's waterlines are georectified with the calibration: each corrected day's
+    rows of `ground` mapped again with that day's own pointing (pointing_daily.apply_corrections; its EO files in
+    waterlines/<cam>/pointing_corrected_eo/). -> the record the detection's stamp keeps, which the README and
+    provenance read."""
+    import pointing_daily
+    from georectify import load_intrinsics, load_extrinsics
+    c = plan["cams"][cam]
+    info = (pc_.get("res") or {}).get("info") or {}
+    days = pointing_daily.apply_corrections(ground, cam, load_intrinsics(c["io_path"]), load_extrinsics(c["eo_path"]),
+                                            c["eo_file"], pc_["days"], Path(ground).parent / "pointing_corrected_eo",
+                                            reference=info.get("reference_frame") or "")
+    say(f"pointing correction {cam}", (", ".join(
+        f"{d} {v['d_deg'][0]:+.2f}/{v['d_deg'][1]:+.2f}/{v['d_deg'][2]:+.2f} deg ({v['rows']} points"
+        + (f", moved {v['moved_m_median']:.2f} m median" if v.get("moved_m_median") is not None else "") + ")"
+        for d, v in sorted(days.items())) or "no day passes the gates")
+        + " (--correct-pointing: mapped with each day's own pointing)")
+    return {"v": pointing_daily.CORRECTION_VERSION, "rules": pointing_correction_rules(),
+            "reference_day": info.get("reference_day"), "reference_frame": info.get("reference_frame"),
+            "days": days, "not_corrected": pc_["not_corrected"]}
+
+
+def pointing_eo_day_specs(plan, cams):
+    """--correct-pointing: survey_compare.py's --camera-eo-day CAM:DAY=PATH for each day the detection of one of
+    `cams` mapped with its own pointing (its stamp's record; the EO files in waterlines/<cam>/pointing_corrected_eo/),
+    so the C = 0 sensitivity re-projects those days' lines with the pointing they were mapped with, not the
+    calibration's. [] for a default build (its compare command is as it was)."""
+    specs = []
+    for cam in sorted(cams):
+        pcr = (read_stamp(plan["out"], f"detect_{cam}") or {}).get("pointing_correction") or {}
+        for d, v in sorted((pcr.get("days") or {}).items()):
+            specs.append(f"{cam}:{d}={plan['out'] / 'waterlines' / cam / 'pointing_corrected_eo' / v['eo_file']}")
+    return specs
+
+
+def pointing_root_problem(plan, args):
+    """--correct-pointing builds in its own root, named for it (<root>_pointing-corrected, optionally + _c<C>), and no
+    other build goes in such a root, so a corrected product never replaces a default one and a root's name says
+    which it holds; not on a BLIND date, not with --eo. -> text ('' when fine). Refused, exit 5."""
+    on = bool(getattr(args, "correct_pointing", False))
+    root = Path(str(getattr(args, "output_root", "") or ""))
+    named = bool(re.search(rf"_{re.escape(POINTING_CORRECTED)}(_c\d+(\.\d+)?)?$", root.name))
+    if on and plan.get("blind"):
+        return (f"--correct-pointing is not for a BLIND date: its builds (A, the table's calibration, and the GCP-free "
+                f"B) are fixed by its protocol")
+    if on and any(c.get("eo_given") for c in plan["cams"].values()):
+        return "--correct-pointing does not go with --eo: a calibration given there is built as it was made"
+    if on and not named:
+        return (f"a --correct-pointing build goes in its own root, named for it: --output-root "
+                f"{root.parent / (root.name + '_' + POINTING_CORRECTED)} (not {root}: a corrected product never "
+                f"replaces a default one, and the root's name says which it holds)")
+    if named and not on:
+        return (f"{root} is named for pointing-corrected products: build there with --correct-pointing, or build this "
+                f"one in another --output-root")
+    return ""
 
 
 def pointing_majority_note(res, args, skip=None, ran=True):
@@ -3088,9 +3263,17 @@ def print_pointing(cam, res, args, detect_now=True, detected=None):
     note = pointing_majority_note(res, args)
     if note:
         warn(f"{cam}: {note}")
+    fixed = pointing_corrections(res)[0] if getattr(args, "correct_pointing", False) else {}
+    if fixed:
+        verdict = {r["date"]: r.get("verdict", "?") for r in res["rows"]}
+        say(f"{cam} corrected", ("" if detect_now else "when the detection runs again: ")
+            + ", ".join(f"{d} ({verdict.get(d, '?')}, {v['d_deg'][0]:+.2f}/{v['d_deg'][1]:+.2f}/{v['d_deg'][2]:+.2f} "
+                        f"deg)" for d, v in sorted(fixed.items()))
+            + " (--correct-pointing: detected, and mapped with the calibration turned by the change matched features "
+              "measured that day)")
     if res.get("different_days"):
         skip = skip_days_of(res, args)
-        kept = [d for d in res["different_days"] if d not in skip]
+        kept = [d for d in res["different_days"] if d not in skip and d not in fixed]
         verdict = {r["date"]: r.get("verdict", "?") for r in res["rows"]}
         # what the detection does with these results: this run's when it runs the detection too; a pointing-only
         # run (--steps pointing) says what the next detection will do and what the one on disk did
@@ -3200,6 +3383,20 @@ def step_detect(plan, args, state):
             sig = {"cmd": cmd_text(cmd), "photos": hashlib.sha1("\n".join(p.name for p in photos).encode()).hexdigest(),
                    "after": {"forcing": token(out, "forcing")}, "eo_file": file_sig(c["eo_path"]),
                    "envelope": file_sig(c["envelope_path"]), "setup_fit": fit_sig(fit), "scripts": scripts_sig("detect")}
+            # The water-level timing (timex_timing.py) reaches the detection through
+            # detect_original_view.py's detector and contour subprocesses (TIMING_MODE). A mode
+            # other than legacy is part of the signature, so a switch rebuilds the detection;
+            # legacy adds nothing to it (no key), so going back to legacy matches legacy stamps.
+            from timex_timing import timing_mode
+            try:
+                timing = timing_mode()
+            except ValueError as e:
+                raise StepFailed(str(e))
+            if timing != "legacy":
+                sig["timing_mode"] = timing
+            pc_ = pointing_correction_plan(plan, state, cam, args)
+            if pc_ is not None:
+                sig["pointing_correction"] = pointing_correction_sig(pc_)
             fresh, why = is_fresh(out, f"detect_{cam}", sig, [ground],
                                   [f / "water_level.csv", f / "waves.csv", c["eo_path"]])
             if fresh:
@@ -3232,11 +3429,20 @@ def step_detect(plan, args, state):
                      f"{wdir / cam / 'processing.log'}: camera left out")
                 state.setdefault("failed_cams", {})[cam] = f"detection failed (exit {rc})"
                 continue
-            write_stamp(out, f"detect_{cam}", sig, [cmd], scripts=STEP_SCRIPTS["detect"],
-                        extra={"setup_coef": args.setup_coef, "setup_fit": fit, "skip_days": skip,
-                               "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
-                               "photos": len(photos), "eo_sha256": calibration_record(c)["eo_sha256"],
-                               "calibration": calibration_record(c)})
+            extra = {"setup_coef": args.setup_coef, "setup_fit": fit, "skip_days": skip,
+                     "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
+                     "photos": len(photos), "eo_sha256": calibration_record(c)["eo_sha256"],
+                     "calibration": calibration_record(c)}
+            if pc_ is not None:
+                try:
+                    extra["pointing_correction"] = correct_pointing_rows(plan, cam, ground, pc_)
+                except (OSError, ValueError, KeyError) as exc:
+                    warn(f"detect {cam}: the pointing correction FAILED ({exc.__class__.__name__}: {exc}): camera "
+                         f"left out")
+                    state.setdefault("failed_cams", {})[cam] = f"pointing correction failed ({exc})"
+                    continue
+            write_stamp(out, f"detect_{cam}", sig, [cmd], scripts=STEP_SCRIPTS["detect"]
+                        + (["pointing_daily.py"] if pc_ is not None else []), extra=extra)
             # the search envelope's content as this detection used it (a GCP-free B of a blind date must use A's)
             update_stamp(out, f"detect_{cam}", envelope_sha256=file_sha(c["envelope_path"]))
             if not args.keep_detector_debug:
@@ -3339,6 +3545,9 @@ def live_detect(plan, args, state, fit):
         sig = {"rows": str(rows_file), "after": {"archive_rows": token(out, "archive_rows")},
                "setup_coef": args.setup_coef, "setup_fit": fit_sig(fit), "skip": sorted(skip), "cmd": cmd_text(geo),
                "eo_file": file_sig(c["eo_path"]), "v": LIVE_DETECT_VERSION, "scripts": scripts_sig("detect_live")}
+        pc_ = pointing_correction_plan(plan, state, cam, args)
+        if pc_ is not None:
+            sig["pointing_correction"] = pointing_correction_sig(pc_)
         fresh, why = is_fresh(out, f"detect_{cam}", sig, [ground], [rows_file, c["eo_path"]])
         if fresh:
             fresh, why = eo_content_fresh(out, f"detect_{cam}", c["eo_path"])
@@ -3367,14 +3576,23 @@ def live_detect(plan, args, state, fit):
             warn(f"georectify {cam} FAILED (exit {rc}): camera left out")
             state.setdefault("failed_cams", {})[cam] = f"georectification failed (exit {rc})"
             continue
+        extra = {"setup": {k: v for k, v in stats.items() if k != "frame_names"},
+                 "setup_coef": args.setup_coef, "setup_fit": fit, "skip_days": skip,
+                 "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
+                 "eo_sha256": calibration_record(c)["eo_sha256"], "calibration": calibration_record(c)}
+        if pc_ is not None:
+            try:
+                extra["pointing_correction"] = correct_pointing_rows(plan, cam, ground, pc_)
+            except (OSError, ValueError, KeyError) as exc:
+                warn(f"georectify {cam}: the pointing correction FAILED ({exc.__class__.__name__}: {exc}): camera "
+                     f"left out")
+                state.setdefault("failed_cams", {})[cam] = f"pointing correction failed ({exc})"
+                continue
         # photos of the frames, for the maps (the maps step links them again from the photo roots of
         # its own run, so a photo that turns up later is used without a new georectification)
         link_frame_photos(plan, cam, args)
-        write_stamp(out, f"detect_{cam}", sig, [geo], scripts=STEP_SCRIPTS["detect_live"],
-                    extra={"setup": {k: v for k, v in stats.items() if k != "frame_names"},
-                           "setup_coef": args.setup_coef, "setup_fit": fit, "skip_days": skip,
-                           "keep_moved_days": bool(getattr(args, "keep_moved_days", False)),
-                           "eo_sha256": calibration_record(c)["eo_sha256"], "calibration": calibration_record(c)})
+        write_stamp(out, f"detect_{cam}", sig, [geo], scripts=STEP_SCRIPTS["detect_live"]
+                    + (["pointing_daily.py"] if pc_ is not None else []), extra=extra)
         parts.append((cam, ground))
     return parts
 
@@ -3430,7 +3648,9 @@ def apply_setup(src, dst, cam, coef, skip_days=()):
     setups = {}
     with open(src, newline="") as fi, open(str(dst) + ".tmp", "w", newline="") as fo:
         rd = csv.DictReader(fi)
-        fields = [k for k in rd.fieldnames if k not in ("setup_correction_m", "beach_elevation_navd88")]
+        # the slope-aware model's columns (the cron's SETUP_MODEL="stockdon") go too: these rows get C's setup
+        fields = [k for k in rd.fieldnames if k not in ("setup_correction_m", "beach_elevation_navd88",
+                                                        "setup_beta_f", "setup_model")]
         st["had_setup"] = "setup_correction_m" in rd.fieldnames
         if "offshore_hs_m" not in rd.fieldnames or "offshore_tp_s" not in rd.fieldnames:
             raise StepFailed(f"{src}: no offshore_hs_m / offshore_tp_s columns (the cron ran without --waves?)")
@@ -3501,7 +3721,7 @@ def implied_c(setup, hs, tp):
         s, h, p = float(setup), float(hs), float(tp)
     except (TypeError, ValueError):
         return None
-    x = np.sqrt(h * G * p ** 2 / (2 * np.pi))
+    x = wave_scale(h, p)
     return s / x if x > 0.05 else None
 
 
@@ -3857,6 +4077,32 @@ def calibration_label(plan, args):
     return ", ".join(sorted(set(out)))
 
 
+# The grids dem_from_contours.py writes that the dem step converts to GeoTIFF; with --dem-loess also the loess
+# surface and its error (dem_loess.LOESS_FILES), none of which a figure, comparison or label reads.
+DEM_GRIDS = ("dem", "spread", "count", "sigma")
+DEM_LOESS_GRIDS = ("loess", "loess_err", "loess_nmse", "loess_skill")
+
+
+def dem_loess_on(args):
+    """--dem-loess (off by default; False for callers whose options predate it)."""
+    return bool(getattr(args, "dem_loess", False))
+
+
+def dem_grids(args):
+    """The grids the dem step converts and expects: DEM_GRIDS, + DEM_LOESS_GRIDS with --dem-loess."""
+    return DEM_GRIDS + (DEM_LOESS_GRIDS if dem_loess_on(args) else ())
+
+
+def dem_loess_settings():
+    """What the DEM's stamp, provenance.json and README record of a --dem-loess build."""
+    from dem_loess import LOESS_SCALES, LOESS_ORDER, LOESS_MAX_NMSE
+    return {"script": "dem_loess.py", "half_widths_m": {"alongshore": LOESS_SCALES[0], "cross_shore": LOESS_SCALES[1]},
+            "order": LOESS_ORDER, "max_nmse": LOESS_MAX_NMSE, "grids": [f"_{k}" for k in DEM_LOESS_GRIDS],
+            "note": "a second surface beside the DEM (quadratic loess with explicit scales, Plant, Holland & Puleo "
+                    "2002) and its prediction error; no figure, comparison or label uses it; check its error with "
+                    "python3 dem_loess.py evaluate <dem stem> <survey>"}
+
+
 def dem_cmds(plan, args, day_test=True):
     out = plan["out"]
     stem = dem_stem(plan)
@@ -3871,7 +4117,9 @@ def dem_cmds(plan, args, day_test=True):
         # are those around the survey, not whichever end weighs more (dem_from_contours.py
         # --anchor-date; 23 Oct 2024, c2: 24 and 26 Oct kept, the survey's own day left out, without it)
         cmd += ["--max-day-offset", args.dem_max_day_offset, "--anchor-date", plan["date"]]
-    tif = [sys.executable, HERE / "asc_to_geotiff.py"] + [f"{stem}_{k}.asc" for k in ("dem", "spread", "count")] + \
+    if dem_loess_on(args):
+        cmd += ["--loess"]                  # opt-in: the loess surface and its error beside the DEM (dem_loess.py)
+    tif = [sys.executable, HERE / "asc_to_geotiff.py"] + [f"{stem}_{k}.asc" for k in dem_grids(args)] + \
           ["--epsg", args.geotiff_epsg, "--note", calibration_identity(plan, args)]
     station = "/".join(sorted({c["station"] for c in plan["cams"].values()}))
     cal = calibration_label(plan, args)
@@ -3897,11 +4145,12 @@ def step_dem(plan, args, state):
     if no_day_test:
         warn(f"DEM day test NOT run: {no_day_test}")
     stem, cmd, tif, page = dem_cmds(plan, args, day_test=not no_day_test)
-    outs = [Path(f"{stem}_{k}.{e}") for k in ("dem", "spread", "count") for e in ("asc", "tif")] + \
+    outs = [Path(f"{stem}_{k}.{e}") for k in dem_grids(args) for e in ("asc", "tif")] + \
            [Path(f"{stem}_dem.png")]
     src_key = "filter" if src.name.endswith("_filtered.csv") else "merge"
+    scripts = STEP_SCRIPTS["dem"] + (["dem_loess.py"] if dem_loess_on(args) else [])
     sig = {"cmd": cmd_text(cmd), "tif": cmd_text(tif), "page": cmd_text(page),
-           "after": {src_key: token(out, src_key)}, "scripts": scripts_sig("dem")}
+           "after": {src_key: token(out, src_key)}, "scripts": {s: script_sha(s) for s in scripts}}
     fresh, why = is_fresh(out, "dem", sig, outs, [src])
     if fresh and not args.force:
         say("dem", f"SKIPPED: {stem}_dem.asc/.tif/.png are up to date (--force to rebuild)")
@@ -3909,7 +4158,9 @@ def step_dem(plan, args, state):
     say("dem", f"dem_from_contours.py over {plan['first']} .. {plan['last']} ({why}); ~10-40 s on the NUC")
     drop_stamp(out, "dem")
     (out / "dem").mkdir(parents=True, exist_ok=True)
-    for o in outs + [Path(f"{stem}_info.json"), Path(f"{stem}_map.png")]:   # no stale grid or page from an earlier build
+    # no stale grid or page from an earlier build (a --dem-loess build's loess grids included, whatever this one asks)
+    for o in outs + [Path(f"{stem}_info.json"), Path(f"{stem}_map.png")] + \
+            [Path(f"{stem}_{k}.{e}") for k in DEM_LOESS_GRIDS for e in ("asc", "tif")]:
         if o.exists():
             o.unlink()
     clear_comparisons(plan, "the DEM is being rebuilt")
@@ -3931,13 +4182,13 @@ def step_dem(plan, args, state):
         warn(f"the plain DEM map (dem_map.py) failed; the grids are fine. See {log}")
     rc = run_cmd(page, log)
     extra = {"cells": cells, "source": str(src),
-             "settings": dict(dem_settings_requested(args), day_test_off=no_day_test or None)}
+             "settings": dict(dem_settings_requested(args), day_test_off=no_day_test or None,
+                              **({"loess": dem_loess_settings()} if dem_loess_on(args) else {}))}
     if rc != 0 or not Path(f"{stem}_dem.png").exists():
         warn(f"the DEM page (dem_figure.py) failed (exit {rc}); the grids are fine. See {log}")
-        write_stamp(out, "dem", dict(sig, page_failed=True), [cmd, tif, page], scripts=STEP_SCRIPTS["dem"],
-                    extra=extra)
+        write_stamp(out, "dem", dict(sig, page_failed=True), [cmd, tif, page], scripts=scripts, extra=extra)
         return "built (page failed)"
-    write_stamp(out, "dem", sig, [cmd, tif, page], scripts=STEP_SCRIPTS["dem"], extra=extra)
+    write_stamp(out, "dem", sig, [cmd, tif, page], scripts=scripts, extra=extra)
     return "built"
 
 
@@ -4811,6 +5062,11 @@ def honest_label(s, plan, args, survey_path, fits=None, verdict=None):
                 v.worse("CIRCULAR", f"the {cam} pointing {Path(eo).name} "
                                     + ("carries a correction fitted to" if len(lin["chain"]) > 1 else "was fitted to")
                                     + f" this survey{via}")
+            elif named and s["survey_type"] == "points" and re.search(r"target|gcp", sname, re.I):
+                # calibration targets the calibration names (solved from them?): PARTLY-CIRCULAR, as the
+                # GCP-day rule below and survey_compare.audit_label say
+                v.worse("PARTLY-CIRCULAR", f"the {cam} calibration {Path(eo).name} names these calibration targets "
+                                           f"in its notes (solved from them?)", heuristic=True)
             elif named:
                 v.worse("CIRCULAR", f"the {cam} calibration {Path(eo).name} names this survey in its notes "
                                     f"(was it fitted to it?)", heuristic=True)
@@ -4987,6 +5243,9 @@ def step_compare(plan, args, state):
                (out / "waterlines" / cam / "contour_points_ground.csv").exists()]
         if eos:
             cmd += ["--camera-eo"] + eos + ["--eo-dirs"] + eo_dirs(args)
+        eod = pointing_eo_day_specs(plan, [e.split("=", 1)[0] for e in eos])
+        if eod:
+            cmd += ["--camera-eo-day"] + eod
         if len(envs) == 1:
             cmd += ["--envelope-source", envs[0]]
         syn = product_synthetic(plan)
@@ -5060,7 +5319,8 @@ SCRIPTS = ["survey_products.py", "historical_forcing.py", "detect_original_view.
            "extract_elevation_contours.py", "georectify.py", "waterline_consistency.py", "dem_from_contours.py",
            "dem_figure.py", "asc_to_geotiff.py", "daily_elevation_map.py", "survey_compare.py",
            "pointing_check.py", "horizon_check.py", "estimate_eo_rotation.py", "view_reproject.py",
-           "compare_dem_survey.py", "compare_rtk.py", "marconi_water_level.py"]
+           "compare_dem_survey.py", "compare_rtk.py", "marconi_water_level.py", "timex_timing.py",
+           "dem_loess.py", "setup_model.py", "pointing_daily.py"]
 
 _SOFTWARE = {}
 
@@ -6683,10 +6943,11 @@ def b_forcing_problem(plan, args):
 
 def option_refusal(plan, args):
     """What refuses this run before anything is written (exit 5): a wrong --eo, a variant in the wrong root,
-    an --eo calibration whose acceptance failed, a GCP-free B under another name than the procedure gave it.
+    an --eo calibration whose acceptance failed, a GCP-free B under another name than the procedure gave it,
+    a --correct-pointing build outside its own root (or another build in that root).
     -> text ('' when none)."""
     return (eo_option_problems(plan, args) or variant_root_problem(plan, args) or eo_acceptance_problem(plan, args)
-            or procedure_variant_problem(plan, args))
+            or procedure_variant_problem(plan, args) or pointing_root_problem(plan, args))
 
 
 def blind_independence_warnings(plan, args):
@@ -6834,7 +7095,8 @@ def missing_parts(plan, state, args=None):
             # these results, is not complete
             op = res["info"]["other_pointing"]
             dst = read_stamp(out, f"detect_{cam}")
-            inside = [d for d in op["days"] if d not in ((dst or {}).get("skip_days") or [])]
+            inside = [d for d in op["days"] if d not in ((dst or {}).get("skip_days") or [])
+                      and d not in corrected_days(dst)]
             if dst is None or inside:
                 miss.append(f"{cam}: the window holds two pointings: {', '.join(op['days'])} agree with each other, "
                             f"away from the calibration's own day {res['info'].get('reference_day')}; "
@@ -6845,7 +7107,8 @@ def missing_parts(plan, state, args=None):
         elif (res.get("info") or {}).get("other_pointing"):
             op = res["info"]["other_pointing"]
             dst = read_stamp(out, f"detect_{cam}")
-            inside = [d for d in op["days"] if d not in ((dst or {}).get("skip_days") or [])]
+            inside = [d for d in op["days"] if d not in ((dst or {}).get("skip_days") or [])
+                      and d not in corrected_days(dst)]
             miss.append(f"{cam}: the window holds two pointings: {', '.join(op['days'])} agree with each other, "
                         f"away from the reference's ({other_pointing_groups(op)}); "
                         + ("the detection has not run with these pointing results" if dst is None else
@@ -7527,6 +7790,51 @@ def calibration_caveats(plan, args, prov):
     return cav
 
 
+def pointing_correction_caveat(cam, pcr, byday=None):
+    """The README's line for a --correct-pointing detection, from its stamp's record (correct_pointing_rows): each day
+    mapped with its own pointing, with the change, the match and how far its lines moved; the days measured to differ
+    (or unconfirmed) that a gate kept from a correction, and why; what the correction is against and what it is not."""
+    byday = byday or {}
+    ru = pcr.get("rules") or {}
+    parts = []
+    for d, v in sorted((pcr.get("days") or {}).items()):
+        a, t, r = v["d_deg"]
+        mv = (f", its {v.get('georectified')} points moved {v['moved_m_median']:.2f} m median ({v['moved_m_max']:.2f} m "
+              f"max) from where the calibration put them" if v.get("moved_m_median") is not None else
+              f", {v.get('georectified', 0)} points")
+        chk = v.get("day_check")
+        held = ("" if chk is None else
+                f" (the {v.get('probe_time_utc') or '?'} UTC frame; held through the day: its "
+                f"{', '.join((f.get('time_utc') or '?') for f in chk)} UTC frames read it within "
+                f"{v.get('day_spread_deg') or 0:.3f} deg)" if chk else
+                f" (the {v.get('probe_time_utc') or '?'} UTC frame, the day's only photo)")
+        parts.append(f"{d} ({(byday.get(d) or {}).get('verdict') or v.get('verdict') or '?'}): {a:+.3f}/{t:+.3f}/"
+                     f"{r:+.3f} deg pan/tilt/roll on {v.get('inliers')} inliers, turn_sigma {v.get('turn_sigma')}"
+                     + held + mv)
+    left = [f"{d} ({'; '.join(w)})" for d, w in sorted((pcr.get("not_corrected") or {}).items())
+            if (byday.get(d) or {}).get("verdict") in LEFT_OUT_VERDICTS]
+    return (f"{cam}: POINTING CORRECTED PER DAY (--correct-pointing: an evaluation product, in its own root): "
+            + ("; ".join(parts) if parts else "no day passed the gates")
+            + f". Each such day was detected like the others and its waterlines mapped with the calibration turned by "
+              f"the change matched features measured that day against the reference frame "
+              f"{pcr.get('reference_frame') or '?'} ({pcr.get('reference_day') or '?'}) (pointing_daily.py; the EO "
+              f"files in waterlines/{cam}/pointing_corrected_eo/); the default product leaves a day measured to differ "
+              f"out instead, and grids a smaller change uncorrected. Gates: {ru.get('min_inliers')} or more inliers, "
+              f"turn_sigma {ru.get('min_turn_sigma', 0):g} or more, inliers spread {ru.get('min_spread_px', 0):g} px or "
+              f"more, a turn of at most {ru.get('max_turn_deg', 0):g} deg"
+            + (f" and of more than {ru['min_turn_deg']:g} deg (the match's own error: a day at rest is gridded as by "
+               f"default)" if "min_turn_deg" in ru else "")
+            + (f", the same turn within {ru['max_day_spread_deg']:g} deg on the day's first and last photos (the "
+               f"pointing held through the day)" if "max_day_spread_deg" in ru else "")
+            + ", not UNCONFIRMED, not the reference day"
+            + (f". Measured to differ or unconfirmed and NOT corrected (left out or kept as the lines above say): "
+               f"{'; '.join(left)}" if left else "")
+            + ". Only the georectification is corrected: the detector searched each day with the calibration's "
+              "envelope or crop (padded ~1-2.7 deg of tilt), so a day tilted ~1 deg or more may have lines outside "
+              "it. The window's constant offset against the calibration (the sea horizon's, above) is not corrected "
+              "(docs/VALIDATION.md 4.6b).")
+
+
 def small_change_caveat(plan, cam, rows, skip=()):
     """The README's line for a camera's KEPT 'small change' days (pointing_verdicts: matched features measured a turn
     of POINT_WARN_DEG - POINT_FAIL_DEG with tilt and roll within RUN_TOL_DEG, or an ambiguous match): each day's
@@ -7679,12 +7987,20 @@ def collect_caveats(plan, args, state, forcing, prov):
         # (--keep-moved-days)'); its days are compared with these results' defaults, and a difference has
         # either reason
         kmd_ = (dst or {}).get("keep_moved_days")
-        stale = dst is not None and skip != skip_days_of(res, argparse.Namespace(keep_moved_days=bool(kmd_)))
+        # a --correct-pointing detection (its stamp's record; its root holds no other) is judged by that option
+        cp_ = "pointing_correction" in (dst or {})
+        dflt = argparse.Namespace(correct_pointing=True) if cp_ else None
+        stale = dst is not None and (skip != skip_days_of(res, argparse.Namespace(keep_moved_days=bool(kmd_),
+                                                                                  correct_pointing=cp_))
+                                     or (cp_ and corrected_days(dst) != sorted(pointing_corrections(res)[0])))
         if dst is None or stale:
             if stale:
                 cav.append(f"{cam}: the detection left out " + (", ".join(skip) if skip else "no day")
+                           + (f" and corrected {', '.join(corrected_days(dst)) or 'no day'}" if cp_ else "")
                            + ", where these pointing results leave out "
-                           + (", ".join(skip_days_of(res, None)) or "no day")
+                           + (", ".join(skip_days_of(res, dflt)) or "no day")
+                           + (f" and correct {', '.join(sorted(pointing_corrections(res)[0])) or 'no day'}" if cp_
+                              else "")
                            # --keep-moved-days leaves out no day: it can explain a detection that left out
                            # none, never one that left days out (review 4)
                            + (" by default: it ran with other pointing results (the pointing step was run again "
@@ -7704,12 +8020,14 @@ def collect_caveats(plan, args, state, forcing, prov):
         else:
             if skip:
                 cav.append(f"{cam}: days left out of the detection for their pointing: {with_why(skip)}.")
-            kept_ = [d_ for d_ in diff_ if d_ not in skip]
+            kept_ = [d_ for d_ in diff_ if d_ not in skip and d_ not in corrected_days(dst)]
             if kept_:
                 cav.append(f"{cam}: days with a different or unconfirmed pointing KEPT in the detection ("
                            f"{kept_reason(res, args, dst)}): {with_why(kept_)}.")
+            if cp_:
+                cav.append(pointing_correction_caveat(cam, dst["pointing_correction"], byday))
         ran_ = dst is not None and not stale
-        note_ = (pointing_majority_note(res, args, skip=skip if ran_ else skip_days_of(res, None), ran=ran_)
+        note_ = (pointing_majority_note(res, args, skip=skip if ran_ else skip_days_of(res, dflt), ran=ran_)
                  if res.get("rows") else None)
         if note_:
             cav.append(f"{cam}: {note_}.")
@@ -7728,7 +8046,8 @@ def collect_caveats(plan, args, state, forcing, prov):
                        + (f"; the detection on disk left out {', '.join(gone)}, so they are kept once it runs again"
                           if gone else "")
                        + f": {with_why(over)}.")
-        small_ = small_change_caveat(plan, cam, res.get("rows") or [], skip if ran_ else skip_days_of(res, None))
+        small_ = small_change_caveat(plan, cam, res.get("rows") or [], (skip + corrected_days(dst)) if ran_ else
+                                     skip_days_of(res, dflt) + (sorted(pointing_corrections(res)[0]) if cp_ else []))
         if small_:
             cav.append(small_)
         bun_ = [r_ for r_ in res.get("rows") or [] if r_.get("verdict") not in LEFT_OUT_VERDICTS and bunched(r_)
@@ -7903,7 +8222,7 @@ def compared_frames_scale(plan, name, cam):
                     except ValueError:
                         continue
                     if hs == hs and tp == tp:
-                        x[k] = float(np.sqrt(hs * G * tp ** 2 / (2 * np.pi)))
+                        x[k] = float(wave_scale(hs, tp))
     except OSError:
         return None, 0
     return (float(np.median(list(x.values()))), len(x)) if x else (None, 0)
@@ -8607,6 +8926,9 @@ def write_provenance(plan, args, state, final=True):
             ({"photos": (dst or {}).get("photos"), "skip_days": (dst or {}).get("skip_days")} if dst else None),
             "built": bool(dst) and cam not in failed_cameras(plan, state),
             "notes": c["notes"]}
+        if cams[cam]["pointing_check"] is not None and "pointing_correction" in (dst or {}):
+            # --correct-pointing (its own root): the days mapped with their own pointing (absent from a default build)
+            cams[cam]["pointing_check"]["pointing_correction"] = dst["pointing_correction"]
     # a GCP-free B made by the pre-registered procedure: its stated rotation term's DEM effect taken as a pure TILT,
     # per range band, from this date's DEM and calibration (the procedure's synthetic errors were almost all roll)
     pinned = {cam: v["calibration"]["origin"]["procedure"] for cam, v in cams.items()
@@ -8675,14 +8997,18 @@ def write_provenance(plan, args, state, final=True):
                       "why": (head or {}).get("why") or s["why"], "status": status, "reason": r.get("reason"),
                       "current": bool(cur),
                       "photo_dates_used": lab.get("photo_dates_used"),
-                      "headline": ({k: head.get(k) for k in ("n", "median", "nmad", "rmse", "mean", "p5", "p95",
-                                                             "dem_cells", "dem_cells_compared", "points",
-                                                             "points_compared", "time_gap", "by_camera",
-                                                             "waterlines", "days_outside_photo_window",
-                                                             "days_from_photo_window_middle", "photo_dates",
-                                                             "dem_cells_compared_partial_cover",
-                                                             "points_outside_dem", "points_in_empty_dem_cells",
-                                                             "vertical_datum_note")}
+                      # the waterlines without their 'strata' (survey_compare's report-only tables, which
+                      # stay in NAME_comparison.json beside its 'intervals', neither copied here)
+                      "headline": ({k: ({kk: vv for kk, vv in head[k].items() if kk != "strata"}
+                                        if k == "waterlines" and isinstance(head.get(k), dict) else head.get(k))
+                                    for k in ("n", "median", "nmad", "rmse", "mean", "p5", "p95",
+                                              "dem_cells", "dem_cells_compared", "points",
+                                              "points_compared", "time_gap", "by_camera",
+                                              "waterlines", "days_outside_photo_window",
+                                              "days_from_photo_window_middle", "photo_dates",
+                                              "dem_cells_compared_partial_cover",
+                                              "points_outside_dem", "points_in_empty_dem_cells",
+                                              "vertical_datum_note")}
                                    if head else None)})
     stamps = {}
     for p in sorted((out / "logs" / "stamps").glob("*.json")) if (out / "logs" / "stamps").exists() else []:
@@ -8779,7 +9105,8 @@ def write_provenance(plan, args, state, final=True):
                     settings_from=("the DEM on disk (its build stamp)" if dem_built else
                                    "this run's options (no DEM built yet)"),
                     requested_this_run=dem_want,
-                    files={k: f"{dem_stem(plan)}_{k}" for k in ("dem", "spread", "count")},
+                    files=dict({k: f"{dem_stem(plan)}_{k}" for k in ("dem", "spread", "count")},
+                               **({k: f"{dem_stem(plan)}_{k}" for k in DEM_LOESS_GRIDS} if dem_set.get("loess") else {})),
                     cells=dstamp.get("cells"),
                     built_from=info,
                     geotiff=(f"asc_to_geotiff.py: tagged EPSG:{dem_set.get('geotiff_epsg')}"
@@ -8787,7 +9114,10 @@ def write_provenance(plan, args, state, final=True):
                              + "; the grid coordinates are in the GCP frame, assumed NAD83(2011) / UTM zone 19N "
                                "as the surveys (the GCP files state no CRS) "
                                "(EPSG:6348), untransformed; only the _dem GeoTIFF carries vertical keys (NAVD88, "
-                               "EPSG:5703); spread, count and difference grids are not heights")),
+                               "EPSG:5703); spread, count, sigma and difference grids are not heights"
+                             + ("; with --dem-loess the _loess GeoTIFF (a second surface, NAVD88) carries them too; "
+                                "its _loess_err, _loess_nmse and _loess_skill are not heights"
+                                if dem_set.get("loess") else ""))),
         "chain": {"current": chain_ok, "why": chain_why or None},
         "blind": blind,
         "comparisons": comps,
@@ -9107,6 +9437,12 @@ def write_readme(plan, args, prov):
             for r in pc_["per_day"]:
                 verdicts.setdefault(r["verdict"], []).append(r["date"])
             w("      pointing check: " + "; ".join(f"{k} {', '.join(v)}" for k, v in verdicts.items()))
+        pcr = pc_.get("pointing_correction")
+        if pcr is not None:
+            w("      pointing CORRECTED per day (--correct-pointing): "
+              + ("; ".join(f"{d} {v['d_deg'][0]:+.2f}/{v['d_deg'][1]:+.2f}/{v['d_deg'][2]:+.2f} deg pan/tilt/roll"
+                           for d, v in sorted((pcr.get("days") or {}).items())) or "no day passed the gates")
+              + " (KNOWN CAVEATS)")
         ref = pc_.get("reference") or {}
         if ref.get("window_horizon_dtilt_deg") is not None and ref.get("clear_horizon_days"):
             w(f"      sea horizon vs the calibration over the window: tilt/roll {ref['window_horizon_dtilt_deg']:+.2f}/"
@@ -9167,6 +9503,10 @@ def write_readme(plan, args, prov):
     if bf.get("frames"):
         for ln in dem_built_from_lines(bf):
             w(ln)
+    if dm.get("loess"):
+        lo = dm["loess"]
+        w(f"      loess (--dem-loess): {lo.get('script')} half-widths {lo['half_widths_m']['alongshore']:g} m "
+          f"alongshore x {lo['half_widths_m']['cross_shore']:g} m cross-shore: {lo.get('note')}")
     w(f"      GeoTIFFs: {dm['geotiff']}")
     sw = prov["software"]
     w(f"  software: {sw.get('note')} (per step in provenance.json software.by_step)")
@@ -9179,7 +9519,9 @@ def write_readme(plan, args, prov):
       "consistency_<cam>.png (what the filter dropped, this build's cameras only), "
       "no_setup_frames.csv (frames left out: no wave record)")
     ds = dem_stem(plan).name
-    w(f"  dem/          {ds}_dem/_spread/_count .asc and .tif, {ds}_dem.png (the DEM page)"
+    w(f"  dem/          {ds}_dem/_spread/_count/_sigma .asc and .tif, {ds}_dem.png (the DEM page)"
+      + (f"; {ds}_loess/_loess_err/_loess_nmse/_loess_skill .asc and .tif (--dem-loess: the loess surface and its "
+         f"prediction error, dem_loess.py)" if (prov.get("dem") or {}).get("loess") else "")
       + (f" (the calibration variant in the file names: {plan_variant(plan)})" if plan_variant(plan) else ""))
     w(f"  maps/         {map_png(plan, '<cam>').name}: waterlines drawn on the photos, per camera "
       f"(daily_elevation_map.py, as the station's own maps: its colour bar says which elevation colours the lines); "
@@ -9325,6 +9667,9 @@ def dry_run(plan, args, steps):
                f"is NOT measured yet: allow up to ~{max(1.0, (est + total * SEC_PER_PHOTO_DETECT) / 60):.0f} min "
                f"(twice the detection) and read the real rate from the first 'detecting : photo k of N ... "
                f"(S s per photo)' line")
+    if getattr(args, "correct_pointing", False):
+        say("pointing", "CORRECTED per day (--correct-pointing): each day whose matched features pass "
+            "pointing_daily.py's gates is detected and mapped with its own pointing; the others as by default")
     say("steps", ", ".join(steps))
     for st in steps:
         key = {"forcing": "forcing", "filter": "filter", "dem": "dem"}.get(st)
@@ -9958,6 +10303,7 @@ def built_args(args, plan):
                 setattr(b, opt, dem[k] if dem[k] is not None else 0.0)
         if dem.get("geotiff_epsg"):
             b.geotiff_epsg = int(dem["geotiff_epsg"])
+        b.dem_loess = bool(dem.get("loess"))     # --dem-loess: whether the DEM on disk was built with the loess
     if read_stamp(plan["out"], "merge"):
         fits, _ = setup_in_use(plan, args)
         coefs = {f.get("coef") for f in fits}
@@ -10048,8 +10394,12 @@ def state_argv(args, date):
                          ("dem_max_hs", DEM_MAX_HS), ("dem_max_day_offset", DEM_MAX_DAY_OFFSET)):
         if getattr(args, opt) != default:
             a += ["--" + opt.replace("_", "-"), str(getattr(args, opt))]
+    if getattr(args, "dem_loess", False):
+        a.append("--dem-loess")
     if args.keep_moved_days:
         a.append("--keep-moved-days")
+    if getattr(args, "correct_pointing", False):
+        a.append("--correct-pointing")
     if args.force_disabled:
         a.append("--force-disabled")
     if args.no_download:
@@ -10816,6 +11166,13 @@ def main():
     ap.add_argument("--keep-moved-days", action="store_true",
                     help="keep the days the pointing check marks DIFFERENT POINTING or UNCONFIRMED (default: "
                          "left out of the detection)")
+    ap.add_argument("--correct-pointing", action="store_true",
+                    help="OPT-IN, an evaluation: a day whose matched features pass pointing_daily.py's gates (a "
+                         f"turn over {MATCH_ERR_DEG:g} deg, held through the day) is detected and its waterlines "
+                         "mapped with its own pointing (the calibration turned by the change measured that day) "
+                         "instead of being left out; every other day as by default. Into "
+                         f"its own root only, <root>_{POINTING_CORRECTED} (e.g. {DEFAULT_OUTPUT_ROOT}_"
+                         f"{POINTING_CORRECTED}; any other root is refused, exit 5); not on a BLIND date, not with --eo")
     ap.add_argument("--pointing-frames", type=int, default=3, help="frames per day for the horizon (default 3)")
     ap.add_argument("--pointing-log-dir", default=str(HERE / "archive"),
                     help="live era: folder of the station's pointing_<cam>.csv monitor logs (summarised)")
@@ -10834,6 +11191,12 @@ def main():
     ap.add_argument("--dem-max-spread", type=float, default=DEM_MAX_SPREAD)
     ap.add_argument("--dem-max-hs", type=float, default=DEM_MAX_HS, help="0 = keep every frame")
     ap.add_argument("--dem-max-day-offset", type=float, default=DEM_MAX_DAY_OFFSET, help="0 = off")
+    ap.add_argument("--dem-loess", action="store_true",
+                    help="also write the scale-controlled loess surface of the DEM's points and its prediction error "
+                         "(dem_from_contours.py --loess, dem_loess.py: <stem>_loess, _loess_err, _loess_nmse, "
+                         "_loess_skill .asc and .tif). Off by default; the DEM, its page, maps and comparisons are "
+                         "the same with it. Check its error against the date's survey with python3 dem_loess.py "
+                         "evaluate dem/<date> <survey file>")
     args = ap.parse_args()
 
     arm_blind_guard()          # no file named like a held survey (BLIND_DATES) is opened by this run, whatever asks
@@ -10925,6 +11288,17 @@ def main():
              f"not this script's default C = {SETUP_COEF}: the live waterlines and these products would carry "
              f"different setups. Change SETUP_COEF in survey_products.py, historical_forcing.py and the cron "
              f"together (with a SETUP_FITS entry saying where the new C was fitted)")
+    # the cron's opt-in slope-aware setup (SETUP_MODEL="stockdon", setup_model.py): read here only, not in
+    # cron_settings (whose keys go into forcing.json); these products keep C's setup either way
+    try:
+        cron_model = next((m.group(1) for m in (re.match(r'^\s*SETUP_MODEL="?([A-Za-z]*)"?', ln) for ln in
+                                                Path(args.live_cron).read_text().splitlines()) if m), "")
+    except OSError:
+        cron_model = ""
+    if cron_model == "stockdon":
+        warn(f"the station's cron ({args.live_cron}) runs the slope-aware setup (SETUP_MODEL=\"stockdon\"): its live "
+             f"DEMs carry Stockdon's setup, these products C = {args.setup_coef}'s (a live date's rows are recomputed "
+             f"with C), so the two differ by the models' difference")
     if args.date:
         res = build_date(args.date, cfg, srv, args, steps)
         return EXIT_CODES.get(res, 1)
@@ -11079,7 +11453,8 @@ def share(args):
     stem = next(iter(sorted((out / "dem").glob("*_dem.asc"))), None) if (out / "dem").is_dir() else None
     if stem is not None:
         st = str(stem)[:-len("_dem.asc")]
-        for suf in ("_dem.tif", "_spread.tif", "_count.tif", "_dem.png", "_map.png", "_info.json"):
+        for suf in ("_dem.tif", "_spread.tif", "_count.tif", "_sigma.tif", "_dem.png", "_map.png", "_info.json") + \
+                tuple(f"_{k}.tif" for k in DEM_LOESS_GRIDS):          # the loess ones only when --dem-loess built them
             if Path(st + suf).is_file():
                 files.append((Path(st + suf), f"dem/{Path(st + suf).name}"))
     for f in sorted((out / "maps").glob("*.png")) if (out / "maps").is_dir() else []:
@@ -11101,6 +11476,10 @@ def share(args):
     wl = waterline_file(product_plan(prov, out), quiet_=True)
     if wl.is_file():
         files.append((wl, f"waterlines/{wl.name}"))
+    # a --correct-pointing product: the per-day pointings its waterlines were mapped with, with the calibration files
+    # (none in a default build)
+    for f in sorted((out / "waterlines").glob("c*/pointing_corrected_eo/*.yaml")) if (out / "waterlines").is_dir() else []:
+        files.append((f, f"calibration/pointing_corrected_eo/{f.name}"))
     seen = set()
     for cam, v in sorted(cams.items()):
         cal = v.get("calibration") or {}

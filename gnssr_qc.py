@@ -71,6 +71,8 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from setup_model import hs_l0               # Hs*L0: the setup formula, once
+
 GOOD, NOT_EVALUATED, SUSPECT, FAIL = 1, 2, 3, 4
 
 GROSS_MIN, GROSS_MAX = -2.5, 3.5       # m NAVD88
@@ -140,7 +142,7 @@ def wave_allowances(epochs, waves):
     jm = np.clip(j - 1, 0, len(w_ep) - 1)
     k = np.where(np.abs(w_ep[jm] - epochs) < np.abs(w_ep[j] - epochs), jm, j)
     ok = np.abs(w_ep[k] - epochs) <= WAVE_MAX_GAP_S
-    hl = np.maximum(hs[k] * 9.81 * tp[k] ** 2 / (2 * np.pi), 0.0)
+    hl = np.maximum(hs_l0(hs[k], tp[k]), 0.0)
     setup = SETUP_COEF * SETUP_BETA * np.sqrt(hl)
     r2 = 1.1 * (setup + np.sqrt(hl * (0.563 * SETUP_BETA ** 2 + 0.004)) / 2)
     return np.where(ok, setup, 0.0), np.where(ok, r2, 0.0)

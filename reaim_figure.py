@@ -63,6 +63,7 @@ sys.path.insert(0, str(HERE))
 from georectify import load_extrinsics, load_intrinsics          # noqa: E402
 from compare_dem_survey import read_survey                       # noqa: E402
 from project_survey import contour_segments, project_pieces      # noqa: E402
+from timex_timing import TIMEX_MID_OFFSET_S                       # noqa: E402
 
 CAL = HERE / "calibration"
 CHELSEA = Path("/mnt/I2Rgus_Data/Chelsea_calibration")
@@ -186,7 +187,7 @@ def main():
     ap.add_argument("--water-level", default=str(CHELSEA / "adcp_water_level_navd88.csv"),
                     help="adcp_water_level_navd88.csv (adcp_to_navd88.py); falls back to the "
                          "repo's ADCP file + 0.09 m")
-    ap.add_argument("--exposure-mid", type=float, default=300.0,
+    ap.add_argument("--exposure-mid", type=float, default=float(TIMEX_MID_OFFSET_S),
                     help="seconds from the file-name time to the middle of the exposure (default 300)")
     ap.add_argument("--title", default=None, help="page title (default: what is drawn)")
     ap.add_argument("--note", default=None, help="one line under the title, e.g. the conclusion")

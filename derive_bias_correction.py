@@ -24,10 +24,15 @@ diagnostic.
 
 Usage:
     python3 derive_bias_correction.py <camera_suffix e.g. c1 or c2>
+
+--json FILE also writes the table (per segment: x, existing, residual, raw
+error, std, frames) and the frames used, for a script to read:
+recalibrate_timing.py turns it into calibration/timex_bias_mid.json.
 """
 
 import sys
 import csv
+import json
 import warnings
 import numpy as np
 from pathlib import Path
@@ -91,7 +96,7 @@ def parse_options(argv):
     """
     opts = {"gt_dir": GROUND_TRUTH_FOLDER, "proc_dir": PROCESSED_FOLDER,
             "suffix": None, "segments": N_SEGMENTS, "exclude_no_signal": True,
-            "uncorrected": False}
+            "uncorrected": False, "json": None}
     rest, i = [], 0
     while i < len(argv):
         a = argv[i]
@@ -107,6 +112,8 @@ def parse_options(argv):
             opts["exclude_no_signal"] = False; i += 1
         elif a == "--uncorrected":
             opts["uncorrected"] = True; i += 1
+        elif a == "--json" and i + 1 < len(argv):
+            opts["json"] = argv[i + 1]; i += 2
         else:
             rest.append(a); i += 1
     return opts, rest
@@ -128,6 +135,7 @@ def main():
         print("                           for timex, whose cron runs --no-bias-correction;")
         print("                           without it the existing snap correction is added")
         print("                           to a residual that never had it subtracted.")
+        print("  --json FILE              also write the table as JSON (recalibrate_timing.py)")
         print()
         print("For timex: --processed-dir archive/processed_timex --suffix .timex.")
         sys.exit(1)
@@ -325,6 +333,24 @@ def main():
           f"days/tides/seasons) set of ground truth becomes available -- a "
           f"correction fit to a narrow sample was already shown to only "
           f"partially generalize to new days.")
+
+    if opts["json"]:
+        def num(v):
+            v = float(v)
+            return round(v, 4) if np.isfinite(v) else None
+        table = {
+            "camera": camera_suffix, "suffix": opts["suffix"], "uncorrected": opts["uncorrected"],
+            "ground_truth_dir": str(gt_dir), "processed_dir": str(processed_dir),
+            "n_frames": int(n_frames), "n_segments": int(n_segments), "n_columns": int(n_columns),
+            "frames": used_frames, "skipped": [list(x) for x in skipped_frames],
+            "segments": [{"x": round(float(x), 3), "existing": num(ex), "residual": num(res), "raw": num(comp),
+                          "std": num(std_v), "n": int(nseg)}
+                         for x, ex, res, comp, std_v, nseg in zip(x_fracs, existing_at_x, segment_avg,
+                                                                  composed, segment_std, segment_n)],
+            "spread_px": num(spread), "mean_px": num(np.mean(raw_error)),
+        }
+        Path(opts["json"]).write_text(json.dumps(table, indent=1) + "\n")
+        print(f"Table written to {opts['json']}")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,8 @@
 ASCII Grids To GeoTIFF
 =========================
 Converts the ESRI ASCII grids written by dem_from_contours.py (<stem>_dem.asc,
-_spread.asc, _count.asc, _source.asc) into GeoTIFFs that open directly in
+_spread.asc, _count.asc, _sigma.asc, _source.asc; with --loess _loess.asc,
+_loess_err.asc, _loess_nmse.asc, _loess_skill.asc) into GeoTIFFs that open directly in
 ArcGIS, QGIS, GDAL and rasterio, georeferenced in UTM zone 19N.
 
 Pure numpy: no GDAL, rasterio or scipy needed (the station's scipy does not
@@ -12,9 +13,13 @@ GeoKeys for the projected coordinate system (EPSG code), the pixel size and
 upper-left corner, and the GDAL nodata tag.
 
 Values: _dem and _spread in metres (elevation NAVD88 for _dem), _count in
-frames per cell, _source 1 = measured, 2 = interpolated. Nodata = -9999.
-The _dem GeoTIFF also carries the vertical GeoKeys (EPSG:5703, NAVD88
-height, metres), so GIS software reads it as NAVD88 without being told.
+frames per cell, _sigma in metres (the standard error of the cell median,
+repeatability only: dem_from_contours.sigma_grid), _source 1 = measured,
+2 = interpolated; _loess in m NAVD88 (the loess surface, dem_loess.py),
+_loess_err in m (its prediction error), _loess_nmse and _loess_skill
+without units. Nodata = -9999.
+The _dem and _loess GeoTIFFs also carry the vertical GeoKeys (EPSG:5703,
+NAVD88 height, metres), so GIS software reads them as NAVD88 without being told.
 
 COORDINATE SYSTEM. Default EPSG:6348 (NAD83(2011) / UTM zone 19N): the grids
 are in the frame of the calibration's GCPs, which is that of the surveys (the
@@ -37,7 +42,7 @@ import numpy as np
 
 NODATA = -9999.0
 NAVD88_EPSG = 5703                     # NAVD88 height (m)
-ELEVATION_LAYERS = ("_dem",)           # grids whose values are NAVD88 elevations
+ELEVATION_LAYERS = ("_dem", "_loess")  # grids whose values are NAVD88 elevations
 
 
 def read_asc(path):
@@ -133,12 +138,17 @@ DESCRIPTIONS = {
     "_dem": "intertidal elevation, m NAVD88",
     "_spread": "16-84 percentile elevation range of repeat crossings, m",
     "_count": "frames (waterline crossings) per cell",
+    "_sigma": "standard error of the cell median from repeat crossings (repeatability, not accuracy), m",
     "_source": "1 = measured, 2 = interpolated between waterlines",
     "_diff": "elevation change, m",
     "_sig": "significant elevation change, m",
     "_slope": "slope",
     "_resid": "RMS residual of the local plane fit, m",
     "_frames": "waterline frames in the fit neighbourhood",
+    "_loess": "scale-controlled quadratic loess elevation, m NAVD88 (dem_loess.py)",
+    "_loess_err": "prediction error of the loess surface, m (random part only)",
+    "_loess_nmse": "normalised mean-square error of the loess estimate",
+    "_loess_skill": "skill of the local loess fit (1 - residual / local variance)",
 }
 
 

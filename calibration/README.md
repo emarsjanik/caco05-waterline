@@ -15,6 +15,20 @@ Setups (the station ID in the image file names):
 | CACO04 | 2025-02-19, 2025-11-04 | set up 2025-01-24: cameras moved ~5.7 m and turned back ~15 deg. `CACO05_<cam>_20250219_EO.yaml` holds the same values under an older name. |
 | CACO05 | 2025-11-13 (`_EO-CV`) | the live station EO. c1 has the 2025-11-04 values; c2 moved 3.1 m. |
 
+`c1_geom_sigma.csv`, `c2_geom_sigma.csv`: how far off the live CACO05
+2025-11-13 calibration can place each pixel on the ground, written by
+`georectify_uncertainty.py` from that solve's own targets
+(`2025-11-13_Marconi_Extrinsic_Targets_<cam>_xyz.csv`, `gcp_uv_<cam>.csv`):
+the solve repeated with each target left out (in-sample RMS 0.42 m for
+both cameras; left out, c1 0.59 m, c2 0.41 m), then its parameter
+uncertainty drawn 2000 times through `georectify.pixel_to_ground`. One row
+per pixel column (every 256 px), ground range (20-1000 m) and plane
+(z -1, 0, 1, 2 m): sigma of the easting and northing, cross-shore sigma
+and the cross-shore pixel footprint; the `#` header holds the provenance
+(inputs by sha256, the per-target leave-one-out errors, the covariance).
+Read only by `dem_from_contours.py --sigma-obs` (opt-in). For the
+2025-11-13 calibration only: rerun the script after any new calibration.
+
 For historical processing (process_chelsea.py), point the rows of
 `chelsea_setups.csv` at the calibration of the period: e.g. Jan 18-23 2025
 -> `CACO03_<cam>_20250123_EO.yaml`. A survey-fitted or carried pointing
@@ -22,3 +36,11 @@ For historical processing (process_chelsea.py), point the rows of
 position fixed, so after a move it absorbs the move into the angles
 (the Jan 2025 lidar fit wanted ~22 deg of pan where the calibration has
 ~15 deg and a 5.8 m move); use it only where no calibration exists.
+
+Timex bias corrections of the detector, one file per water-level timing mode
+(`timex_timing.py`, `TIMING_MODE`; docs/VALIDATION.md section 2.7):
+
+| File | Mode | What |
+|---|---|---|
+| `timex_bias_legacy.json` | `legacy` (the default) | The detector's built-in v6.8 values (c1 constant -11.03 px, c2 a 10-point curve), fitted with the temporal blend on. Never edited: the legacy products are the v6.8 ones, and `test_timing_mode.py` fails on any change. |
+| `timex_bias_mid.json` | `mid` | Not shipped. Written only by `recalibrate_timing.py --steps derive` on the NUC, from the hand-clicked ground truth detected with the blend off; a previous one is kept as `.bak`. Without it a mid timex run is refused. |

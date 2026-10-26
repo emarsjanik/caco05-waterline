@@ -100,13 +100,15 @@ import numpy as np
 import cv2
 
 import georectify
+from timex_timing import TIMEX_MID_OFFSET_S
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PIX_DIR = "/home/argus_user/arguseyes/build"
 SAMPLE_HZ = 2.0
 LINE_BREAK_PX = 100.0
 IG_CUTOFF_HZ = 0.05          # infragravity / incident split, standard in runup work
-BURST_MID_OFFSET_S = 300.0   # filename epoch is the burst start; stats refer to its middle
+# filename epoch is the burst start; stats refer to its middle (300.0 s: timex_timing.py)
+BURST_MID_OFFSET_S = float(TIMEX_MID_OFFSET_S)
 
 
 def camera_from_name(name):

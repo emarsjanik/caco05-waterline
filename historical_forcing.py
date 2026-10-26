@@ -154,6 +154,7 @@ import pandas as pd
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from setup_model import G, setup_c, wave_scale      # noqa: E402,F401  the setup formula, once (G: tests)
 
 # Station (NUC) defaults. The 2024-25 files are searched for in these
 # folders, in order, so the command runs without options on the station.
@@ -170,7 +171,6 @@ CHATHAM_STATION = "8447435"
 DOWNLOADED_CHATHAM = "chatham_8447435_navd88.csv"   # written to the output folder
 
 SETUP_COEF = 0.037            # waterline_timex_cron.sh SETUP_COEF
-G = 9.81
 DAYTIME_UTC = (13.5, 18.0)    # hours whose photos the products use
 LAG_GRID_MIN = np.arange(-180, 181, 6)
 GAUGE_MAX_GAP_S = 1800.0      # Chatham is 6-minutely; a longer hole is a gap
@@ -952,10 +952,11 @@ def spans(ep, step):
 # --------------------------------------------------------------------------
 
 def setup_m(hs, tp, coef=SETUP_COEF):
-    """Stockdon-form setup C * sqrt(Hs * L0), L0 = g Tp^2 / (2 pi) (extract_elevation_contours.py)."""
+    """Stockdon-form setup C * sqrt(Hs * L0), L0 = g Tp^2 / (2 pi) (extract_elevation_contours.py;
+    setup_model.setup_c)."""
     hs, tp = np.asarray(hs, float), np.asarray(tp, float)
     with np.errstate(invalid="ignore"):
-        return coef * np.sqrt(hs * G * tp ** 2 / (2 * np.pi))
+        return setup_c(hs, tp, coef)
 
 
 class HsLinear:
@@ -1389,7 +1390,7 @@ def gnssr_setup_share(coef, spline=None, gauge_csv=None, waves_csv=None):
         i = np.clip(np.searchsorted(we, t), 1, len(we) - 1)
         j = np.where(np.abs(we[i - 1] - t) < np.abs(we[i] - t), i - 1, i)
         near = np.abs(we[j] - t) <= 3600
-        x = np.where(near, np.sqrt(np.clip(hs[j], 0, None) * G * tp[j] ** 2 / (2 * np.pi)), np.nan)
+        x = np.where(near, wave_scale(np.clip(hs[j], 0, None), tp[j]), np.nan)
         f = setup_share_fit(resid, x)
     except Exception as exc:                       # a cross-check, never a blocker
         return {"quantified": False, "note": f"failed: {exc}"}

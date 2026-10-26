@@ -24,7 +24,11 @@ coefficient and the DEM settings (cell, minimum frames, spread, Hs and
 day-offset limits, GeoTIFF EPSG) reported are those the outputs on disk were
 built with, never a later command line's: `--steps compare --dem-cell 1`
 warns that the option is not applied and says to rerun `--steps
-dem,maps,compare`. The DEM's day test (`--dem-max-day-offset`, 0.15 m;
+dem,maps,compare`. `--dem-loess` (off by default) also writes the loess
+surface and its prediction error beside the DEM (`dem/<date>_loess*.asc`
+and `.tif`), which no figure, comparison or label uses; it is not among the
+options a later step warns about, so give it with `--steps dem`
+(docs/VALIDATION.md section 2.8). The DEM's day test (`--dem-max-day-offset`, 0.15 m;
 docs/VALIDATION.md section 2.3a) leaves out a camera-day whose waterlines
 sit, on median, more than 0.15 m from the DEM of the other kept days. It is
 iterative: the day furthest over the limit goes first and the others are
@@ -655,6 +659,37 @@ The code is tested here under the station's oldest libraries too (Python
 3.8, numpy 1.17.4, matplotlib 3.3.4, pandas 1.1.5). The waterline maps on the
 photos need the `daily_elevation_map.py` that falls back to `plt.get_cmap`
 on matplotlib 3.3/3.4 (the version merged with the waterline work).
+
+**The re-pin of 20 Oct 2026** (`georectify.py`, `view_reproject.py`: the
+in-front-of-camera test and the lens inversion's guards; why, and the proof
+that no number changes: `docs/VALIDATION.md` section 3.5). The pin in
+`GCPFREE_PINS` was replaced, which its rule allows only while nothing has run
+under it. So BEFORE pulling it, `ls calibration/gcpfree/` must show no
+`PREREGISTERED.txt` and no `runs/`; if either is there, do not pull it: the
+pre-registration names the old sha256s, and every run would be refused. After
+the pull, `python3 test_georectify.py` (ends "all georectify tests passed").
+Each survey date's next build reruns its detection once, because both files
+are in that step's signature. Calibration A was not opened when the outputs
+were shown to be bit-identical. On the NUC this says whether it is unchanged
+too (it prints no numbers):
+
+```
+python3 -c "
+import georectify as G
+for cam in ('c1', 'c2'):
+    eo = G.load_extrinsics('calibration/CACO03_%s_20241023_EO.yaml' % cam)
+    print(cam, 'unchanged by the re-pin' if G.cirn_angles_to_R(*eo[3:6])[2] @ eo[0:3] > 0
+          else 'CHANGED: do not build A; tell the developer')
+"
+```
+
+`gcpfree_eo.py`'s sha256, the one these notes send to Chris, is unchanged,
+and B's ORDER line dates the pin by it (14 Oct 2026), so it does not show this
+change. **Send Chris the new module sha256s before A's DEM is shared, and
+before any run of `gcpfree_eo.py`**, whether or not the old ones were sent:
+`sha256sum georectify.py view_reproject.py`, with the reason ("modules
+corrected 20 Oct 2026, outputs bit-identical, gcpfree_eo.py unchanged; see
+docs/VALIDATION.md 3.5").
 
 ## 23 Oct 2024: BLIND (DEM only), two calibrations
 

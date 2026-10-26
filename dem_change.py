@@ -20,6 +20,24 @@ a difference is called significant only where
 (95% level of detection). --min-lod (default 0.05 m) is a floor for
 errors a single DEM cannot see: errors shared by every crossing in a
 week (e.g. a week-long water-level or setup bias) do not show in s.
+Each DEM's <stem>_sigma.asc (dem_from_contours.sigma_grid, the same
+formula) is read when it is there and on the same grid (the log says
+which); a cell where it differs from the formula above (from the _spread
+and _count grids) by more than its 4-decimal rounding takes the file's
+value (a file built by another definition), every other cell the
+formula's, so a file of the same definition leaves the map as without it.
+
+CROSSINGS OF ONE DAY ARE NOT INDEPENDENT. The frames of a day share its
+water-level error, its wave setup and, per camera, its pointing, so the
+SE above is optimistic where a day's crossings sit on one side of the
+cell value. --day-block-lod (report only: the grids and the map keep the
+LoD above) also reads each DEM's <stem>_sigma_day.asc
+(dem_from_contours.py --day-block-se: the cluster-robust SE of the cell
+median with the days as clusters, never taken below the SE above), and
+prints the level of detection, the significant cells and the volumes
+under it, beside the ones the map uses. With --rebuild it builds the
+reference's _sigma_day.asc itself; the new DEM needs --day-block-se in
+its own build (the cron's DEM_DAY_BLOCK_LOD=1 does both).
 Cells are compared only where BOTH DEMs rest on at least --min-count
 (default 5) tide crossings. At the edge of coverage a cell may hold only
 3 or 4 crossings; their spread then badly understates the noise, the
@@ -88,6 +106,7 @@ Usage:
 
 Outputs, next to B (or in --output-dir): change_<A>_to_<B>_diff.asc
 (all overlapping cells), _sig.asc (significant change only), .png.
+--day-block-lod adds lines to the log only.
 """
 
 import re
@@ -134,6 +153,21 @@ def load_dem(stem):
     return dem, spread, np.nan_to_num(count), h
 
 
+def load_se(stem, h, suffix="_sigma.asc"):
+    """
+    A DEM's standard-error grid (<stem>_sigma.asc, or with suffix='_sigma_day.asc' the day-block
+    one), rows south to north like load_dem, or None when the file is not there or not on the
+    DEM's grid (then why, one line). -> (grid or None, why)
+    """
+    p = Path(f"{stem}{suffix}")
+    if not p.exists():
+        return None, f"no {p.name}"
+    g, hs = read_grid(str(p))
+    if any(abs(hs.get(k, -1) - h[k]) > 1e-6 for k in ("ncols", "nrows", "xllcorner", "yllcorner", "cellsize")):
+        return None, f"{p.name} is not on the DEM's grid: not used"
+    return g, ""
+
+
 def overlap(ha, hb):
     """Common extent of two grids on the same cell size, as index slices into each."""
     cell = ha["cellsize"]
@@ -155,14 +189,18 @@ def overlap(ha, hb):
 
 
 def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
-            min_uniform_cells=50, name_a=None, ref_note=None):
+            min_uniform_cells=50, name_a=None, ref_note=None, day_block_lod=False):
     """
     B minus A over the cells both rest on >= min_count crossings. `name_a`
     names the reference in the outputs (default: its stem); `ref_note`
-    says where it came from (printed and on the figure).
+    says where it came from (printed and on the figure). day_block_lod:
+    also print the change judged on the day-block standard errors
+    (day_block_report; nothing written changes).
     """
     A, sA, nA, ha = load_dem(stem_a)
     B, sB, nB, hb = load_dem(stem_b)
+    gA, whyA = load_se(stem_a, ha)
+    gB, whyB = load_se(stem_b, hb)
     ia, ib, x0, y0, cell = overlap(ha, hb)
     A, sA, nA = A[ia], sA[ia], nA[ia]
     B, sB, nB = B[ib], sB[ib], nB[ib]
@@ -170,8 +208,14 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
     in_both = np.isfinite(A) & np.isfinite(B) & (nA > 0) & (nB > 0)
     both = in_both & (nA >= min_count) & (nB >= min_count)
     diff = np.where(both, B - A, np.nan)
-    seA = 1.25 * (np.nan_to_num(sA) / 2.0) / np.sqrt(np.maximum(nA, 1))
-    seB = 1.25 * (np.nan_to_num(sB) / 2.0) / np.sqrt(np.maximum(nB, 1))
+    # each DEM's standard errors: the formula from its spread and count, and its own <stem>_sigma.asc
+    # where that differs by more than the file's 4-decimal rounding (a file built by another
+    # definition); within the rounding the formula's value stays, so the default map is unchanged
+    seA_f = 1.25 * (np.nan_to_num(sA) / 2.0) / np.sqrt(np.maximum(nA, 1))
+    seB_f = 1.25 * (np.nan_to_num(sB) / 2.0) / np.sqrt(np.maximum(nB, 1))
+    with np.errstate(invalid="ignore"):          # NaN where a file has no value
+        seA = seA_f if gA is None else np.where(np.isfinite(gA[ia]) & (np.abs(gA[ia] - seA_f) > 1e-4), gA[ia], seA_f)
+        seB = seB_f if gB is None else np.where(np.isfinite(gB[ib]) & (np.abs(gB[ib] - seB_f) > 1e-4), gB[ib], seB_f)
     lod = np.maximum(1.96 * np.sqrt(seA ** 2 + seB ** 2), min_lod)
     with np.errstate(invalid="ignore"):          # NaN outside the overlap
         sig = both & (np.abs(diff) > lod)
@@ -199,6 +243,8 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
     print(f"{'change, ' + str(n_both) + ' cells':<24}: median {np.median(d):+.3f} m, "
           f"mean {np.mean(d):+.3f} m, p10 {np.percentile(d, 10):+.3f}, p90 {np.percentile(d, 90):+.3f}")
     print(f"level of detection      : median {np.median(lod[both]):.3f} m (95%, floor {min_lod} m)")
+    print("standard errors         : " + "; ".join(se_source_text(nm, g, why, se, se_f, both) for nm, g, why, se, se_f in
+                                                 ((name_a, gA, whyA, seA, seA_f), (name_b, gB, whyB, seB, seB_f))))
     with np.errstate(invalid="ignore"):          # NaN outside the overlap
         ero, acc = sig & (diff < 0), sig & (diff > 0)
     area = cell * cell
@@ -222,6 +268,8 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
               f"a median {np.median(d):+.2f} m. Uniform change is more typical of a shift in water "
               "level, wave setup or camera calibration between the two weeks than of sand moving. "
               "Check before interpreting as erosion/accretion.")
+    if day_block_lod:
+        day_block_report(stem_a, stem_b, ha, hb, ia, ib, seA, seB, diff, both, sig, lod, min_lod, cell)
     print(f"wrote {out}_diff.asc, {out}_sig.asc")
 
     if plot:
@@ -286,6 +334,69 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
         except Exception as exc:
             print(f"(plot skipped: {exc})")
     return out
+
+
+def se_source_text(name, g, why, se, se_f, both):
+    """Where a DEM's standard errors came from, one clause for the log: its _sigma.asc, or the formula
+    (and why), and, if the file disagrees with the formula on the compared cells by more than rounding,
+    by how much (a file built by another definition would)."""
+    if g is None:
+        return f"{name} from its spread and count (1.25 x spread/2 / sqrt(n); {why})"
+    with np.errstate(invalid="ignore"):
+        d = np.abs(se - se_f)[both]
+    off = float(np.nanmax(d)) if d.size and np.isfinite(d).any() else 0.0
+    return (f"{name} from its _sigma.asc"
+            + (f" (it differs from 1.25 x spread/2 / sqrt(n) by up to {off:.3f} m on the compared cells)"
+               if off > 0.002 else ""))
+
+
+def day_block_report(stem_a, stem_b, ha, hb, ia, ib, seA, seB, diff, both, sig, lod, min_lod, cell):
+    """
+    --day-block-lod (report only): the change judged on each DEM's day-block standard error
+    (<stem>_sigma_day.asc, dem_from_contours.day_block_sigma: a day's crossings share an error),
+    taken no lower than the SE the map uses (with 2-3 days a day-block SE comes out 0 by chance
+    where days cancel), the 95% level of detection max(1.96 x sqrt(SEdA^2 + SEdB^2), --min-lod),
+    and the significant cells and volumes under it, beside those of the map. Cells resting on one
+    day in a DEM have no day-block SE and are not judged here (counted). Prints only.
+    """
+    print()
+    print("DAY-BLOCK LEVEL OF DETECTION (--day-block-lod; report only: the grids and the map use the LoD above)")
+    gA, whyA = load_se(stem_a, ha, "_sigma_day.asc")
+    gB, whyB = load_se(stem_b, hb, "_sigma_day.asc")
+    if gA is None or gB is None:
+        print("  not judged: " + "; ".join(w for w in (whyA, whyB) if w) + ". Build the DEM(s) with "
+              "dem_from_contours.py --day-block-se (with --rebuild the reference gets it; the new DEM needs it "
+              "in its own build: the cron's DEM_DAY_BLOCK_LOD=1)")
+        return None
+    sdA, sdB = gA[ia], gB[ib]
+    with np.errstate(invalid="ignore"):
+        sdA = np.where(np.isfinite(sdA), np.maximum(sdA, seA), np.nan)
+        sdB = np.where(np.isfinite(sdB), np.maximum(sdB, seB), np.nan)
+        has = both & np.isfinite(sdA) & np.isfinite(sdB)
+        lod_d = np.maximum(1.96 * np.sqrt(sdA ** 2 + sdB ** 2), min_lod)
+        sig_d = has & (np.abs(diff) > lod_d)
+        ero, acc = sig_d & (diff < 0), sig_d & (diff > 0)
+    n_both, n_has = int(both.sum()), int(has.sum())
+    area = cell * cell
+    print(f"  cells judged          : {n_has} of the {n_both} compared ({n_both - n_has} rest on one day in a DEM: "
+          f"no day-block SE)")
+    if not n_has:
+        return None
+    with np.errstate(invalid="ignore", divide="ignore"):   # --min-lod 0 and a cell of zero spread: LoD 0
+        ratio = np.median(lod_d[has] / lod[has])
+    print(f"  level of detection    : median {np.median(lod_d[has]):.3f} m (95%, floor {min_lod} m), "
+          f"{ratio:.2f} x the map's on the same cells (median)")
+    print(f"  significant erosion   : {int(ero.sum())} cells, {ero.sum() * area:.0f} m2, "
+          f"{np.nansum(diff[ero]) * area:+.1f} m3")
+    print(f"  significant accretion : {int(acc.sum())} cells, {acc.sum() * area:.0f} m2, "
+          f"{np.nansum(diff[acc]) * area:+.1f} m3")
+    print(f"  net (significant)     : {np.nansum(diff[sig_d]) * area:+.1f} m3 over {100 * sig_d.sum() / n_both:.0f}% "
+          f"of the overlap")
+    lost = int((sig & has & ~sig_d).sum())
+    print(f"  of the {int((sig & has).sum())} cell(s) the map calls significant (on these cells), {lost} are within "
+          f"the day-block LoD")
+    return {"cells": n_has, "lod_median_m": float(np.median(lod_d[has])), "significant": int(sig_d.sum()),
+            "erosion_cells": int(ero.sum()), "accretion_cells": int(acc.sum()), "not_significant_here": lost}
 
 
 def series_dems(series_dir, days):
@@ -355,13 +466,15 @@ def window_subset(ground, start, end, out_csv):
 
 
 def rebuild_reference(ground, new_end, days, build_args, tmp, lookback, min_count, min_cells,
-                      min_range):
+                      min_range, extra=()):
     """
     Build the reference window again from the current ground file, with
     the new DEM's dem_from_contours.py settings (`build_args`): the window
     ending `days` before `new_end`, or, if that one is degenerate, the
     nearest earlier one that is not (one day at a time, back `lookback`
-    days). Returns (stem, start, end) or None, printing what was tried.
+    days). `extra`: options that add outputs only (--day-block-se for
+    --day-block-lod), never the DEM. Returns (stem, start, end) or None,
+    printing what was tried.
     """
     here = Path(__file__).resolve().parent
     last_end = new_end - timedelta(days=days)
@@ -379,7 +492,7 @@ def rebuild_reference(ground, new_end, days, build_args, tmp, lookback, min_coun
         stem = Path(tmp) / f"dem_{end.isoformat()}_{days}d"
         cmd = [sys.executable, str(here / "dem_from_contours.py"), str(sub), str(stem),
                "--start-date", start.isoformat(), "--end-date", end.isoformat(),
-               "--no-plot"] + list(build_args)
+               "--no-plot"] + list(build_args) + list(extra)
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               universal_newlines=True)
         label = f"  {start} to {end}"
@@ -429,6 +542,10 @@ def main():
     ap.add_argument("--lookback", type=int, default=7,
                     help="With --series: if the reference window is degenerate, try windows "
                          "ending up to this many days earlier (default 7).")
+    ap.add_argument("--day-block-lod", action="store_true",
+                    help="Also print the change judged on the day-block standard errors (<stem>_sigma_day.asc, "
+                         "dem_from_contours.py --day-block-se): a day's crossings share an error. Report only: the "
+                         "grids and the map are unchanged. With --rebuild the reference gets the file itself.")
     ap.add_argument("build_args", nargs=argparse.REMAINDER,
                     help="After '--': the new DEM's dem_from_contours.py settings, for --rebuild "
                          "(e.g. -- --cell 2 --min-points 3 --max-spread 0.5 --max-hs 2.5).")
@@ -438,7 +555,7 @@ def main():
 
     if args.a and args.b:
         compare(args.a, args.b, args.min_lod, args.output_dir, not args.no_plot, args.min_count,
-                args.min_uniform_cells)
+                args.min_uniform_cells, day_block_lod=args.day_block_lod)
         return
     if not args.series:
         ap.error("give --a and --b, or --series")
@@ -481,7 +598,8 @@ def main():
         tmp = tempfile.mkdtemp(prefix="dem_change_ref_", dir=str(parent))
         try:
             ref = rebuild_reference(args.rebuild, b_end, args.days, build_args, tmp,
-                                    args.lookback, *adequacy)
+                                    args.lookback, *adequacy,
+                                    extra=["--day-block-se"] if args.day_block_lod else [])
             if ref is None:
                 print("No change map this run: no adequate reference window.")
                 return
@@ -493,7 +611,7 @@ def main():
                        if archived.exists() else ""))
             compare(stem, b, args.min_lod, args.output_dir, not args.no_plot, args.min_count,
                     args.min_uniform_cells, name_a=f"dem_{end.isoformat()}_{args.days}d",
-                    ref_note=note)
+                    ref_note=note, day_block_lod=args.day_block_lod)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         return
@@ -514,7 +632,7 @@ def main():
         if k:
             note += f"; nearest adequate, {k} newer one(s) skipped"
         compare(a, b, args.min_lod, args.output_dir, not args.no_plot, args.min_count,
-                args.min_uniform_cells, ref_note=note)
+                args.min_uniform_cells, ref_note=note, day_block_lod=args.day_block_lod)
         return
     print(f"No change map this run: no adequate {args.days}-day DEM ending {args.days} to "
           f"{args.days + args.lookback} days before {Path(b).name}.")

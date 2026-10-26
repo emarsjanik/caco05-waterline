@@ -13,6 +13,7 @@ Each check below catches one of those.
 CHECKS (OK / WARN / ALERT):
   timex images      newest archived image          WARN > 26 h, ALERT > 72 h
   detections        newest archived waterline CSV  WARN > 48 h, ALERT > 5 d
+                    (of the cron's TIMING_MODE: processed_timex or _mid)
   GNSS-R            newest water level             WARN > 3 d,  ALERT > 5 d
                     (gnssrefl normally runs ~2 days behind)
   GNSS-R QC         failed share, last 7 days      WARN > 10 %, ALERT > 30 %
@@ -29,6 +30,7 @@ Usage:
         --gnssr /home/argus_user/GNSS/.../usgs_spline_out.txt
 """
 
+import os
 import csv
 import shutil
 import argparse
@@ -74,6 +76,17 @@ def newest_epoch_in_csv(path, column="epoch"):
     return last
 
 
+def cron_timing_mode(base):
+    """The TIMING_MODE= line of <base>/waterline_timex_cron.sh (the one switch), else legacy."""
+    try:
+        for ln in (Path(base) / "waterline_timex_cron.sh").read_text().splitlines():
+            if ln.startswith("TIMING_MODE="):
+                return ln.split("=", 1)[1].split("#")[0].strip().strip("\"'")
+    except OSError:
+        pass
+    return "legacy"
+
+
 def fmt_age(h):
     return "missing" if h is None else (f"{h:.0f} h ago" if h < 48 else f"{h / 24:.1f} days ago")
 
@@ -97,9 +110,17 @@ def main():
     h = age_hours(t) if t else None
     add("timex images", grade(h, 26, 72), f"newest archived {fmt_age(h)}")
 
-    t = newest_mtime(base / "archive/processed_timex", "*.csv")
+    # The detections of the cron's timing mode (waterline_timex_cron.sh
+    # TIMING_MODE, which it exports): archive/processed_timex (legacy) or
+    # archive/processed_timex_mid (mid). Run by hand, without TIMING_MODE,
+    # the mode the cron script is set to (never the newest archive: the
+    # backfill fills the mid one while the cron is still legacy).
+    mode = os.environ.get("TIMING_MODE", "") or cron_timing_mode(base)
+    newest_mid = mode == "mid"
+    t = newest_mtime(base / ("archive/processed_timex_mid" if newest_mid else "archive/processed_timex"), "*.csv")
     h = age_hours(t) if t else None
-    add("detections", grade(h, 48, 120), f"newest waterline {fmt_age(h)}")
+    add("detections", grade(h, 48, 120), f"newest waterline {fmt_age(h)}"
+        + (" (timing mode mid, archive/processed_timex_mid)" if newest_mid else ""))
 
     if args.gnssr:
         try:

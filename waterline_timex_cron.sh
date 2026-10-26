@@ -10,8 +10,9 @@
 #     every run, so the working folder can never be the accumulator --
 #     each run would destroy the previous day's detections. The
 #     detector writes to a scratch folder and results are copied into
-#     archive/processed_timex with `cp -n` (no clobber), which
-#     accumulates and is idempotent.
+#     archive/processed_timex (archive/processed_timex_mid when
+#     TIMING_MODE=mid) with `cp -n` (no clobber), which accumulates and
+#     is idempotent.
 #   * Because it is idempotent, running it more often than necessary is
 #     harmless. That matters: cleanup.sh runs at 19:45 AND 21:00 local
 #     while captures continue to 20:59, so a single nightly run cannot
@@ -35,7 +36,35 @@ SCRATCH="$BASE/processed_timex"
 # for ground-truth collection three times a day.
 SCRATCH_INPUT="$BASE/input_timex"
 LOCK="$BASE/.timex_cron.lock"
-ARCHIVE_CSV="$BASE/archive/processed_timex"
+
+# Water-level timing (timex_timing.py; docs/VALIDATION.md section 2.7): ONE
+# line for the detector and the contour step together, so the level time and
+# the temporal blend can never change one without the other.
+#   legacy  the level at each timex's file-name epoch (the START of its
+#           10-min exposure), the detector's temporal blend on, the v6.8 timex
+#           bias (calibration/timex_bias_legacy.json): the products as they
+#           have always been made. A line is then 4-8 min older than its level
+#           (the blend is recursive): high on the flood, low on the ebb, up to
+#           ~0.1 m a frame at spring rates (review finding C-B1).
+#   mid     the level, the waves and the stale-gap check at mid-exposure (the
+#           file-name epoch + 300 s), the blend off, and the timex bias
+#           re-derived with it off (calibration/timex_bias_mid.json, which only
+#           recalibrate_timing.py writes, on this computer). Its detections are
+#           archived in archive/processed_timex_mid, never mixed with the
+#           blended ones (a blended line given a mid-exposure level is worse
+#           than either mode).
+# Before setting mid: recalibrate_timing.py (derive, then compare: it must
+# print PASS), then its backfill, which re-detects archive/images_timex into
+# archive/processed_timex_mid; run the backfill again right before the switch.
+# Going back to legacy: the legacy archive is kept as it was, but holds no
+# detection of the photos taken while the cron ran in mid (it archives only
+# the mid ones): re-detect those days of archive/images_timex in legacy into
+# archive/processed_timex, or the legacy maps and DEMs have a gap there.
+TIMING_MODE=legacy
+case "$TIMING_MODE" in
+    mid) ARCHIVE_CSV="$BASE/archive/processed_timex_mid" ;;
+    *)   ARCHIVE_CSV="$BASE/archive/processed_timex" ;;    # an unknown mode is refused below
+esac
 ARCHIVE_IMG="$BASE/archive/images_timex"
 ARCHIVE_RAS="$BASE/archive/ras_c2"
 LOG="$BASE/logs/timex_cron.log"
@@ -46,6 +75,19 @@ LOG="$BASE/logs/timex_cron.log"
 # has already been necessary several times. Set to a glob such as
 # "*12_00_00*.timex.jpg" to keep only a daily backdrop instead.
 BACKDROP_PATTERN="all"
+
+# The detector's debug images (8 energy PNGs per frame, ~8 MB, one folder
+# per frame under $BASE/debug) are written on every run and nothing in this
+# job reads them back: they are for looking at a frame that went wrong. At
+# ~60 daylight frames a day they grow ~0.5 GB a day without limit (the
+# detector only clears its input and output folders). Each run removes the
+# frame folders last changed DEBUG_KEEP_DAYS or more days ago (only folders
+# named like a photo, so anything else kept in DEBUG_DIR stays; DEBUG_DIR
+# may be a link to another disk: prune_debug_images below). Detection
+# is unaffected: the detector never reads debug/ (its temporal blend uses
+# the previous frame's CSV). Set to "" to keep every debug image.
+DEBUG_DIR="$BASE/debug"
+DEBUG_KEEP_DAYS=7
 
 # The other Argus products, kept the same way, each in archive/images_<product>.
 # The wave models read the BRIGHT image, so without it the live wave record
@@ -182,6 +224,12 @@ DEM_MAX_DAY_OFFSET=0.15
 # (dem_change.py). Set DEM_WINDOW_DAYS="" to skip.
 DEM_WINDOW_DAYS=7
 DEM_SERIES="$BASE/archive/dems"
+# Report-only check of the change map's level of detection when the crossings of one day share an
+# error (its water level, setup, pointing): set to 1 and the window DEM also writes
+# <stem>_sigma_day.asc (dem_from_contours.py --day-block-se) and dem_change.py prints a DAY-BLOCK
+# LEVEL OF DETECTION block (--day-block-lod) beside its usual lines. The DEMs, the change grids and
+# the map stay exactly as they are. "" = off (the default).
+DEM_DAY_BLOCK_LOD=""
 
 # Wave-setup correction (extract_elevation_contours.py --setup-coef): each
 # waterline's elevation becomes water level + C*sqrt(Hs*L0), Hs and Tp from
@@ -233,6 +281,21 @@ DEM_SERIES="$BASE/archive/dems"
 # survey_products.py and historical_forcing.py carry the same C (their
 # SETUP_COEF): change all three together.
 SETUP_COEF="0.037"
+# Which setup model SETUP_COEF switches on (setup_model.py). "" (the default,
+# the station's since 6 Oct 2026): C*sqrt(Hs*L0) above. "stockdon" (opt-in,
+# NOT the station's): Stockdon et al. (2006) k*beta_f*sqrt(H0*L0), with the
+# foreshore slope beta_f measured for each frame on the dated DEM of
+# DEM_SERIES nearest its day (within 7 days), over the frame's swash band,
+# and H0 the Hs deshoaled from 21 m to deep water; a frame no DEM serves
+# keeps C's setup (beta_f = SETUP_COEF/k). Switch only when
+# evaluate_setup_model.py, run on the survey-date products, recommends it
+# (it refits C and k against the RTK and lidar surveys with leave-one-
+# survey-out cross-validation). SETUP_STOCKDON_K: k, "" = the paper's 0.35
+# (or the k evaluate_setup_model.py recommends). Every DEM changes with the
+# model, and survey_products.py keeps C (its products are recomputed with
+# SETUP_COEF whatever this says).
+SETUP_MODEL=""
+SETUP_STOCKDON_K=""
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
@@ -249,9 +312,88 @@ GNSSR_STALE_DAYS=5
 GNSSR_START_FILE="$BASE/archive/gnssr_record_start.txt"
 GNSSR_MAX_LOST_DAYS=3
 
+# Camera pointing log (pointing_daily.py). LOG ONLY: nothing here changes a
+# product; every waterline is still georectified with the calibrations of
+# step 6 as they are. Each run, for each camera and each complete UTC day of
+# the last 7 not yet logged (at most 2 a run, so a backlog fills over a few
+# runs; off the station a camera-day of 2 frames took 14 s with its
+# reference, not yet timed on the NUC), up to 3 archived timex spread over the
+# day are matched against the camera's reference frame (land features, the
+# survey products' matcher), each gated as survey_products.py
+# --correct-pointing gates a day (40+ inliers, turn_sigma 4+, inliers spread
+# 180 px+, a turn of 2.5 deg or less), and the day's turn from the reference
+# is written to archive/pointing_daily_<cam>.json with the EO a correction
+# would use, and one line per day to this log (no WARNING: a camera that
+# turned reads 'MOVED' there; look before trusting the maps). c1 turned
+# -1.2 deg of pan on 26-28 Sep 2026 and nothing here saw it. The reference:
+# pointing_check.py's bank (calibration/pointing/<cam>/) at this
+# calibration, else a frame of the calibration's own day still in the
+# archive, else none (the log says how to give one: --reference-day). Set
+# POINTING_LOG_ENABLE=0 to skip.
+POINTING_LOG_ENABLE=1
+
 mkdir -p "$SCRATCH" "$SCRATCH_INPUT" "$ARCHIVE_CSV" "$ARCHIVE_IMG" "$ARCHIVE_RAS" "$(dirname "$LOG")"
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
+
+# The detector's debug images (see DEBUG_KEEP_DAYS): removes the frame
+# folders directly in folder $1 last changed $2 or more days ago, by their
+# modification time, and logs how many went -- and, with a WARNING, how many
+# could not (each folder found is looked for again afterwards, not assumed
+# gone).
+#   * Only folders named as the detector names them (debug_directory(): the
+#     photo's name without its extension, an Argus epoch of 10 digits and a
+#     dot first, e.g. 1727712000.Mon.Sep.30_16_00_00.GMT.2024.CACO05.c1.timex),
+#     so a folder kept there by hand, or the wrong folder in DEBUG_DIR, is
+#     never removed.
+#   * find -H: $1 may itself be a link (the debug images on another disk);
+#     without -H find looked at the link, not the folder, and pruned nothing.
+#     Links inside it are never followed (-type d does not match a link).
+#   * A days value that is not a whole number is a WARNING in the log (the
+#     arithmetic on it failed with a message on the job's stderr only, and
+#     nothing was pruned, run after run, with no word in the log). A whole
+#     number is read in base 10: bash reads 08 or 09 as a bad octal number.
+#   * One cut-off time, $2 days before now, taken once and used by both
+#     finds (! -newermt: last changed at or before it; the same folders
+#     -mtime +($2 - 1) matches). With -mtime each find measured the age from
+#     its own start, so a folder that reached the limit while rm was running
+#     was counted as left but never tried: a false WARNING (the station
+#     status WARN for that run) and one fewer logged as removed.
+#   * What is left is counted from the list the first find returned, each
+#     folder looked for again by its name. A second find missed a folder rm
+#     had emptied but could not remove (DEBUG_DIR not writable by the job, a
+#     subfolder of another user): emptying it makes it new again, so it was
+#     logged as removed, with no WARNING. The list is only counted, a line
+#     at a time (a frame name never holds a newline); rm is handed the
+#     names by find itself.
+prune_debug_images() {
+    local dir="$1" keep="$2" cut old p n_old=0 n_left=0
+    local frame='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].*'
+    if [ -z "$keep" ] || [ ! -d "$dir" ]; then
+        return 0
+    fi
+    if ! [[ "$keep" =~ ^[0-9]+$ ]]; then
+        log "WARNING: DEBUG_KEEP_DAYS='$keep' is not a whole number of days: debug images NOT pruned"
+        return 0
+    fi
+    cut=$(( $(date +%s) - 10#$keep * 86400 ))
+    old=$(find -H "$dir" -mindepth 1 -maxdepth 1 -type d -name "$frame" ! -newermt "@$cut" 2>/dev/null)
+    if [ -z "$old" ]; then
+        return 0
+    fi
+    find -H "$dir" -mindepth 1 -maxdepth 1 -type d -name "$frame" ! -newermt "@$cut" -exec rm -rf {} + 2>/dev/null
+    while IFS= read -r p; do
+        n_old=$((n_old + 1))
+        if [ -e "$p" ]; then
+            n_left=$((n_left + 1))
+        fi
+    done <<< "$old"
+    log "debug images: removed $((n_old - n_left)) frame folder(s) $keep or more days old"
+    if [ "$n_left" -gt 0 ]; then
+        log "WARNING: debug images: $n_left frame folder(s) $keep or more days old could not be removed (permissions?)"
+    fi
+    return 0
+}
 
 # One run at a time. The detector clears its scratch folders on start,
 # so an overlapping run (a slow run meeting the next cron slot, or a
@@ -266,18 +408,42 @@ log "=== run start ==="
 
 cd "$BASE" || { log "FATAL: cannot cd to $BASE"; exit 1; }
 
+# The timing mode (see TIMING_MODE above), exported so that every script this
+# run starts takes its level at the same time.
+case "$TIMING_MODE" in
+    legacy|mid) export TIMING_MODE ;;
+    *) log "FATAL: TIMING_MODE=$TIMING_MODE is not legacy or mid (see its comment in this file)"; exit 1 ;;
+esac
+if [ "$TIMING_MODE" != "legacy" ]; then
+    log "timing mode: $TIMING_MODE (level at mid-exposure, blend off; detections in $ARCHIVE_CSV)"
+    [ -f "$BASE/calibration/timex_bias_$TIMING_MODE.json" ] \
+        || log "ERROR: calibration/timex_bias_$TIMING_MODE.json not found (recalibrate_timing.py writes it): the detector will refuse to run"
+    n_legacy=$(find "$BASE/archive/processed_timex" -name '*.csv' 2>/dev/null | wc -l)
+    n_mode=$(find "$ARCHIVE_CSV" -name '*.csv' 2>/dev/null | wc -l)
+    if [ "$n_mode" -lt $(( n_legacy * 9 / 10 )) ]; then
+        log "WARNING: $ARCHIVE_CSV holds $n_mode detection(s) against $n_legacy in the legacy archive: the"
+        log "         backfill (recalibrate_timing.py --steps backfill) has not run or not finished, so the"
+        log "         maps and DEMs cover only the frames detected in mode $TIMING_MODE so far."
+    fi
+fi
+
 # 1. Detect. Bias correction is ON: timex-specific corrections were
 #    derived in v6.8 and the detector selects them by image suffix, so
-#    a timex run no longer picks up the snap-tuned values.
+#    a timex run no longer picks up the snap-tuned values. --timing-mode
+#    chooses the blend and the timex bias file (TIMING_MODE above).
 python3 waterline_detector_v5.py \
     --image-suffix timex.jpg \
+    --timing-mode "$TIMING_MODE" \
     --input-dir "$SCRATCH_INPUT" \
     --output-dir "$SCRATCH" \
-    --debug-dir "$BASE/debug" >> "$LOG" 2>&1
+    --debug-dir "$DEBUG_DIR" >> "$LOG" 2>&1
 status=$?
 if [ $status -ne 0 ]; then
     log "WARNING: detector exited $status (continuing to archive whatever it produced)"
 fi
+# 1b. Prune old debug images (see DEBUG_KEEP_DAYS and prune_debug_images):
+#     only the detector's frame folders directly inside DEBUG_DIR.
+prune_debug_images "$DEBUG_DIR" "$DEBUG_KEEP_DAYS"
 
 # 2. Accumulate. -n never overwrites, so re-running is safe and a
 #    filename already archived is left alone.
@@ -408,6 +574,14 @@ else
 
     setup_arg=""
     [ -n "$SETUP_COEF" ] && [ -n "$waves_arg" ] && setup_arg="--setup-coef $SETUP_COEF"
+    # the opt-in slope-aware setup (SETUP_MODEL above); an unknown value keeps C's
+    if [ -n "$setup_arg" ] && [ "$SETUP_MODEL" = "stockdon" ]; then
+        setup_arg="$setup_arg --setup-model stockdon --setup-slope-dem $DEM_SERIES"
+        [ -n "$SETUP_STOCKDON_K" ] && setup_arg="$setup_arg --setup-stockdon-k $SETUP_STOCKDON_K"
+        log "setup: slope-aware (SETUP_MODEL=stockdon, k ${SETUP_STOCKDON_K:-0.35}), foreshore slope from $DEM_SERIES"
+    elif [ -n "$SETUP_MODEL" ] && [ "$SETUP_MODEL" != "c" ] && [ "$SETUP_MODEL" != "stockdon" ]; then
+        log "WARNING: SETUP_MODEL=\"$SETUP_MODEL\" is not \"\", \"c\" or \"stockdon\": the setup stays C*sqrt(Hs*L0)"
+    fi
     # GNSS-R QC report and plot (the contour and runup stages apply the
     # same QC themselves through $qc_arg).
     if [ -f "$GAUGE_CSV" ]; then
@@ -418,6 +592,7 @@ else
 
     python3 "$BASE/extract_elevation_contours.py" "$GNSSR_SPLINE" \
         --processed-dir "$ARCHIVE_CSV" $waves_arg $setup_arg $qc_arg \
+        --timing-mode "$TIMING_MODE" \
         --output "$CONTOURS" >> "$LOG" 2>&1
     if [ $? -ne 0 ]; then
         log "ERROR: contour extraction failed -- see above. Maps not regenerated."
@@ -533,6 +708,7 @@ else
                 if [ -n "$DEM_WINDOW_DAYS" ]; then
                     python3 "$BASE/dem_from_contours.py" "$GROUND" "${DEM_STEM}_${DEM_WINDOW_DAYS}day" $hs_arg \
                         --last-days "$DEM_WINDOW_DAYS" --series-dir "$DEM_SERIES" \
+                        ${DEM_DAY_BLOCK_LOD:+--day-block-se} \
                         --cell "$DEM_CELL" \
                         --min-points "$DEM_MIN_POINTS" \
                         --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1
@@ -567,7 +743,8 @@ else
                             new_dem="$DEM_SERIES/dem_${win_end}_${DEM_WINDOW_DAYS}d"
                         fi
                         python3 "$BASE/dem_change.py" --series "$DEM_SERIES" --days "$DEM_WINDOW_DAYS" \
-                            ${new_dem:+--b "$new_dem"} --rebuild "$GROUND" -- $hs_arg \
+                            ${new_dem:+--b "$new_dem"} ${DEM_DAY_BLOCK_LOD:+--day-block-lod} \
+                            --rebuild "$GROUND" -- $hs_arg \
                             --cell "$DEM_CELL" \
                             --min-points "$DEM_MIN_POINTS" \
                             --max-spread "$DEM_MAX_SPREAD" >> "$LOG" 2>&1 \
@@ -601,6 +778,16 @@ else
             done
         fi
     fi
+fi
+
+# 7b. Camera pointing log (see POINTING_LOG_ENABLE): log only, after the
+#     products so a slow match never holds them up; its failure is a WARNING
+#     (the products are unaffected).
+if [ "$POINTING_LOG_ENABLE" = "1" ]; then
+    python3 "$BASE/pointing_daily.py" --image-dir "$ARCHIVE_IMG" --log-dir "$BASE/archive" \
+        --eo-c1 "$CAL/CACO05_c1_20251113_EO-CV.yaml" \
+        --eo-c2 "$CAL/CACO05_c2_20251113_EO-CV.yaml" >> "$LOG" 2>&1 \
+        || log "WARNING: camera pointing log failed (see above); the products are unaffected"
 fi
 
 # 8. Station health summary (station_status.py): also written to

@@ -39,6 +39,15 @@ python3 test_survey_products.py                  # ends "all survey_products tes
 python3 test_survey_compare.py                   # ends "all survey_compare tests passed"
 python3 test_historical_forcing.py               # ends "101/101 checks passed"
 python3 test_dem_day_test.py                     # ends "all DEM day-test tests passed" (section 2.3a)
+python3 test_timing_mode.py                      # ends "all timing-mode tests passed" (section 2.7)
+python3 test_georectify.py                       # ends "all georectify tests passed" (section 3.5, re-pin)
+python3 test_validation_stats.py                 # ends "all validation statistics tests passed" (section 2.4a)
+python3 test_pointing_daily.py                   # ends "all pointing_daily tests passed" (section 4.6b)
+python3 test_cron_debug_prune.py                 # ends "all cron debug-prune tests passed"
+python3 test_setup_model.py                      # ends "all setup model tests passed" (section 4.1)
+python3 test_evaluate_setup_model.py             # ends "all setup-model evaluation tests passed" (section 4.1)
+python3 test_dem_loess.py                        # ends "all loess DEM tests passed" (section 2.8)
+python3 test_georectify_uncertainty.py           # ends "all georectification uncertainty tests passed" (section 4.10)
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
@@ -53,11 +62,16 @@ for 2025-03-06 (c2). The live 2026-09-29 date keeps its forcing (the live forcin
 of the station's own rows, minutes) only if the new rule leaves out other days than the detection
 on disk did; then its DEM, plan view and comparisons. The GeoTIFFs are then tagged EPSG:6348
 (section 4.8), and a further run skips every step. (PR #87's own note, that its pull reran only
-the plan-view map and the comparisons, was checked on a 2026-09-29 build then.)
+the plan-view map and the comparisons, was checked on a 2026-09-29 build then.) The per-day pointing
+log and its opt-in correction (`pointing_daily.py`, section 4.6b) add nothing to a step's signature
+unless `--correct-pointing` is given. `survey_compare.py` gains `--camera-eo-day`, which only a
+corrected build passes; its new sha256 reruns a default build's comparisons and plan-view map once,
+with the same numbers.
 
-`view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file
-is unchanged by this PR, and the survey products use only its `ground_to_pixel`, which
-does not need scipy. **Do not run `pointing_check.py --self-test` on the NUC**: it rotates a frame
+`view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file's
+only change since this PR is the in-front-of-camera test of 20 Oct 2026 (section 3.5, re-pin;
+`test_georectify.py` checks it without scipy), and the survey products use only its
+`ground_to_pixel`, which does not need scipy. **Do not run `pointing_check.py --self-test` on the NUC**: it rotates a frame
 with `view_reproject.reproject_image`, which needs scipy; without a scipy that imports (none, or
 one installed but broken) it now says `SKIPPED (nothing checked)` and exits 0 (it needs `--image
 <a c2 frame>` too). The survey products'
@@ -425,6 +439,73 @@ grey for "not compared" and light grey for "compared, within the level of detect
 archive before the window is thin, the log says "No change map this run: no adequate
 reference window" instead of drawing one.
 
+### 2.4a How much the validation numbers and the change map's LoD are worth (text and json only)
+
+**Claim.** The survey comparison now says how far its headline can be trusted, splits the
+waterlines by the conditions that should move their error, and the change map's level of
+detection can be checked for errors a day's crossings share. No figure, CSV, grid or default
+number changes.
+
+* `survey_compare.py`: an `INTERVAL` line under the `HEADLINE` and an `UNCERTAINTY` table:
+  95% intervals of the median, mean and RMSE of DEM - survey (overall, per camera, per distance
+  band) by a block bootstrap of stretches along the shore (along: across the survey's mean slope
+  where compared, a plane fitted to the survey, not to the DEM under test), a stretch as long as
+  the residuals' correlogram says they stay correlated (at least `--block-m`, 50 m), and the
+  effective sample size. Fewer than 5 stretches: no interval, and how many independent stretches
+  there are. If the intervals cannot be computed the comparison goes on without them (`INTERVAL :
+  not computed (...)`, `intervals: null` in the json); the same holds for the strata.
+* **For the station's surveys so far DEM - survey gets no interval.** The Jan and Mar 2025 lidars
+  hold ~4 and ~3 independent stretches, the 2026-09-29 RTK shots one 50 m stretch. A percentile
+  interval from resampling 2-4 blocks is the spread of 2-4 numbers (4 blocks give only 35 distinct
+  resamples), so none is given, and the `INTERVAL` line says how many independent stretches the
+  comparison holds instead. A t interval on so few is not given either: the count itself comes from
+  a noisy correlogram of 160-250 cells. The waterlines' flood - ebb rests on 2 (Jan 2025) and 3
+  (2026 RTK) camera-days that hold both stages: no interval either. A survey that runs further
+  along the shore, or more camera-days on it, gets one.
+* With `--contours`: `WATERLINES BY TIDE STAGE, WAVES AND RANGE`, one value per frame, by flood /
+  ebb / slack (dz/dt beyond +/-0.1 m/h, as the DEM log's residual diagnostic), Hs thirds and range
+  from the camera, with intervals from resampling camera-days. The timing test is flood - ebb
+  WITHIN each camera-day that holds both stages (its median over those camera-days, with an
+  interval from resampling them; pooled and per camera): a day's own error (its water level,
+  pointing, a bad day) cancels in its difference. The flood and ebb rows pool different days and
+  carry those days' errors; the daylight hours move by ~50 min of tide phase a day, so the stage
+  mix changes from day to day, and the difference of the pooled rows is not a timing test. Highest
+  - lowest Hs third (the setup error) is between days by construction (Hs hardly changes within a
+  day): an error of whole days that falls on the big- or small-wave days reads the same way. The
+  strata stay in `NAME_comparison.json`; survey_products.py's provenance.json does not copy them.
+* `dem_change.py` reads each DEM's `<stem>_sigma.asc` and says so; it takes the file's SE only
+  where that differs from the formula by more than the file's 4-decimal rounding (a file of
+  another definition), so the default map is byte for byte the same as from the formula alone;
+  `--day-block-lod` (report only) prints the LoD from the day-block SE of
+  `dem_from_contours.py --day-block-se` (`<stem>_sigma_day.asc`).
+* Labels: calibration targets that a calibration names in its notes are PARTLY-CIRCULAR (they were
+  CIRCULAR, against the label's own definition and the GCP-day rule); a pointing "fitted to the
+  Jan 2025 lidar" that names no file is unresolved (CIRCULAR as a rule), no longer "fitted to
+  another survey" (a file name, a path or an underscored stem such as
+  `2025005FA_Marconi_Mar_YSMP` still names a file: `names_file`); a provenance sentence (a
+  history note, a `how`) naming the survey is a rule surveys.csv can overrule, a file a step used
+  still a chain fact. The worst finding wins (`suggested_label`, the one rule `compare()` and
+  the tests use). None of these changes a label of the station's real comparisons: the
+  calibrations in `calibration/` carry no such notes, and on the NUC's provenance.json of
+  2025-01-23 and 2025-03-06 the findings for the two lidars and the 2026 RTK are the same, line
+  for line, before and after.
+
+| what | data | number | reproduce here | check on the NUC |
+|---|---|---|---|---|
+| Figure, CSV and difference grid of a comparison, before and after | [REAL] Jan 2025 lidar, 2026-09-29 RTK, DEMs built here from the NUC's contour files | byte for byte the same (`cmp`); the txt only gains lines, the json keeps every key and value | run `survey_compare.py` of `42e3e86` and of this branch on the same inputs | `cmp` a rebuilt `compare/*_comparison.png` with the copy made before the pull |
+| Jan 2025 lidar, DEM - survey | [REAL] | 163 cells over 179 m along the shore (across the survey's 1:9 slope: along 174 deg; a plane fitted to the DEM, flattened by c1's -1.8 m cells, gave 1:217); residual correlation +0.74 at 0-5 m, +0.56 at 20-40 m, -0.04 at 40-80 m: ~50 m, so ~4 independent stretches and no interval | `survey_compare.py` as in survey_products.py, on a DEM from the filtered rows | the `INTERVAL` line of `compare/2025-01-23_jan_lidar_comparison.txt` |
+| Mar 2025 lidar, DEM - survey | [REAL] | 249 cells over 285 m (survey slope 1:17, along 164 deg); correlation +0.22 to +0.32 out to 40-80 m, -0.03 at 80-160 m: ~84 m, ~3 stretches, no interval (with 50 m stretches regardless of the correlation it gave median -0.29 m [-0.46, -0.17], too narrow) | as above | the same for 2025-03-06 |
+| Jan 2025 waterlines by stage | [REAL] | flood -0.152 m (22 frames), ebb -1.704 m (9). The pooled rows differ by +1.55 m because 7 of the 9 ebb frames are from 2025-01-22, a bad day on both cameras (c1 -1.90 m, c2 -1.72 m that day): a day error, not timing, and the camera split does not remove it (c2's ebb frames are that day too). Within camera-days only 2 hold both stages: flood - ebb -0.028 m (c1 2025-01-22 -0.083 m, c2 2025-01-21 +0.027 m), no interval | as above | the `WATERLINES BY TIDE STAGE` block |
+| 2026-09-29 RTK waterlines | [REAL] | 16 frames on 4 camera-days: no interval; flood - ebb within camera-days +0.009 m over the 3 camera-days that hold both stages (5 / 7 frames; c1 -0.09 m on 2, c2 +0.03 m on 1) | as above | - |
+| Day-block SE, live window 26 Sep - 2 Oct 2026 | [REAL] | 946 cells of 2+ days: median 1.0 x the independent SE, p90 1.6 x, a tenth at 0 (days cancelling by chance; dem_change never takes it below the independent SE); 216 cells of one day have none | `dem_from_contours.py ... --day-block-se` | `DEM_DAY_BLOCK_LOD=1` in the cron for a few weeks; read the `DAY-BLOCK LEVEL OF DETECTION` block of the log |
+| Change 28-30 Sep vs 1-2 Oct 2026 | [REAL] | 48 cells; the map's LoD median 0.154 m; day-block LoD on the 22 cells of 2+ days in both 0.142 m, 1.12 x the map's on those cells; 12 of their 14 significant cells stay significant; `_diff` / `_sig` byte for byte the same with and without `--day-block-lod` | `dem_change.py --a A --b B --day-block-lod` | as above |
+| The statistics and labels by construction | [SYNTH] | resamples spelled out equal the fast ones to 1e-12; 20 blocks of shared errors give n_eff 20 of 300; the block interval holds the truth 94% of 150 simulations, the n-value one 46%; a planted 60 m error comes back as ~40 m of correlation; a planted 0.1 m timing error as flood - ebb +0.20 m [+0.20, +0.21]; with no timing error, a 0.02 m/day pointing drift while the daylight frames move from ebb to flood reads +0.07 m [+0.03, +0.11] from the pooled medians and -0.002 m [-0.004, +0.003] within camera-days; one crossing per day gives the independent SE exactly | `python3 test_validation_stats.py` | the same |
+
+The intervals hold the errors that differ from one stretch of the shore (or one camera-day) to
+the next. An error every cell shares (the GNSS-R datum, the setup coefficient, a camera's pointing
+over the whole window) moves the median and not its interval: the intervals are a floor on the
+uncertainty, not its whole.
+
 ### 2.5 GNSS-R record guard
 
 **Claim.** `archive/gnssr_record_start.txt` ("YYYY-MM-DD N") now keeps N as the **most** days
@@ -445,8 +526,221 @@ The station's record started on 2026-07-09 when this was written (start file "20
 |---|---|---|
 | Python 3.8 syntax of every `.py` changed since `af8e1bd` | vermin: minimum 3.8, no violations; `py_compile` passes on the station-floor venv | `pip install vermin && vermin -t=3.8- --no-tips $(git diff --name-only af8e1bd -- '*.py')` |
 | Shell syntax | `bash -n` passes on both `.sh` files | `bash -n waterline_timex_cron.sh` |
-| Self-tests on three Python setups (section "How to read this file") | all pass, except `view_reproject.py` on the two 3.8 venvs (no scipy; file unchanged) | section 1 |
+| Self-tests on three Python setups (section "How to read this file") | all pass, except `view_reproject.py` on the two 3.8 venvs (no scipy) | section 1 |
 | Whole cron on the station-floor venv, synthetic station | rc 0 in 381 s, every processing stage rc 0 (the network fetch stubs exit 1 and station_status exits 2, as expected offline) | scratch harness |
+
+### 2.7 Water-level timing (`TIMING_MODE`): the fix, switched OFF, and how to switch it on
+
+**Claim.** A timex waterline is given the water level at its file-name epoch, the START of its
+10-min exposure (`extract_elevation_contours.py`), while the detector blends 30% of the previous
+saved frame (30 min older) into every line (`waterline_detector_v5.py`, `temporal_filter`). The
+blend is recursive: the stored previous line is itself blended, so a line trails mid-exposure by
+0, 9, 11.7, ... up to 12.9 min along a chain of frames. Net, a line is 4 to 7.9 min OLDER than the
+level it is given: high on the flood, low on the ebb (review finding C-B1, reproduced twice). The fix
+is three changes that work only together (any one alone leaves an error or makes it worse):
+
+* the level, the waves and the stale-gap check at mid-exposure, the file-name epoch +
+  `TIMEX_MID_OFFSET_S` (300 s) for a timex, + 0 s for a snap; `capture_time_utc` and
+  `capture_epoch` stay the file-name time, so nothing that joins on them changes;
+* the detector's blend off (a causal blend cannot be made lag-free);
+* timex bias corrections re-derived with the blend off. The v6.8 values were fitted with the
+  blend on, on 11 Sep 2026 frames that were all on the flood, and absorbed ~2.8 px (c1) / ~2.6 px
+  (c2) of blend lag: with the blend off they would over-correct.
+
+All three sit behind ONE switch, `TIMING_MODE` (`timex_timing.py`), and the default is NOT
+changed:
+
+| mode | level time | blend | timex bias | detections archived in |
+|---|---|---|---|---|
+| `legacy` (default) | file-name epoch | on | `calibration/timex_bias_legacy.json` (the built-in v6.8 values) | `archive/processed_timex` |
+| `mid` | epoch + 300 s (timex), + 0 s (snap) | off | `calibration/timex_bias_mid.json`, written only by `recalibrate_timing.py` on the NUC | `archive/processed_timex_mid` |
+
+The cron sets it in one line (`TIMING_MODE=legacy` in `waterline_timex_cron.sh`) and passes it to
+the detector and the contour step together, and exports it. `process_historical.py` and
+`process_chelsea.py` take `--timing-mode` (default: the `TIMING_MODE` environment variable, else
+legacy) and pass the same mode to both steps. `detect_original_view.py` is not edited (it is one of
+the modules the GCP-free pre-registration pins by sha256, `survey_products.py` `GCPFREE_PINS`): its
+detector and contour step are subprocesses that inherit the environment, so both read the same
+`TIMING_MODE`; `survey_products.py` passes the environment on to it and makes a mode other than
+legacy part of the detection's signature. A mid detection CSV says so on every row
+(`Timing_Mode`), and the contour step gives a line a level only in the mode it was detected in:
+a blended line given a mid-exposure level is 11.5 min behind it, worse than either mode, so such
+files are left out with a WARNING and counted. A mid detector run without its timex bias file is
+refused. A DEM built from mid contours records it in `<stem>_info.json` (`water_level_timing`) and
+WARNs on a mix; a legacy DEM's log and info.json are as before. `TIMEX_MID_OFFSET_S` is the one
+definition of the 300 s: `runup_from_timestack.py`, `timestack_wave_period.py`,
+`relabel_manifests.py` and `reaim_figure.py` read it and keep their 300.0 s.
+
+After the pull, in legacy: the scripts of a survey-date build's detection step changed
+(`waterline_detector_v5.py`, `extract_elevation_contours.py`, the new `timex_timing.py`), so its
+next build reruns the detection and everything after it once. In
+legacy the detector, contour and DEM steps give byte-identical files (`test_timing_mode.py`), so
+those builds and the cron's products come out as before; a whole survey-date build was not
+re-run here to compare.
+
+No plot changes format. After a switch to mid the numbers drawn change (the per-frame
+`tide_elevation_navd88` by up to about +/-0.05 m at peak rates, the DEM and map elevations by a few
+cm), nothing else.
+
+| what | data | number | reproduce here | check on the NUC |
+|---|---|---|---|---|
+| Legacy is the code without the switch, bit for bit | [SYNTH] test (8 synthetic photos; 43 detection files; a 5-day ground file) | detector: 16/16 CSVs and overlays byte-identical to the code without the switch (this checkout with the changes of the commit that brought the switch in taken out by `git merge-file`: the switch commit on its own line, else the merge that joined it, against its first parent; so a fix merged after it is on both sides; on its branch, `--before 42e3e86`), also with `TIMING_MODE=legacy`, `--timing-mode legacy`, no calibration folder (the built-in values) and an unreadable legacy file (a WARNING, the built-in values); contour file byte-identical; DEM grids, `_sigma.asc`, `_info.json` and log byte-identical | `python3 test_timing_mode.py` | after the pull the cron's products are as before (section 1) |
+| `timex_bias_legacy.json` is the built-in v6.8 timex bias | [SYNTH] test | every float equal (c1 constant -11.03 px; c2's 10 points, the last three -17.22) | same | - |
+| Mid does all three, together | [SYNTH] test | detector: blend off, the mid file's corrections, `Timing_Mode=mid` on every row; refused without its file (unless that camera's bias is off, as in `detect_original_view.py`); contour step: level, waves and stale-gap check at +300 s (timex) / +0 s (snap), capture time unchanged, `level_time_offset_s` last; the other mode's detections left out, both ways | same | - |
+| The pass rule finds a planted lag | [SYNTH] test: synthetic lines shaped like a real 11 Sep 2026 hand-clicked line, georectified with the real CACO05 calibration, 4 days, a 7.9 min lag planted in the legacy lines and none in the mid ones | legacy lag 5.6 (c1) / 6.7 (c2) min, flood minus ebb +0.083 / +0.099 m; mid 0.1 / 0.8 min, +0.010 / +0.024 m: PASS | same | `recalibrate_timing.py --steps compare` |
+| The derive step's rules give back the v6.8 corrections from the v6.8 numbers | [SYNTH] test | c1 spread/SEM 2.7: constant -11.03; c2 spread/SEM 12.0: the 10-point curve, its far two segments clamped to -17.22 | same | `--steps derive` prints control (blend on) beside the v6.8 values |
+| Size of the error today | [SCRATCH] the review's reproduction: the real `process_image` chain and contour step, a harmonic tide fitted to the real Marconi ADCP, 29 Sep - 5 Oct 2026, 322 daylight frames | live: c1 -0.065 m + 6.46 min x dz/dt, c2 -0.098 m + 6.46 min x dz/dt (flood -0.007 / -0.040 m, ebb -0.117 / -0.150 m); blend off alone: -0.070 m - 5.00 min x dz/dt; level at epoch + 300 s alone: +11.45 min x dz/dt (worse); all three: RMS 3 mm, largest 5 mm (the linear interpolation of the 30-min spline) | not in the repository | `--steps compare` |
+| Blend lag in the v6.8 timex bias | [SCRATCH] same reproduction, the real 11 Sep ground-truth rows | -2.78 px of c1's -11.03 px; -2.58 px of c2's mean -8.41 px | not in the repository | `--steps derive`: "blend lag the v6.8 values absorbed" |
+| What reaches the DEM | [SCRATCH] the real IO and EO at the ground-truth pixels (beta 0.106) | share of a level error: c1 0.62, c2 0.26; on switching, c1 cells rise ~+0.04 m on average (to ~+0.07 m where built on the ebb), c2 ~+0.02 m | not in the repository | `--steps compare`: "DEM: mid minus legacy" |
+
+**Not known yet, and what the NUC must confirm.** The 10-min exposure and "the name is the start"
+are the repository's assumption (the four scripts above, the :00/:30 names, 1200-row 2 Hz
+timestacks), not read off the arguseyes collection settings. If the exposure is not 600 s named by
+its start, `TIMEX_MID_OFFSET_S` in `timex_timing.py` is the one number to change (half the
+exposure; -300 if the name were the END of a 10-min exposure).
+
+**On the NUC, step by step.** Nothing below changes a station product until step 6. Each step
+prints what it found; `recalibrate_timing.py` writes into `timing_recalibration/` (its work
+folder), `calibration/timex_bias_mid.json` (derive) and `archive/processed_timex_mid` (backfill),
+never `calibration/timex_bias_legacy.json`. It runs at lower priority (`--nice 10`), and its
+detections take the detector's rate per photo (printed as it goes), twice for compare.
+
+```
+cd /mnt/I2Rgus_Data/waterline
+python3 test_timing_mode.py                      # ends "all timing-mode tests passed"
+```
+
+On an integrated tree the "without the switch" code is built from git (the test's first lines say
+from which commit). Where it cannot be built exactly (a later change on the switch's own lines, or a
+squash: the commit that added `timex_timing.py` then carries other branches' changes), a difference
+is a SKIP that names the command to decide it: `python3 test_timing_mode.py --before REF`, REF a
+commit with every change of the tree but the switch's (after a merge, the merge's first parent). The
+branch-level proof is `python3 test_timing_mode.py --before 42e3e86` on `deep/cam-timing`; merge the
+branch with a merge commit (not a squash) to keep the default check exact. A copy of the scripts
+elsewhere (a mirror) needs `timex_timing.py`, `calibration/timex_bias_legacy.json`,
+`calibration/README.md`, `recalibrate_timing.py` and `test_timing_mode.py` beside them: the detector,
+the contour step, `process_chelsea.py` and `process_historical.py` import `timex_timing.py`.
+
+1. **The exposure.** `python3 recalibrate_timing.py --steps exposure` reads when the newest
+   archived timex were written (their modification time, kept by the cron's `cp -p`, minus the time
+   in their names) and how long the c2 timestacks last (rows at 2 Hz). Expect `EXPOSURE:
+   CONSISTENT`: written ~600-700 s after their names, stacks 600 s. A collection named by its START
+   can only be written after it ends, so files written sooner than 600 s after their names give
+   `MISMATCH` (exit 4), and the later steps refuse to run until the constant is right
+   (`--ignore-exposure` overrides). The same by hand, and in the collection settings:
+
+   ```
+   for f in $(ls archive/images_timex/*.c2.timex.jpg | tail -5); do
+       e=$(basename "$f" | cut -d. -f1); echo "$(basename "$f"): written $(( $(stat -c %Y "$f") - e )) s after its name"
+   done
+   ```
+
+   The write-time test cannot tell a 10-min exposure from a shorter one written late, and the
+   timestacks are their own collection: read the timex's collection length once in the arguseyes
+   collection settings (under `/home/argus_user/arguseyes/`). A different exposure means changing
+   `TIMEX_MID_OFFSET_S`, which also moves the time `runup_from_timestack.py`,
+   `timestack_wave_period.py`, `relabel_manifests.py` and `reaim_figure.py` take their levels and
+   waves at (they assume the same collection), and the 300 s that `test_timing_mode.py` pins.
+
+2. **Ground truth (optional).** `derive` uses every `ground_truth/*.timex.csv` whose photo it can
+   find (`--image-dirs`; by default `archive/images_timex`, `input`, `input_timex` and
+   `/mnt/I2Rgus_Data/ImageProducts`), at least 6 per camera (`--min-frames`). With the blend off
+   the fit compares a detection with the hand-clicked line ON THE SAME PHOTO, so the tide's stage
+   no longer enters it; more frames and more days still make it sturdier (v6.8 had one day, 12 c1
+   and 13 c2 frames). `collect_all_ground_truth.py --filter <epoch prefix>` adds some, ideally on
+   an ebb.
+
+3. **Derive.** `python3 recalibrate_timing.py --steps derive` detects the ground-truth photos twice
+   with the bias off, blend ON (the CONTROL, as when the v6.8 values were fitted) and blend OFF,
+   runs `derive_bias_correction.py --suffix .timex. --uncorrected` on both, and writes the blend-off
+   result to `calibration/timex_bias_mid.json` by the v6.8 rules (a constant unless spread/SEM > 3;
+   a curve's segments beyond x = 0.8, the detector's far field, take the value of the outermost
+   segment at x <= 0.8, as v6.8; nothing at x <= 0.8 is clamped, whatever its scatter). A table those
+   rules cannot settle (a segment at x <= 0.8 that too few frames reach, another segmentation) writes
+   nothing and stops with exit 5: read the table, click more ground truth, or set the points by hand. Read its table: mid minus
+   control is the blend lag the v6.8 values absorbed (expect about +2.8 px c1, +2.6 px c2); control
+   minus the v6.8 values says whether the old fit is reproducible (a NOTE above 3 px: the detector
+   or the ground truth changed since; mid is still a like-for-like fit). `--dry-run` writes
+   nothing. Keep the file with the station's other calibrations (a previous one is kept as `.bak`).
+
+4. **Compare.** `python3 recalibrate_timing.py --steps compare --start-date 2026-09-29 --end-date
+   2026-10-05 --fit-setup` (any window of `archive/images_timex`; a week of mixed waves is best)
+   detects the window in BOTH modes and runs each through the cron's own chain, with the cron's
+   settings read from `waterline_timex_cron.sh` (contours with GNSS-R QC, waves and setup C, the
+   consistency filter, georectify, the DEM with `--max-hs`, `--max-day-offset`). Then, per camera,
+   the DEM's residual diagnostic (`dem_from_contours.py`, `diagnostics.residuals`: each frame's
+   median offset from the other frames' cell medians against dz/dt) for legacy and mid, the
+   verdict, and mid minus legacy over the shared DEM cells. **The pass rule:** a camera PASSes when,
+   from legacy to mid, BOTH the |slope| of the residual on dz/dt AND |flood - ebb| (the median
+   residual of frames with dz/dt above +0.1 m/h minus that below -0.1 m/h) shrink; overall PASS when
+   every camera that could be judged passes (exit 0; FAIL exit 2; NOT JUDGED, too few flood or ebb
+   frames, exit 3: take a longer window). The slope and the contrast are blind to a wrong offset or
+   shape in the mid bias file, so each camera's DEM is also built alone in both modes, and a camera
+   FAILs when its median mid minus legacy is more than 0.1 m from what the fix predicts (c1 +0.04 m,
+   c2 +0.02 m); without such a DEM in both modes it is not judged. Expected if the timing error is real: legacy lag about +4
+   to +8 min with flood above ebb, mid near 0. The minutes are indicative (a planted 6 min comes back
+   as 5.5-8 min); the sign, the contrast and which mode is smaller are the test. The report is in
+   `timing_recalibration/compare/<window>/report.txt` and `.json`.
+
+5. **Backfill** (after a PASS). `python3 recalibrate_timing.py --steps backfill` re-detects every
+   photo of `archive/images_timex` in mode mid into `archive/processed_timex_mid`, one UTC day at a
+   time, never overwriting a file there; a stopped run resumes (days done are listed in
+   `timing_recalibration/backfill/done_days.txt`; today's UTC day is never listed, as the cron is
+   still adding its photos). Hours for a few months of photos. Run it again right before step 6, so
+   the days since the first run are in `archive/processed_timex_mid` too.
+
+6. **Switch.** In `waterline_timex_cron.sh` change `TIMING_MODE=legacy` to `TIMING_MODE=mid`. The
+   next run logs `timing mode: mid (...)` and WARNs while `archive/processed_timex_mid` holds fewer
+   than 90% of the legacy archive's detections (the backfill not finished). The 7-day DEM's
+   `_info.json` then has `water_level_timing` (`+300 s`, not mixed), and its residual diagnostic
+   should show a slope near 0. Survey-date builds follow with `TIMING_MODE=mid python3
+   survey_products.py ...`, historical runs with `--timing-mode mid`.
+
+7. **Setup C.** C = 0.037 was fitted on legacy lines and may have absorbed a little of their timing
+   error (~0.004-0.008, review C-B1). `--fit-setup` in step 4 prints the refit for both modes on
+   contours built with C = 0. Change `SETUP_COEF` (and its copies, section 4.1) only by the rule
+   of section 4.1: when it holds over several weeks of different waves.
+
+8. **Going back.** `TIMING_MODE=legacy` again. The legacy archive was never changed, but while the
+   cron ran in mid it archived only mid detections (`ImageProducts` is cleared daily): re-detect the
+   photos of that period from `archive/images_timex` in legacy into `archive/processed_timex`, or
+   the legacy maps and DEMs have a gap there.
+
+**If compare FAILs.** Keep `TIMING_MODE=legacy`. Look at: the exposure (step 1: a wrong
+`TIMEX_MID_OFFSET_S` moves the mid lines' level by that error x dz/dt); the mid file's table (a
+camera whose fit rests on few frames); whether legacy showed a lag at all (a legacy slope near 0 with
+no flood/ebb contrast means the timing error is not what moves the residuals of that window: try
+another window before concluding).
+
+**Not every flood/ebb difference is timing.** On a falling tide the beach's water table lags the
+sea and seeps out on the beach face above the waterline, a seepage face (Turner 1993; Vousdoukas
+2014). It can put an ebb line landward of still water, where the sand is higher than the level the
+line is given: low on the ebb, the same sign as the timing error. It is the same in both modes, so
+it does not decide the comparison (what mid removes is the timing), but it can be what is left in
+mid. A flood/ebb contrast left in mid is therefore no reason to change `TIMEX_MID_OFFSET_S` to null
+it: only the exposure (step 1) changes that constant.
+### 2.8 The loess DEM and its prediction error (opt-in, not in the cron: `--loess`, `--dem-loess`)
+
+**Claim.** `dem_from_contours.py --loess` (and `survey_products.py --dem-loess`) also writes
+`<stem>_loess.asc`, the DEM's points interpolated by scale-controlled quadratic loess (Plant,
+Holland & Puleo 2002; half-widths 20 m alongshore x 5 m cross-shore), and its prediction error
+`<stem>_loess_err.asc` (with `_loess_nmse` and `_loess_skill`; GeoTIFFs in the survey products).
+Off by default: the cron and the survey products do not ask for it, and without it every grid,
+`_info.json`, page and command is what it was. No figure draws it. `err` is the random error of
+the smoothed surface; it leaves out what the frames share (datum, setup, pointing, detector).
+
+| what | data | number | reproduce here | check on the NUC |
+|---|---|---|---|---|
+| Default unchanged | [REAL] 2026-09-29 survey-date lines (26 Sep - 2 Oct, the dem step's settings) | `_dem/_spread/_count/_sigma.asc` and `_info.json` byte-identical to `42e3e86`'s; with `--loess` the same grids and the same `_info.json` but its `loess` key | `python3 dem_from_contours.py <ground.csv> x --start-date 2026-09-26 --end-date 2026-10-02 --max-hs 1.5 --max-day-offset 0.15 --anchor-date 2026-09-29 --no-plot [--loess]` | `cmp` the grids of a build with and without `--loess` |
+| A known surface recovered within its error bars | [SYNTH] curved profile + alongshore wave, a 0.04 m level error per frame, 0.3 m detection scatter, 4 seeds | bias -0.002 to +0.012 m, RMS 0.013-0.018 m; truth within err 59-76%, within 2 err 97-100% | `python3 test_dem_loess.py` | same |
+| err the size of the error it predicts | [SYNTH] the same 30 lines 20 times over, only a 0.04 m level error per frame | RMS error / RMS err per cell median 0.94; truth within err 70%, within 2 err 92% (the n/(n - 6) of an unweighted fit put err ~2 x too high here) | same | same |
+| The error grows away from the data | [SYNTH] a gap between the lines; the lowest line | into the gap nmse 0.13 -> 0.90 -> 9.8 (among the lines 0.08), its middle nodata; beyond the lowest line nodata (with extrapolation on, tests only: err 0.007 -> 0.016 -> 0.12 m over 4 m) | same | same |
+| The DEM page is not touched | [SYNTH] | the page with `--loess` is the same to the pixel | same | - |
+| err against a survey | [REAL] NUC survey-date lines (copies of 15 Oct 2026) vs the 2025 lidar, median offset removed | Mar 2025 (c2): NMAD 0.137 m vs median err 0.038 m (3.6 x), 47% within 2 err; Jan 2025 (c2 alone, `--camera c2`: c1's lines in those builds sit ~1.8 m below the lidar): 0.123 vs 0.024 m (5.2 x), 33%. The binned DEM's `_sigma.asc` on the same builds: 6.2 x and 4.1 x | `python3 dem_loess.py evaluate <stem> <lidar.tif>` on builds made with `--loess` | `python3 survey_products.py --date 2025-03-06 --steps dem --dem-loess`, then `python3 dem_loess.py evaluate <root>/2025-03-06/dem/2025-03-06 <the Mar 2025 lidar .tif> --json loess_check.json` (and 2025-01-23 with the Jan lidar). Read "NMAD / median err" and the shares by nmse |
+
+What would make `err` more than a floor: the frames' shared errors (setup per day, pointing,
+detection offset) as terms of their own; until then read it as the interpolation's part of the
+error, the cells' relative quality, and where the lines are too far apart (nmse).
 
 ---
 
@@ -637,6 +931,40 @@ FOLLOWING THE PROCEDURE, and the PRE-REGISTRATION COMMIT with whether a remote b
 computer has fetched holds it (`surveys/README.md`, "What the code enforces, and what rests on
 the owner").
 
+**Re-pin of 20 Oct 2026: two modules corrected, no number changed.** Two of the procedure's
+pinned modules were corrected. The single pin in `GCPFREE_PINS` was replaced in the same commit,
+as its comment allows while nothing has run on the station:
+* `georectify.pixel_to_ground` and `view_reproject.ground_to_pixel` judged "in front of the
+  camera" by the sign of the projective scale. `build_P` divides by `P[2,3] = -R[2].C`, so that
+  sign depends on the camera's absolute UTM position. At this site every in-view point was lost
+  for a camera aimed at about 95-275 deg, and some points behind the camera were taken as in
+  view (review finding C-B3). Both now use the point's depth along the optical axis,
+  `R[2].(X - C) > 0` (`georectify.camera_depth`; Hartley & Zisserman 2003, section 6.2.3).
+* `georectify.undistort_uv` gives NaN, not a finite wrong pixel, where its 20 passes do not
+  converge (forward residual > 0.01 px) or beyond the radius where the lens polynomial folds
+  back (C-B7). The fold limit is the one CIRN's UAV-Processing-Toolbox applies ("no folding
+  back", `makeRadDist.m`); the Quantitative Coastal Imaging Toolbox's `distortUV.m` (Bruder &
+  Brodie 2020) has no such test, its flag marking only points outside the image and points with
+  more tangential distortion than the frame's corners.
+
+Neither change moves a number on this station. Over every pixel of the 2448 x 2048 frame, each
+of the 8 IO files in `calibration/` was paired with each of the 10 EO files of its camera (20 EO
+files in all; 80 pairs), at z = -1, 0.5 and 2.5 m. Every output hashed bit-identical before and
+after: `pixel_to_ground`'s X and Y, and `ground_to_pixel`'s U, V and valid flag, on those points
+and on points all round the camera out to 3 km. The two files of calibration A
+(`CACO03_<cam>_20241023_EO`) were not opened: the NUC check in `surveys/README.md` ("Deploying
+on the station") says whether they agree too. The 20 EOs are aimed at 11.9-79.7 deg. Every lens
+inverts to 1e-12 px, reaching 0.01 px in 4-5 passes. Each folds at 1.33 x the radius of the
+frame's corners or further out, or never folds. `gcpfree_eo.py` and its pre-registered constants
+are the same files (sha256 `e97c24f045c5...`, the one the deploy notes send to Chris).
+The pin was replaced, not appended: `gcpfree_pin_of` takes the first pin with a given
+`gcpfree_eo.py` sha256, so a second pin of the same file would never be read. B's ORDER line
+dates the pin by `gcpfree_eo.py`'s sha256, so it still gives that file's first pinned commit
+(14 Oct 2026), not this re-pin of its modules. So the holder's record shows the change only when
+he is told: before A's DEM is shared, and before any run of `gcpfree_eo.py`, Chris is sent
+`sha256sum georectify.py view_reproject.py` with the reason (`surveys/README.md`, "The re-pin of
+20 Oct 2026").
+
 | what | data | number | reproduce |
 |---|---|---|---|
 | The procedure recovers a known turn, and says NOT DELIVERED otherwise | [SYNTH] rendered direction-only worlds (lens and EO files of CACO03), the brief's test turns (c1 -12.5, c2 -13.4 deg pan) | c2 direct: 0.0025 deg from the truth, the Dec chain within 0.0005 deg of it, DELIVERED; c1 with Aug photos: Jan-based B primary, B_aug compared on the beach; c1 when Jan shares nothing with Oct but Aug does: B = the Aug solve (0.002 deg), the Aug position; Oct photos of another world: NOT DELIVERED, no B file | `test_gcpfree_eo.py` |
@@ -672,7 +1000,9 @@ source, how well it is verified, its limits, and how to re-check it on the NUC.
 where `eta_still` is the still-water level (GNSS-R on the live station, the ADCP for the 2025
 dates), `Hs` the offshore significant wave height and `Tp` the peak period of the frame
 (`extract_elevation_contours.py --setup-coef`; `survey_products.apply_setup` uses the same
-formula and rounding). **Value: C = 0.037** (`waterline_timex_cron.sh` SETUP_COEF; the same
+formula and rounding; since Oct 2026 the formula exists once, in `setup_model.py`, which every
+module that uses it calls, bit-identical to the copies it replaced: `test_setup_model.py`).
+**Value: C = 0.037** (`waterline_timex_cron.sh` SETUP_COEF; the same
 value in `survey_products.py` and `historical_forcing.py`, checked by a test). Not changed by
 this PR.
 
@@ -690,7 +1020,8 @@ wavelength from the peak period, and `beta_f` the foreshore beach slope. (For ve
 dissipative beaches, Iribarren number below 0.3, they give `R2% = 0.043 sqrt(H0 L0)`
 instead; Marconi's foreshore is not in that range: at beta_f 0.1, Hs 1 m, Tp 8 s the
 Iribarren number is ~1.0.) The repository implements the same equations in
-`foreshore_slope.py` and `gnssr_qc.py`.
+`setup_model.py` (`stockdon_setup`, `stockdon_swash`; `foreshore_slope.py` and the opt-in
+slope-aware setup below use them) and in `gnssr_qc.py` (its QC allowance, slope fixed at 0.10).
 
 **What our C means.** Our form is Stockdon's setup with `C = 0.35 * beta_f`. C = 0.037 implies
 **beta_f = 0.037 / 0.35 = 0.106 (about 1:9.5)**. The real 7-day DEM of 29 Sep - 5 Oct 2026
@@ -795,8 +1126,10 @@ in that month's build (0.6 in January, 0.8 in March; at 0.8 January would be ~0.
 These are estimates, not measurements. They add to the ADCP still-water effect above. The
 real builds on the NUC are the test.
 
-The re-projecting fits exist only as scratch scripts; `dem_from_contours.py --fit-setup` does
-not re-project and is in principle biased low by roughly the re-projection factor.
+The re-projecting repeat-crossing fits exist only as scratch scripts; `dem_from_contours.py
+--fit-setup` does not re-project and is in principle biased low by roughly the re-projection
+factor. The re-projecting fit against the surveys is now in the repository:
+`evaluate_setup_model.py` (below).
 
 **Re-check on the NUC.**
 ```
@@ -808,6 +1141,79 @@ Read the printed curve, the near-best band and the verdict. It offers a C to app
 C = 0 and the C in use both lie outside the band and the minimum is not flat. Adopt a new C
 only if it holds over several weeks of different waves; then change it in all three places
 (the cron, `survey_products.py`, `historical_forcing.py`) and give it a SETUP_FITS entry.
+
+**The slope-aware alternative (opt-in; the station stays on C).** `setup_model.py` also holds
+Stockdon's own form, `setup = k * beta_f * sqrt(H0 * L0)` with k = 0.35 (Eq. 10), selected by
+`extract_elevation_contours.py --setup-model stockdon` or, on the station, by
+`SETUP_MODEL="stockdon"` in `waterline_timex_cron.sh` (default `""`: C, unchanged). What it does:
+
+* `beta_f` is measured for each frame on the dated 7-day DEM of `archive/dems` nearest its day
+  (within 7 days), as the median slope (5 x 5 plane fits, `foreshore_slope.surface_slope`) of the
+  DEM cells inside the frame's swash band, still water + setup +/- S/2 (Stockdon's definition of the
+  foreshore slope, over the region of significant swash), iterated three passes as
+  `foreshore_slope.py --iterate` does. One value per frame: the contours are tagged in pixel space,
+  before their ground positions are known.
+* `H0` is Stockdon's DEEP-WATER height. The station's Hs is the ADCP's at 21 m (`hs_best`), so it
+  is deshoaled with linear theory, `H0 = Hs / Ks`: Ks at 21 m is 0.97 (Tp 6 s), 0.92 (8 s), 0.913
+  (9 s, its minimum), 0.94 (12 s), so H0 is 0.7-9.5% above Hs over Tp 5-14 s and sqrt(H0 L0)
+  0.3-4.7% above sqrt(Hs L0) [SYNTH, `test_setup_model.py`]. Refraction is not undone (no wave
+  direction or offshore bathymetry here). The raw-buoy currency is taken as deep water.
+  `--setup-deshoal-depth none` uses Hs as it is.
+* A frame no DEM can serve (none within 7 days, fewer than 20 cells in its band, or a slope
+  outside 0.01-0.30) keeps `beta_f = C / k` (0.106): C's setup, up to the deshoaling. The rows
+  carry `setup_beta_f` and `setup_model`; the extractor prints the slopes used and how many
+  frames fell back and why; the DEM's `_info.json` names the model (only for such contours: the
+  station's C rows and their DEM records are unchanged).
+* `survey_products.py` keeps C whatever the cron says (its live rows are recomputed with C, the
+  two slope-aware columns dropped), and warns when the cron runs `stockdon`.
+
+| check | data | result | reproduce |
+|---|---|---|---|
+| One formula: every replaced copy against the expression as written before | [SYNTH] Hs 0-6 m by 0.01, Tp 1-25 s by 0.1, 3000 random pairs, 0 / NaN / negative Hs, four C | the same bits everywhere; the extractor's rows the old expression's text; `--setup-model c` the same file, byte for byte | `python3 test_setup_model.py` |
+| Slope-aware rows | [SYNTH] a 0.08 plane DEM; a two-slope beach (0.13 above +0.5 m, 0.06 below) | `setup_beta_f` 0.08, setup = 0.35 x 0.08 x sqrt(H0 L0) to the 0.1 mm rounding; high water 0.130, low water 0.060; no DEM: every frame C/k with a WARNING | same |
+
+**Choosing between them: `evaluate_setup_model.py`.** On the station, over the survey-date
+products `survey_products.py` built (`/mnt/I2Rgus_Data/survey_products/<date>`), it refits C and
+Stockdon's k against each date's survey, every line RE-PROJECTED at every setup it scores (two
+`pixel_to_ground` planes per camera; the ray is straight, so any other plane is exact
+interpolation), the survey-floor rule applied (RTK: the transect's lowest shot; lidar: its local
+floor within ~10 m, i.e. its water edge), lines more than 1 m off at C = 0.037 left out as
+detection failures. It reports, per survey, bias, median, RMSE and NMAD of the per-frame residuals
+for C = 0, C = 0.037 (CIRCULAR on the 2026-09-29 RTK, which it was fitted to), Stockdon's own k =
+0.35 (no fit), and the refits: in-sample, each survey alone, and LEAVE-ONE-SURVEY-OUT (each survey
+scored with the coefficient fitted on the others), each also WITH A FREE OFFSET PER SURVEY AND
+CAMERA (the residuals less their mean: only how the lines follow the waves within a survey). That
+second score is needed because with a few surveys of one dominant slope each, C and Stockdon differ
+mostly by a scale on each survey's setup, so a level offset of a survey (pointing, the still-water
+datum: ADCP in 2025, GNSS-R in 2026; a camera's bias) that lines up with the slopes is credited to
+Stockdon by the absolute score. It recommends Stockdon (k refitted, H0 = Hs/Ks, fixed beforehand;
+H0 = Hs is a sensitivity) only when, with 3 or more surveys, against the C refit held out and over
+the frames both keep, its cross-validated RMSE is at least 0.01 m below C's and lower on a majority
+of the held-out surveys, AND with the free offset its cross-validated RMSE is below C's and lower on
+a majority; otherwise the station keeps C. A coefficient on the edge of its grid is flagged. The
+BLIND 2024-10-23 row is skipped before anything of it is opened, and so is any row whose survey file
+is named like a survey of that date (the run also arms `survey_products.arm_blind_guard`); a survey
+row without a path is never looked up by its date.
+
+| check | data | result | reproduce |
+|---|---|---|---|
+| Truth C = 0.045 on beaches of slope 0.13, 0.07, 0.10 (two DSMs, one RTK transect file; real c1 calibration) | [SYNTH] | C refit 0.045 in-sample and held out on each; held-out RMSE 0.016-0.019 m; Stockdon's cross-validated RMSE 0.145 m against C's 0.018 m: keep C | `python3 test_evaluate_setup_model.py` |
+| Truth Stockdon k = 0.35 (H0 deshoaled) on the same beaches | [SYNTH] | k refit 0.35 (held out 0.35-0.355); the paper's k 0.013-0.018 m RMSE; H0 = Hs needs k 0.365; C's cross-validated RMSE 0.133 m against 0.016 m: switch, with the cron lines | same |
+| Truth C = 0.037, each survey's lines offset in level with its slope (+0.10 m on the 0.13 beach, -0.08 m on the 0.07 one) | [SYNTH] | absolute: Stockdon 0.065 m against C's 0.080 m, lower on 2 of 3 (it alone would switch); free offset: Stockdon 0.045 m against C's 0.019 m, C held out 0.037-0.038: keep C. Jan held out = the fit on Mar and the RTK alone, every model; no DEM: every frame C / k | same |
+| Survey floor, gross failures, BLIND | [SYNTH] | lines below a DSM's water edge (-0.5 m) or the transects' lowest shot are not scored; two lines planted 1.5 m low: 2 gross failures; the blind row's survey file and product never opened, nor another date's survey file named like a survey of the blind date (audit hook) | same |
+| Two surveys only | [SYNTH] | no recommendation, keep C | same |
+
+**[NUC] Run it** once the survey-date products are built (each with its DEM):
+```
+python3 evaluate_setup_model.py --json /mnt/I2Rgus_Data/survey_products/setup_model_eval.json
+```
+Read the LEAVE-ONE-SURVEY-OUT tables (absolute and with a free offset) and the RECOMMENDATION's
+two tests. To switch, set
+`SETUP_MODEL="stockdon"` and `SETUP_STOCKDON_K="<k>"` in the cron as the report prints; the
+next run re-tags every contour row (the cron re-extracts the whole archive) and builds its DEMs
+with it; the dated copies already in `archive/dems` stay as they were built (they are the slopes'
+source), and `dem_change.py --rebuild` rebuilds the reference week like for like. Frames older
+than the series, or more than 7 days from its nearest DEM, keep C's setup.
 
 ### 4.2 GNSS-R water level onto NAVD88: +0.349 m
 
@@ -1390,6 +1796,151 @@ only if it holds over several weeks of different waves; then change it in all th
   match's `turn_sigma`, `runner_up_inliers`, `runner_up_d`); the step prints each day's why under
   its table.
 
+### 4.6b Per-day pointing: the live log and the opt-in correction (`pointing_daily.py`)
+
+* **Why.** Section 4.6 measures each day's turn and leaves a turned day out; the live cron
+  measures nothing and grids every frame with one calibration. The coastal-imaging practice
+  is to measure the turn on static land features in each image and to update the pointing with
+  it (Rodriguez-Padilla et al. 2020; Pearre & Puleo 2009). At Sisal, stabilisation cut the
+  shoreline position error by about 40% (Arriaga et al. 2022). View angles also drift with the sun
+  (Bouvier et al. 2019), which a day-by-day record can test here.
+* **What changed, and what did not.**
+  * `pointing_daily.py` (new). It has the gates, the corrected pointing and the live log; its
+    docstring gives each rule and its evidence. The gates are: a matched reading (not ambiguous),
+    40 or more inliers, `turn_sigma` 4 or more, inliers spread 180 px or more, a turn of 2.5 deg or
+    less, not UNCONFIRMED and not the reference day. The first three are `survey_products.py`'s own
+    constants.
+  * `--correct-pointing` adds two gates of the day, both at `MATCH_ERR_DEG` (0.1 deg):
+    * **A turn of more than 0.1 deg** in pan, tilt or roll. A smaller one is within the match's own
+      error against another day, so that day is at rest and is gridded as by default. `turn_sigma`
+      does not include this error: real at-rest matches read 4.9-18.5. The corrected days are
+      therefore the turned ones: the days the default leaves out or keeps as a 'small change'.
+    * **The pointing held through the day.** The turn is measured on one probe frame (nearest
+      17:00 UTC) and maps every row of the UTC day. The pointing step therefore also matches the
+      day's first and last photos of the detection against the same reference. Each must pass the
+      gates and read the probe's turn within 0.1 deg. A day the camera turned or came back during
+      is not corrected. Neither is a day whose first or last photo cannot be read (fog, rain): it
+      stays left out when the default leaves it out, and the README gives the reason. These extra
+      matches run only with the option, and only on days that would otherwise be corrected.
+  * The compare step's C = 0 sensitivity re-projects a corrected day's lines with that day's EO
+    (`survey_compare.py --camera-eo-day`), not the calibration's. Otherwise it would undo the
+    correction and count the difference as setup effect.
+  * The corrected EO is the calibration's position with its angles plus the measured change. This
+    is exact for `pointing_check.measure`. It is written next to the waterlines it mapped, and no
+    pinned file is edited.
+  * `survey_products.py --correct-pointing` is **opt-in**. It builds only in a root named
+    `<root>_pointing-corrected`, refuses a blind date and refuses `--eo`. It detects a passing day
+    instead of leaving it out and maps its rows with that day's pointing. Every other day is handled
+    as in a default build. The README has a KNOWN CAVEATS line `POINTING CORRECTED PER DAY` and a
+    camera line. Provenance has `pointing_check.pointing_correction`, the record the detection's
+    stamp keeps.
+  * **Default builds are unchanged.** Without the option no signature gains a key, and the compare
+    command is the same. The new `survey_compare.py` reruns the comparisons and the plan-view map
+    once, with the same numbers. The default README and provenance gain no line or key, and the
+    default detection leaves out the same days (`test_pointing_daily.py`).
+  * The live cron (step 7b, `POINTING_LOG_ENABLE=1`) **only logs**. It writes
+    `archive/pointing_daily_<cam>.json`, its own reference frame in
+    `archive/pointing_daily_reference/<cam>/` and one `pointing <cam> <day>: ...` line per day in
+    `logs/timex_cron.log`, with no WARNING unless the script itself fails. The live calibrations are
+    used as they are. Nothing is written to `calibration/pointing/`, where `owg.sh`'s hourly monitor
+    reads its bank.
+* **[SYNTH] Recovery** (`test_pointing_daily.py`; `pointing_daily.py --self-test`; c2's lens and
+  live EO, a synthetic scene).
+  * Planted turns of 0.05 to 2 deg were read back to under 0.001 deg (4,570-4,900 inliers; the same on
+    Python 3.11 / OpenCV 5.0 and on the station floor, Python 3.8 / OpenCV 4.5.1 / numpy 1.17).
+  * Waterline points at 56-397 m sat 0.09 / 2.08 / 4.98 / 3.63 m (median) off with the calibration,
+    up to 56 m at range. Corrected, they sat 0.001 m off (0.010 m at most).
+  * c1's measured storm pan (-1.214/+0.004/+0.030 deg), planted on c2: the live-era build put that
+    day's lines 1.9 m (median) off uncorrected and within 4 mm with `--correct-pointing`. Every
+    other row was identical to the default build's. The historical path behaved the same way, with
+    the day no longer in `--skip-days`.
+  * The corrected rows are string for string what `georectify.py` gives with the day's EO file.
+    Every other row is unchanged, byte for byte.
+  * Not corrected:
+    * an unturned frame (`turn_sigma` 1.2-1.6);
+    * dirt on the window that wins the match ('ambiguous', `turn_sigma` 1.5-1.9);
+    * a scene too faint to match ('ok' at zero turn, `turn_sigma` 3.1);
+    * a 3.0 deg turn (measured and logged, but over the limit).
+  * Two copies of one image match with no noise at all and read a zero turn as many standard errors
+    from none. The live-log test therefore gives each synthetic frame its own sensor noise, as a
+    camera does.
+* **[NUC] Evaluation, step by step.** Nothing here is validated on real photos yet.
+  1. After the pull, run both of these:
+     ```
+     python3 test_pointing_daily.py               # ends "all pointing_daily tests passed" (~35 s on the floor venv)
+     python3 pointing_daily.py --self-test --image archive/images_timex/<a clear c2 timex>.jpg   # ends PASS
+     ```
+     The second plants the same turns on a real c2 frame (no scipy needed) and recovers them.
+  2. **The live log**, after the next cron run:
+     ```
+     grep "^pointing c" logs/timex_cron.log | tail
+     ```
+     * If it says `no reference`, the calibration's own day (2025-11-13) is no longer in the archive.
+       Give a clear day whose pointing is the calibration's:
+       `python3 pointing_daily.py --camera c1 --reference-day <day>`. A day a survey-product pointing
+       table reads 'matches' against the calibration day is one.
+     * Then backfill the storm:
+       ```
+       python3 pointing_daily.py --camera c1 c2 --days 2026-09-20 2026-10-10
+       ```
+       (~3 frames a camera-day; time it). Expect c1 26-28 Sep at about -1.2 deg of pan ('MOVED')
+       where the survey product measured -1.214 deg on 27 Sep, and back by 29 Sep. If the land was
+       unread on 26 and 28 Sep, the log says 'no reading' for those days.
+     * The log's `d_deg` should agree with each survey build's `pointing/pointing_<cam>.csv` within
+       ~0.1 deg on days both read: the same matcher, other frames and another reference.
+     * `range_deg`, the spread between one day's frames, is the diurnal-drift test. Spreads over
+       ~0.1 deg on sunny days and not on overcast ones would be the thermal drift of Bouvier et al.
+       (2019).
+  3. **The correction against surveys.** Compare each date three ways, each in its own root: the
+     default product (already in the default root), the corrected one, and every day kept
+     uncorrected (the before/after on the same frames).
+     ```
+     R=/mnt/I2Rgus_Data/survey_products            # the default products: already built there
+     for D in 2025-01-23 2025-03-06 2026-09-29; do
+         python3 survey_products.py --date $D --correct-pointing --output-root ${R}_pointing-corrected
+         python3 survey_products.py --date $D --keep-moved-days --output-root ${R}_keepmoved
+     done
+     ```
+     * A 2025 date reruns its detection in each new root (~38 min for 2025-01-23 and ~20 min for
+       2025-03-06, section 1). Start after ~21:30 local.
+     * 2025-01-23 and 2025-03-06 compare with INDEPENDENT lidar. The 2026-09-29 window (26 Sep -
+       2 Oct) holds the c1 storm. Its RTK is CIRCULAR for C, but C is the same in all three builds,
+       so their difference tests the pointing alone.
+     * Read the corrected README's `POINTING CORRECTED PER DAY` line: which days, by how much, on
+       which frames, and how far their lines moved. Its 'NOT corrected' list gives, for each day
+       measured to differ, the gate that kept it out (for example, the pointing did not hold
+       through the day).
+     * Only turned days are corrected (over 0.1 deg). On a date with no such day, the corrected
+       build's waterlines are the default's, row for row. The README line then says 'no day passed
+       the gates'.
+     * Compare per camera in `compare/` the DEM - survey median and NMAD of the three, and the
+       waterlines - survey of the corrected days against the other days.
+  4. **Decision.** Make the correction the default only if both hold on the INDEPENDENT surveys:
+     * the corrected DEM - survey (median, NMAD, per camera) is no worse than the default's;
+     * a corrected day's waterlines - survey agree with the unturned days' within their NMAD, where
+       the same days uncorrected (`_keepmoved`) do not.
+
+     An independent date with no corrected day gives no evidence either way, because its two
+     builds are the same. The rule is read only on the independent dates that have a corrected day.
+     If none has one, the rule cannot be applied and the correction stays opt-in. The storm window
+     (2026-09-29) then shows only that the correction is consistent with its own survey.
+
+     Until then it stays opt-in. A live correction would follow only after this, and as its own
+     change.
+* **Not corrected, by design.**
+  * The window's constant offset against the calibration: the sea horizon's +0.5 to +0.9 deg of
+    tilt on the 2026 cameras (section 4.6) may be the lens model. The correction aligns each day
+    with the reference frame's pointing, taken as the calibration's, as the pointing step does.
+  * Days nothing could read: they stay left out, as by default.
+  * The detector's search. Only the georectification is corrected. A historical era's search
+    envelope is placed with `--eo`, and the live crop is fixed. Both are the calibration's, padded by
+    0.03 / 0.06 of the frame height (~61 / ~123 px). That is ~1.4 / ~2.7 deg of tilt for c1
+    (fy ~2573 px) and ~1.0 / ~1.9 deg for c2 (fy ~3681 px). On a corrected day tilted ~1 deg or
+    more, or rolled so that the band's ends move as far, part of the waterline band can fall
+    outside the search, and the detector can follow another edge. c1's +1.17 m lines already sit
+    ~33 px below its envelope floor at the calibration (`waterline_consistency.py`). The gates still
+    allow up to 2.5 deg, so read such a day's lines in the comparison before trusting them.
+
 ### 4.7 Detector edge position
 
 * The detector places its line where a water pixel has foam around it. In the fixture this is
@@ -1423,6 +1974,70 @@ only if it holds over several weeks of different waves; then change it in all th
 | Change: uniform warning | >= 50 cells | `dem_change.py` | no verdict on a handful of cells |
 | Filter: threshold / window / bins | max(0.75 m, 4 x robust scatter) / +/-3 d, exp(-dt/1 d) / 32 px | `waterline_consistency.py` | section 2.1 |
 | Survey floor margin | 0.10 m above each transect's lowest shot | `survey_compare.py` SURVEY_FLOOR_MARGIN | section 4.1 |
+| Intervals of DEM - survey | stretches >= 50 m (`--block-m`), as long as the residual correlation stays above 0.1; >= 5 stretches; 1000 resamples, seed 1 | `survey_compare.py` ALONGSHORE_BLOCK_M, RHO_GONE, MIN_CI_BLOCKS | section 2.4a (text and json only) |
+| Waterline strata | flood / ebb beyond +/-0.1 m/h, flood - ebb within camera-days; Hs thirds; intervals by camera-day, >= 5 | `survey_compare.py` STAGE_RATE | section 2.4a (text and json only) |
+| Change: day-block LoD | report only, off (`--day-block-lod`; cron `DEM_DAY_BLOCK_LOD`) | `dem_change.py` | section 2.4a |
+
+### 4.10 Georectification uncertainty (`georectify_uncertainty.py`; opt-in `--sigma-obs`)
+
+* **What.** The 2025-11-13 solve repeated with each of its targets left out, and its parameter
+  uncertainty drawn through `georectify.pixel_to_ground` to every pixel (Monte Carlo, 2000
+  draws, seed 0), written to `calibration/<cam>_geom_sigma.csv` (calibration/README.md).
+  `dem_from_contours.py --sigma-obs` turns it into `<stem>_sigma_obs.asc` =
+  sqrt(SE^2 + sigma_wl^2 + sigma_setup^2 + (tan(beta) x sigma_x)^2), tan(beta) from the DEM's own
+  3 x 3-cell plane. **Off by default**: without the switch every output is byte for byte what
+  42e3e86 wrote [SYNTH: builds with and without the day and frame tests, interpolation, the
+  fine DEM, the series copy and the page]. No pinned file is touched.
+* **Leave-one-out** [REAL], the error at the target left out, horizontal:
+
+  | camera | solve (the most parameters whose refit reproduces the calibration) | targets | in-sample mean / RMS / max | left out RMS / max |
+  |---|---|---|---|---|
+  | c1 | all 6 (the refit moves 0.045 m, 0.044 deg) | 14 at 29-92 m | 0.328 / 0.416 / 1.181 m | 0.589 m (1.41 x) / 1.80 m (#214, 92 m) |
+  | c2 | 3 angles, position held (6 would move 0.33 m) | 13 at 36-150 m | 0.330 / 0.416 / 0.994 m | 0.410 m (0.99 x) / 0.63 m (#214, 90 m) |
+
+  So the in-sample figure understates little AT the targets; what it cannot show is the
+  extrapolation in range.
+* **Parameter uncertainty** [REAL]: the Jacobian of the solve (CIRN's extrinsics error) and the
+  jackknife of the leave-one-out solves; the table uses the larger, the Jacobian for both
+  cameras. c1: x 0.17, y 0.15, z 0.18 m, azimuth 0.21, tilt 0.20, roll 0.25 deg (the position
+  was solved from targets within 92 m, so position and angles trade off); c2: azimuth 0.034,
+  tilt 0.029, roll 0.175 deg.
+* **Horizontal sigma on z = 0 m** [REAL], median over the columns (Jacobian; jackknife in
+  brackets), and the cross-shore pixel footprint:
+
+  | range | 50 m | 100 m | 150 m | 200 m | 300 m | 400 m |
+  |---|---|---|---|---|---|---|
+  | c1 sigma_h | 0.20 (0.16) | 1.05 (0.64) | 2.9 (1.8) | 5.6 (3.7) | 13.7 (9.6) | 23.8 (19.2) |
+  | c2 sigma_h | 0.11 (0.08) | 0.38 (0.28) | 0.83 (0.61) | 1.46 (1.07) | 3.3 (2.4) | 5.8 (4.2) |
+  | c1 / c2 footprint | 0.05 / 0.03 | 0.19 / 0.09 | 0.42 / 0.19 | 0.73 / 0.31 | 1.63 / 0.67 | 2.89 / 1.15 |
+
+  The far field is the tilt: (h^2 + r^2)/h x 0.20 deg is ~15 m at 300 m for c1 (h 20.5 m). In the station's
+  own rows (the 2026-09-29 survey-date build, 27 Sep - 2 Oct) c1's waterlines lie 63-89 m out
+  (p10-p90; sigma_h 0.34-0.71 m) and c2's 105-307 m (0.36-5.2 m). There `--sigma-obs` gives
+  median 0.258 m, p90 0.315 m on 1193 cells; the georectification term median 0.047 m, p90
+  0.18 m (tan(beta) median 0.10): the water level and setup defaults dominate [REAL].
+* **Defaults** (`dem_from_contours.py` SIGMA_WL_M, SIGMA_SETUP_M; `--sigma-wl`, `--sigma-setup`):
+  water level 0.12 m, the GNSS-R vs Chatham-transfer residual RMS of `gnssr_qc.py` (an upper bound:
+  the harbour transfer is in it; the datum's +/-0.061 m, section 4.2, is not); setup 0.21 m, the
+  RMSE of Stockdon et al. (2006)'s setup formula on its own 10 experiments as re-evaluated by
+  Dalinghaus, Coco & Higuera (2023, NHESS 23, 2157-2169) [secondary: Stockdon's full text was not
+  retrievable here]. Both are counted in full, not divided by sqrt(n) (errors the crossings share);
+  their random part is also in the SE, so `_sigma_obs` is an upper estimate.
+* **Limits.** Beyond 150 m the sigma is the solve's extrapolation, not a measurement; it holds for
+  the 2025-11-13 calibration only (the 2025 survey-date builds use other calibrations); it does
+  not include a camera turned since (section 4.6), the pick origin (VERIFIED L27) or the
+  detector's own pixel error (that is in the SE). The sea horizon, which pins tilt and roll,
+  is not used as an observation in the solve; adding it would shrink the far field most.
+* **[NUC] Is it honest?** `georectify_uncertainty.py --evaluate <stem> --survey <survey>` gives the
+  share of cells (or RTK shots) within 1 and 2 sigma_obs (about 68 / 95 % if right), raw and with
+  the median offset removed, and the RMS by thirds of sigma_obs. It needs a survey of a window
+  georectified with the 2025-11-13 calibration that reaches the waterlines: the 29 Sep 2026 RTK
+  stops at +1.17 m and meets only 2 cells of that week's DEM [REAL]. A calm low-tide RTK or
+  lidar survey (section 6) is the test. [SYNTH] residuals drawn from sigma_obs come back 68.3 /
+  95.0 %; the code reads the real 2025 lidar BigTIFFs (smoke test).
+* **Re-check.** `python3 georectify_uncertainty.py --no-write` (both cameras, ~20 s) prints the
+  tables above; `python3 test_georectify_uncertainty.py` (~50 s; `--quick` ~30 s) checks it on a
+  synthetic camera with known answers and the committed tables against a fresh run.
 
 ---
 
@@ -1484,6 +2099,10 @@ copy of today's pictures made before the pull (section 1).
   gives the edge numbers and inliers per day. The NUC's edge numbers are 3-frame medians, where
   the storm values above are single 17:00 frames. Why c1 turned ~1.2 deg on 26-28 Sep 2026 and
   was back by 29 Sep (wind load, or a slip reset) is not known.
+* **The per-day pointing correction on real photos.** `--correct-pointing` and the live log
+  (section 4.6b) are checked on synthetic turns only. Their evaluation is the three-root comparison
+  of section 4.6b on the Jan and Mar 2025 lidar dates and the 2026 storm window, which only the NUC
+  can run. Until it is done the correction stays opt-in and the live cron only logs.
 * **Window dirt in a storm.** The zero-turn guard (`turn_sigma` under 4.0 shows nothing) rests on
   synthetic drops on real frames and on real cross-day matches of one camera's storm frames (c2 26-28
   Sep against 7 Oct and against each other; section 4.6); real
@@ -1503,6 +2122,11 @@ copy of today's pictures made before the pull (section 1).
   days' neighbours whatever the waves, is the owner's call; the 1.5 m threshold is the DEM's own,
   not measured as a storm signal for camera turns (the one storm seen: 1.95 / 3.71 / 2.11 m at its
   peak on 26 / 27 / 28 Sep 2026).
+* **The water-level timing fix (section 2.7).** The 10-min timex exposure named by its start is the
+  repository's assumption, not read off the arguseyes settings; the mid-mode timex bias needs the
+  ground-truth photos, and the test of the fix a window of photos, both on the NUC. Until
+  `recalibrate_timing.py` has PASSed there, the station stays on `TIMING_MODE=legacy`, whose lines
+  are 4-8 min older than their levels (up to ~0.1 m a frame at spring rates).
 * **The detector's rate on the NUC10i3.** Measured here at 20-25 s per photo on a 2.8 GHz
   Xeon; the NUC prints its own rate.
 * **Reviews.** The waterline work had three review rounds (the last: all lenses "ship"), the
@@ -1533,14 +2157,46 @@ copy of today's pictures made before the pull (section 1).
 * Aarninkhof, S.G.J., Turner, I.L., Dronkers, T.D.T., Caljouw, M., Nipius, L., 2003. A
   video-based technique for mapping intertidal beach bathymetry. Coastal Engineering 49(4),
   275-289.
+* Arriaga, J., Medellin, G., Ojeda, E., Salles, P., 2022. Shoreline detection accuracy from video
+  monitoring systems. Journal of Marine Science and Engineering 10(1), 95.
+  https://doi.org/10.3390/jmse10010095
+* Bouvier, C., Balouin, Y., Castelle, B., Holman, R., 2019. Modelling camera viewing angle
+  deviation to improve nearshore video monitoring. Coastal Engineering 147, 99-106.
+* Carlstein, E., 1986. The use of subseries values for estimating the variance of a general
+  statistic from a stationary sequence. Annals of Statistics 14(3), 1171-1179 (non-overlapping
+  blocks, as resampled here).
+* Davison, A.C., Hinkley, D.V., 1997. Bootstrap Methods and their Application. Cambridge
+  University Press (section 3.8: resampling clustered data).
 * Hart-Davis, M.G., Piccioni, G., Dettmering, D., Schwatke, C., Passaro, M., Seitz, F., 2021.
   EOT20: a global ocean tide model from multi-mission satellite altimetry. Earth System Science
   Data 13, 3869-3884.
+* Holman, R.A., Stanley, J., 2007. The history and technical capabilities of Argus. Coastal
+  Engineering 54(6-7), 477-491.
+* Lahiri, S.N., 2003. Resampling Methods for Dependent Data. Springer (non-overlapping and
+  moving blocks).
+* Liang, K.-Y., Zeger, S.L., 1986. Longitudinal data analysis using generalized linear models.
+  Biometrika 73(1), 13-22.
+* Parente, P.M.D.C., Santos Silva, J.M.C., 2016. Quantile regression with clustered data.
+  Journal of Econometric Methods 5(1), 1-15.
+* Pearre, N.S., Puleo, J.A., 2009. Quantifying seasonal shoreline variability at Rehoboth Beach,
+  Delaware, using automated imaging techniques. Journal of Coastal Research 25(4), 900-914.
+  https://doi.org/10.2112/08-1029.1
+* Plant, N.G., Holland, K.T., Puleo, J.A., 2002. Analysis of the scale of errors in nearshore
+  bathymetric data. Marine Geology 191(1-2), 71-86.
 * Plant, N.G., Holman, R.A., 1997. Intertidal beach profile estimation using video images.
   Marine Geology 140(1-2), 1-24.
 * Plant, N.G., Aarninkhof, S.G.J., Turner, I.L., Kingston, K.S., 2007. The performance of
   shoreline detection models applied to video imagery. Journal of Coastal Research 23(3),
   658-670.
+* Rodriguez-Padilla, I., Castelle, B., Marieu, V., Morichon, D., 2020. A simple and efficient
+  image stabilization method for coastal monitoring video systems. Remote Sensing 12(1), 70.
+  https://doi.org/10.3390/rs12010070
+* Rolstad, C., Haug, T., Denby, B., 2009. Spatially integrated geodetic glacier mass balance and
+  its uncertainty based on geostatistical analysis. Journal of Glaciology 55(192), 666-680.
 * Stockdon, H.F., Holman, R.A., Howd, P.A., Sallenger, A.H., 2006. Empirical parameterization
   of setup, swash, and runup. Coastal Engineering 53(7), 573-588.
   https://doi.org/10.1016/j.coastaleng.2005.12.005
+* Turner, I.L., 1993. Water table outcropping on macro-tidal beaches: a simulation model.
+  Marine Geology 115(3-4), 227-238.
+* Vousdoukas, M.I., 2014. Observations of wave run-up and groundwater seepage line motions on a
+  reflective-to-intermediate, meso-tidal beach. Marine Geology 350, 52-70.
