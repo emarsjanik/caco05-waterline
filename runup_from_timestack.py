@@ -59,15 +59,30 @@ wrong call is visible.
 WHAT IT CANNOT DO.
   * Ground coordinates are computed on the horizontal plane at the
     still-water level. The swash sits above it, so positions are
-    slightly biased along the camera ray. Small for position, but it
-    is one more reason elevations here are approximate.
+    biased along the camera ray: c2 sees the swash ~230 m away from
+    19.8 m up, so a point above still water lands further along its
+    ray (on a synthetic 1:7-1:14 beach with the real calibration, the
+    plane's straight-line span of the swash is 1.1-1.8 times the
+    beach's). Distances along the line are also the sum of the
+    pixel-to-pixel steps, so a line drawn as a staircase of single-
+    pixel steps adds its zigzag: on such a synthetic line the two
+    together give 2-3 metres of path per beach metre (docs/VALIDATION.md
+    4.11). How much of that real lines carry depends on how their .pix
+    was drawn. The *_horiz_m columns and --max-retreat-speed are in
+    these path metres. timestack_wave_height.py puts the same edge on
+    the DEM.
   * NO ELEVATIONS. An earlier version read setup and R2 off the
     intertidal DEM, but that DEM is built by giving each timex
     waterline -- which sits at the mean swash position -- the
     still-water level. At the mean swash position the DEM therefore
     equals still water by construction and "setup" came out near zero
     whatever the waves did. Elevations need a beach profile measured
-    independently of the waterlines (RTK, UAS or lidar survey).
+    independently of the waterlines (RTK, UAS or lidar survey). The
+    DEM now carries the station's setup C sqrt(hs_best L0), so
+    elevations read off it are still partly circular:
+    timestack_wave_height.py reads them, opt-in, with that caveat
+    (only its S_IG, which needs the DEM's slope and not its level, is
+    free of it: docs/VALIDATION.md 4.11).
   * Swash statistics are HORIZONTAL distances along the line (the
     *_horiz_m columns), not the vertical S of Stockdon et al. (2006).
     Converting needs the same independent profile.
@@ -107,6 +122,7 @@ DEFAULT_PIX_DIR = "/home/argus_user/arguseyes/build"
 SAMPLE_HZ = 2.0
 LINE_BREAK_PX = 100.0
 IG_CUTOFF_HZ = 0.05          # infragravity / incident split, standard in runup work
+LAND_REF_FRACTION = 0.85     # find_edge: the line's landward 15% is the no-foam reference
 # filename epoch is the burst start; stats refer to its middle (300.0 s: timex_timing.py)
 BURST_MID_OFFSET_S = float(TIMEX_MID_OFFSET_S)
 
@@ -200,7 +216,7 @@ def find_edge(gray, k, min_threshold, min_run=15, block=200):
     """
     g = cv2.GaussianBlur(gray.astype(np.float32), (3, 3), 0)
     n = g.shape[1]
-    land = slice(int(0.85 * n), n)
+    land = slice(int(LAND_REF_FRACTION * n), n)
 
     # Whole-row brightness changes: exposure steps or cloud shadow.
     land_level = np.median(g[:, land], axis=1, keepdims=True)
@@ -244,18 +260,42 @@ def find_edge(gray, k, min_threshold, min_run=15, block=200):
     return smoothed, threshold, anomaly
 
 
-def runup_peaks(series, half_width=4):
-    """Local maxima (one per uprush) of a runup series, NaNs ignored."""
+def peak_mask(series, half_width=4):
+    """True at the local maxima (one per uprush) of a runup series, NaNs ignored."""
     s = np.where(np.isfinite(series), series, -np.inf)
     padded = np.pad(s, half_width, constant_values=-np.inf)
     window = np.stack([padded[i:i + len(s)] for i in range(2 * half_width + 1)])
     is_peak = (s == window.max(axis=0)) & np.isfinite(series)
     # Collapse plateaus to their first sample.
     is_peak[1:] &= ~(is_peak[:-1] & (s[1:] == s[:-1]))
-    return series[is_peak]
+    return is_peak
+
+
+def runup_peaks(series, half_width=4):
+    """Local maxima (one per uprush) of a runup series, NaNs ignored."""
+    return series[peak_mask(series, half_width)]
 
 
 MAX_FILL_SAMPLES = 10    # gaps up to 5 s are bridged before spectral analysis
+
+
+def bridge_gaps(series):
+    """
+    The series with its gaps of up to MAX_FILL_SAMPLES bridged
+    linearly, as band_sig analyses it; None when over 10% of it is
+    missing or any gap is longer (no longer an evenly sampled record).
+    """
+    x = np.asarray(series, float)
+    bad = ~np.isfinite(x)
+    if bad.all() or bad.sum() > 0.1 * len(x):
+        return None
+    if bad.any():
+        edges = np.flatnonzero(np.diff(np.r_[0, bad.astype(int), 0]))
+        if (edges[1::2] - edges[::2]).max() > MAX_FILL_SAMPLES:
+            return None
+        idx = np.arange(len(x))
+        x = np.interp(idx, idx[~bad], x[~bad])
+    return x
 
 
 def band_sig(series, lo_hz, hi_hz):
@@ -266,17 +306,8 @@ def band_sig(series, lo_hz, hi_hz):
     record and NaN is returned. (An earlier version dropped the NaNs and
     joined the remainder, which shifts every frequency.)
     """
-    x = np.asarray(series, float)
-    bad = ~np.isfinite(x)
-    if bad.all() or bad.sum() > 0.1 * len(x):
-        return np.nan
-    if bad.any():
-        edges = np.flatnonzero(np.diff(np.r_[0, bad.astype(int), 0]))
-        if (edges[1::2] - edges[::2]).max() > MAX_FILL_SAMPLES:
-            return np.nan
-        idx = np.arange(len(x))
-        x = np.interp(idx, idx[~bad], x[~bad])
-    if len(x) < 64:
+    x = bridge_gaps(series)
+    if x is None or len(x) < 64:
         return np.nan
     x = x - x.mean()
     f = np.fft.rfftfreq(len(x), 1.0 / SAMPLE_HZ)
@@ -327,7 +358,21 @@ def water_level_at(gnssr, epoch):
     return float(np.interp(epoch, g_ep, g_lv))
 
 
-def process(ras_path, args, pix_cache, gnssr):
+def swash_edge(ras_path, args, pix_cache, gnssr):
+    """
+    The swash edge of one stack along line args.line: the part of
+    process() everything it reports is computed from, so another
+    script (timestack_wave_height.py) can use the same edge without a
+    copy of the steps. None (reason printed) for a stack that cannot be
+    read; else a dict of:
+      name, cam, epoch (burst start), mid_epoch, wl (GNSS-R level or
+      NaN), z_plane (the plane the line was georectified on), sea_at,
+      gray (time x pixels, sea end first), line_uv (sea end first),
+      threshold, anomaly (find_edge), valid (fraction of rows with an
+      edge), E, N, dist (per pixel, on z_plane), pos (edge, m along the
+      line from the sea end, retreat-limited) and edge (the same as a
+      fractional column index from the sea end; NaN where none).
+    """
     name = Path(ras_path).name
     cam = args.camera or camera_from_name(name)
     epoch = epoch_from_name(name)
@@ -389,6 +434,19 @@ def process(ras_path, args, pix_cache, gnssr):
         if np.isfinite(pos[t - 1]) and np.isfinite(pos[t]) and pos[t] < pos[t - 1] - step_m:
             pos[t] = pos[t - 1] - step_m
     edge = np.where(np.isfinite(pos), np.interp(pos, dist, idx), np.nan)
+    return {"name": name, "cam": cam, "epoch": epoch, "mid_epoch": mid_epoch, "wl": wl,
+            "z_plane": z_plane, "sea_at": sea_at, "gray": gray, "line_uv": line_uv,
+            "threshold": threshold, "anomaly": anomaly, "valid": valid,
+            "E": E, "N": N, "dist": dist, "pos": pos, "edge": edge}
+
+
+def process(ras_path, args, pix_cache, gnssr):
+    s = swash_edge(ras_path, args, pix_cache, gnssr)
+    if s is None:
+        return None
+    name, cam, epoch, mid_epoch, wl = s["name"], s["cam"], s["epoch"], s["mid_epoch"], s["wl"]
+    sea_at, threshold, anomaly, valid = s["sea_at"], s["threshold"], s["anomaly"], s["valid"]
+    E, N, dist, pos, edge = s["E"], s["N"], s["dist"], s["pos"], s["edge"]
 
     peaks = runup_peaks(pos)
     enough = len(peaks) >= args.min_peaks and valid >= args.min_valid
@@ -432,7 +490,8 @@ def process(ras_path, args, pix_cache, gnssr):
     }
 
 
-def main():
+def build_parser():
+    """The command line (also how timestack_wave_height.py gets the same edge settings)."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("ras", nargs="+",
                     help="*.ras.tiff timestacks, or folders of them (all *.ras.tiff inside "
@@ -476,7 +535,11 @@ def main():
     ap.add_argument("--gnssr-qc-reference", default=None,
                     help="Tide-gauge archive for GNSS-R quality control (gnssr_qc.py); failed "
                          "readings are removed, so stacks at those times get no water level.")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
 
     gnssr = None
     if args.gnssr:
