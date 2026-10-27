@@ -44,6 +44,7 @@ python3 test_georectify.py                       # ends "all georectify tests pa
 python3 test_validation_stats.py                 # ends "all validation statistics tests passed" (section 2.4a)
 python3 test_pointing_daily.py                   # ends "all pointing_daily tests passed" (section 4.6b)
 python3 test_cron_debug_prune.py                 # ends "all cron debug-prune tests passed"
+python3 test_station_status.py                  # ends "all station status tests passed"
 python3 test_setup_model.py                      # ends "all setup model tests passed" (section 4.1)
 python3 test_evaluate_setup_model.py             # ends "all setup-model evaluation tests passed" (section 4.1)
 python3 test_dem_loess.py                        # ends "all loess DEM tests passed" (section 2.8)
