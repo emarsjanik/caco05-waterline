@@ -297,16 +297,25 @@ SETUP_COEF="0.037"
 SETUP_MODEL=""
 SETUP_STOCKDON_K=""
 # Where each frame's setup comes from (extract_elevation_contours.py --setup-source).
-# "" (the default, the station's): the model above, the rows exactly as
-# before. "auto" (opt-in, NOT the station's): the setup MEASURED on the c2
-# runup timestack of the frame's own collection where there is one
-# (archive/setup_measured_c2.csv, which measured_setup.py writes; this cron
-# does not run it), the model's elsewhere; "measured": that one only, no
-# setup without it. The measured setup stands on the DEM of earlier days, so
-# it inherits that DEM's level and reads beach change since as setup: switch
-# only as docs/VALIDATION.md 4.12 says. Any other value is ignored (the model);
-# so is the switch while that file does not exist (a WARNING in the log).
+# "" or "model" (the default, the station's): the model above, the rows and
+# every file exactly as before. "auto" (opt-in, NOT the station's): the setup
+# MEASURED on the c2 runup timestack of the frame's own collection where
+# there is one (archive/setup_measured_c2.csv, which measured_setup.py
+# writes; this cron does not run it), the model's elsewhere; "measured":
+# that one only, no setup without it. A measured setup must stand on a DEM
+# built with the MODEL's setup: on DEMs built from measured setups the error
+# passes from DEM to DEM with unit gain, and the DEM drifts and loses the
+# beach's change (measured_setup.py, rule 2). So while it is on, this cron
+# also runs the contour, filter, georectification and window-DEM steps a
+# second time with the model's setup into DEM_SERIES_MODEL (its work files
+# in MODEL_WORK; no page, map or change map), which measured_setup.py reads
+# by default; that roughly doubles the contour stage's time. Switch only as
+# docs/VALIDATION.md 4.12 says. Any other value is ignored (the model, with a
+# WARNING); so is the switch while that file is missing, empty or not
+# measured_setup.py's (a WARNING too).
 SETUP_SOURCE=""
+DEM_SERIES_MODEL="$BASE/archive/dems_model"
+MODEL_WORK="$BASE/archive/setup_model_chain"
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
@@ -402,6 +411,62 @@ prune_debug_images() {
     log "debug images: removed $((n_old - n_left)) frame folder(s) $keep or more days old"
     if [ "$n_left" -gt 0 ]; then
         log "WARNING: debug images: $n_left frame folder(s) $keep or more days old could not be removed (permissions?)"
+    fi
+    return 0
+}
+
+# The model-only DEM series (step 6c; only while SETUP_SOURCE is on): the
+# measured setups must stand on DEMs built with the MODEL's setup
+# (measured_setup.py, rule 2), so the contour, consistency, georectification
+# and window-DEM steps of this run go again with the model's options
+# ($model_setup_arg: the station's own chain as it would be with SETUP_SOURCE
+# off) into DEM_SERIES_MODEL, measured_setup.py's default profile. Every
+# file of it is in MODEL_WORK or that series: no page, map or change map,
+# nothing the station shows. A failure is a WARNING; measured_setup.py then
+# finds no DEM young enough after 3 days, and those collections keep the
+# model's setup (auto).
+build_model_series() {
+    local mc="$MODEL_WORK/contour_points_model.csv" mq="$MODEL_WORK/contour_points_model_qc.csv"
+    local mg="$MODEL_WORK/contour_points_ground_model.csv" use rc
+    mkdir -p "$MODEL_WORK" "$DEM_SERIES_MODEL"
+    rm -f "$mc" "$mq" "$mg"
+    if ! python3 "$BASE/extract_elevation_contours.py" "$GNSSR_SPLINE" \
+            --processed-dir "$ARCHIVE_CSV" $waves_arg $model_setup_arg $qc_arg \
+            --timing-mode "$TIMING_MODE" \
+            --output "$mc" >> "$LOG" 2>&1; then
+        log "WARNING: model-only DEM series: contour extraction failed (see above); $DEM_SERIES_MODEL not updated"
+        return 0
+    fi
+    use="$mc"
+    if [ "$CONSISTENCY_ENABLE" = "1" ]; then
+        if python3 "$BASE/waterline_consistency.py" "$mc" --output "$mq" \
+                --report "$MODEL_WORK/waterline_consistency_report_model.csv" >> "$LOG" 2>&1 && [ -s "$mq" ]; then
+            use="$mq"
+        else
+            log "WARNING: model-only DEM series: consistency filter failed; its DEM uses the unfiltered lines (as the station's chain would)"
+        fi
+    fi
+    if ! python3 "$BASE/georectify.py" "$use" "$mg" \
+            --io-c1 "$CAL/CACO05_c1_20240801_IO.yaml" \
+            --eo-c1 "$CAL/CACO05_c1_20251113_EO-CV.yaml" \
+            --io-c2 "$CAL/CACO05_c2_20240801_IO.yaml" \
+            --eo-c2 "$CAL/CACO05_c2_20251113_EO-CV.yaml" >> "$LOG" 2>&1; then
+        log "WARNING: model-only DEM series: georectification failed (see above); $DEM_SERIES_MODEL not updated"
+        return 0
+    fi
+    python3 "$BASE/dem_from_contours.py" "$mg" "$MODEL_WORK/dem_window" $hs_arg \
+        --last-days "$DEM_WINDOW_DAYS" --series-dir "$DEM_SERIES_MODEL" \
+        ${DEM_DAY_BLOCK_LOD:+--day-block-se} \
+        --cell "$DEM_CELL" \
+        --min-points "$DEM_MIN_POINTS" \
+        --max-spread "$DEM_MAX_SPREAD" --no-plot >> "$LOG" 2>&1
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        log "model-only window DEM written (dated copy in $DEM_SERIES_MODEL: measured_setup.py's profile)"
+    elif [ $rc -eq 4 ]; then
+        log "WARNING: model-only window DEM not built: no waterline points left in the last ${DEM_WINDOW_DAYS} days"
+    else
+        log "WARNING: model-only window DEM build failed (exit $rc, see above)"
     fi
     return 0
 }
@@ -594,15 +659,27 @@ else
         log "WARNING: SETUP_MODEL=\"$SETUP_MODEL\" is not \"\", \"c\" or \"stockdon\": the setup stays C*sqrt(Hs*L0)"
     fi
     # the opt-in measured setup (SETUP_SOURCE above): only with the setup on, only "measured" or "auto",
-    # only when measured_setup.py's file is there (else the model's, with a WARNING)
+    # only when measured_setup.py's file is there, not empty and its own (else the model's, with a WARNING);
+    # while it is on, the model-only series is built too (step 6c), with the model's options
+    setup_measured_on=0
+    model_setup_arg="$setup_arg"
     case "$SETUP_SOURCE" in
+        ""|model) ;;
         measured|auto)
-            if [ -n "$setup_arg" ] && [ -f "$BASE/archive/setup_measured_c2.csv" ]; then
+            if [ -z "$setup_arg" ]; then
+                :
+            elif [ -s "$BASE/archive/setup_measured_c2.csv" ] \
+              && head -1 "$BASE/archive/setup_measured_c2.csv" | grep -q '^collection_epoch,'; then
+                # the model-only chain: the same options, its slope (SETUP_MODEL=stockdon) from its own series
+                model_setup_arg="${setup_arg/"--setup-slope-dem $DEM_SERIES"/--setup-slope-dem $DEM_SERIES_MODEL}"
                 setup_arg="$setup_arg --setup-source $SETUP_SOURCE --setup-measured $BASE/archive/setup_measured_c2.csv"
-                log "setup: SETUP_SOURCE=$SETUP_SOURCE, the measured setup of $BASE/archive/setup_measured_c2.csv"
-            elif [ -n "$setup_arg" ]; then
-                log "WARNING: SETUP_SOURCE=$SETUP_SOURCE but no $BASE/archive/setup_measured_c2.csv (measured_setup.py writes it): the model's setup"
+                setup_measured_on=1
+                log "setup: SETUP_SOURCE=$SETUP_SOURCE, the measured setup of $BASE/archive/setup_measured_c2.csv; the model-only DEM series in $DEM_SERIES_MODEL"
+            else
+                log "WARNING: SETUP_SOURCE=$SETUP_SOURCE but $BASE/archive/setup_measured_c2.csv is missing, empty or not measured_setup.py's (measured_setup.py writes it): the model's setup"
             fi ;;
+        *)
+            log "WARNING: SETUP_SOURCE=\"$SETUP_SOURCE\" is not \"\", \"model\", \"measured\" or \"auto\": ignored, the setup stays the model's" ;;
     esac
     # GNSS-R QC report and plot (the contour and runup stages apply the
     # same QC themselves through $qc_arg).
@@ -776,6 +853,12 @@ else
                     else
                         log "WARNING: window DEM build failed (see above)"
                     fi
+                fi
+
+                # 6c. The model-only DEM series, only while the measured setup is on
+                #     (SETUP_SOURCE): build_model_series above.
+                if [ "$setup_measured_on" = "1" ] && [ -n "$DEM_WINDOW_DAYS" ]; then
+                    build_model_series
                 fi
             fi
         fi
