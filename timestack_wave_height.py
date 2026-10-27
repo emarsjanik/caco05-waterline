@@ -7,51 +7,87 @@ c2 runup timestack (archive/ras_c2, 2 Hz): the swash edge that
 runup_from_timestack.py tracks is put on the beach, its runup, setup and
 swash are measured as Stockdon et al. (2006) defined them, and their
 parameterization is inverted for the deep-water wave height H0 in three
-independent ways. OPT-IN: it writes only archive/hs_timestack_c2.csv. The
-cron, every plot and every published value are untouched; whether it is
-ever shown or blended is decided by docs/VALIDATION.md 4.11.
+ways. OPT-IN: it writes only archive/hs_timestack_c2.csv. The cron,
+every plot and every published value are untouched; whether it is ever
+shown or blended is decided by docs/VALIDATION.md 4.11. Of the three,
+only the infragravity swash (S_IG) is independent of the station's own
+wave heights (CIRCULARITY below): hs_sig_m is the camera-only candidate.
 
 THE RULE
  1. EDGE. runup_from_timestack.swash_edge with that script's own settings
     (foam threshold, 15 px tongues, 2.5 s median), on lines 1 and 2 (the
     c2 lines that cross the swash). One change: its backwash limit, 3 m/s,
-    is meant on the beach, but it is applied on the still-water plane, and
-    c2 (19.8 m up, the swash 150-300 m away at a grazing angle) stretches
-    the line on that plane: 2.1-2.8 plane metres per beach metre on a
-    1:7-1:11 beach 230 m away (the real c2 calibration, a synthetic line and
-    beach), so the limit is 1.1-1.4 m/s on the beach, slower than real
-    backwash. It is therefore scaled by the line's own stretch over the
-    swash (plane_stretch): 3 m/s on the beach (--max-retreat-speed). On the
-    synthetic scene the plane limit made the setup error +0.09 to +0.11 m
-    instead of +0.06 m and cut S_inc by 10%. For the same reason
-    runup_from_timestack.py's *_horiz_m are plane metres, 2-3 of them to a
-    beach metre on such a line (that script is unchanged).
+    is meant on the beach, but it is applied to distances along the line
+    on the still-water plane, the sum of the pixel-to-pixel steps (its
+    dist). On a synthetic cross-shore line of single-pixel steps, a
+    1:7-1:14 beach 230 m away and the real c2 calibration, that path is
+    2.0-3.0 m per beach metre over the swash: 1.1-1.8 of it the plane
+    geometry (the plane's straight-line span of the swash: c2 is 19.8 m
+    up and sees the swash at a grazing angle, so a point above still water
+    lands further along its ray), the rest the zigzag of the staircase (a
+    line drawn from 1 m ground samples, as make_timestack_line.py draws
+    its surf lines, has none; how the runup lines were drawn is not known
+    here). So on such a line the limit is 1.0-1.5 m/s on the beach,
+    slower than real backwash. It is therefore scaled by the line's own
+    path per beach metre over the swash (plane_stretch, which measures both
+    parts on the actual line): 3 m/s on the beach (--max-retreat-speed).
+    On the synthetic scene the plane limit read the setup +0.09 to +0.20 m
+    (rescaled: +0.06 to +0.10 m) and S_inc 10-21% low (rescaled: -3 to
+    +14%), and lost the 3 m case entirely (no spectrum, no estimate); but
+    for H0 0.8 m the rescale made S_IG worse (+6.5% -> +16.6%) and the
+    combined H0 (+9% -> +20%). runup_from_timestack.py's *_horiz_m are
+    those path metres (that script is unchanged).
  2. ELEVATION. Each pixel of the line is a ray from the camera, followed
     down to where it meets the station's 7-day DEM (archive/dems: the DEM
-    whose window centre is nearest the stack, within 7 days, picked as
-    setup_model.EvolvingSlope picks it) in 1 cm steps, read bilinearly and
-    only where all four cells exist. Past the DEM's ends the profile goes on
-    as the straight line through its last 10 m, for at most 10 m
-    (--max-extrapolate; z_extrapolated_fraction is the share of the edge
-    read there); gaps up to 6 m are bridged. Without a DEM, --beta gives a
-    plane through the Jan 2025 0 m contour (timestack_wave_period.py's beach
-    geometry; profile 'planar'). The edge's elevation in each 2 Hz row is the
-    profile at its (fractional) pixel, minus still water
-    (marconi_water_level.py, GPS first, interpolated across the burst).
-    Plane positions times a slope would not do: on the synthetic scene the
-    plane spread the swash 2.1-2.7 times wider (sd) than the beach did.
+    setup_model.EvolvingSlope.for_epoch picks, its window centre nearest
+    the stack and within 7 days) in 1 cm steps, read bilinearly
+    (survey_compare.bilinear) and only between cell centres whose weighted
+    cells all exist. Past the DEM's ends the profile goes on as the
+    straight line through its last 10 m, if that rises landward, for at
+    most 10 m (--max-extrapolate; z_extrapolated_fraction is the share of
+    the edge read there); gaps up to 6 m are bridged. Without a DEM,
+    --beta gives a plane through the Jan 2025 0 m contour
+    (timestack_wave_period.py's beach geometry; profile 'planar'). The
+    edge's elevation in each 2 Hz row is the profile at its (fractional)
+    pixel, minus still water (marconi_water_level.py, GPS first,
+    interpolated across the burst; --level-csv another record). Plane
+    positions times a slope would not do: on the synthetic scene the plane
+    path spread the swash 2.1-2.7 times wider (sd) than the beach did.
+    THE LINE'S END. An edge in find_edge's land reference (the line's
+    landward 15%, less 2 px: line_end) is capped by the line and its foam
+    would sit in the detector's no-foam reference; it counts as past the
+    line, like an edge past the profile. (Foam there also lifts the row's
+    reference brightness, which can pull the detected edge seaward: that
+    is not detectable here.)
+    STILL WATER IS NOT SETUP-FREE. Stockdon's R2 and <eta> are measured
+    above the tide. The GNSS-R footprint is the surf zone, where breaking
+    waves raise the mean level: its level already holds part of the setup
+    (historical_forcing.py; its report measures the share), and the
+    Chatham fallback, fitted to the GPS, holds the share's mean. Setup and
+    R2 therefore read low by share x setup, more the bigger the waves: at
+    H0 2 m, T0 10 s, beta_f 0.10 (setup 0.62 m) a share of 20% reads H0
+    from setup 1.28 m and from R2 1.71 m, 40% 0.72 m and 1.44 m. S_IG is
+    unaffected (the level is smooth over 10 minutes). --compare splits the
+    scores by water_level_source; --no-gps (the Chatham transfer: only the
+    share's mean, a constant) or a --level-csv from a transfer fitted on
+    calm hours gives R2 and setup a level nearer setup-free.
  3. STATISTICS, Stockdon's definitions. R2: the 98th percentile of the
     uprush maxima above still water (the edge's local maxima, found as
     runup_from_timestack.py finds them); an uprush past the landward end of
-    the profile counts as higher than any value on it, and if the 98th
-    percentile falls among those, no R2 ('R2 above the profile'). Setup
-    <eta>: the mean (none when over 2% of the edge is off the profile).
-    Swash: 4 x the standard deviation of the series above 0.05 Hz (S_inc)
-    and below (S_IG), Stockdon's split, with runup_from_timestack.band_sig
-    (gaps up to 5 s bridged; none with 10% missing), after the straight
-    line through the series is removed (band_sig removes only the mean,
-    and a drift of 0.5 m across the record adds 10% or more to S_IG; the
-    tide, at most ~0.1 m in 10 minutes, goes with still water anyway).
+    the profile, or of the line, counts as higher than any value on it,
+    and if the 98th percentile falls among those, no R2 ('R2 above the
+    profile' / 'R2 above the line'). Setup <eta>: the mean (none when over
+    2% of the edge is off the profile). Swash: 4 x the standard deviation
+    of the series above 0.05 Hz (S_inc) and below (S_IG), Stockdon's split,
+    with runup_from_timestack.band_sig (gaps up to 5 s bridged; none with
+    10% missing), after the straight line through the series is removed
+    (band_sig removes only the mean, and a drift of 0.5 m across the record
+    adds 10% or more to S_IG; the tide, at most ~0.1 m in 10 minutes, goes
+    with still water anyway). Samples off the profile are bridged too,
+    which flattens the uprush tops: S_IG reads low by 0.65-0.85 x the share
+    off (Stockdon-generated swash, its top 2 / 5 / 8% taken off: -1.3 /
+    -3.5 / -5.8% at H0 3 m, -1.4 / -4.0 / -6.8% at 2 m), so the share is
+    written (off_profile_fraction), noted and added to S_IG's error (7.).
  4. FORESHORE SLOPE beta_f: Stockdon's, the mean slope over <eta> +/- 2
     sigma of the swash. The median DEM slope (setup_model.slope_grid: the
     plane through each cell's 5 x 5 window, steepest descent, so the
@@ -66,7 +102,8 @@ THE RULE
     H0 36% low, 25% too short 78% high (runup_inversion.py's warning), and
     the camera's Tp is the less stable of its two periods
     (timestack_wave_period.py reports Tm01 for that reason): --period-source
-    buoy is the check.
+    buoy is the check. A buoy period ties the estimate to the buoy: the
+    converted buoy (buoy_transfer.py) uses the same Tp.
  6. INVERSION, closed form (each statistic is proportional to sqrt(H0 L0),
     L0 = g T0^2 / 2 pi, so H0 = (statistic / coefficient)^2 / L0):
       (a) R2    = 1.1 [0.35 b sqrt(H0 L0) + sqrt(H0 L0 (0.563 b^2 + 0.004)) / 2]
@@ -77,35 +114,66 @@ THE RULE
                   al. 1998), so the estimate meant for big seas;
       (c) <eta> = 0.35 b sqrt(H0 L0), Eq. 10.
     An R2 or setup at or below still water gives none (an error of level,
-    not small waves). Eq. 19 is Stockdon's for xi0 = b / sqrt(H0/L0) >= 0.3,
-    with R2 = 0.043 sqrt(H0 L0) (Eq. 18) below; on Marconi's 0.07-0.14
-    foreshore xi0 < 0.3 needs a deep-water steepness H0/L0 above 0.05-0.22,
-    steeper than storm seas usually are, so Eq. 19 is used throughout and
-    iribarren is written for the check.
+    not small waves). These are Stockdon's forms for xi0 = b / sqrt(H0/L0)
+    >= 0.3. Below it (dissipative) they give R2 = 0.043 sqrt(H0 L0) (Eq.
+    18) and, beside it, setup 0.016 and S_IG 0.046 sqrt(H0 L0) (not
+    checkable here against the paper, whose full text was not retrievable,
+    but consistent with Eq. 18: 1.1 (0.016 + 0.046 / 2) = 0.043); the
+    intermediate forms there would read H0 from S_IG 41% low and, at
+    beta_f 0.03, from setup 2.3 x high. Both sets are inverted and combined
+    (estimate_h0), each giving its own xi0; the set whose own xi0 agrees
+    with it is kept, and when both or neither do (near the threshold) the
+    one whose estimates agree better, noted 'regime unsure'. On Marconi's
+    0.07-0.14 foreshore xi0 < 0.3 needs a deep-water steepness H0/L0 above
+    0.05-0.22, steeper than storm seas usually are; on a flatter DEM slope
+    (BETA_RANGE allows 0.01) it happens.
  7. COMBINATION (combine): the inverse-variance mean of log H0. A relative
     error e of a statistic is 2e in H0. The error of each statistic: R2 26%
     (Stockdon's own scatter, 38 cm rms on a mean observed R2 of 144 cm) and
     0.28 m of level (still water now, 0.12 m: dem_from_contours.SIGMA_WL_M;
     the DEM's own level, its median sigma_obs 0.258 m: VALIDATION 4.10);
     S_IG 26% (Stockdon's per-band scatter was not retrievable here, so the R2
-    figure is assumed) and its sampling error, sqrt(2/dof)/2 = 9% for 10
-    minutes (58 degrees of freedom), no level term; setup 0.21 m (Stockdon's
-    setup scatter re-evaluated by Dalinghaus, Coco & Higuera 2023:
-    dem_from_contours.SIGMA_SETUP_M) and the 0.28 m of level. The errors are
-    taken at the COMBINED H0, iterated, not at each estimate's own (that would
-    give a reading that is too high a smaller error and more weight). R2 and
-    setup share the level error, so h0_sigma_rel (the sigma of log H0) is a
-    floor. A planar profile does not know where still water meets the beach:
-    there only S_IG is combined. --scatter replaces the error model once the
-    NUC has measured each estimate (VALIDATION 4.11).
+    figure is assumed), its sampling error and the share of the edge off
+    the profile, no level term; setup 0.21 m (Stockdon's setup scatter
+    re-evaluated by Dalinghaus, Coco & Higuera 2023: dem_from_contours
+    .SIGMA_SETUP_M) and the 0.28 m of level. The SAMPLING error of S_IG is
+    sqrt(2 / nu) / 2 with nu the record's own effective degrees of freedom
+    (ig_dof_eff: from its periodogram, corrected for the periodogram's own
+    scatter). Ten minutes hold at most 58 (a flat infragravity spectrum:
+    9%), but swash spectra are peaked or red: on Gaussian records of 10
+    minutes the sd of S_IG was 0.096 flat, 0.116 for a 1/f spectrum and
+    0.174 peaked at 0.01 Hz (17 minutes: 0.076 / 0.089 / 0.137), and
+    ig_dof_eff predicted 0.094 / 0.109 / 0.162. A SLOPE term: 15% of the
+    slope (SLOPE_REL, PROVISIONAL: a 5 x 5 plane fit with the DEM's 0.258 m
+    per cell, cells independent, has a slope error of 0.018, 18% of 0.10;
+    the 29 Sep - 5 Oct 2026 DEM's foreshore spans 0.089-0.125 at four
+    positions, +/-17% about 0.106), times each estimate's sensitivity
+    (slope_sensitivity): H0 from setup goes as beta_f^-2, from R2 as
+    beta_f^-1.5 (2 beta k'/k = 1.52 at 0.10), from S_IG as the DEM's slope
+    squared (its elevations scale with it); a 20% slope error is about 30%
+    in H0 from R2 and 40% from setup. The errors are taken at the COMBINED H0,
+    iterated, not at each estimate's own (that would give a reading that
+    is too high a smaller error and more weight). The estimates are NOT
+    independent and the combination treats them as if they were: R2 is
+    about 1.1 (<eta> + S / 2) of the same edge series, so its errors move
+    with setup's and S_IG's (on Stockdon-generated swash a 30% excess of
+    infragravity swash moved H0 from S_IG +69% and from R2 +9 to +15%);
+    R2 and setup share the level error; all three share the slope (when
+    beta_f is read under the same line, R2's and setup's own elevations
+    scale with it too, which partly cancels their beta_f term; that is not
+    modelled). h0_sigma_rel (the sigma of log H0) is therefore a floor. A
+    planar profile does not know where still water meets the beach: there
+    only S_IG is inverted (h0_r2_m and h0_setup_m stay blank). --scatter
+    replaces the error model once the NUC has measured each estimate
+    (VALIDATION 4.11).
  8. CURRENCY. H0 is a DEEP-WATER height, Stockdon's (their nearshore wave
     records taken back to deep water with linear theory, as setup_model.py
     records from how the paper is cited). One shoaling step is applied, the
     other way: hs_m = H0 x Ks(T0, 21 m) (setup_model.shoaling_coefficient,
     0.91-0.97 for 6-14 s) is the height at the ADCP's 21 m, the currency of
-    hs_best and of the OWG (both fitted to the ADCP's wh_4061), so hs_m is
-    the number to compare with them. Refraction is not undone either way
-    (setup_model's choice). Being
+    hs_best and of the OWG (both fitted to the ADCP's wh_4061), so hs_m and
+    hs_sig_m (H0 from S_IG alone x Ks) are the numbers to compare with
+    them. Refraction is not undone either way (setup_model's choice). Being
     inverted from the swash on this beach, H0 is the height that reaches
     Marconi, sheltering included: the raw buoy 44008 (offshore, any
     direction) compares only through buoy_transfer.py (waves_marconi.csv
@@ -123,24 +191,45 @@ STATUS (first match; note says more)
   no slope       no DEM within 7 days covers the line, and no --beta
   no period      neither the camera's Tp nor a buoy period
   ok
-  A stack younger than --wait-days (3) still lacking a camera period, a DEM
-  or a water level is left for a later run, not written.
+  WAITING. A stack younger than --wait-days (3) is left for a later run,
+  not written, while any input that arrives late is missing: the camera's
+  period (its file has no row for the stack yet), a DEM, any period, the
+  water level, or -- where the GPS is the level source in use -- the GPS
+  level (it arrives 1-2 days late; the cron's runup stage waits for it
+  too). That holds whatever the contrast label; only 'dark' and a failed
+  edge (whose numbers no input would change) are written at once.
   EDGE CONTRAST is the Michelson contrast (foam - sand) / (foam + sand) of
   the mean grey 2-8 px either side of the tip, median over the uprush maxima
   (where the tip stands still). Blur spreads the tip; spray haze lifts both
   sides. On the synthetic scene 0.21-0.23 clear; with 50% haze and a 2 / 4 /
-  6 / 10 px blur 0.096 / 0.065 / 0.047 / 0.027. 0.05 is PROVISIONAL: no real
-  stack was available here, and the NUC sets it from 20-24 Oct 2026 against
-  clear days (VALIDATION 4.11).
+  6 / 10 px blur 0.096 / 0.065 / 0.047 / 0.027. 0.05 is PROVISIONAL, and on
+  that scene too lenient: the 2 and 4 px blurs (0.096, 0.065) stay 'ok'
+  while moving hs_m 16-17% and hs_sig_m 34% below the clear stack's (the
+  same swash). No real stack was available here; the NUC sets it from 20-24
+  Oct 2026 against clear days, where the heights start to drift
+  (VALIDATION 4.11).
 
 WHAT IT CANNOT DO
   * CIRCULARITY. The DEM is built from the timex waterlines with the
-    station's setup C sqrt(Hs L0) added, Hs = hs_best, which contains the
-    OWG. R2 and setup read the DEM's LEVEL, so the setup model's error on the
-    DEM's frames moves both, and part of their agreement with hs_best is
-    built in. S_IG reads only the DEM's SLOPE (elevation differences a few
-    metres apart: a setup error common to a frame cancels). Fair references
-    are the ADCP (Dec 2024 - Mar 2025) and the converted buoy only.
+    station's setup C sqrt(Hs L0) added: Hs = hs_best on the live DEMs,
+    which blends the OWG and the converted buoy (in storms the buoy carries
+    the blend: marconi_waves.py), and the ADCP's own wh_4061 on the
+    survey-date DEMs of Dec 2024 - Mar 2025 (historical_forcing.py). R2 and
+    setup read the DEM's LEVEL, so they carry that setup: a DEM made of
+    waterlines at the mean swash position is high or low by (model setup -
+    true setup) there, and for a stack inside the DEM's own week the
+    measured setup tends to C sqrt(Hs_ref L0) itself, i.e. H0 from setup to
+    Hs_ref x (0.106 / beta_f)^2 (C = 0.037 = 0.35 x 0.106), and the setup
+    inside R2 (<eta> is ~38% of R2 at beta_f 0.10) likewise. So R2, setup and the combined hs_m are NOT independent
+    of hs_best, of hs_buoy_marconi or of the ADCP (on a DEM forced by it);
+    their agreement with any of them is partly built in, and their bias,
+    the very thing VALIDATION 4.11's criterion 3 scores, most. S_IG reads
+    only the DEM's SLOPE (elevation differences a few metres apart: a setup
+    error common to a frame cancels; a setup that grows with elevation
+    over the week is second-order): H0 from S_IG (hs_sig_m) is the only
+    camera-only candidate against hs_buoy_marconi or the ADCP (with a buoy
+    period it shares the buoy's Tp, 5.). --compare lists the others as
+    '[not indep.]'.
   * THE DETECTOR on a synthetic scene (the image the real c2 calibration
     would record of a planar 1:7-1:11 beach whose DEM covers -1.0 to +1.6
     m, with Stockdon-shaped swash whose backwash is at most 2 m/s; four
@@ -151,43 +240,52 @@ WHAT IT CANNOT DO
     neighbouring rows), H0 from setup +38 to +59% (part of it the synthetic
     swash's own: its capped backwash lifts its mean above Eq. 10); S_IG +4
     to +17% (the edge drops seaward at the deepest rundowns), H0 from S_IG
-    -8 to +32%; combined H0 +9 to +20%. Real foam is not synthetic foam:
+    -8 to +32%; combined H0 +11 to +20%. Real foam is not synthetic foam:
     only the NUC comparison measures the real errors.
-  * Ten minutes is short for infragravity statistics: sampling alone is 9%
-    on S_IG, 19% on H0 from it.
+  * Ten minutes is short for infragravity statistics: S_IG's sampling error
+    alone is 9% for a flat spectrum (19% in H0 from it), about 12% for a
+    1/f spectrum and 17% for one peaked at 0.01 Hz (23% and 35% in H0);
+    ig_dof_eff measures it per stack.
+  * Still water holds part of the setup (2.): R2 and setup read low, most
+    in storms.
   * The period (5. above).
   * The DEM is a week's waterlines, i.e. the mean swash of the week's tides:
     at high water and in big waves the swash runs above it (10 m of
     extension, then no R2), and a berm built or cut within the week is not in
-    it.
+    it. The line's landward 15% is not read (2.): at high water in storms
+    the uprush may reach it, and then there is no R2 ('R2 above the line').
   * Stockdon's relations are fits over ten experiments on other beaches. A
     site coefficient could be fitted to this beach once truth exists, which
     is what VALIDATION 4.11 is for.
 
-OUTPUT archive/hs_timestack_c2.csv, one row per stack and line, APPENDED:
-rows already there are never rewritten except by --reprocess, and a file
-with other columns is refused.
+OUTPUT archive/hs_timestack_c2.csv, one row per stack and line, APPENDED
+(every 50 line-stacks, so a crash loses at most those): rows already there
+are never rewritten except by --reprocess, and a file with other columns is
+refused before any stack is processed.
   epoch (burst middle), time_utc, filename, line, status, note, brightness,
   edge_contrast, window_sharpness, valid_fraction, n_peaks, sea_at, profile,
-  z_extrapolated_fraction, water_level_m, water_level_source, beta_f,
+  z_extrapolated_fraction, off_profile_fraction (share of the edge off the
+  profile or past the line), water_level_m, water_level_source, beta_f,
   beta_source, iribarren, period_s, period_source, setup_m, r2_m, s_inc_m,
   s_ig_m, s_m (m, above still water), h0_r2_m, h0_sig_m, h0_setup_m (each
   estimate, deep water), h0_m, h0_sigma_rel, combined_from (the
-  combination), ks_21m, hs_m (H0 x Ks at 21 m: compare this one)
+  combination), ks_21m, hs_m (H0 x Ks at 21 m), hs_sig_m (H0 from S_IG alone
+  x Ks: the camera-only candidate)
 
 References: Stockdon, Holman, Howd & Sallenger 2006, Coastal Engineering
 53, 573-588 (its full text was not retrievable here; equations checked
-against py-wave-runup's Stockdon2006); USGS Data Series 602 (its runup
-statistics); Holman & Sallenger 1985, J. Geophys. Res. 90(C1), 945-953
-(setup and swash from video); Guza & Thornton 1982, J. Geophys. Res.
-87(C1), 483-491; Ruessink, Kleinhans & van den Beukel 1998, J. Geophys.
-Res. 103(C2), 3111-3118; Dalinghaus, Coco & Higuera 2023, Nat. Hazards
-Earth Syst. Sci. 23, 2157-2169.
+against py-wave-runup's Stockdon2006, which holds Eqs. 10-12, 18 and 19);
+USGS Data Series 602 (its runup statistics); Holman & Sallenger 1985, J.
+Geophys. Res. 90(C1), 945-953 (setup and swash from video); Guza & Thornton
+1982, J. Geophys. Res. 87(C1), 483-491; Ruessink, Kleinhans & van den
+Beukel 1998, J. Geophys. Res. 103(C2), 3111-3118; Dalinghaus, Coco &
+Higuera 2023, Nat. Hazards Earth Syst. Sci. 23, 2157-2169.
 
 Usage:
     python3 timestack_wave_height.py                  new stacks in archive/ras_c2
     python3 timestack_wave_height.py --reprocess      every archived stack again
-    python3 timestack_wave_height.py --compare        against ADCP / converted buoy / hs_best / OWG
+    python3 timestack_wave_height.py --compare        against the ADCP / converted buoy, the OWG on the same stacks
+    python3 timestack_wave_height.py --compare --since YYYY-MM-DD      only the held-out stacks
     python3 timestack_wave_height.py --self-test
 Tests: python3 test_timestack_wave_height.py
 """
@@ -204,21 +302,22 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import runup_from_timestack as rft                                          # noqa: E402
-from runup_from_timestack import SAMPLE_HZ, IG_CUTOFF_HZ, band_sig, peak_mask  # noqa: E402
+from runup_from_timestack import SAMPLE_HZ, IG_CUTOFF_HZ, LAND_REF_FRACTION, band_sig, bridge_gaps, peak_mask  # noqa: E402
 from setup_model import (deep_water_wavelength, stockdon_setup, shoaling_coefficient,  # noqa: E402
                          slope_grid, ForeshoreSlope, EvolvingSlope, STOCKDON_SETUP_K,
                          STOCKDON_SWASH_IG, DESHOAL_DEPTH_BY_CURRENCY, BETA_RANGE, SLOPE_MAX_DAYS)
 from dem_from_contours import SIGMA_WL_M, SIGMA_SETUP_M                     # noqa: E402
 from station_status import LENS_BLURRED                                     # noqa: E402
 from timestack_wave_period import SHORE_ORIGIN, SEAWARD_DEG                 # noqa: E402
+from survey_compare import bilinear                                         # noqa: E402
 
 FIELDS = ["epoch", "time_utc", "filename", "line", "status", "note",
           "brightness", "edge_contrast", "window_sharpness", "valid_fraction", "n_peaks", "sea_at",
-          "profile", "z_extrapolated_fraction", "water_level_m", "water_level_source",
+          "profile", "z_extrapolated_fraction", "off_profile_fraction", "water_level_m", "water_level_source",
           "beta_f", "beta_source", "iribarren", "period_s", "period_source",
           "setup_m", "r2_m", "s_inc_m", "s_ig_m", "s_m",
           "h0_r2_m", "h0_sig_m", "h0_setup_m", "h0_m", "h0_sigma_rel", "combined_from",
-          "ks_21m", "hs_m"]
+          "ks_21m", "hs_m", "hs_sig_m"]
 STATUSES = ("ok", "low contrast", "no swash edge", "no slope", "no period", "dark")
 
 DEFAULT_LINES = (1, 2)            # the c2 lines that cross the swash (waterline_timex_cron.sh RUNUP_LINES)
@@ -228,6 +327,7 @@ CONTRAST_NEAR, CONTRAST_FAR = 2, 8    # pixels either side of the tip compared b
 OWG_MAX_GAP_S = 600.0             # the bright frame of the same 10-min collection
 PERIOD_MAX_GAP_S = 5400.0         # a buoy hour within 1.5 h of the burst's middle
 WAIT_DAYS = 3.0                   # inputs that arrive late (period, DEM, water level) are waited for
+CHUNK_ROWS = 50                   # line-stacks per append to the output (a crash loses at most these)
 DESHOAL_DEPTH_M = DESHOAL_DEPTH_BY_CURRENCY["marconi"]     # 21 m: the ADCP / hs_best / OWG currency
 
 # The beach profile along a line
@@ -237,57 +337,94 @@ MAX_EXTRAPOLATE_M = 10.0          # m beyond the DEM's edge (along the line) the
 GAP_FILL_M = 6.0                  # m: DEM gaps inside the profile up to this long are bridged
 MISSING_ELEV_MAX = 0.02           # share of edge samples off the profile above which no setup is given
 MIN_SLOPE_CELLS = 3               # distinct DEM cells under the line inside the swash band
+LINE_END_PX = 2                   # an edge this close to find_edge's land reference counts as past the line
 
-# Error model of the combination (log H0, inverse variance): per estimate (relative, absolute m)
-# scatter of the measured quantity about Stockdon's relation, see THE COMBINATION.
+# Stockdon et al. (2006) below xi0 = 0.3 (dissipative): R2 = 0.043 sqrt(H0 L0) (Eq. 18), setup 0.016 and
+# S_IG 0.046 sqrt(H0 L0) (the dissipative forms beside it; 1.1 (0.016 + 0.046 / 2) = 0.043)
+XI_DISSIPATIVE = 0.3
+DISSIPATIVE_K = {"r2": 0.043, "setup": 0.016, "sig": 0.046}
+
+# Error model of the combination (log H0, inverse variance): per estimate (relative, absolute m,
+# slope relative): the scatter of the measured quantity about Stockdon's relation, and the relative
+# error of the slope it depends on, see THE COMBINATION.
 DEM_SIGMA_M = 0.258               # median per-cell sigma_obs of the station's DEM, VALIDATION 4.10 [REAL]
 LEVEL_SIGMA_M = float(np.hypot(SIGMA_WL_M, DEM_SIGMA_M))   # still water now and the DEM's level: 0.28 m
 R2_REL = 0.38 / 1.44              # Stockdon et al. (2006): R2 rms 38 cm on a mean observed 144 cm
-SCATTER = {"r2": (R2_REL, LEVEL_SIGMA_M),
-           "sig": (R2_REL, 0.0),
-           "setup": (0.0, float(np.hypot(SIGMA_SETUP_M, LEVEL_SIGMA_M)))}
+SLOPE_REL = 0.15                  # beta_f and the DEM's slope, relative: PROVISIONAL (THE COMBINATION)
+SCATTER = {"r2": (R2_REL, LEVEL_SIGMA_M, SLOPE_REL),
+           "sig": (R2_REL, 0.0, SLOPE_REL),
+           "setup": (0.0, float(np.hypot(SIGMA_SETUP_M, LEVEL_SIGMA_M)), SLOPE_REL)}
 
 
 # ---------------------------------------------------------------------
 # Stockdon et al. (2006), forward and inverted
 # ---------------------------------------------------------------------
 
-def stockdon_r2(h0, t0, beta):
+def stockdon_r2(h0, t0, beta, regime="intermediate"):
     """R2 = 1.1 [0.35 beta sqrt(H0 L0) + sqrt(H0 L0 (0.563 beta^2 + 0.004)) / 2]: Stockdon et al.
     (2006) Eq. 19 as published, the relation runup_inversion.h0_from_runup inverts. Its swash
     term rounds Eqs. 11-12 (0.75^2 = 0.5625, 0.06^2 = 0.0036), so 1.1 (<eta> + S/2) from
-    setup_model.stockdon_setup / stockdon_swash is 0-3% lower."""
+    setup_model.stockdon_setup / stockdon_swash is 0-3% lower. regime 'dissipative': Eq. 18,
+    R2 = 0.043 sqrt(H0 L0)."""
     h0, t0, beta = (np.asarray(a, float) for a in (h0, t0, beta))
     x = h0 * deep_water_wavelength(t0)
+    if regime == "dissipative":
+        return DISSIPATIVE_K["r2"] * np.sqrt(x)
     return 1.1 * (STOCKDON_SETUP_K * beta * np.sqrt(x) + np.sqrt(x * (0.563 * beta ** 2 + 0.004)) / 2.0)
 
 
-def stockdon_sig(h0, t0):
-    """Infragravity swash S_IG = 0.06 sqrt(H0 L0), Stockdon et al. (2006) Eq. 12 (no slope in it)."""
-    return STOCKDON_SWASH_IG * np.sqrt(h0 * deep_water_wavelength(t0))
+def stockdon_sig(h0, t0, regime="intermediate"):
+    """Infragravity swash S_IG = 0.06 sqrt(H0 L0), Stockdon et al. (2006) Eq. 12 (no slope in it);
+    0.046 sqrt(H0 L0) for regime 'dissipative'."""
+    k = DISSIPATIVE_K["sig"] if regime == "dissipative" else STOCKDON_SWASH_IG
+    return k * np.sqrt(h0 * deep_water_wavelength(t0))
 
 
-def h0_from_r2(r2, beta, t0):
-    """H0 from R2 above still water: runup_inversion.h0_from_runup (closed form; NaN for R2 <= 0)."""
+def stockdon_eta(h0, t0, beta, regime="intermediate"):
+    """Setup <eta> = 0.35 beta sqrt(H0 L0) (Eq. 10, setup_model.stockdon_setup); 0.016 sqrt(H0 L0)
+    for regime 'dissipative'."""
+    if regime == "dissipative":
+        return DISSIPATIVE_K["setup"] * np.sqrt(np.asarray(h0, float) * deep_water_wavelength(t0))
+    return stockdon_setup(h0, t0, beta)
+
+
+def _period_ok(t0):
+    return np.isfinite(t0) and t0 > 0
+
+
+def h0_from_r2(r2, beta, t0, regime="intermediate"):
+    """H0 from R2 above still water: runup_inversion.h0_from_runup (closed form; NaN for R2 <= 0);
+    regime 'dissipative': (R2 / 0.043)^2 / L0, no slope."""
+    if regime == "dissipative":
+        r2, t0 = float(r2), float(t0)
+        if not (np.isfinite(r2) and r2 > 0 and _period_ok(t0)):
+            return np.nan
+        return (r2 / DISSIPATIVE_K["r2"]) ** 2 / float(deep_water_wavelength(t0))
     from runup_inversion import h0_from_runup
     return float(h0_from_runup(np.asarray([r2], float), np.asarray([beta], float),
                                np.asarray([t0], float))[0])
 
 
-def h0_from_sig(s_ig, t0):
-    """H0 = (S_IG / 0.06)^2 / L0: Eq. 12 inverted. NaN for S_IG <= 0 or no period."""
+def h0_from_sig(s_ig, t0, regime="intermediate"):
+    """H0 = (S_IG / 0.06)^2 / L0: Eq. 12 inverted (0.046 for regime 'dissipative'). NaN for
+    S_IG <= 0 or no period."""
     s_ig, t0 = float(s_ig), float(t0)
-    if not (np.isfinite(s_ig) and s_ig > 0 and np.isfinite(t0) and t0 > 0):
+    if not (np.isfinite(s_ig) and s_ig > 0 and _period_ok(t0)):
         return np.nan
-    return (s_ig / STOCKDON_SWASH_IG) ** 2 / float(deep_water_wavelength(t0))
+    k = DISSIPATIVE_K["sig"] if regime == "dissipative" else STOCKDON_SWASH_IG
+    return (s_ig / k) ** 2 / float(deep_water_wavelength(t0))
 
 
-def h0_from_setup(setup, beta, t0):
-    """H0 = (setup / (0.35 beta))^2 / L0: Eq. 10 inverted. NaN for setup <= 0 (below still water:
-    an error in the level, not small waves), no slope or no period."""
+def h0_from_setup(setup, beta, t0, regime="intermediate"):
+    """H0 = (setup / (0.35 beta))^2 / L0: Eq. 10 inverted ((setup / 0.016)^2 / L0, no slope, for
+    regime 'dissipative'). NaN for setup <= 0 (below still water: an error in the level, not small
+    waves), no slope or no period."""
     setup, beta, t0 = float(setup), float(beta), float(t0)
-    if not (np.isfinite(setup) and setup > 0 and np.isfinite(beta) and beta > 0
-            and np.isfinite(t0) and t0 > 0):
+    if not (np.isfinite(setup) and setup > 0 and _period_ok(t0)):
+        return np.nan
+    if regime == "dissipative":
+        return (setup / DISSIPATIVE_K["setup"]) ** 2 / float(deep_water_wavelength(t0))
+    if not (np.isfinite(beta) and beta > 0):
         return np.nan
     return (setup / (STOCKDON_SETUP_K * beta)) ** 2 / float(deep_water_wavelength(t0))
 
@@ -299,25 +436,65 @@ def iribarren(beta, h0, t0):
     return float(beta / np.sqrt(h0 / deep_water_wavelength(t0)))
 
 
-def predicted(kind, h0, t0, beta):
+def predicted(kind, h0, t0, beta, regime="intermediate"):
     """The swash statistic an estimate was inverted from, as Stockdon predicts it for H0."""
     if kind == "r2":
-        return float(stockdon_r2(h0, t0, beta))
+        return float(stockdon_r2(h0, t0, beta, regime))
     if kind == "sig":
-        return float(stockdon_sig(h0, t0))
+        return float(stockdon_sig(h0, t0, regime))
     if kind == "setup":
-        return float(stockdon_setup(h0, t0, beta))
+        return float(stockdon_eta(h0, t0, beta, regime))
     raise ValueError(kind)
 
 
-def combine(estimates, t0, beta, scatter=None, sig_sampling=0.0, passes=20):
+def slope_sensitivity(kind, beta, regime="intermediate"):
+    """
+    |d ln H0 / d ln slope| of an estimate. 'sig': 2 (S_IG has no slope in Eq. 12, but its
+    elevations are read off the DEM, so they scale with the DEM's slope, and H0 with S_IG^2).
+    'setup': 2 (H0 goes as beta_f^-2). 'r2': 2 beta k'/k, k = 0.35 beta + sqrt(0.563 beta^2 +
+    0.004) / 2 the bracket of Eq. 19: 1.52 at beta 0.10, i.e. H0 ~ beta_f^-1.5. Dissipative: 0 for
+    R2 and setup (no slope in Stockdon's dissipative forms). Each is beta_f's effect on the inversion alone:
+    R2's and setup's own elevations scale with the DEM's slope too, which, when beta_f is read
+    under the same line, partly cancels it (setup's to first order); that is not modelled.
+    """
+    if kind == "sig":
+        return 2.0
+    if regime == "dissipative" or not (np.isfinite(beta) and beta > 0):
+        return 0.0
+    if kind == "setup":
+        return 2.0
+    root = np.sqrt(0.563 * beta ** 2 + 0.004)
+    k = STOCKDON_SETUP_K * beta + root / 2.0
+    dk = STOCKDON_SETUP_K + 0.563 * beta / (2.0 * root)
+    return float(2.0 * beta * dk / k)
+
+
+def estimate_sigma(kind, h0, t0, beta, scatter=None, sig_extra=0.0, regime="intermediate"):
+    """
+    The error (sigma of ln H0) of one estimate, evaluated at H0: its statistic q's error
+    sqrt((rel q)^2 + abs^2) (scatter[kind] = (rel, abs m, slope rel); for 'sig' rel also takes
+    sig_extra, its sampling and off-profile terms, in quadrature) is 2 s_q / q in ln H0, since q
+    goes as sqrt(H0); the slope term slope_sensitivity x slope rel adds in quadrature. inf when
+    q <= 0.
+    """
+    scatter = scatter or SCATTER
+    rel, ab, sl = (tuple(scatter[kind]) + (0.0, 0.0))[:3]
+    q = predicted(kind, h0, t0, beta, regime)
+    if not q > 0:
+        return np.inf
+    if kind == "sig":
+        rel = float(np.hypot(rel, sig_extra))
+    s_q = float(np.hypot(rel * q, ab))
+    return float(np.hypot(2.0 * s_q / q, slope_sensitivity(kind, beta, regime) * sl))
+
+
+def combine(estimates, t0, beta, scatter=None, sig_extra=0.0, regime="intermediate", passes=20):
     """
     One H0 from the separate estimates {'r2' | 'sig' | 'setup': H0 m}: the inverse-variance mean
-    of log H0. Each estimate inverts a statistic q that Stockdon puts proportional to sqrt(H0), so a
-    relative error e in q is 2e in H0. The error of q is sqrt((rel q)^2 + abs^2) (scatter, per
-    kind), plus for 'sig' its sampling error (sig_sampling, relative). It is evaluated at the
-    COMBINED H0, not at each estimate's own (that would give an estimate that reads high a smaller
-    relative error and so more weight), iterated to a fixed point from the geometric mean.
+    of log H0, the variance of each from estimate_sigma. It is evaluated at the COMBINED H0, not at
+    each estimate's own (that would give an estimate that reads high a smaller relative error and
+    so more weight), iterated to a fixed point from the geometric mean. The estimates are treated
+    as independent, which they are not (THE COMBINATION): the sigma returned is a floor.
     -> (H0, sigma of log H0, '+'-joined names used); (NaN, NaN, '') with no usable estimate.
     """
     scatter = scatter or SCATTER
@@ -330,12 +507,8 @@ def combine(estimates, t0, beta, scatter=None, sig_sampling=0.0, passes=20):
     w = np.ones(len(names))
     for _ in range(passes):
         for i, k in enumerate(names):
-            rel, ab = scatter[k]
-            q = predicted(k, h, t0, beta)
-            if k == "sig":
-                rel = float(np.hypot(rel, sig_sampling))
-            s_q = np.hypot(rel * q, ab)
-            w[i] = (q / (2.0 * s_q)) ** 2 if q > 0 and s_q > 0 else 0.0
+            sd = estimate_sigma(k, h, t0, beta, scatter, sig_extra, regime)
+            w[i] = 1.0 / sd ** 2 if 0 < sd < np.inf else 0.0
         if w.sum() <= 0:
             return np.nan, np.nan, ""
         h_new = float(np.exp((w * logs).sum() / w.sum()))
@@ -347,7 +520,8 @@ def combine(estimates, t0, beta, scatter=None, sig_sampling=0.0, passes=20):
 
 
 def parse_scatter(text):
-    """'r2=0.26:0.28,sig=0.26:0,setup=0:0.36' (relative:absolute m) -> a SCATTER dict."""
+    """'r2=0.26:0.28:0.15,sig=0.26:0,setup=0:0.36' (relative:absolute m[:slope relative]; a slope
+    term left out keeps the default's) -> a SCATTER dict."""
     out = dict(SCATTER)
     if not text:
         return out
@@ -356,8 +530,11 @@ def parse_scatter(text):
         k = k.strip()
         if k not in SCATTER:
             raise ValueError(f"--scatter: unknown estimate {k!r} (r2, sig, setup)")
-        rel, _, ab = v.partition(":")
-        out[k] = (float(rel), float(ab or 0.0))
+        bits = v.split(":")
+        rel = float(bits[0])
+        ab = float(bits[1]) if len(bits) > 1 and bits[1] != "" else 0.0
+        sl = float(bits[2]) if len(bits) > 2 and bits[2] != "" else SCATTER[k][2]
+        out[k] = (rel, ab, sl)
     return out
 
 
@@ -399,16 +576,13 @@ class Dem:
         return out
 
     def sample(self, E, N):
-        """Bilinear between cell centres; NaN where any of the four cells is missing."""
+        """Bilinear between cell centres: survey_compare.bilinear (NaN where a neighbour that carries
+        weight is nodata), and NaN in the outer half cell too, where it would hold the edge value."""
         r, c = self._rc(E, N)
         with np.errstate(invalid="ignore"):
-            r0, c0 = np.floor(r), np.floor(c)
-        fr, fc = r - r0, c - c0
-        z00 = self._cell(self.z, r0, c0)
-        z01 = self._cell(self.z, r0, c0 + 1)
-        z10 = self._cell(self.z, r0 + 1, c0)
-        z11 = self._cell(self.z, r0 + 1, c0 + 1)
-        return z00 * (1 - fr) * (1 - fc) + z01 * (1 - fr) * fc + z10 * fr * (1 - fc) + z11 * fr * fc
+            z = bilinear(self.z, self.x0, self.ytop, self.cell, E, N)
+            between = (r >= 0) & (r <= self.z.shape[0] - 1) & (c >= 0) & (c <= self.z.shape[1] - 1)
+        return np.where(between, z, np.nan)
 
     def slope_and_cell(self, E, N):
         """Foreshore slope of the nearest cell, and that cell's index (NaN / -1 outside)."""
@@ -421,7 +595,8 @@ class Dem:
         return s, idx.astype(np.int64)
 
     def foreshore(self):
-        """setup_model.ForeshoreSlope of this DEM (the whole grid), for the band fallback."""
+        """setup_model.ForeshoreSlope of this DEM (the whole grid), for the band fallback: the one
+        EvolvingSlope already holds when it picked this DEM, else computed here."""
         if self._foreshore is None:
             self._foreshore = ForeshoreSlope(self.z, self.cell, self.name)
         return self._foreshore
@@ -429,25 +604,23 @@ class Dem:
 
 class DemSource:
     """The DEM for a stack: a dated series (dem_from_contours.py --series-dir, the cron's archive/dems)
-    picked as setup_model.EvolvingSlope picks it -- the DEM whose window centre is nearest, within
-    max_days -- or one DEM file for every stack."""
+    or one DEM file for every stack, picked by setup_model.EvolvingSlope.for_epoch itself -- the DEM
+    whose window centre is nearest, within max_days -- so the two can never pick differently."""
 
     def __init__(self, source, max_days=SLOPE_MAX_DAYS):
         self.ev = EvolvingSlope(source, max_days) if source else None
         self._cache = {}
 
     def path_for(self, epoch):
-        ev = self.ev
-        if ev is None:
+        """The DEM file EvolvingSlope picks for epoch (None: none within max_days, or unreadable)."""
+        if self.ev is None:
             return None
-        if ev.single is not None:
-            return ev.single
-        if not ev.series:
+        fs, _why = self.ev.for_epoch(epoch)
+        if fs is None:
             return None
-        i = int(np.argmin(np.abs(ev.centres - float(epoch))))
-        if abs(ev.centres[i] - float(epoch)) > ev.max_days * 86400.0:
-            return None
-        return ev.series[i][1]
+        if self.ev.single is not None:
+            return self.ev.single
+        return next((p for _, p in self.ev.series if p.name == fs.name), None)
 
     def for_epoch(self, epoch):
         p = self.path_for(epoch)
@@ -456,6 +629,7 @@ class DemSource:
         if p not in self._cache:
             try:
                 self._cache[p] = Dem(p)
+                self._cache[p]._foreshore = self.ev.for_epoch(epoch)[0]      # the same ForeshoreSlope
             except (OSError, ValueError, KeyError) as exc:
                 print(f"WARNING: cannot read the DEM {p} ({exc})")
                 self._cache[p] = None
@@ -480,8 +654,9 @@ def line_profile(u, v, io, eo, dem=None, beta=None, max_extrapolate=MAX_EXTRAPOL
     only where all four surrounding cells exist (at its edges the nearest cell would be up to a cell
     off: 0.1-0.2 m on a 1:10 foreshore). Where the line runs off the DEM, the profile is carried on
     as the straight line (elevation against horizontal distance along the line) fitted to the last
-    EXT_FIT_M of DEM profile at that end, for at most max_extrapolate metres, rising landward or not
-    at all; gaps inside up to GAP_FILL_M are bridged. kind 'dem'.
+    EXT_FIT_M of DEM profile at that end, for at most max_extrapolate metres (the pixels from the
+    DEM's end until the line first reaches that far), rising landward or not at all; gaps inside up
+    to GAP_FILL_M are bridged. kind 'dem'.
     beta (no dem): the plane z = -beta x (metres seaward of the Jan 2025 0 m contour). kind 'planar'.
     -> dict z, E, N, d (m along the line on the beach, from the first pixel with an elevation),
        extrap (bool: extended or bridged), slope, cell (DEM foreshore slope and cell under each
@@ -531,14 +706,15 @@ def line_profile(u, v, io, eo, dem=None, beta=None, max_extrapolate=MAX_EXTRAPOL
             dcov = d0[ci] + d1[ci] * z[ci]
             zcov = z[ci].copy()
             for end in ("land", "sea"):
+                # targets in order away from the DEM's end
                 if end == "land":
                     sel = dcov >= dcov.max() - EXT_FIT_M
                     targets = np.arange(ci[-1] + 1, n)
-                    d_end = dcov.max()
+                    d_end, sgn = dcov.max(), 1.0
                 else:
                     sel = dcov <= dcov.min() + EXT_FIT_M
-                    targets = np.arange(0, ci[0])
-                    d_end = dcov.min()
+                    targets = np.arange(ci[0] - 1, -1, -1)
+                    d_end, sgn = dcov.min(), -1.0
                 if sel.sum() < 10 or np.ptp(dcov[sel]) < 3.0 or not len(targets):
                     continue
                 b, a = np.polyfit(dcov[sel], zcov[sel], 1)
@@ -547,8 +723,10 @@ def line_profile(u, v, io, eo, dem=None, beta=None, max_extrapolate=MAX_EXTRAPOL
                 with np.errstate(invalid="ignore", divide="ignore"):
                     zt = (a + b * d0[targets]) / (1.0 - b * d1[targets])
                     dt = d0[targets] + d1[targets] * zt
-                    ok = np.isfinite(zt) & ((dt - d_end) * (1 if end == "land" else -1) > 0) & \
-                        (np.abs(dt - d_end) <= max_extrapolate)
+                    # how far past the DEM's end the line has reached so far: a staircase pixel line
+                    # steps back a little at each turn, which must not leave holes in the extension
+                    reach = np.maximum.accumulate(np.where(np.isfinite(dt), sgn * (dt - d_end), -np.inf))
+                    ok = np.isfinite(zt) & (reach <= max_extrapolate)
                 z[targets[ok]] = zt[ok]
                 extrap[targets[ok]] = True
             # bridge short gaps inside the DEM profile
@@ -584,12 +762,21 @@ def line_profile(u, v, io, eo, dem=None, beta=None, max_extrapolate=MAX_EXTRAPOL
     return out
 
 
-def elevation_at(edge, z_line):
+def line_end(n_px, margin=LINE_END_PX):
+    """The first column (from the sea end) of the line's landward end as find_edge sees it: its land
+    reference, the last 15% (runup_from_timestack.LAND_REF_FRACTION), less `margin` pixels. An edge
+    there is capped by the line, and its foam would sit in find_edge's no-foam reference."""
+    return max(int(LAND_REF_FRACTION * int(n_px)) - int(margin), 1)
+
+
+def elevation_at(edge, z_line, land_end=None):
     """
     Elevation of the edge (fractional column index, sea end first) on the profile z_line, linear
     between pixels. -> (z, above, below): NaN where the edge is NaN or off the profile; above /
     below flag edge samples landward / seaward of the profile's ends (an uprush above the profile
-    is still known to be above every elevation the profile has).
+    is still known to be above every elevation the profile has). land_end (a column, line_end):
+    edge samples at or past it are censored the same way (NaN, above), whatever the profile there:
+    the line caps them, so their elevation would read low.
     """
     edge = np.asarray(edge, float)
     z_line = np.asarray(z_line, float)
@@ -608,10 +795,14 @@ def elevation_at(edge, z_line):
     za, zb = z_line[i0], z_line[i1]
     val = np.where(fr == 0, za, za + fr * (zb - za))
     idx = np.flatnonzero(ok)
+    if land_end is not None:
+        val = np.where(edge[idx] >= land_end, np.nan, val)
     z[idx] = val
     miss = idx[~np.isfinite(val)]
     above[miss] = edge[miss] > fin[-1]
-    below[miss] = edge[miss] < fin[0]
+    if land_end is not None:
+        above[miss] |= edge[miss] >= land_end
+    below[miss] = (edge[miss] < fin[0]) & ~above[miss]
     return z, above, below
 
 
@@ -631,21 +822,52 @@ def detrend(x):
 
 
 def ig_dof(n, fs=SAMPLE_HZ, cutoff=IG_CUTOFF_HZ):
-    """Degrees of freedom of the infragravity variance of an n-sample record: 2 per frequency bin
-    in (0, cutoff) -- 58 for 10 min at 2 Hz."""
+    """Degrees of freedom of the infragravity variance of an n-sample record with a FLAT spectrum:
+    2 per frequency bin in (0, cutoff) -- 58 for 10 min at 2 Hz. The most a record can have."""
     f = np.fft.rfftfreq(int(n), 1.0 / fs)
     return 2 * int(((f > 0) & (f < cutoff)).sum())
 
 
-def swash_stats(z_abs, swl, edge, above, below, valid, min_peaks, min_valid):
+def ig_dof_eff(series, fs=SAMPLE_HZ, cutoff=IG_CUTOFF_HZ):
+    """
+    The effective degrees of freedom of the infragravity variance of this record, from its own
+    periodogram P_k over the bins in (0, cutoff): nu = 2 (sum S_k)^2 / sum S_k^2 for the spectrum
+    S_k, which a peaked or red swash spectrum makes far fewer than the flat-spectrum 2 per bin. The
+    raw periodogram's own scatter (each bin a chi-square of 2 degrees of freedom) inflates sum P_k^2
+    twofold and would halve it, so the moments are corrected: nu = 4 (sum P_k)^2 / sum P_k^2 - 2
+    (2 per bin on average for a flat spectrum), within [2, ig_dof(n)]. The series is taken as
+    band_sig takes it (gaps up to 5 s bridged, the mean removed). NaN when band_sig gives no value.
+    """
+    x = bridge_gaps(series)
+    if x is None or len(x) < 64:
+        return np.nan
+    x = x - x.mean()
+    f = np.fft.rfftfreq(len(x), 1.0 / fs)
+    P = np.abs(np.fft.rfft(x)) ** 2
+    p = P[(f > 0) & (f < cutoff)]
+    if not len(p) or not (p ** 2).sum() > 0:
+        return np.nan
+    nu = 4.0 * p.sum() ** 2 / (p ** 2).sum() - 2.0
+    return float(np.clip(nu, 2.0, ig_dof(len(x), fs, cutoff)))
+
+
+def sig_sampling_rel(nu):
+    """Relative sampling error of S_IG (4 x its standard deviation) for nu degrees of freedom of its
+    variance: sqrt(2 / nu) / 2."""
+    return float(np.sqrt(2.0 / nu) / 2.0) if np.isfinite(nu) and nu > 0 else np.nan
+
+
+def swash_stats(z_abs, swl, edge, above, below, valid, min_peaks, min_valid, past_line=None):
     """
     z_abs: elevation of the swash edge (m NAVD88) per 2 Hz sample; swl: still-water level per
-    sample (NaN if unknown); edge: the edge (fractional column index, for the uprush peaks).
-    -> dict setup_m (mean of z - swl), r2_m (98th percentile of the uprush maxima of z - swl, the
-    maxima found on the edge series as runup_from_timestack.py finds them: peak_mask), s_inc_m,
-    s_ig_m, s_m (4 x std of the detrended z - swl in > 0.05 Hz, < 0.05 Hz, all: band_sig), n_peaks,
-    eta and sigma (mean and std of z_abs, for the foreshore band), missing (share of edge samples
-    with no elevation), notes.
+    sample (NaN if unknown); edge: the edge (fractional column index, for the uprush peaks);
+    above / below: elevation_at's flags; past_line: the samples it censored at the line's landward
+    end (for the note). -> dict setup_m (mean of z - swl), r2_m (98th percentile of the uprush
+    maxima of z - swl, the maxima found on the edge series as runup_from_timestack.py finds them:
+    peak_mask), s_inc_m, s_ig_m, s_m (4 x std of the detrended z - swl in > 0.05 Hz, < 0.05 Hz,
+    all: band_sig), ig_dof (ig_dof_eff of that series), n_peaks, eta and sigma (mean and std of
+    z_abs, for the foreshore band), missing (share of edge samples with no elevation: off the
+    profile or past the line), notes.
     """
     z_abs, swl, edge = (np.asarray(a, float) for a in (z_abs, swl, edge))
     notes = []
@@ -659,13 +881,15 @@ def swash_stats(z_abs, swl, edge, above, below, valid, min_peaks, min_valid):
         pz = rel[mask].copy()
         pz[above[mask]] = np.inf
         pz[below[mask]] = -np.inf
-        pz = pz[~np.isnan(pz)]
+        keep = ~np.isnan(pz)
+        line_cut = (np.zeros(len(pz), bool) if past_line is None else np.asarray(past_line, bool)[mask])[keep]
+        pz = pz[keep]
         if n_peaks >= min_peaks and valid >= min_valid and len(pz) >= min_peaks:
             with np.errstate(invalid="ignore"):
                 r2 = float(np.percentile(pz, 98))
             if not np.isfinite(r2):
                 r2 = np.nan
-                notes.append("R2 above the profile")
+                notes.append("R2 above the line" if line_cut.any() else "R2 above the profile")
         setup = float(np.nanmean(rel)) if missing <= MISSING_ELEV_MAX and np.isfinite(rel).any() else np.nan
         if missing > MISSING_ELEV_MAX:
             notes.append(f"{missing:.0%} of the edge off the profile: no setup")
@@ -678,11 +902,14 @@ def swash_stats(z_abs, swl, edge, above, below, valid, min_peaks, min_valid):
     s_ig = float(band_sig(zd, 1e-9, IG_CUTOFF_HZ))
     s_inc = float(band_sig(zd, IG_CUTOFF_HZ, SAMPLE_HZ))
     s_all = float(band_sig(zd, 0.0, SAMPLE_HZ))
+    dof = ig_dof_eff(zd) if np.isfinite(s_ig) else np.nan
     if not np.isfinite(s_ig):
         notes.append("edge gaps: no swash spectrum")
+    elif missing > 0:
+        notes.append(f"S_IG with {missing:.1%} of the edge off the profile (bridged: reads low)")
     fin = z_abs[np.isfinite(z_abs)]
     return {"setup_m": setup, "r2_m": r2, "s_inc_m": s_inc, "s_ig_m": s_ig, "s_m": s_all,
-            "n_peaks": n_peaks, "eta": float(fin.mean()) if len(fin) else np.nan,
+            "ig_dof": dof, "n_peaks": n_peaks, "eta": float(fin.mean()) if len(fin) else np.nan,
             "sigma": float(fin.std()) if len(fin) else np.nan, "missing": missing, "notes": notes}
 
 
@@ -875,10 +1102,12 @@ def _r(x, nd):
 
 
 def plane_stretch(dist, d_beach, edge):
-    """How many metres along the line on the still-water plane (runup_from_timestack's dist) one
-    metre on the beach is, over the pixels the swash edge covers (its 5-95th percentile): c2 sees
-    the swash at a grazing angle from 19.8 m up, so a point above still water lands further along
-    its ray on that plane. 1.0 where it cannot be measured."""
+    """How many metres of path along the line on the still-water plane (runup_from_timestack's dist,
+    the sum of its pixel-to-pixel steps) one metre on the beach is, over the pixels the swash edge
+    covers (its 5-95th percentile). Two things make it: the plane geometry (c2 sees the swash at a
+    grazing angle from 19.8 m up, so a point above still water lands further along its ray on that
+    plane) and, on a line drawn as single-pixel steps, the staircase's zigzag; both are measured on
+    the actual line. 1.0 where it cannot be measured."""
     dist, d_beach, edge = (np.asarray(a, float) for a in (dist, d_beach, edge))
     e = edge[np.isfinite(edge)]
     if len(e) < 10:
@@ -893,10 +1122,92 @@ def plane_stretch(dist, d_beach, edge):
     return float(np.clip(r, 0.2, 20.0)) if np.isfinite(r) and r > 0 else 1.0
 
 
+def sig_extra_rel(st, n):
+    """S_IG's own relative error beyond Stockdon's scatter: its sampling error (sig_sampling_rel of
+    the record's effective degrees of freedom, st['ig_dof']; the flat-spectrum count of an n-sample
+    record where that is unknown) and the share of the edge off the profile (st['missing']: bridged
+    samples flatten the uprush tops, so S_IG reads low by about that much), in quadrature."""
+    samp = sig_sampling_rel(st["ig_dof"])
+    return float(np.hypot(samp if np.isfinite(samp) else sig_sampling_rel(ig_dof(n)), st["missing"]))
+
+
+def late_inputs(pending, have_profile, t0, wl_mid, wl_src, want_gps):
+    """The inputs that arrive late and are missing for a stack: the camera period (pending), a DEM,
+    any period, the water level, and the GPS level where the GPS is the level source in use."""
+    miss = []
+    if pending:
+        miss.append("camera period")
+    if not have_profile:
+        miss.append("DEM")
+    if not (np.isfinite(t0) and t0 > 0):
+        miss.append("period")
+    if not np.isfinite(wl_mid):
+        miss.append("water level")
+    elif want_gps and wl_src != "gps":
+        miss.append("GPS level")
+    return miss
+
+
+def invert_all(st, beta, t0, dem_level, regime):
+    """The three H0 estimates of one stack in one regime. R2 and setup only on a DEM (dem_level: a
+    planar profile does not know where still water meets the beach) and, but in the dissipative
+    regime, with a foreshore slope."""
+    est = {"sig": h0_from_sig(st["s_ig_m"], t0, regime), "r2": np.nan, "setup": np.nan}
+    if dem_level and (np.isfinite(beta) or regime == "dissipative"):
+        est["r2"] = h0_from_r2(st["r2_m"], beta, t0, regime)
+        est["setup"] = h0_from_setup(st["setup_m"], beta, t0, regime)
+    return est
+
+
+def misfit(est, h0, t0, beta, scatter=None, sig_extra=0.0, regime="intermediate"):
+    """How badly the estimates agree with their combination: sum of ((ln H0_k - ln H0) / sigma_k)^2,
+    sigma_k at the combined H0 (0 for a single estimate)."""
+    out = 0.0
+    for k, v in est.items():
+        if v is not None and np.isfinite(v) and v > 0 and np.isfinite(h0) and h0 > 0:
+            sd = estimate_sigma(k, h0, t0, beta, scatter, sig_extra, regime)
+            if 0 < sd < np.inf:
+                out += ((np.log(v) - np.log(h0)) / sd) ** 2
+    return float(out)
+
+
+def estimate_h0(st, beta, t0, dem_level, scatter=None, sig_extra=0.0):
+    """
+    H0 from one stack's statistics (swash_stats' dict), inverted and combined with Stockdon's
+    intermediate forms (Eqs. 10, 12, 19) and with the dissipative ones (Eq. 18 and the setup and
+    S_IG beside it), each giving its own xi0. The regime is the one whose own H0 agrees with it
+    (intermediate xi0 >= 0.3, dissipative below); when both do or neither does (H0 near the
+    threshold), the one whose estimates agree better (misfit; the intermediate on a tie), noted as
+    unsure. Without a foreshore slope, the intermediate. -> dict est (the three H0s), h0, sigma (of
+    ln H0), used, regime, xi0 (at the H0 kept), note.
+    """
+    b_comb = beta if np.isfinite(beta) else 0.1     # S_IG alone: the slope does not enter
+    res = {}
+    for regime in ("intermediate", "dissipative"):
+        est = invert_all(st, beta, t0, dem_level, regime)
+        h0, sig_ln, used = combine(est, t0, b_comb, scatter, sig_extra, regime)
+        res[regime] = {"est": est, "h0": h0, "sigma": sig_ln, "used": used, "regime": regime,
+                       "xi0": iribarren(beta, h0, t0), "note": "",
+                       "misfit": misfit(est, h0, t0, b_comb, scatter, sig_extra, regime)}
+    i, d = res["intermediate"], res["dissipative"]
+    if not (np.isfinite(i["xi0"]) and np.isfinite(d["xi0"])):
+        return i
+    ok_i, ok_d = i["xi0"] >= XI_DISSIPATIVE, d["xi0"] < XI_DISSIPATIVE
+    if ok_i and not ok_d:
+        return i
+    pick = d if (ok_d and not ok_i) or d["misfit"] < i["misfit"] else i
+    unsure = ok_i == ok_d
+    if pick is d or unsure:
+        pick["note"] = (f"xi0 {i['xi0']:.2f} with the intermediate forms, {d['xi0']:.2f} with the dissipative "
+                        f"(Stockdon's, below xi0 {XI_DISSIPATIVE:g}: R2 0.043, setup 0.016, S_IG 0.046 x sqrt(H0 L0)): "
+                        f"{pick['regime']} kept" + ("; regime unsure" if unsure else ""))
+    return pick
+
+
 def estimate_stack(ras_path, line, ctx, now=None):
     """The row for one stack and line, None if the stack cannot be read, or 'wait' when an input that
-    arrives late (camera period, DEM, water level) is missing and the stack is younger than
-    ctx.wait_days."""
+    arrives late (camera period, DEM, water level, the GPS level) is missing, the stack is younger
+    than ctx.wait_days and its numbers would be computed (not dark, an edge found)."""
     rargs = copy.copy(ctx.rargs)
     rargs.line = int(line)
     # georectified (for the retreat limit) on the plane at still water, as the cron's runup is
@@ -923,7 +1234,7 @@ def estimate_stack(ras_path, line, ctx, now=None):
         ctx.profiles[key] = prof
     prof = ctx.profiles[key]
     have_profile = bool(np.isfinite(prof["z"]).any())
-    # the retreat limit, on the beach: the runup script applies it on the still-water plane
+    # the retreat limit, on the beach: the runup script applies it along its still-water-plane path
     stretch = plane_stretch(s["dist"], prof["d"], s["edge"]) if have_profile else 1.0
     if abs(stretch - 1.0) > 0.02:
         rargs.max_retreat_speed = ctx.retreat_speed * stretch
@@ -951,8 +1262,8 @@ def estimate_stack(ras_path, line, ctx, now=None):
                       ctx.min_contrast, rargs.min_valid, rargs.min_peaks)
     now = datetime.now(timezone.utc).timestamp() if now is None else float(now)
     young = now - mid < ctx.wait_days * 86400.0
-    if young and (pending or status in ("no period", "no slope")
-                  or (status == "ok" and not np.isfinite(wl_mid))):
+    if young and status not in ("dark", "no swash edge") and \
+            late_inputs(pending, have_profile, t0, wl_mid, wl_src, getattr(ctx, "want_gps", False)):
         return "wait"
 
     row = {"epoch": int(mid), "time_utc": datetime.fromtimestamp(mid, tz=timezone.utc).isoformat(),
@@ -965,37 +1276,39 @@ def estimate_stack(ras_path, line, ctx, now=None):
            "period_s": _r(t0, 2), "period_source": psrc}
     notes = []
     if status in ("ok", "low contrast") and have_profile and np.isfinite(t0):
-        z_abs, above, below = elevation_at(edge, prof["z"])
-        st = swash_stats(z_abs, swl, edge, above, below, valid, rargs.min_peaks, rargs.min_valid)
+        n_px = len(prof["z"])
+        cut = line_end(n_px)
+        z_abs, above, below = elevation_at(edge, prof["z"], cut)
+        with np.errstate(invalid="ignore"):
+            past_line = np.isfinite(edge) & (edge >= cut)
+        st = swash_stats(z_abs, swl, edge, above, below, valid, rargs.min_peaks, rargs.min_valid, past_line)
         notes += st["notes"]
         with np.errstate(invalid="ignore"):
             on = np.isfinite(z_abs)
-            xf = float(prof["extrap"][np.clip(np.round(edge[on]).astype(int), 0, len(prof["z"]) - 1)].mean()) \
+            xf = float(prof["extrap"][np.clip(np.round(edge[on]).astype(int), 0, n_px - 1)].mean()) \
                 if on.any() else np.nan
         beta, bsrc = foreshore_beta(prof, dem if prof["kind"] == "dem" else None, st["eta"], st["sigma"],
                                     ctx.beta)
-        est = {"sig": h0_from_sig(st["s_ig_m"], t0)}
-        absolute = prof["kind"] == "dem"            # R2 and setup need the beach's true level
-        est["r2"] = h0_from_r2(st["r2_m"], beta, t0) if np.isfinite(beta) else np.nan
-        est["setup"] = h0_from_setup(st["setup_m"], beta, t0) if np.isfinite(beta) else np.nan
+        dem_level = prof["kind"] == "dem"           # R2 and setup need the beach's true level
         if not np.isfinite(beta):
             notes.append("no foreshore slope: no R2 or setup estimate")
-        use = dict(est) if absolute else {"sig": est["sig"]}
-        if not absolute:
-            notes.append("planar profile: R2 and setup not combined")
-        samp = np.sqrt(2.0 / max(ig_dof(n), 1)) / 2.0
-        h0, sig_ln, used = combine(use, t0, beta if np.isfinite(beta) else 0.1, ctx.scatter, samp)
+        if not dem_level:
+            notes.append("planar profile: R2 and setup not inverted")
+        sig_extra = sig_extra_rel(st, n)
+        res = estimate_h0(st, beta, t0, dem_level, ctx.scatter, sig_extra)
+        est, h0, sig_ln, used, xi = res["est"], res["h0"], res["sigma"], res["used"], res["xi0"]
+        if res["note"]:
+            notes.append(res["note"])
         ks = float(shoaling_coefficient(t0, DESHOAL_DEPTH_M))
-        row.update({"z_extrapolated_fraction": _r(xf, 3), "beta_f": _r(beta, 4), "beta_source": bsrc,
-                    "iribarren": _r(iribarren(beta, h0, t0), 2) if np.isfinite(beta) else "",
+        row.update({"z_extrapolated_fraction": _r(xf, 3), "off_profile_fraction": _r(st["missing"], 3),
+                    "beta_f": _r(beta, 4), "beta_source": bsrc,
+                    "iribarren": _r(xi, 2) if np.isfinite(beta) else "",
                     "setup_m": _r(st["setup_m"], 3), "r2_m": _r(st["r2_m"], 3),
                     "s_inc_m": _r(st["s_inc_m"], 3), "s_ig_m": _r(st["s_ig_m"], 3), "s_m": _r(st["s_m"], 3),
                     "h0_r2_m": _r(est["r2"], 3), "h0_sig_m": _r(est["sig"], 3),
                     "h0_setup_m": _r(est["setup"], 3), "h0_m": _r(h0, 3), "h0_sigma_rel": _r(sig_ln, 3),
-                    "combined_from": used, "ks_21m": _r(ks, 4), "hs_m": _r(h0 * ks, 3)})
-        xi = iribarren(beta, h0, t0)
-        if np.isfinite(xi) and xi < 0.3:
-            notes.append(f"xi0 {xi:.2f} < 0.3: dissipative, where Stockdon use Eq. 18 for R2")
+                    "combined_from": used, "ks_21m": _r(ks, 4), "hs_m": _r(h0 * ks, 3),
+                    "hs_sig_m": _r(est["sig"] * ks, 3)})
         if status == "ok" and not np.isfinite(h0):
             row["status"] = "no swash edge"
     if status == "low contrast":
@@ -1017,25 +1330,31 @@ def read_done(path):
     return set() if not rows else {(r["filename"], str(r["line"])) for r in rows}
 
 
+def check_header(path, reprocess=False):
+    """A non-empty output file whose header is not FIELDS is refused (SystemExit) unless reprocess,
+    so a column change never shifts old rows. -> whether the file exists with content."""
+    path = Path(path)
+    exists = path.exists() and path.stat().st_size > 0
+    if exists:
+        with open(path, newline="") as f:
+            header = next(csv.reader(f), [])
+        if header != FIELDS and not reprocess:
+            raise SystemExit(f"{path}: its columns are not this version's; rerun with --reprocess")
+    return exists
+
+
 def write_rows(path, rows, reprocess=False):
     """
     Appends rows to the CSV (header first if new). Rows whose (filename, line) are already in it
-    are not appended again. With reprocess, the file is rewritten once: its rows that this run
-    redid are replaced, the others kept, all in (epoch, line) order. A file with another header is
-    refused (SystemExit), so a column change never shifts old rows: rerun with --reprocess.
-    -> the number of rows written.
+    are not appended again. With reprocess, the file is rewritten: its rows that these rows redo
+    are replaced, the others kept, all in (epoch, line) order. A file with another header is
+    refused (check_header): rerun with --reprocess. -> the number of rows written.
     """
     path = Path(path)
     if not rows:
         return 0
     rows = sorted(rows, key=lambda r: (int(r["epoch"]), int(r["line"])))
-    exists = path.exists() and path.stat().st_size > 0
-    if exists:
-        with open(path, newline="") as f:
-            header = next(csv.reader(f), [])
-        if header != FIELDS:
-            if not reprocess:
-                raise SystemExit(f"{path}: its columns are not this version's; rerun with --reprocess")
+    exists = check_header(path, reprocess)
     if reprocess and exists:
         redo = {(r["filename"], str(r["line"])) for r in rows}
         kept = [r for r in (_read_rows(path) or []) if (r.get("filename"), str(r.get("line"))) not in redo]
@@ -1184,6 +1503,9 @@ def make_context(args, wl=None):
     else:
         from marconi_water_level import WaterLevel
         ctx.wl = WaterLevel(None if args.no_gps else args.gnssr_spline, args.gauge_csv)
+    # young stacks wait for the GPS level where the GPS is in use (it arrives 1-2 days late; the
+    # cron's runup stage waits for it too, --require-water-level)
+    ctx.want_gps = getattr(ctx.wl, "s_ep", None) is not None
     return ctx
 
 
@@ -1194,6 +1516,7 @@ def _day_epoch(s, end=False):
 
 def run(args, wl=None, now=None):
     out = Path(args.output or HERE / "archive" / f"hs_timestack_{args.camera}.csv")
+    check_header(out, args.reprocess)               # refuse a file of other columns before any work
     ctx = make_context(args, wl)
     done = set() if args.reprocess else read_done(out)
     paths = sorted(Path(args.ras_dir).glob(f"*.{args.camera}.ras.tiff"), key=lambda q: q.name)
@@ -1205,30 +1528,35 @@ def run(args, wl=None, now=None):
              ("" if ctx.dems is not None else " (every line 'no slope' without --beta)")))
     if hasattr(ctx.wl, "describe"):
         print("  " + ctx.wl.describe())
-    rows, waiting = [], 0
-    for p in paths:
-        e = rft.epoch_from_name(p.name)
-        if e is None or not lo <= e < hi:
-            continue
-        for ln in args.lines:
-            if (p.name, str(ln)) in done:
+    chunk, waiting, n, counts, latest = [], 0, 0, {}, None
+    try:
+        for p in paths:
+            e = rft.epoch_from_name(p.name)
+            if e is None or not lo <= e < hi:
                 continue
-            r = estimate_stack(p, ln, ctx, now=now)
-            if r is None:
-                break
-            if r == "wait":
-                waiting += 1
-                continue
-            rows.append(r)
-    n = write_rows(out, rows, reprocess=args.reprocess)
-    counts = {}
-    for r in rows:
-        counts[r["status"]] = counts.get(r["status"], 0) + 1
-    ok = [r for r in rows if r["status"] == "ok" and r["hs_m"] != ""]
+            for ln in args.lines:
+                if (p.name, str(ln)) in done:
+                    continue
+                r = estimate_stack(p, ln, ctx, now=now)
+                if r is None:
+                    break
+                if r == "wait":
+                    waiting += 1
+                    continue
+                chunk.append(r)
+                counts[r["status"]] = counts.get(r["status"], 0) + 1
+                if r["status"] == "ok" and r["hs_m"] != "":
+                    latest = r
+                if len(chunk) >= CHUNK_ROWS:            # appended as it goes: a crash loses at most these
+                    n += write_rows(out, chunk, reprocess=args.reprocess)
+                    chunk = []
+    finally:
+        if chunk:
+            n += write_rows(out, chunk, reprocess=args.reprocess)
     print(f"timestack wave height {args.camera}: {n} new row(s) -> {out}"
           + (" (" + ", ".join(f"{v} {k}" for k, v in sorted(counts.items())) + ")" if counts else "")
-          + (f"; {waiting} line-stack(s) wait for a period, DEM or water level" if waiting else "")
-          + (f"; latest Hs {ok[-1]['hs_m']} m ({ok[-1]['time_utc'][:16]}Z)" if ok else ""))
+          + (f"; {waiting} line-stack(s) wait for a period, DEM, water level or the GPS level" if waiting else "")
+          + (f"; latest Hs {latest['hs_m']} m ({latest['time_utc'][:16]}Z)" if latest else ""))
     return 0
 
 
@@ -1248,97 +1576,191 @@ def scores(est, ref):
     return n, float(d.mean()), float(np.sqrt(np.mean(d ** 2))), r
 
 
+def with_owg(est, owg, ref):
+    """The estimate and the OWG on the SAME stacks (all three finite): -> dict n, bias, rmse (the
+    estimate's), owg_bias, owg_rmse, err_corr (of the two errors), blend_rmse (their 50:50 mean)."""
+    est, owg, ref = (np.asarray(a, float) for a in (est, owg, ref))
+    ok = np.isfinite(est) & np.isfinite(owg) & np.isfinite(ref)
+    out = {"n": int(ok.sum())}
+    if not out["n"]:
+        return out
+    e1, e2 = est[ok] - ref[ok], owg[ok] - ref[ok]
+    eb = 0.5 * (est[ok] + owg[ok]) - ref[ok]
+    out.update(bias=float(e1.mean()), rmse=float(np.sqrt(np.mean(e1 ** 2))), owg_bias=float(e2.mean()),
+               owg_rmse=float(np.sqrt(np.mean(e2 ** 2))), blend_rmse=float(np.sqrt(np.mean(eb ** 2))),
+               err_corr=(float(np.corrcoef(e1, e2)[0, 1]) if out["n"] > 2 and np.std(e1) > 0 and np.std(e2) > 0
+                         else np.nan))
+    return out
+
+
 HS_BANDS = ((0.0, 1.0), (1.0, 2.0), (2.0, 99.0))
+STORM_HS_M = 2.0                  # a storm stack: the reference Hs 2 m or more (VALIDATION 4.11)
+STORM_GAP_S = 86400.0             # storm stacks 24 h or more apart are separate storms (a night is shorter)
 
 
-def compare_table(df, ref_col, ref_name, cols):
-    """Prints n / bias / RMSE of each estimate column against ref_col: all, by Hs band of the
-    reference, and clear (status ok) against blurred (status low contrast)."""
-    print(f"\n  against {ref_name}:")
-    print(f"    {'estimate':<26} {'subset':<16} {'n':>5} {'bias m':>8} {'RMSE m':>8} {'r':>6}")
-    subsets = [("all clear", df["status"] == "ok")]
+def compare_subsets(df, ref_col, by_source=True):
+    """[(name, mask)]: all clear (status ok), clear by Hs band of the reference, clear by water-level
+    source and by period source (when they differ), and blurred (status low contrast)."""
+    clear = df["status"] == "ok"
+    out = [("all clear", clear)]
     for a, b in HS_BANDS:
-        subsets.append((f"clear, {a:g}-{b:g} m" if b < 99 else f"clear, >= {a:g} m",
-                        (df["status"] == "ok") & (df[ref_col] >= a) & (df[ref_col] < b)))
-    subsets.append(("blurred", df["status"] == "low contrast"))
+        out.append((f"clear, {a:g}-{b:g} m" if b < 99 else f"clear, >= {a:g} m",
+                    clear & (df[ref_col] >= a) & (df[ref_col] < b)))
+    if by_source:
+        for col, short in (("water_level_source", "level"), ("period_kind", "T0")):
+            vals = sorted(v for v in df.loc[clear, col].dropna().unique() if str(v))
+            if len(vals) > 1:
+                out += [(f"clear, {short} {v}", clear & (df[col] == v)) for v in vals]
+    out.append(("blurred", df["status"] == "low contrast"))
+    return out
+
+
+def storm_count(epochs, gap_s=STORM_GAP_S):
+    """Separate storms among storm-stack times: a new one wherever 24 h or more pass without one."""
+    t = np.sort(np.asarray(epochs, float))
+    return int(len(t) > 0) + int((np.diff(t) >= gap_s).sum()) if len(t) else 0
+
+
+def compare_counts(df, ref_col, col="hs_sig"):
+    """The counts of decision rule 1 for an estimate column against a reference: clear stacks with
+    both, distinct UTC days, storm stacks (reference >= 2 m) and separate storms."""
+    m = (df["status"] == "ok") & df[col].notna() & df[ref_col].notna()
+    st = m & (df[ref_col] >= STORM_HS_M)
+    days = {datetime.fromtimestamp(float(t), tz=timezone.utc).strftime("%Y-%m-%d") for t in df.loc[m, "start"]}
+    return {"stacks": int(m.sum()), "days": len(days), "storm_stacks": int(st.sum()),
+            "storms": storm_count(df.loc[st, "start"])}
+
+
+def compare_table(df, ref_col, ref_name, cols, owg_col=None, result=None):
+    """
+    Prints, and stores in result[ref_col] when given: (1) each estimate column against ref_col on
+    its own stacks (n / bias / RMSE / r) for compare_subsets; (2) with owg_col, each estimate and the
+    OWG on the stacks where the estimate, the OWG and the reference all exist (the estimate's bias
+    and RMSE there, the OWG's, the correlation of their errors and the RMSE of their 50:50 mean):
+    all clear, by Hs band, blurred.
+    """
+    print(f"\n  against {ref_name}:")
+    if any("[not indep.]" in label for label, _ in cols):
+        print(f"    [not indep.]: not independent of {ref_col} (the DEM's level carries setup computed from it)")
+    print(f"    {'estimate':<34} {'subset':<20} {'n':>5} {'bias m':>8} {'RMSE m':>8} {'r':>6}")
+    alone, paired = [], []
     for label, col in cols:
-        for name, m in subsets:
+        for name, m in compare_subsets(df, ref_col):
             n, bias, rmse, r = scores(df.loc[m, col], df.loc[m, ref_col])
             if n:
-                print(f"    {label:<26} {name:<16} {n:>5} {bias:>+8.3f} {rmse:>8.3f} {r:>6.2f}")
+                alone.append({"estimate": label, "col": col, "subset": name, "n": n, "bias": bias,
+                              "rmse": rmse, "r": r})
+                print(f"    {label:<34} {name:<20} {n:>5} {bias:>+8.3f} {rmse:>8.3f} {r:>6.2f}")
+    if owg_col is not None and owg_col in df and df[owg_col].notna().any():
+        print(f"    with the OWG, on the stacks where the estimate, the OWG and {ref_col} all exist:")
+        print(f"    {'estimate':<34} {'subset':<20} {'n':>5} {'bias m':>8} {'RMSE m':>8} {'OWG bias':>9} "
+              f"{'OWG RMSE':>9} {'err corr':>9} {'50:50 RMSE':>11}")
+        for label, col in cols:
+            for name, m in compare_subsets(df, ref_col, by_source=False):
+                w = with_owg(df.loc[m, col], df.loc[m, owg_col], df.loc[m, ref_col])
+                if w["n"]:
+                    w.update(estimate=label, col=col, subset=name)
+                    paired.append(w)
+                    print(f"    {label:<34} {name:<20} {w['n']:>5} {w['bias']:>+8.3f} {w['rmse']:>8.3f} "
+                          f"{w['owg_bias']:>+9.3f} {w['owg_rmse']:>9.3f} {w['err_corr']:>+9.2f} "
+                          f"{w['blend_rmse']:>11.3f}")
+    c = compare_counts(df, ref_col)
+    print(f"    rule 1 counts (from S_IG, clear): {c['stacks']} stack(s) on {c['days']} day(s); "
+          f"{c['storm_stacks']} storm stack(s) ({ref_col} >= {STORM_HS_M:g} m) in {c['storms']} storm(s) "
+          f"(24 h without one starts a new storm)")
+    if result is not None:
+        result[ref_col] = {"alone": alone, "with_owg": paired, "counts": c}
 
 
-def compare(args):
+def load_compare(args):
+    """The output file as --compare scores it: one row per stack and status (the median of its lines),
+    with hs_sig / hs_r2 / hs_setup (each estimate x Ks, R2 and setup only from DEM profiles), the
+    stack's start (its filename epoch), only stacks inside --since / --until (as the run selects
+    them), and the references: the OWG's ok frame of the same collection, the ADCP within 30 min,
+    and hs_best / hs_buoy_marconi of the hour the stack starts in (as marconi_waves.py files frames).
+    -> (DataFrame, whether any stack falls in the ADCP record)."""
     import pandas as pd
     out = Path(args.output or HERE / "archive" / f"hs_timestack_{args.camera}.csv")
     if not out.exists():
         sys.exit(f"no {out} yet: run without --compare first")
-    d = pd.read_csv(out)
+    d = pd.read_csv(out, dtype={"water_level_source": str, "period_source": str, "profile": str})
     d = d[d["status"].isin(["ok", "low contrast"]) & d["hs_m"].notna()].copy()
+    d["start"] = d["filename"].astype(str).str.split(".").str[0].astype(float)
+    lo = _day_epoch(args.since) if args.since else -np.inf
+    hi = _day_epoch(args.until, end=True) if args.until else np.inf
+    d = d[(d["start"] >= lo) & (d["start"] < hi)]
     if not len(d):
-        sys.exit("no stack with a wave height yet")
+        sys.exit("no stack with a wave height yet" + (" in --since / --until" if args.since or args.until else ""))
+    on_dem = d["profile"].fillna("").str.startswith("dem:")
     for k in ("r2", "sig", "setup"):
         d[f"hs_{k}"] = d[f"h0_{k}_m"] * d["ks_21m"]
-    # one value per stack: the median of its lines (of the same status)
+        if k != "sig":
+            d.loc[~on_dem, f"hs_{k}"] = np.nan             # a planar profile has no level for them
+    d["period_kind"] = np.where(d["period_source"].fillna("").str.startswith("camera"), "camera", "buoy")
+    d["water_level_source"] = d["water_level_source"].fillna("")
     g = d.groupby(["filename", "status"], as_index=False).agg(
-        epoch=("epoch", "first"), hs_m=("hs_m", "median"), hs_r2=("hs_r2", "median"),
+        epoch=("epoch", "first"), start=("start", "first"), water_level_source=("water_level_source", "first"),
+        period_kind=("period_kind", "first"), hs_m=("hs_m", "median"), hs_r2=("hs_r2", "median"),
         hs_sig=("hs_sig", "median"), hs_setup=("hs_setup", "median"))
-    g["start"] = g["filename"].str.split(".").str[0].astype(float)
-    print(f"timestack wave height: {len(g)} stack(s) with a value ({(g['status'] == 'ok').sum()} clear, "
-          f"{(g['status'] == 'low contrast').sum()} blurred) in {out}")
-    cols = [("timestack hs_m (combined)", "hs_m"), ("  from R2", "hs_r2"), ("  from S_IG", "hs_sig"),
-            ("  from setup", "hs_setup")]
-
     owg = _read_rows(args.owg_csv)
+    g["owg"] = np.nan
     if owg:
         oe = np.array([_num(r.get("epoch")) for r in owg])
         oh = np.array([_num(r.get("hs_m")) if r.get("status") == "ok" else np.nan for r in owg])
         good = np.isfinite(oe) & np.isfinite(oh)
         oe, oh = oe[good], oh[good]
         g["owg"] = [_nearest(oe, oh, t, OWG_MAX_GAP_S) for t in g["start"]]
-    else:
-        g["owg"] = np.nan
-
+    g["adcp"] = np.nan
     adcp_path = Path(args.adcp)
-    used_adcp = False
     if adcp_path.exists():
         from historical_forcing import read_adcp
         a = read_adcp(adcp_path)
         g["adcp"] = [_nearest(a["ep"].to_numpy(float), a["hs"].to_numpy(float), t, 1800.0) for t in g["epoch"]]
-        if g["adcp"].notna().any():
-            used_adcp = True
-            compare_table(g, "adcp", "the ADCP (wh_4061, 21 m; the truth the OWG was trained on)",
-                          cols + [("OWG (same stacks)", "owg")])
-    if not used_adcp:
-        print("  no stack falls in the ADCP record (Dec 2024 - Mar 2025): compared with the station's "
-              "own estimates instead, which are NOT independent truth")
-        w = _read_rows(args.waves_csv)
+    w = _read_rows(args.waves_csv)
+    for c in ("hs_best", "hs_buoy_marconi"):
+        g[c] = np.nan
         if w:
             we = np.array([_num(r.get("epoch")) for r in w])
-            for c in ("hs_best", "hs_buoy_marconi"):
-                vals = np.array([_num(r.get(c)) for r in w])
-                # the hour the stack starts in, as marconi_waves.py files its frames
-                g[c] = [_nearest(we, vals, np.floor(t / 3600.0) * 3600.0, 0.0) for t in g["start"]]
-            compare_table(g, "hs_buoy_marconi", "the buoy converted to Marconi (hs_buoy_marconi: no camera in it)",
-                          cols + [("OWG (same stacks)", "owg")])
-            compare_table(g, "hs_best", "hs_best (the hourly blend: it CONTAINS the OWG, and the DEM's setup "
-                          "was computed from it)", cols)
-        if g["owg"].notna().any():
-            compare_table(g, "owg", "the OWG's ok frames of the same collections", cols)
-    # does it complement the OWG? error correlation and the 50:50 blend against the reference
-    ref = "adcp" if used_adcp else ("hs_buoy_marconi" if "hs_buoy_marconi" in g else None)
-    if ref is not None:
-        m = (g["status"] == "ok") & g[ref].notna() & g["owg"].notna() & g["hs_m"].notna()
-        if m.sum() >= 5:
-            e1, e2 = g.loc[m, "hs_m"] - g.loc[m, ref], g.loc[m, "owg"] - g.loc[m, ref]
-            blend = 0.5 * (g.loc[m, "hs_m"] + g.loc[m, "owg"])
-            n, _, rb, _ = scores(blend, g.loc[m, ref])
-            print(f"\n  with the OWG on {n} clear stack(s), against {ref}: error correlation "
-                  f"{np.corrcoef(e1, e2)[0, 1]:+.2f}; RMSE timestack {np.sqrt(np.mean(e1 ** 2)):.3f}, "
-                  f"OWG {np.sqrt(np.mean(e2 ** 2)):.3f}, 50:50 blend {rb:.3f} m")
-    print("\n  hs_m is the deep-water H0 shoaled to 21 m (Ks, linear theory): the currency of the ADCP,")
-    print("  hs_best and the OWG. R2 and setup read the DEM's level, which carries the station's setup")
-    print("  (C x sqrt(hs_best L0)); S_IG uses only the DEM's slope. Decision rule: docs/VALIDATION.md 4.11.")
+            vals = np.array([_num(r.get(c)) for r in w])
+            # the hour the stack starts in, as marconi_waves.py files its frames
+            g[c] = [_nearest(we, vals, np.floor(t / 3600.0) * 3600.0, 0.0) for t in g["start"]]
+    return g, bool(g["adcp"].notna().any()), out
+
+
+def compare(args, result=None):
+    """--compare: the output file against the references (load_compare), printed; result (a dict),
+    when given, receives each table (compare_table)."""
+    g, used_adcp, out = load_compare(args)
+    span = ""
+    if args.since or args.until:
+        span = f" from {args.since or 'the start'} to {args.until or 'the end'}"
+    print(f"timestack wave height: {len(g)} stack(s) with a value{span} ({(g['status'] == 'ok').sum()} clear, "
+          f"{(g['status'] == 'low contrast').sum()} blurred) in {out}")
+
+    def cols_for(ref):
+        tag = " [not indep.]"
+        return [("from S_IG (camera only)", "hs_sig"), ("hs_m (combined)" + tag, "hs_m"),
+                ("from R2" + tag, "hs_r2"), ("from setup" + tag, "hs_setup")]
+    refs = []
+    if used_adcp:
+        refs.append(("adcp", "the ADCP (wh_4061, 21 m; the truth the OWG was trained on)"))
+    else:
+        print("  no stack falls in the ADCP record (Dec 2024 - Mar 2025): the converted buoy is the reference")
+    if g["hs_buoy_marconi"].notna().any():
+        refs.append(("hs_buoy_marconi", "the buoy converted to Marconi (hs_buoy_marconi: no camera in it)"))
+    for ref, name in refs:
+        compare_table(g, ref, name, cols_for(ref), "owg", result)
+    if g["hs_best"].notna().any():
+        compare_table(g, "hs_best", "hs_best (a consistency check only: it CONTAINS the OWG, and the DEM's "
+                      "setup was computed from it)", cols_for("hs_best"), None, result)
+    if g["owg"].notna().any():
+        compare_table(g, "owg", "the OWG's ok frames of the same collections", cols_for("owg"), None, result)
+    print("\n  hs_* is the deep-water H0 shoaled to 21 m (Ks, linear theory): the currency of the ADCP,")
+    print("  hs_best and the OWG. [not indep.]: R2 and setup read the DEM's LEVEL, which carries the")
+    print("  station's setup C x sqrt(Hs L0) with Hs = hs_best (in storms mostly hs_buoy_marconi) or, on a")
+    print("  survey-date DEM, the ADCP's: their agreement with that reference is partly built in. S_IG")
+    print("  reads only the DEM's slope: 'from S_IG' is the camera-only candidate (with a buoy period it")
+    print("  shares the buoy's Tp). Decision rule: docs/VALIDATION.md 4.11.")
     return 0
 
 
@@ -1366,7 +1788,8 @@ def build_parser():
                     help=f"m the DEM profile is carried on past its edge (default {MAX_EXTRAPOLATE_M:g})")
     ap.add_argument("--max-retreat-speed", type=float, default=None,
                     help="fastest the swash edge may move seaward, m/s ON THE BEACH (default: "
-                         "runup_from_timestack.py's 3, which it applies on the still-water plane)")
+                         "runup_from_timestack.py's 3, which it applies along the line's path on the "
+                         "still-water plane)")
     ap.add_argument("--period-source", choices=["auto", "camera", "buoy"], default="auto",
                     help="T0: camera Tp when ok, else the buoy (auto, default); or only one of them")
     ap.add_argument("--period-csv", default=str(HERE / "archive" / "wave_period_c2.csv"))
@@ -1379,11 +1802,11 @@ def build_parser():
                     help=f"edge contrast below which a stack is 'low contrast' (default {MIN_CONTRAST:g}, "
                          "provisional)")
     ap.add_argument("--scatter", default=None,
-                    help="error model of the combination, e.g. 'r2=0.26:0.28,sig=0.26:0,setup=0:0.36' "
-                         "(relative:absolute m per estimate; default the module's SCATTER)")
+                    help="error model of the combination, e.g. 'r2=0.26:0.28:0.15,sig=0.26:0,setup=0:0.36' "
+                         "(relative:absolute m[:slope relative] per estimate; default the module's SCATTER)")
     ap.add_argument("--wait-days", type=float, default=WAIT_DAYS,
-                    help=f"leave stacks younger than this without a period, DEM or water level for a "
-                         f"later run (default {WAIT_DAYS:g})")
+                    help=f"leave stacks younger than this without a period, DEM, water level or (where the "
+                         f"GPS is in use) the GPS level for a later run (default {WAIT_DAYS:g})")
     ap.add_argument("--level-csv", default=None,
                     help="water level (epoch, level_navd88, or the formats historical_forcing.py reads) "
                          "instead of marconi_water_level.py")
@@ -1391,12 +1814,15 @@ def build_parser():
     ap.add_argument("--gnssr-spline", default=GNSSR_SPLINE)
     ap.add_argument("--gauge-csv", default=GAUGE_CSV)
     ap.add_argument("--no-gps", action="store_true", help="water level from the Chatham transfer only")
-    ap.add_argument("--since", default=None, help="only stacks from this UTC day (YYYY-MM-DD)")
-    ap.add_argument("--until", default=None, help="only stacks up to this UTC day (YYYY-MM-DD)")
+    ap.add_argument("--since", default=None, help="only stacks from this UTC day (YYYY-MM-DD); with "
+                    "--compare, only these are scored (the held-out stacks: --since the day after D)")
+    ap.add_argument("--until", default=None, help="only stacks up to this UTC day (YYYY-MM-DD), runs and "
+                    "--compare alike")
     ap.add_argument("--reprocess", action="store_true",
                     help="redo the stacks (of --since/--until) and replace their rows")
     ap.add_argument("--compare", action="store_true",
-                    help="against the ADCP (Jan-Mar 2025 stacks), else hs_best, the converted buoy and the OWG")
+                    help="against the ADCP (Dec 2024 - Mar 2025 stacks) and the converted buoy, with the OWG "
+                         "on the same stacks; hs_best and the OWG as consistency checks")
     ap.add_argument("--self-test", action="store_true")
     return ap
 

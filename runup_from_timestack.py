@@ -59,19 +59,30 @@ wrong call is visible.
 WHAT IT CANNOT DO.
   * Ground coordinates are computed on the horizontal plane at the
     still-water level. The swash sits above it, so positions are
-    biased along the camera ray, and for c2 not slightly: it sees the
-    swash ~230 m away from 19.8 m up, and over the swash 2-3 plane
-    metres stand for one beach metre on a 1:10 beach (a synthetic line
-    and beach, the real calibration: docs/VALIDATION.md 4.11). The
-    *_horiz_m columns and --max-retreat-speed are in those plane
-    metres. timestack_wave_height.py puts the same edge on the DEM.
+    biased along the camera ray: c2 sees the swash ~230 m away from
+    19.8 m up, so a point above still water lands further along its
+    ray (on a synthetic 1:7-1:14 beach with the real calibration, the
+    plane's straight-line span of the swash is 1.1-1.8 times the
+    beach's). Distances along the line are also the sum of the
+    pixel-to-pixel steps, so a line drawn as a staircase of single-
+    pixel steps adds its zigzag: on such a synthetic line the two
+    together give 2-3 metres of path per beach metre (docs/VALIDATION.md
+    4.11). How much of that real lines carry depends on how their .pix
+    was drawn. The *_horiz_m columns and --max-retreat-speed are in
+    these path metres. timestack_wave_height.py puts the same edge on
+    the DEM.
   * NO ELEVATIONS. An earlier version read setup and R2 off the
     intertidal DEM, but that DEM is built by giving each timex
     waterline -- which sits at the mean swash position -- the
     still-water level. At the mean swash position the DEM therefore
     equals still water by construction and "setup" came out near zero
     whatever the waves did. Elevations need a beach profile measured
-    independently of the waterlines (RTK, UAS or lidar survey).
+    independently of the waterlines (RTK, UAS or lidar survey). The
+    DEM now carries the station's setup C sqrt(hs_best L0), so
+    elevations read off it are still partly circular:
+    timestack_wave_height.py reads them, opt-in, with that caveat
+    (only its S_IG, which needs the DEM's slope and not its level, is
+    free of it: docs/VALIDATION.md 4.11).
   * Swash statistics are HORIZONTAL distances along the line (the
     *_horiz_m columns), not the vertical S of Stockdon et al. (2006).
     Converting needs the same independent profile.
@@ -111,6 +122,7 @@ DEFAULT_PIX_DIR = "/home/argus_user/arguseyes/build"
 SAMPLE_HZ = 2.0
 LINE_BREAK_PX = 100.0
 IG_CUTOFF_HZ = 0.05          # infragravity / incident split, standard in runup work
+LAND_REF_FRACTION = 0.85     # find_edge: the line's landward 15% is the no-foam reference
 # filename epoch is the burst start; stats refer to its middle (300.0 s: timex_timing.py)
 BURST_MID_OFFSET_S = float(TIMEX_MID_OFFSET_S)
 
@@ -204,7 +216,7 @@ def find_edge(gray, k, min_threshold, min_run=15, block=200):
     """
     g = cv2.GaussianBlur(gray.astype(np.float32), (3, 3), 0)
     n = g.shape[1]
-    land = slice(int(0.85 * n), n)
+    land = slice(int(LAND_REF_FRACTION * n), n)
 
     # Whole-row brightness changes: exposure steps or cloud shadow.
     land_level = np.median(g[:, land], axis=1, keepdims=True)
@@ -267,6 +279,25 @@ def runup_peaks(series, half_width=4):
 MAX_FILL_SAMPLES = 10    # gaps up to 5 s are bridged before spectral analysis
 
 
+def bridge_gaps(series):
+    """
+    The series with its gaps of up to MAX_FILL_SAMPLES bridged
+    linearly, as band_sig analyses it; None when over 10% of it is
+    missing or any gap is longer (no longer an evenly sampled record).
+    """
+    x = np.asarray(series, float)
+    bad = ~np.isfinite(x)
+    if bad.all() or bad.sum() > 0.1 * len(x):
+        return None
+    if bad.any():
+        edges = np.flatnonzero(np.diff(np.r_[0, bad.astype(int), 0]))
+        if (edges[1::2] - edges[::2]).max() > MAX_FILL_SAMPLES:
+            return None
+        idx = np.arange(len(x))
+        x = np.interp(idx, idx[~bad], x[~bad])
+    return x
+
+
 def band_sig(series, lo_hz, hi_hz):
     """
     Significant excursion (4 x std) of the part of the signal in
@@ -275,17 +306,8 @@ def band_sig(series, lo_hz, hi_hz):
     record and NaN is returned. (An earlier version dropped the NaNs and
     joined the remainder, which shifts every frequency.)
     """
-    x = np.asarray(series, float)
-    bad = ~np.isfinite(x)
-    if bad.all() or bad.sum() > 0.1 * len(x):
-        return np.nan
-    if bad.any():
-        edges = np.flatnonzero(np.diff(np.r_[0, bad.astype(int), 0]))
-        if (edges[1::2] - edges[::2]).max() > MAX_FILL_SAMPLES:
-            return np.nan
-        idx = np.arange(len(x))
-        x = np.interp(idx, idx[~bad], x[~bad])
-    if len(x) < 64:
+    x = bridge_gaps(series)
+    if x is None or len(x) < 64:
         return np.nan
     x = x - x.mean()
     f = np.fft.rfftfreq(len(x), 1.0 / SAMPLE_HZ)
