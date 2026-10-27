@@ -50,6 +50,7 @@ python3 test_evaluate_setup_model.py             # ends "all setup-model evaluat
 python3 test_dem_loess.py                        # ends "all loess DEM tests passed" (section 2.8)
 python3 test_georectify_uncertainty.py           # ends "all georectification uncertainty tests passed" (section 4.10)
 python3 test_timestack_wave_height.py            # ends "all timestack wave height tests passed" (section 4.11, opt-in)
+python3 test_measured_setup.py                   # ends "all measured setup tests passed" (section 4.12, opt-in)
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
@@ -68,7 +69,9 @@ the plan-view map and the comparisons, was checked on a 2026-09-29 build then.) 
 log and its opt-in correction (`pointing_daily.py`, section 4.6b) add nothing to a step's signature
 unless `--correct-pointing` is given. `survey_compare.py` gains `--camera-eo-day`, which only a
 corrected build passes; its new sha256 reruns a default build's comparisons and plan-view map once,
-with the same numbers.
+with the same numbers. The measured setup (section 4.12) changes `extract_elevation_contours.py`
+(detection) and `dem_from_contours.py` (DEM): the next build of a survey date reruns its detection and
+every step after it once, with the same numbers (the extractor's default is byte for byte as before).
 
 `view_reproject.py --self-test` needs scipy, which does not import on the NUC. That file's
 only change since this PR is the in-front-of-camera test of 20 Oct 2026 (section 3.5, re-pin;
@@ -2204,6 +2207,195 @@ than the series, or more than 7 days from its nearest DEM, keep C's setup.
   level carries no setup from the reference (step 4), on a NEW held-out period, with `--scatter`
   then set from their held-out errors. Otherwise it stays opt-in.
 
+### 4.12 Measured wave setup from the runup timestacks (opt-in, not in the cron: `measured_setup.py`, `--setup-source`)
+
+* **What.** The DEM gives each waterline still water + the MODELLED setup `C x sqrt(Hs x L0)`
+  (C = 0.037, section 4.1), which needs the buoy period: a frame without Tp gets no setup at all
+  (finding H2 of the review register). `measured_setup.py` MEASURES the setup of each 10-minute
+  collection instead, from the c2 runup timestack of the same collection: per line (1 and 2)
+  `timestack_wave_height.estimate_stack` unchanged (section 4.11: the swash edge put on a beach
+  profile ray by ray, less still water; `setup_m` is the mean of that series, Stockdon's <eta>),
+  then the median over the lines that pass the QC, with its own uncertainty. It writes
+  `archive/setup_measured_c2.csv`, one row per collection (appended; `--reprocess` rewrites; a
+  file of other columns is refused). Three of that script's settings differ, none of them in the
+  setup's arithmetic: the profile is the strictly-earlier DEM (next bullet), never a plane; the
+  edge-contrast label is off (on the real stacks of Oct 2026 `edge_contrast` had a median of
+  0.00-0.02 on every day, clear days included, so its provisional 0.05 labelled everything 'low
+  contrast'; the window's sharpness is the blur check instead); the period is a placeholder (a
+  mean has no period in it; the period gates only the H0 inversion, which is not used), so a
+  collection has a measured setup in a buoy outage too.
+* **The QC, per line, all of:** status `ok`; `window_sharpness >= 10` (`station_status.LENS_BLURRED`,
+  owg_live.py's sharpness of the bright frame of the same collection; a collection without one
+  fails, `--allow-no-sharpness` for a period without the OWG record); `valid_fraction >= 0.8` with
+  `n_peaks >= 20`; `off_profile_fraction <= 0.02`; `z_extrapolated_fraction <= 0.10` (PROVISIONAL:
+  10% of the edge on the profile's 10 m extension moves the mean by ~7 mm on a 1:10 foreshore
+  whose slope changes by 0.03 there); a finite `setup_m`; the still water from the source the
+  frames get (`gps` by default: a setup measured above one level and added to another carries
+  their difference 1:1). A collection passes with 1 line or more (`--min-lines`).
+* **Its uncertainty**, `setup_sigma_m` = sqrt(sampling^2 + lines^2). Sampling: the standard error
+  of a 10-minute mean from the series' own low-frequency level (the mean periodogram over 0 <
+  f <= 0.005 Hz taken as the level at zero frequency, sqrt(G0 / 2T)); the lines' sampling errors
+  taken as fully correlated (infragravity swash is coherent between the lines). Lines: the sd of
+  the lines' setups / sqrt(n) (two lines: half their difference); with one line unknown, and then
+  `setup_sigma_m` is the sampling term alone (noted). NOT in it: the level error of the profile
+  (the DEM's or a survey's: a bias common to every collection standing on it) and the detector's
+  own bias.
+* **THE CIRCULARITY RULE: the DEM is strictly earlier.** The swash elevation is read off a DEM, and
+  a DEM of waterlines carries the setup its lines were given: on the DEM of its own week the
+  measured setup tends to the model's `C x sqrt(Hs x L0)` itself (section 4.11), i.e. it echoes the
+  model. So the profile comes ONLY from a DEM built from days strictly before the stack's UTC day:
+  of `archive/dems` (`dem_<window end>_<days>d_dem.asc`), the one whose window ends latest before
+  that day, at most 3 days before (`--max-dem-age-days`); none, no measurement. A DEM whose window
+  holds the frame's day, the DEM being built from the frame's own window included, is never used,
+  so no frame's elevation is ever computed from a DEM that holds that frame or its day. A DEM file
+  whose window is not known (not a series name) is refused. Each row records the DEM, its window,
+  its age and its sha256 (12 hex), so the rule can be checked afterwards.
+* **What the live measured setup corrects, and what it cannot.** Standing on an earlier DEM, it
+  corrects the model's DAY-TO-DAY departures, those the offshore Hs and Tp do not see: the buoy
+  outages (no Tp, no model setup), the wave direction (sheltered south-west seas), groupiness and
+  infragravity energy. It INHERITS the long-term level of the DEM it stands on: that DEM's lines
+  carried the model's setup (or, once measured setups are in use, those of still earlier DEMs), so
+  a chain of DEMs built with measured setups keeps the level of its first, model-built, DEMs; it
+  cannot correct C's long-term level, which only the survey-date check below can test. And it
+  reads BEACH CHANGE since that DEM as setup: the edge is put on the OLD beach, so where the beach
+  has eroded by d since, the rays meet the old, higher surface first and the setup reads high by
+  d / (1 - beta / tan(delta)) [SYNTH, real c2 calibration: a DEM 0.10 m above a 1:10 beach read
+  the setup +0.154 m, 0.10 m below -0.154 m; +0.13 / +0.19 m on 1:14 / 1:8 beaches, tan(delta)
+  ~0.29]. Given to the waterline of the same collection, which lies near the mean swash position,
+  that setup puts the line back onto the old surface: **at the timestack lines a DEM built with
+  measured setups follows the DEM it stood on, not the beach**, and its week-to-week change is
+  suppressed there (the rest of the view keeps its change relative to the lines). This is why the
+  DEM is the most recent earlier one, why the default stays the model, and why the live trial
+  below is scored against a survey after a storm.
+* **Opt-in.** `extract_elevation_contours.py --setup-source model` (the default) writes the
+  station's files exactly as before: `test_measured_setup.py` runs the extractor this branch
+  started from (commit `33221c8`) and the new one on the same inputs, with no waves, with waves,
+  with `--setup-coef 0.037`, with the slope-aware model, with `--setup-source model` and with
+  `--setup-measured` alone: the same file and the same log, byte for byte, and the default's
+  output has a pinned sha256; the default does not even import `measured_setup.py`. `measured`:
+  a frame whose file-name epoch lies within 300 s of a QC-passed collection's start gets that
+  collection's setup (the frames of both cameras), the others none (blank, the water level, as a
+  frame without Tp). `auto`: the measured one where there is one, the model's elsewhere. Either
+  adds a last column `setup_source` (`measured` / `model` / `none`); every reader reads by name
+  (checked: `georectify.py`, `waterline_consistency.py`, `evaluate_setup_model.read_lines`,
+  `dem_from_contours.py`, which then counts the frames of each source in its log and
+  `_info.json`, and nothing new where the column is absent). `survey_products.apply_setup`
+  recomputes C's setup on live rows, as before, and now drops `setup_source` with it (it would
+  misname C's setup); the survey-date products keep C whatever the cron says. The cron:
+  `SETUP_SOURCE=""` (default: the options as before); `"auto"` or `"measured"` add `--setup-source
+  ... --setup-measured $BASE/archive/setup_measured_c2.csv` (any other value nothing; while that file
+  does not exist, the model's setup and a WARNING in the log, so the contour stage never fails for it).
+  The cron runs neither `measured_setup.py` nor `timestack_wave_height.py`: the file is kept
+  current by hand or by its own crontab line (below), and with `auto` a stale file falls back to
+  the model frame by frame. Editing the extractor and `dem_from_contours.py` changes their
+  sha256, so the next survey-date build reruns its detection and everything after it once, with
+  the same numbers (section 1).
+* **Evidence: synthetic only here [SYNTH]** (`test_measured_setup.py`; the synthetic c2 scene of
+  section 4.11: the real c2 calibration, a planar 1:10 beach, Stockdon-shaped swash):
+
+  | check | result |
+  |---|---|
+  | The setup on the DEM of the day before, H0 1.5 m, T 10 s | 0.642 m against the swash's own 0.576 m (+0.066 m: the detector, section 4.11); sampling 0.028 m |
+  | The DEM 0.10 m too high / too low | +0.154 / -0.154 m (inherited level; beach change read as setup) |
+  | Only the DEM of the stack's own day | not used: no measurement (old stack), waits (young) |
+  | Sampling error against Gaussian records (rms predicted / true sd of the mean) | 1.10 flat to zero frequency, 2.55 empty below 0.005 Hz, 0.96 level below 1/T |
+  | The same plane as a survey's surface (`evaluate_measured_setup.py`) | the same setup as on the station DEM, within 5 mm |
+  | Lines planted at truth C = 0.045 (the c1 fixture of section 4.1), every other frame with its true setup as the measured one | measured: bias +0.002 m, RMSE 0.015 m; model C = 0.037: bias -0.082 m, RMSE 0.086 m; `auto` over every frame 0.066 m |
+  | The extractor, default | byte for byte as `33221c8`'s in 7 option sets; `measured` / `auto`: the 300 s window, both cameras, the outage frame filled |
+
+* **[REAL] what exists.** On the clear days 17-18 Oct 2026 `timestack_wave_height.py` read setups
+  of 0.16-0.55 m against Stockdon's ~0.31 m for H0 ~1 m, T 7 s, beta_f 0.10, on the nearest DEM
+  (the circular one); its edge contrast was useless on every day (above). Those are the station's
+  numbers of 27 Oct 2026, not reproduced here.
+* **[NUC] Evaluation procedure.**
+  ```
+  python3 test_measured_setup.py                      # ends "all measured setup tests passed"
+  python3 -c "import glob, os, collections, datetime as d; c = collections.Counter(str(d.datetime.utcfromtimestamp(int(os.path.basename(p).split('.')[0])).date()) for p in glob.glob('archive/ras_c2/*.ras.tiff')); [print(k, n) for k, n in sorted(c.items())]"   # stacks per UTC day
+  ```
+  1. **The survey-date check first (the clean test).** `evaluate_measured_setup.py` puts the swash
+     edge on the SURVEY's surface (independent of the station's DEM and of C), measures the setup
+     per collection with the QC above, and compares it with the model of the same collections'
+     frames: the C that would match (least squares through the origin, 90% day-block bootstrap
+     interval), measured - model by Hs band, tide phase and day offset from the survey; then it
+     scores the product's lines against the survey with the model's setup and with the measured
+     one (re-projected, `evaluate_setup_model.py`'s survey-floor rule and gross-failure cut), and
+     `auto` over every frame. Survey dates with stacks: 2026-09-29 (the RTK checkshots, window 26
+     Sep - 2 Oct, if `archive/ras_c2` holds that week; the transects cover only ~+1.2 m and up, so
+     only high-water stacks within 5 m of a transect pass; and C was fitted to these shots, so the
+     model is CIRCULAR there and the report says so); 2025-01-23 and 2025-03-06 (the lidars:
+     INDEPENDENT) only once their c2 stacks are fetched back from S3, with that period's pixel list
+     (`--pix`) and no OWG record (`--allow-no-sharpness`). The BLIND 2024-10-23 row is never opened.
+     ```
+     python3 survey_products.py --date 2026-09-29        # the product the check reads (if not built yet)
+     python3 evaluate_measured_setup.py --dates 2026-09-29 --json /mnt/I2Rgus_Data/survey_products/msetup_2026-09-29.json
+     python3 evaluate_measured_setup.py --dates 2025-01-23 --ras-dir <the fetched Jan 2025 c2 stacks> \
+         --pix <the c2 .pix of that width> --allow-no-sharpness --json /mnt/I2Rgus_Data/survey_products/msetup_2025-01-23.json
+     ```
+     Read: how many collections pass and why the others fail (the `failed:` lines; the share
+     extrapolated decides whether 0.10 is right); C_fit and its interval against 0.037; measured -
+     model by Hs band (storms: Hs >= 2 m) and by flood / ebb; THE LINES ON THE SURVEY, model against
+     measured on the same frames, per camera.
+  2. **Then a live trial window**, on stacks and a DEM series the station already has. Measure
+     (the first run reads every archived stack: hours; then minutes a day, e.g. a crontab line
+     before the cron's contour stage, `python3 measured_setup.py >> archive/measured_setup.log 2>&1`),
+     then build the DEMs of one window three ways from the same rows and score each against the
+     NEXT survey (one that fitted nothing, best a calm low-tide RTK across the intertidal after a
+     storm, or a lidar):
+     ```
+     python3 measured_setup.py
+     for s in model measured auto; do
+       python3 extract_elevation_contours.py /home/argus_user/GNSS/v4.1/products/refl_code/Files/usgs/usgs_spline_out.txt \
+           --processed-dir archive/processed_timex \
+           --waves archive/waves_marconi.csv --setup-coef 0.037 --gnssr-qc-reference archive/gauge_8447435.csv \
+           --timing-mode legacy --setup-source $s --setup-measured archive/setup_measured_c2.csv \
+           --output /tmp/trial/contours_$s.csv
+       python3 waterline_consistency.py /tmp/trial/contours_$s.csv --output /tmp/trial/qc_$s.csv \
+           --report /tmp/trial/report_$s.csv --plot /tmp/trial/qc_$s --image-dir archive/images_timex --plot-days 7
+       python3 georectify.py /tmp/trial/qc_$s.csv /tmp/trial/ground_$s.csv \
+           --io-c1 calibration/CACO05_c1_20240801_IO.yaml --eo-c1 calibration/CACO05_c1_20251113_EO-CV.yaml \
+           --io-c2 calibration/CACO05_c2_20240801_IO.yaml --eo-c2 calibration/CACO05_c2_20251113_EO-CV.yaml
+       python3 dem_from_contours.py /tmp/trial/ground_$s.csv /tmp/trial/dem_$s --max-hs 1.5 --max-day-offset 0.15 \
+           --start-date <first> --end-date <last> --cell 2.0 --min-points 3 --max-spread 0.5
+       python3 survey_compare.py --dem /tmp/trial/dem_${s}_dem.asc --survey <the next survey> --survey-type <dsm|points> \
+           --name trial_$s --output-dir /tmp/trial/compare_$s --label INDEPENDENT --why "live trial, setup $s" \
+           --survey-date <its date> --photo-dates <first> <last> --contours /tmp/trial/ground_$s.csv
+     done
+     ```
+     (the `_info.json` of each DEM counts its frames per `setup_source`; `--setup-source model`'s
+     contour file is the station's own, byte for byte.) Also map the change across a storm two ways,
+     `dem_change.py` on the model DEMs and on the measured ones of the week before and the week
+     after: at the c2 lines the measured ones must show change, or they are following the earlier
+     DEM (the inheritance above).
+* **Decision rule: when `auto` (or `measured`) may become the default.** The station stays on the
+  model unless ALL of:
+  1. on the survey-date check, on the INDEPENDENT dates (not the 2026-09-29 RTK, which C was fitted
+     to), over the frames both score, the measured setup's lines are at least as good as the
+     model's: RMSE no larger, |bias| no more than 0.02 m larger, on each date or, with 3 or more
+     dates, on average and on a majority; and C_fit's 90% interval says what the difference is
+     (a measured setup that only rescales C argues for refitting C, section 4.1, not for switching);
+  2. ESPECIALLY where the model is weak: in storms (frames with Hs >= 2 m) the measured RMSE is no
+     larger than the model's, and where the buoy period is missing (the H2 frames, counted by the
+     check; in the live trial the DEM with `auto` holds them where the model's leaves them at still
+     water) the measured setup is available for most of them (half or more of those collections
+     pass the QC). If neither condition arises on the dates checked, the rule is not met: the
+     switch is for those conditions;
+  3. in the live trial, the `auto` (or `measured`) DEM against the next survey is at least as good
+     as the model's (RMSE and bias, the same cells), AND its change across a storm at the c2 lines
+     is not suppressed relative to the model DEMs' (the inheritance); and
+  4. the QC holds on real stacks: the `failed:` reasons make sense (no rule rejecting nearly every
+     stack, e.g. the extrapolated share), and blurred-window days fail as they should.
+
+  Then `SETUP_SOURCE="auto"` in the cron, with `measured_setup.py` run before the contour stage,
+  and the owner's approval (every DEM changes with it). Otherwise it stays opt-in.
+* **Known limits.** The inheritance and the beach change (above). Still water is not setup-free
+  (the GNSS-R footprint holds part of the setup, section 4.11): the measured setup is above the
+  same level the lines get, which is what a line needs, not Stockdon's setup above the tide. The
+  timex waterline is the edge of a time-averaged image, not the mean elevation of the
+  instantaneous edge: how the two relate is what the survey-date check measures (C, fitted to
+  lines, absorbs it; the measurement does not). One place, c2's lines 1 and 2, for the whole view
+  of both cameras. The detector's bias (+0.04 to +0.10 m on the synthetic scenes). Night, fog and a
+  wet window give no measurement. Ten minutes: sampling 0.02-0.03 m on the synthetic swash.
+
 ---
 
 ## 5. Reproducing the before/after on the real contours
@@ -2253,6 +2445,11 @@ copy of today's pictures made before the pull (section 1).
   real errors, its low-contrast threshold and whether its camera-only estimate (from S_IG; R2 and
   setup read a DEM level that carries the references' setup) beats or complements the OWG are for
   the NUC's held-out comparison and the decision rule there. Until then it stays opt-in.
+* **The measured setup (section 4.12).** Checked on synthetic stacks and surveys only. Whether the
+  setup measured on the timestacks places the lines better than the model is for the survey-date check
+  (`evaluate_measured_setup.py`: the 2025 lidar dates need their c2 stacks back from S3) and then a live
+  trial against the next survey; live, it inherits the level of the earlier DEM it stands on and reads
+  beach change since as setup. Until the decision rule there is met it stays opt-in.
 * **The real 2025 numbers.** Only the NUC has the real January and March 2025 photos. The
   sandbox numbers for those dates are synthetic and test the pipeline only.
 * **An unbiased 2026 level.** The 2026 RTK stops at +1.17 to +1.80 m; every C = 0 line, and some

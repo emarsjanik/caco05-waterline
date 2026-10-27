@@ -59,6 +59,22 @@ how many seconds later its level was taken. A detection is only used in
 the mode it was detected in (its Timing_Mode column; none = legacy): a
 blended legacy line given a mid-exposure level is 11.5 min behind it,
 worse than either mode, so such files are left out and counted.
+
+THE MEASURED SETUP (opt-in: --setup-source; measured_setup.py). With
+--setup-coef and --waves, the default --setup-source model gives every
+frame the model's setup, exactly as before (the same file, byte for byte:
+test_measured_setup.py). 'measured' gives a frame the setup MEASURED on
+the c2 runup timestack of its own collection (--setup-measured, the file
+measured_setup.py writes: its collection starts within 300 s of the
+frame's file-name epoch and passed its QC), the frames of both cameras
+alike; a frame without one gets no setup (blank, its beach elevation the
+water level, as a frame without Tp). 'auto' gives the measured setup where
+there is one and the model's elsewhere. Either adds a last column,
+setup_source (measured / model / none), which dem_from_contours.py counts.
+The measured setup stands on a DEM of earlier days only, and what that
+means for the DEM (it inherits that DEM's level, and reads beach change
+since as setup) is in measured_setup.py; whether the station switches is
+docs/VALIDATION.md 4.12.
 """
 
 import argparse
@@ -76,6 +92,10 @@ import timex_timing
 from setup_model import (SETUP_MODELS, STOCKDON_SETUP_K, EvolvingSlope, deshoal_depth, model_tag,
                          setup_c, stockdon_frame)
 
+
+# --setup-source: the model's setup (the default), the measured one (measured_setup.py), or the
+# measured one where there is one and the model's elsewhere
+SETUP_SOURCES = ("model", "measured", "auto")
 
 DEFAULT_PROCESSED_DIR = "/mnt/I2Rgus_Data/waterline/processed"
 DEFAULT_OUTPUT = "/mnt/I2Rgus_Data/waterline/contour_points.csv"
@@ -910,6 +930,16 @@ def main():
                              "'auto' (default): 21 m for the ADCP currency (waves_marconi.csv "
                              "hs_best, historical_forcing.py's waves), none for a raw buoy file; "
                              "'none': H0 = Hs.")
+    parser.add_argument("--setup-source", choices=SETUP_SOURCES, default="model",
+                        help="Which setup --setup-coef switches on (opt-in; measured_setup.py). 'model' (the "
+                             "default): the --setup-model's, as before, byte for byte. 'measured': the setup "
+                             "measured on the c2 runup timestack of the frame's own collection "
+                             "(--setup-measured; within 300 s of its file-name epoch, QC passed), else none "
+                             "(blank, like a frame without Tp). 'auto': the measured one where there is one, "
+                             "else the model's. Either adds the last column setup_source.")
+    parser.add_argument("--setup-measured", default=None,
+                        help="With --setup-source measured or auto (required there): measured_setup.py's "
+                             "file of measured setups per collection (archive/setup_measured_c2.csv).")
     parser.add_argument("--vertical-datum-offset", type=float, default=0.0,
                          help="Meters to ADD to every tide elevation, converting the tide "
                               "model's vertical datum (mean sea level or a geoid, for global "
@@ -948,6 +978,19 @@ def main():
             sys.exit(1)
         if not 0 < args.setup_stockdon_k < float("inf"):
             print(f"ERROR: --setup-stockdon-k {args.setup_stockdon_k}: must be a finite number above 0.")
+            sys.exit(1)
+    measured = None
+    if args.setup_source != "model":
+        # checked before any frame is read, like the slope-aware model's options
+        if args.setup_coef is None or not args.waves or not args.setup_measured:
+            print(f"ERROR: --setup-source {args.setup_source} needs --setup-coef and --waves (the switch that turns "
+                  f"the setup on, and the model's setup where it is needed) and --setup-measured.")
+            sys.exit(1)
+        from measured_setup import MeasuredSetups
+        try:
+            measured = MeasuredSetups(args.setup_measured)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: --setup-measured {args.setup_measured}: {exc}")
             sys.exit(1)
 
     using_gnssr = looks_like_gnssr_spline(args.tide_model_csv)
@@ -1231,9 +1274,29 @@ def main():
             slope_aware = None
             if args.setup_model == "stockdon":
                 slope_aware = stockdon_setups(output_rows, args, wave_tag)
+            # --setup-source measured / auto: each frame's measured setup (its collection's, by its
+            # file-name epoch), and which setup every frame got; None in the default (model)
+            measured_of = source_of = None
+            if measured is not None:
+                measured_of = {}
+                for r in output_rows:
+                    if r[0] not in measured_of:
+                        measured_of[r[0]] = measured.at(r[3])
+                source_of = {}
             for r in output_rows:
                 hs, tp = r[-2], r[-1]
-                if slope_aware is not None:
+                m = measured_of.get(r[0]) if measured_of is not None else None
+                if m is not None:
+                    # the collection's measured setup in place of the model's (the slope-aware model's
+                    # columns then hold no slope, and its tag)
+                    r.extend([round(m, 4), round(r[6] + m, 4)] + (["", slope_aware["tag"]] if slope_aware else []))
+                    source_of[r[0]] = "measured"
+                elif measured_of is not None and args.setup_source == "measured":
+                    # no measured setup: no setup at all (blank, as a frame without Tp)
+                    no_waves.add(r[0])
+                    r.extend(["", r[6]] + (["", slope_aware["tag"]] if slope_aware else []))
+                    source_of[r[0]] = "none"
+                elif slope_aware is not None:
                     # the slope-aware model's setup and the slope it used (setup_model.py)
                     s = slope_aware["frames"].get(r[0])
                     if s is not None:
@@ -1254,10 +1317,24 @@ def main():
             setups = [r[isu] for r in output_rows if r[isu] != ""]
             what = (f"C = {args.setup_coef}" if slope_aware is None else
                     f"slope-aware (Stockdon et al. 2006, k = {args.setup_stockdon_k:g}; {slope_aware['how']})")
+            left = "without wave height+period"
+            if source_of is not None:
+                for r in output_rows:
+                    source_of.setdefault(r[0], "none" if r[0] in no_waves else "model")
+                what = (f"measured (the collection's own, {args.setup_measured})"
+                        + (f", else {what}" if args.setup_source == "auto" else ""))
+                left = ("without a measured setup" if args.setup_source == "measured" else
+                        "without a measured setup or wave height+period")
             print(f"Setup correction         : {what}, "
                   + (f"{min(setups):.3f}-{max(setups):.3f} m" if setups else "none applied")
-                  + (f"; {len(no_waves)} frame(s) without wave height+period left uncorrected"
+                  + (f"; {len(no_waves)} frame(s) {left} left uncorrected"
                      if no_waves else ""))
+            if source_of is not None:
+                n_src = {k: sum(1 for v in source_of.values() if v == k) for k in ("measured", "model", "none")}
+                print(f"Setup source             : --setup-source {args.setup_source}: "
+                      + ", ".join(f"{k} {v}" for k, v in n_src.items()) + f" frame(s) ({measured.ok} of "
+                      f"{measured.rows} collection(s) of the file measured and QC-passed; a frame takes the one "
+                      f"starting within {measured.tol:g} s of its file-name epoch)")
             if slope_aware is not None:
                 for line in slope_aware["lines"]:
                     print(line)
@@ -1286,6 +1363,14 @@ def main():
         offsets = sorted(set(level_offset_of[r[0]] for r in output_rows))
         print(f"Water-level time         : {timing}: level (and waves) taken at capture_epoch + "
               + ", ".join(f"{o} s" for o in offsets) + f" ({timex_timing.LEVEL_OFFSET_COLUMN})")
+
+    # --setup-source measured / auto only: which setup each frame got, as the very last column (every
+    # column before it, wave_source and level_time_offset_s included, is where it was); the default
+    # (model) rows are exactly as before
+    if measured is not None:
+        for r in output_rows:
+            r.append(source_of[r[0]])
+        header += ["setup_source"]
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

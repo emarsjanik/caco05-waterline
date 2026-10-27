@@ -296,6 +296,17 @@ SETUP_COEF="0.037"
 # SETUP_COEF whatever this says).
 SETUP_MODEL=""
 SETUP_STOCKDON_K=""
+# Where each frame's setup comes from (extract_elevation_contours.py --setup-source).
+# "" (the default, the station's): the model above, the rows exactly as
+# before. "auto" (opt-in, NOT the station's): the setup MEASURED on the c2
+# runup timestack of the frame's own collection where there is one
+# (archive/setup_measured_c2.csv, which measured_setup.py writes; this cron
+# does not run it), the model's elsewhere; "measured": that one only, no
+# setup without it. The measured setup stands on the DEM of earlier days, so
+# it inherits that DEM's level and reads beach change since as setup: switch
+# only as docs/VALIDATION.md 4.12 says. Any other value is ignored (the model);
+# so is the switch while that file does not exist (a WARNING in the log).
+SETUP_SOURCE=""
 # If GNSS-R falls further behind than this, something has stopped --
 # 2 days is normal, so this allows generous margin before complaining.
 GNSSR_STALE_DAYS=5
@@ -582,6 +593,17 @@ else
     elif [ -n "$SETUP_MODEL" ] && [ "$SETUP_MODEL" != "c" ] && [ "$SETUP_MODEL" != "stockdon" ]; then
         log "WARNING: SETUP_MODEL=\"$SETUP_MODEL\" is not \"\", \"c\" or \"stockdon\": the setup stays C*sqrt(Hs*L0)"
     fi
+    # the opt-in measured setup (SETUP_SOURCE above): only with the setup on, only "measured" or "auto",
+    # only when measured_setup.py's file is there (else the model's, with a WARNING)
+    case "$SETUP_SOURCE" in
+        measured|auto)
+            if [ -n "$setup_arg" ] && [ -f "$BASE/archive/setup_measured_c2.csv" ]; then
+                setup_arg="$setup_arg --setup-source $SETUP_SOURCE --setup-measured $BASE/archive/setup_measured_c2.csv"
+                log "setup: SETUP_SOURCE=$SETUP_SOURCE, the measured setup of $BASE/archive/setup_measured_c2.csv"
+            elif [ -n "$setup_arg" ]; then
+                log "WARNING: SETUP_SOURCE=$SETUP_SOURCE but no $BASE/archive/setup_measured_c2.csv (measured_setup.py writes it): the model's setup"
+            fi ;;
+    esac
     # GNSS-R QC report and plot (the contour and runup stages apply the
     # same QC themselves through $qc_arg).
     if [ -f "$GAUGE_CSV" ]; then

@@ -1282,6 +1282,9 @@ def estimate_stack(ras_path, line, ctx, now=None):
         with np.errstate(invalid="ignore"):
             past_line = np.isfinite(edge) & (edge >= cut)
         st = swash_stats(z_abs, swl, edge, above, below, valid, rargs.min_peaks, rargs.min_valid, past_line)
+        sink = getattr(ctx, "series_out", None)
+        if sink is not None:                # measured_setup.py: the series whose mean setup_m is (its sampling error)
+            sink[(s["name"], int(line))] = z_abs - swl
         notes += st["notes"]
         with np.errstate(invalid="ignore"):
             on = np.isfinite(z_abs)

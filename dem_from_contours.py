@@ -43,7 +43,10 @@ SOURCES OF ERROR, roughly in order of size:
     (--fit-setup checks it against repeat crossings). Without it the edge
     is given the still-water elevation and the DEM reads LOW where
     rough-water frames land; --max-hs leaves the roughest frames out,
-    using the offshore wave record (fetch_buoy_waves.py).
+    using the offshore wave record (fetch_buoy_waves.py). Contours made
+    with the opt-in measured setup (extract_elevation_contours.py
+    --setup-source measured / auto) say per frame which setup it got
+    (setup_source): the log and _info.json then count the frames of each.
 
 Usage:
     python3 dem_from_contours.py contour_points_ground.csv dem_out \\
@@ -138,6 +141,7 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
     wave_source_of = {}           # frame -> its wave_source (extract_elevation_contours.py)
     level_offset_of = {}          # frame -> its level_time_offset_s (None: a legacy row, none)
     setup_model_of = {}           # frame -> its setup_model (--setup-model stockdon rows only)
+    setup_source_of = {}          # frame -> its setup_source (--setup-source measured / auto rows only)
     with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
         if "easting_utm19" not in (reader.fieldnames or []):
@@ -145,6 +149,7 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             sys.exit(1)
         has_source = "source_file" in (reader.fieldnames or [])
         has_model = "setup_model" in (reader.fieldnames or [])
+        has_source_col = "setup_source" in (reader.fieldnames or [])
         if max_hs is not None and "offshore_hs_m" not in (reader.fieldnames or []):
             print("ERROR: --max-hs needs an 'offshore_hs_m' column. Run "
                   "extract_elevation_contours.py with --waves first.")
@@ -187,6 +192,8 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
             level_offset_of.setdefault(frames[-1], r.get("level_time_offset_s"))
             if has_model:
                 setup_model_of.setdefault(frames[-1], r.get("setup_model") or "")
+            if has_source_col:
+                setup_source_of.setdefault(frames[-1], r.get("setup_source") or "")
             try:
                 ucol.append(float(r.get("pixel_column") or "nan"))
             except ValueError:
@@ -203,6 +210,8 @@ def load_points(path, camera=None, start_date=None, end_date=None, max_hs=None, 
                      level_time_offset=level_offset_of)
         if has_model:
             stats.update(setup_model=setup_model_of)
+        if has_source_col:
+            stats.update(setup_source=setup_source_of)
     return (np.array(E), np.array(N), np.array(Z),
             np.array(cams), np.array(dates), np.array(frames), missing_ground)
 
@@ -2699,6 +2708,17 @@ def main():
         setup_models = dict(sorted(setup_models.items()))
         print("Setup model       : " + ", ".join(f"{t} {n} frame(s)" for t, n in setup_models.items())
               + " (setup_model.py)")
+    # Which setup each frame got, when the contours say (extract_elevation_contours.py --setup-source
+    # measured / auto writes setup_source; the default rows carry no such column: log and _info.json as before)
+    setup_sources = None
+    if "setup_source" in load_stats:
+        setup_sources = {}
+        for f in set(frames.tolist()):
+            t = load_stats["setup_source"].get(f, "") or "unrecorded"
+            setup_sources[t] = setup_sources.get(t, 0) + 1
+        setup_sources = dict(sorted(setup_sources.items()))
+        print("Setup source      : " + ", ".join(f"{t} {n} frame(s)" for t, n in setup_sources.items())
+              + " (measured_setup.py)")
     print()
 
     dem, count, spread, e0, n0, ncols, nrows = build_grid(
@@ -2893,6 +2913,9 @@ def main():
         # which setup model placed the lines (setup_model.py), only when the contours carry the
         # setup_model column (--setup-model stockdon): {its tag: frames}
         **({"setup_model": setup_models} if setup_models is not None else {}),
+        # which setup each frame got (measured / model / none), only when the contours carry the
+        # setup_source column (--setup-source measured / auto): {source: frames}
+        **({"setup_source": setup_sources} if setup_sources is not None else {}),
         # <stem>_sigma.asc: what it is (sigma_grid) and its median / p90 over the cells with one
         "sigma": {"file": "_sigma.asc",
                   "definition": "1.25 x (16-84 percentile spread / 2) / sqrt(frames): the standard error of "
