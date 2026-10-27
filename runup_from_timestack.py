@@ -59,8 +59,12 @@ wrong call is visible.
 WHAT IT CANNOT DO.
   * Ground coordinates are computed on the horizontal plane at the
     still-water level. The swash sits above it, so positions are
-    slightly biased along the camera ray. Small for position, but it
-    is one more reason elevations here are approximate.
+    biased along the camera ray, and for c2 not slightly: it sees the
+    swash ~230 m away from 19.8 m up, and over the swash 2-3 plane
+    metres stand for one beach metre on a 1:10 beach (a synthetic line
+    and beach, the real calibration: docs/VALIDATION.md 4.11). The
+    *_horiz_m columns and --max-retreat-speed are in those plane
+    metres. timestack_wave_height.py puts the same edge on the DEM.
   * NO ELEVATIONS. An earlier version read setup and R2 off the
     intertidal DEM, but that DEM is built by giving each timex
     waterline -- which sits at the mean swash position -- the
@@ -244,15 +248,20 @@ def find_edge(gray, k, min_threshold, min_run=15, block=200):
     return smoothed, threshold, anomaly
 
 
-def runup_peaks(series, half_width=4):
-    """Local maxima (one per uprush) of a runup series, NaNs ignored."""
+def peak_mask(series, half_width=4):
+    """True at the local maxima (one per uprush) of a runup series, NaNs ignored."""
     s = np.where(np.isfinite(series), series, -np.inf)
     padded = np.pad(s, half_width, constant_values=-np.inf)
     window = np.stack([padded[i:i + len(s)] for i in range(2 * half_width + 1)])
     is_peak = (s == window.max(axis=0)) & np.isfinite(series)
     # Collapse plateaus to their first sample.
     is_peak[1:] &= ~(is_peak[:-1] & (s[1:] == s[:-1]))
-    return series[is_peak]
+    return is_peak
+
+
+def runup_peaks(series, half_width=4):
+    """Local maxima (one per uprush) of a runup series, NaNs ignored."""
+    return series[peak_mask(series, half_width)]
 
 
 MAX_FILL_SAMPLES = 10    # gaps up to 5 s are bridged before spectral analysis
@@ -327,7 +336,21 @@ def water_level_at(gnssr, epoch):
     return float(np.interp(epoch, g_ep, g_lv))
 
 
-def process(ras_path, args, pix_cache, gnssr):
+def swash_edge(ras_path, args, pix_cache, gnssr):
+    """
+    The swash edge of one stack along line args.line: the part of
+    process() everything it reports is computed from, so another
+    script (timestack_wave_height.py) can use the same edge without a
+    copy of the steps. None (reason printed) for a stack that cannot be
+    read; else a dict of:
+      name, cam, epoch (burst start), mid_epoch, wl (GNSS-R level or
+      NaN), z_plane (the plane the line was georectified on), sea_at,
+      gray (time x pixels, sea end first), line_uv (sea end first),
+      threshold, anomaly (find_edge), valid (fraction of rows with an
+      edge), E, N, dist (per pixel, on z_plane), pos (edge, m along the
+      line from the sea end, retreat-limited) and edge (the same as a
+      fractional column index from the sea end; NaN where none).
+    """
     name = Path(ras_path).name
     cam = args.camera or camera_from_name(name)
     epoch = epoch_from_name(name)
@@ -389,6 +412,19 @@ def process(ras_path, args, pix_cache, gnssr):
         if np.isfinite(pos[t - 1]) and np.isfinite(pos[t]) and pos[t] < pos[t - 1] - step_m:
             pos[t] = pos[t - 1] - step_m
     edge = np.where(np.isfinite(pos), np.interp(pos, dist, idx), np.nan)
+    return {"name": name, "cam": cam, "epoch": epoch, "mid_epoch": mid_epoch, "wl": wl,
+            "z_plane": z_plane, "sea_at": sea_at, "gray": gray, "line_uv": line_uv,
+            "threshold": threshold, "anomaly": anomaly, "valid": valid,
+            "E": E, "N": N, "dist": dist, "pos": pos, "edge": edge}
+
+
+def process(ras_path, args, pix_cache, gnssr):
+    s = swash_edge(ras_path, args, pix_cache, gnssr)
+    if s is None:
+        return None
+    name, cam, epoch, mid_epoch, wl = s["name"], s["cam"], s["epoch"], s["mid_epoch"], s["wl"]
+    sea_at, threshold, anomaly, valid = s["sea_at"], s["threshold"], s["anomaly"], s["valid"]
+    E, N, dist, pos, edge = s["E"], s["N"], s["dist"], s["pos"], s["edge"]
 
     peaks = runup_peaks(pos)
     enough = len(peaks) >= args.min_peaks and valid >= args.min_valid
@@ -432,7 +468,8 @@ def process(ras_path, args, pix_cache, gnssr):
     }
 
 
-def main():
+def build_parser():
+    """The command line (also how timestack_wave_height.py gets the same edge settings)."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("ras", nargs="+",
                     help="*.ras.tiff timestacks, or folders of them (all *.ras.tiff inside "
@@ -476,7 +513,11 @@ def main():
     ap.add_argument("--gnssr-qc-reference", default=None,
                     help="Tide-gauge archive for GNSS-R quality control (gnssr_qc.py); failed "
                          "readings are removed, so stacks at those times get no water level.")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
 
     gnssr = None
     if args.gnssr:

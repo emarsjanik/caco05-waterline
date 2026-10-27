@@ -49,6 +49,7 @@ python3 test_setup_model.py                      # ends "all setup model tests p
 python3 test_evaluate_setup_model.py             # ends "all setup-model evaluation tests passed" (section 4.1)
 python3 test_dem_loess.py                        # ends "all loess DEM tests passed" (section 2.8)
 python3 test_georectify_uncertainty.py           # ends "all georectification uncertainty tests passed" (section 4.10)
+python3 test_timestack_wave_height.py            # ends "all timestack wave height tests passed" (section 4.11, opt-in)
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
@@ -2040,6 +2041,114 @@ than the series, or more than 7 days from its nearest DEM, keep C's setup.
   tables above; `python3 test_georectify_uncertainty.py` (~50 s; `--quick` ~30 s) checks it on a
   synthetic camera with known answers and the committed tables against a fresh run.
 
+### 4.11 Camera-only wave height from the runup timestacks (opt-in, not in the cron: `timestack_wave_height.py`)
+
+* **What.** For each c2 runup timestack (10 min, 2 Hz) and line (1 and 2): the swash edge of
+  `runup_from_timestack.py`, put on the beach where each pixel's ray meets the station's 7-day DEM
+  (`archive/dems`), less the still-water level (`marconi_water_level.py`, GPS first); from that
+  series R2 (98th percentile of the uprush maxima), the setup (mean) and the swash split at
+  0.05 Hz (S = 4 sigma), as Stockdon et al. (2006) defined them; inverted for the deep-water H0
+  three ways, (a) R2 by Eq. 19 (`runup_inversion.h0_from_runup`), (b) S_IG = 0.06 sqrt(H0 L0)
+  (Eq. 12, no slope in it) and (c) setup = 0.35 beta_f sqrt(H0 L0) (Eq. 10), beta_f the DEM's
+  foreshore slope over <eta> +/- 2 sigma, L0 from the camera's Tp (`timestack_wave_period.py`,
+  status ok) or else the buoy peak period; combined by inverse variance in log H0. `hs_m` =
+  H0 x Ks(T0, 21 m), the currency of the ADCP, `hs_best` and the OWG. Every step, its evidence
+  and its limits are in the module docstring.
+* **Opt-in.** It writes only `archive/hs_timestack_c2.csv` (one row per stack and line,
+  appended; `--reprocess` rewrites). The cron, `owg.sh`, every plot and every published value
+  are untouched; `test_timestack_wave_height.py` checks that none of the cron, `owg.sh`,
+  `owg_report.py`, `owg_live.py`, `marconi_waves.py` or `station_status.py` calls it.
+  `runup_from_timestack.py` was only refactored, so that the new module uses its edge rather than
+  a copy (`swash_edge`, the first half of `process()`; `peak_mask`, inside `runup_peaks`;
+  `build_parser`, out of `main()`): on a synthetic stack its CSV and diagnostic PNG are byte for
+  byte what the code before wrote [SYNTH].
+* **Evidence: synthetic only [SYNTH].** No real timestack was available here.
+  * `--self-test`: swash series built to Stockdon's setup, S_IG and R2 for four (H0, T0, beta)
+    and a tide rising 0.12 m through the burst, read through a curved profile: H0 back to 0.00%
+    (each estimate and the combination); with 3 cm noise and 4% of the rows lost, within 2.0%.
+  * A synthetic scene: the image the real c2 calibration would record of a planar beach (a 2 m
+    DEM of it covering -1.0 to +1.6 m), its swash Stockdon-shaped with backwash at most 2 m/s,
+    through the whole chain (the runup edge detection included). `test_timestack_wave_height.py`
+    prints this table:
+
+    | H0 m, T0 s, beta | R2 read vs the swash's own | setup | S_IG | H0 from R2 | from S_IG | from setup | combined |
+    |---|---|---|---|---|---|---|---|
+    | 0.8, 8, 0.12 | -0.1% | +0.056 m | +16.6% | -0% | +32% | +38% | +20% |
+    | 1.5, 10, 0.10 | -0.4% | +0.065 m | +16.4% | -1% | +24% | +43% | +15% |
+    | 3.0, 12, 0.09 | above the DEM's extension: no R2 | +0.066 m | +3.5% | - | -8% | +59% | +9% |
+    | 2.0, 9, 0.14 | -0.6% | +0.104 m | +16.9% | -1% | +25% | +50% | +18% |
+
+    So on synthetic foam the uprush maxima are read well, the setup is high (the edge trails a
+    fast tip: the detector's 3 x 3 blur spans neighbouring rows; part of the setup row is the
+    synthetic swash's own asymmetry) and S_IG is high (the edge drops seaward at the deepest
+    rundowns). The error model (`SCATTER`) is a priori, not fitted to this table.
+  * Edge contrast (blurred window): 0.226 clear; with 50% haze and a 2 / 4 / 6 / 10 px blur 0.096
+    / 0.065 / 0.047 / 0.027 (`low contrast` below 0.05). Real stacks will differ.
+* **Found on the way, not changed [SYNTH geometry, real c2 calibration].** `runup_from_timestack.py`
+  measures positions on the horizontal plane at still water. c2 is 19.8 m up and sees the swash
+  about 230 m away at a grazing angle, so a point above still water lands further along its ray:
+  over the swash, 2.1-2.8 plane metres per beach metre on a 1:7-1:11 beach. Its `*_horiz_m`
+  columns are therefore 2-3 times the swash excursion on the beach, and its 3 m/s backwash limit
+  is 1.1-1.4 m/s on the beach. The new module rescales that limit for its own use (3 m/s on the
+  beach); the runup CSVs are as they were.
+* **Known limits.** R2 and setup read the DEM's level, and the DEM carries the station's setup
+  `C x sqrt(hs_best x L0)`: they are partly circular with `hs_best` (S_IG reads only the DEM's
+  slope). H0 goes as 1/T0^2 (a period 25% too long reads H0 36% low, 25% too short 78% high). Ten minutes give S_IG 9% of
+  sampling error alone (19% in H0). At high water and in big waves the swash runs above the DEM
+  (a week's mean swash) and its 10 m extension: no R2. The low-contrast threshold (0.05) and the
+  error model are provisional.
+* **[NUC] Evaluation procedure.**
+  ```
+  python3 test_timestack_wave_height.py              # ends "all timestack wave height tests passed"
+  python3 timestack_wave_height.py --self-test       # ends "PASS: ..."
+  ls archive/ras_c2/*.c2.ras.tiff | wc -l; ls archive/dems/ | tail -3     # stacks and dated DEMs
+  python3 timestack_wave_height.py                   # every archived stack (~0.4 s per stack and line here;
+                                                     # hours for months: run overnight, or --since/--until)
+  python3 timestack_wave_height.py --period-source buoy --output archive/hs_timestack_c2_buoyT.csv
+  python3 timestack_wave_height.py --compare
+  python3 timestack_wave_height.py --compare --output archive/hs_timestack_c2_buoyT.csv
+  ```
+  1. **The lens threshold, first.** Compare `edge_contrast` on 20-24 Oct 2026 (the blurred window:
+     `window_sharpness` 3.4-4.7) with clear days (sharpness 49-88):
+     `python3 -c "import pandas as p; d=p.read_csv('archive/hs_timestack_c2.csv'); d['day']=d.time_utc.str[:10]; print(d.groupby('day')[['edge_contrast','window_sharpness']].median().tail(30))"`.
+     Set `--min-contrast` between the clear days' 5th percentile and the blurred days' 95th, and
+     rerun with `--reprocess`; if they overlap, use `--min-contrast 0` (the window sharpness alone)
+     and write down which.
+  2. **Eyes on the edge.** For a few stacks of each kind (calm, storm, high and low water):
+     `python3 runup_from_timestack.py <stack> --camera c2 --line 1 --output /tmp/r.csv --plot-dir /tmp/p`
+     shows the edge on the stack; in the CSV read `z_extrapolated_fraction`, `beta_f` and `note`.
+  3. **Pre-register, then hold out.** Before looking at any comparison, write down (commit) a split
+     day D: the method, `--scatter` (default) and `--min-contrast` (step 1, chosen on stacks before
+     D) are frozen; only stacks after D are scored. A storm is a reference Hs of 2 m or more.
+  4. **References.** The ADCP (`sig1000_waves_ALL.csv`, Dec 2024 - Mar 2025) only if c2 stacks of
+     that winter can be fetched back from S3 (`cleanup.sh` moved the ras.tiff files there): run
+     them into their own `--output`, with that period's pixel list (`--pix`, its stack width),
+     calibration (`--eo`, `calibration/calibration_history.csv`: the cameras were re-set on 24 Jan
+     2025), a DEM of the window (`--dem`, e.g. the survey-date build's) and a water level
+     (`--level-csv adcp_water_level_navd88.csv`, the ADCP's level from `adcp_to_navd88.py`).
+     Otherwise the converted buoy (`hs_buoy_marconi`: no camera in it) is the reference for the
+     timestacks and the OWG alike; `hs_best` is a consistency check only (it contains the OWG,
+     and the DEM's setup uses it).
+* **Decision rule: when it may be shown or blended.** On held-out clear stacks (status `ok`) after
+  D, against the ADCP or else `hs_buoy_marconi`, with the OWG scored on the same stacks
+  (`--compare` prints all of it), ALL of:
+  1. at least 200 stacks from 14 or more days, including 30 or more storm stacks from at least two
+     separate storms;
+  2. it BEATS the OWG (RMSE no larger, overall and in storms) or COMPLEMENTS it (error correlation
+     with the OWG under 0.5 and the 50:50 blend's RMSE at most 0.9 x the OWG's, overall and in
+     storms);
+  3. bias within +/-0.15 m overall and +/-0.30 m in storms;
+  4. the labels earn their keep: `low contrast` stacks score worse than clear ones, and no Hs band
+     of the clear stacks has an RMSE over twice the overall.
+
+  Then it may be SHOWN as its own, labelled series, and only once the owner approves that plot
+  change (no plot changes before). It may be BLENDED into `hs_best` only after 1-4 hold again on a
+  second, later held-out period, with its sigma by Hs band from the held-out RMSE (as
+  `marconi_waves.py --camera-sigma` does for the OWG) and the blend scored again. If 2 fails as a
+  whole but one estimate passes on its own (`from R2` or `from S_IG` in `--compare`), that
+  estimate may be weighted up with `--scatter` and tested again on a NEW held-out period, never the
+  same one. Otherwise it stays opt-in.
+
 ---
 
 ## 5. Reproducing the before/after on the real contours
@@ -2085,6 +2194,9 @@ copy of today's pictures made before the pull (section 1).
   whole chain, geometry included. Nothing on our side may read his file; A and B are compared
   with each other (DEM difference, `dem_change.py`) only after both are built.
 
+* **The camera-only timestack wave height (section 4.11).** Checked on synthetic stacks only; its
+  real errors, its low-contrast threshold and whether it beats or complements the OWG are for the
+  NUC's held-out comparison and the decision rule there. Until then it stays opt-in.
 * **The real 2025 numbers.** Only the NUC has the real January and March 2025 photos. The
   sandbox numbers for those dates are synthetic and test the pipeline only.
 * **An unbiased 2026 level.** The 2026 RTK stops at +1.17 to +1.80 m; every C = 0 line, and some
