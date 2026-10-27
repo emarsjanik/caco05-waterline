@@ -21,6 +21,18 @@ CHECKS (OK / WARN / ALERT):
   tide gauge        newest record                  WARN > 1 d,  ALERT > 3 d
   disk              free space on the data disk    WARN < 100 GB, ALERT < 20 GB
   last cron run     WARNING/ERROR lines logged     WARN on WARNING, ALERT on ERROR
+  c2 lens           median sharpness of the day's  WARN < 10 on the newest day,
+                    daylight frames (owg_live.py)  ALERT < 10 on the newest 3 days
+
+LENS. Spray, rain or salt on the camera window leaves frames bright and
+featureless: on 20-24 Oct 2026 the median daylight sharpness of c2 was
+3.4-4.7 for five days, against 49-88 on clear days, and the optical wave
+gauge rejected every daylight frame ("blurred", its floor is 10). Nothing
+else on the station said so. One blurred day can be fog or rain; three in
+a row usually means the window needs cleaning. The check reads the
+sharpness owg_live.py already scores for every c2 frame
+(archive/owg_c2_H.csv; skipped when that file is absent) and needs no
+image decoding of its own. c1 has no such score and is not checked.
 
 Writes the report to stdout; exit status 0 all OK, 1 any WARN, 2 any ALERT,
 so a mail or heartbeat hook can key on it.
@@ -87,6 +99,53 @@ def cron_timing_mode(base):
     return "legacy"
 
 
+LENS_BLURRED = 10.0        # owg_live.py's --min-sharpness: below it a frame is "blurred"
+LENS_DAYS_ALERT = 3        # consecutive blurred days that mean the window, not the weather
+LENS_MIN_FRAMES = 4        # daylight frames a day needs before its median counts
+
+
+def lens_check(owg_csv, now=None):
+    """(status, detail) for the c2 window from owg_live.py's per-frame
+    scores, or None without the file or without a recent scored day.
+    Days are UTC dates of daylight frames (not "dark", not "unreadable")
+    within the last LENS_DAYS_ALERT + 1 days."""
+    path = Path(owg_csv)
+    if not path.exists():
+        return None
+    now = now if now is not None else datetime.now(timezone.utc).timestamp()
+    by_day = {}
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            status = str(r.get("status", ""))
+            if status.startswith(("dark", "unreadable")):
+                continue
+            try:
+                epoch, sharp = float(r["epoch"]), float(r["sharpness"])
+            except (KeyError, ValueError):
+                continue
+            if not np.isfinite(sharp) or epoch < now - (LENS_DAYS_ALERT + 1) * 86400 or epoch > now:
+                continue
+            day = datetime.fromtimestamp(epoch, tz=timezone.utc).date()
+            by_day.setdefault(day, []).append(sharp)
+    days = sorted(d for d, v in by_day.items() if len(v) >= LENS_MIN_FRAMES)
+    if not days:
+        return None
+    medians = [float(np.median(by_day[d])) for d in days]
+    newest, n = medians[-1], len(by_day[days[-1]])
+    streak = 0
+    for m in reversed(medians):
+        if m >= LENS_BLURRED:
+            break
+        streak += 1
+    detail = (f"median daylight sharpness {newest:.1f} on {days[-1]:%d %b} ({n} frames; "
+              f"clear is about 50+, below {LENS_BLURRED:.0f} the wave gauge cannot read)")
+    if streak >= LENS_DAYS_ALERT:
+        return "ALERT", detail + f"; blurred {streak} days running: check and clean the c2 window"
+    if streak:
+        return "WARN", detail + "; fog, rain or spray on the window"
+    return "OK", detail
+
+
 def fmt_age(h):
     return "missing" if h is None else (f"{h:.0f} h ago" if h < 48 else f"{h / 24:.1f} days ago")
 
@@ -99,6 +158,8 @@ def main():
     ap.add_argument("--gauge-csv", default="archive/gauge_8447435.csv")
     ap.add_argument("--qc-csv", default="archive/gnssr_qc.csv")
     ap.add_argument("--log", default="logs/timex_cron.log")
+    ap.add_argument("--owg-csv", default="archive/owg_c2_H.csv",
+                    help="owg_live.py's per-frame scores of c2 (for the lens check)")
     args = ap.parse_args()
     base = Path(args.base)
     rows = []
@@ -170,6 +231,10 @@ def main():
         n_warn = sum(("WARNING" in l) for l in last_run)
         status = "ALERT" if n_err else "WARN" if n_warn else "OK"
         add("last cron run", status, f"{n_err} ERROR line(s), {n_warn} WARNING line(s)")
+
+    lens = lens_check(base / args.owg_csv)
+    if lens:
+        add("c2 lens", *lens)
 
     worst = max((LEVELS[s] for _, s, _ in rows), default=0)
     overall = [k for k, v in LEVELS.items() if v == worst][0]
