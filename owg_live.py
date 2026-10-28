@@ -58,6 +58,14 @@ AVERAGING. Per-frame errors are partly random, so the plot also shows a
 5-frame (2-hour) centred average: on the held-out frames that cut the
 error 11% (average_predictions.py, 0.219 -> 0.195 m on the same frames).
 
+READING THE PLOT (owg_plot_marks.py). Night is shaded grey and daylight
+frames screened out for the view (dusk, fog, wet lens, glare) a lighter
+shade, so a gap in the camera's line says why it is there; a gap with no
+shade is missing images. The average carries a band of +/- the model's
+tested error per frame (holdback RMSE; for averaged models the mean of
+theirs): where the buoy line runs inside it, the two agree within what
+the camera can tell.
+
 BUOY. 44008 is offshore (Nantucket Shoals); its height is an index of
 the incoming sea, not the height at the beach. Expect the two to rise
 and fall together, with the camera's nearshore value lower in big seas
@@ -85,6 +93,7 @@ sys.path.insert(0, str(HERE))
 from train_marconi_owg import normalise, prepare_image   # noqa: E402
 from score_image_quality import score                        # noqa: E402
 from composite_owg import channel, product_name, products_in  # noqa: E402
+import owg_plot_marks as marks                                 # noqa: E402
 
 FIELDS = ["filename", "epoch", "time_utc", "brightness", "sharpness", "saturation",
           "status", "hs_m", "hs_members", "water_level_m", "water_level_source", "model_id"]
@@ -203,7 +212,7 @@ def averaged(ok, window, max_gap_min):
     return list(zip(np.split(at, gaps), np.split(av, gaps)))
 
 
-def plot(df, waves_csv, out, days, window, max_gap_min, model_name, score="", others=()):
+def plot(df, waves_csv, out, days, window, max_gap_min, model_name, score="", others=(), rmse=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -222,6 +231,10 @@ def plot(df, waves_csv, out, days, window, max_gap_min, model_name, score="", ot
     INK, MUTED, GRID = "#1f1f1e", "#6b6a64", "#e4e3dc"
     fig, ax = plt.subplots(figsize=(12, 4.6), dpi=110)
     fig.patch.set_facecolor("white")
+    # night, and daylight frames screened out for the view, behind everything (owg_plot_marks.py)
+    s0, s1 = start.timestamp(), end.timestamp()
+    marks.shade(ax, marks.night_spans(s0, s1),
+                marks.screened_spans(df["epoch"].to_numpy(float), df["status"].to_numpy(object), s0, s1))
 
     if waves_csv and Path(waves_csv).exists():
         w = pd.read_csv(waves_csv)
@@ -236,7 +249,6 @@ def plot(df, waves_csv, out, days, window, max_gap_min, model_name, score="", ot
                 ax.plot(ts, vs, color=ORANGE, lw=2,
                         label="Buoy 44008 (offshore)" if i == 0 else None)
 
-    n_avg = 0
     if len(ok):
         ax.scatter(ok["t"], ok["hs_m"], s=14, color=BLUE, alpha=0.35, lw=0,
                    label="Camera, single frames")
@@ -244,12 +256,14 @@ def plot(df, waves_csv, out, days, window, max_gap_min, model_name, score="", ot
         # computed but not trusted: left out of the average and of every product downstream
         ax.scatter(low["t"], low["hs_m"].astype(float), s=18, facecolors="none", edgecolors=MUTED,
                    lw=0.9, label="Camera, view degraded (may read low; not used)")
-        # centred average of `window` frames, never across a gap (night, rejected frames)
-        pieces = averaged(ok, window, max_gap_min)
-        n_avg = sum(len(v) for _, v in pieces)
-        for i, (ts, vs) in enumerate(pieces):
-            ax.plot(ts, vs, color=BLUE, lw=2,
-                    label=f"Camera ({model_name}), {window}-frame average" if i == 0 else None)
+    # centred average of `window` frames, never across a gap (night, rejected frames), with the
+    # model's tested error around it
+    pieces = averaged(ok, window, max_gap_min) if len(ok) else []
+    n_avg = sum(len(v) for _, v in pieces)
+    marks.error_band(ax, pieces, rmse, BLUE)
+    for i, (ts, vs) in enumerate(pieces):
+        ax.plot(ts, vs, color=BLUE, lw=2,
+                label=f"Camera ({model_name}), {window}-frame average" if i == 0 else None)
 
     # other models run alongside, for comparison (owg_live.py --also)
     for label, path in others:
@@ -281,9 +295,11 @@ def plot(df, waves_csv, out, days, window, max_gap_min, model_name, score="", ot
     for s in ("left", "bottom"):
         ax.spines[s].set_color(MUTED)
     ax.tick_params(colors=MUTED)
-    ax.legend(loc="upper left", frameon=False, fontsize=9)
+    # below the time axis, so it never sits on the data
+    ax.legend(*marks.background_last(*ax.get_legend_handles_labels()), loc="upper left",
+              bbox_to_anchor=(0.0, -0.09), ncol=3, frameon=False, fontsize=8.5)
     fig.tight_layout()
-    fig.savefig(out)
+    fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"plot              : {out} ({len(ok)} frames, {n_avg} averaged points)")
 
@@ -508,7 +524,7 @@ def main():
         else:
             score_txt = f"validation RMSE {rep['val_rmse']:.2f} m per frame" if rep.get("val_rmse") else ""
         plot(df, args.waves_csv, args.plot, args.days, args.window, args.max_gap,
-             name, score_txt, others)
+             name, score_txt, others, rmse=marks.model_rmse(stems))
     return 0
 
 

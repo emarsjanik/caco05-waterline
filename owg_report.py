@@ -9,9 +9,15 @@ that matter for judging the measurement. owg.sh runs it; --email sends
 it with msmtp, the same transport as the GPS health email.
 
 PLOTS (written to --out-dir, attached to the email)
-  owg_report_7day.png        wave height from both camera models and the
-                             buoy, the buoy's period and direction, and
-                             the tide -- the context every reading needs
+  owg_report_7day.png        wave height: the headline camera reading
+                             (HEADLINE: the composite models, else the
+                             ensemble, else Run C) with its tested error
+                             band, the other models thin grey, the buoy
+                             and the best estimate; the buoy's period and
+                             direction, and the tide -- the context every
+                             reading needs. Night and the daylight frames
+                             screened out for the view are shaded
+                             (owg_plot_marks.py), so every gap says why
   owg_report_scatter.png     camera vs buoy for each model: the last
                              7 days over the whole record, with n, bias,
                              RMSE, correlation and Willmott's d
@@ -35,6 +41,20 @@ against the ADCP in validation (Run C 0.27 m per frame).
 CHECKS. Each prints [ OK ] or [FAIL]; the exit status is the number of
 failures (0 = all healthy), which owg.sh puts in the email subject.
 
+DRIFT. For each camera model, its bias against the buoy (the converted
+buoy where buoy_transfer.py has a fit, else 44008 itself) over the last
+7 days against what the 28 days before say it should be at those wave
+heights, from daily means (a day needs 3 matched frames). The models read
+big waves low and small ones high, so the bias moves with the weather:
+the earlier days give it as a line in wave height, and the last days are
+judged by how far they sit off that line (drift()). FAIL when they sit
+at least DRIFT_MIN_M (0.15 m) AND at least DRIFT_SIGMAS (3) standard
+errors off it: a dirty or wet window, a camera knocked off its aim, or a
+changed beach shows up here before it shows in any single reading. Waves
+from a direction the earlier weeks did not have can move it too: look at
+the residuals plot before acting. Fewer days than that: the line says
+it was not judged.
+
 Usage:
     python3 owg_report.py                       write the report and plots
     python3 owg_report.py --email a@x b@y       ... and send them
@@ -53,10 +73,18 @@ import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import owg_plot_marks as marks   # noqa: E402
 
 INK, MUTED, GRID = "#1f1f1e", "#6b6a64", "#e4e3dc"
 ORANGE, BLUE, GREEN, GREY = "#eb6834", "#2a78d6", "#1baf7a", "#b9b8b0"
 PALETTE = (BLUE, GREEN, "#8a5cd1", "#c8417a", "#3b3a36")
+LOW_SHARPNESS = "low sharpness (may read low)"   # owg_live.py's status: measured, view degraded, not used
+HEADLINE = ("composite", "ensemble", "Run C")   # the camera reading the 7-day plot leads with, first present
+DRIFT_MIN_M, DRIFT_SIGMAS = 0.15, 3.0           # the drift check: shift of the 7-day bias (DRIFT)
+DRIFT_RECENT_D, DRIFT_BASE_D = 7, 28
+DRIFT_MIN_FRAMES, DRIFT_MIN_RECENT, DRIFT_MIN_BASE = 3, 4, 10
+DRIFT_MIN_SPREAD_M = 0.3                        # base days' heights must span this for the bias's slope
 # r and Willmott d are only reported when the buoy spans at least this much (m)
 MIN_SPREAD = 1.0
 COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
@@ -137,6 +165,67 @@ def metrics(cam, ref):
             "d": float(1 - np.sum(e ** 2) / d_den) if d_den > 0 else np.nan}
 
 
+def headline_of(models, s0):
+    """The camera reading the 7-day plot leads with: the first of HEADLINE with an OK frame since s0, else
+    the first model that has one; None if none has."""
+    have = [l for l, d in models if d is not None and len(d) and ((d["status"] == "ok") & (d["epoch"] >= s0)).any()]
+    return next((l for l in HEADLINE if l in have), have[0] if have else None)
+
+
+def members_of(d, stem):
+    """The model stems behind an archive's newest reading (owg_live.py's model_id 'name:hash+name:hash'),
+    found next to `stem`; [stem] when the archive does not say."""
+    if not stem:
+        return []
+    ids = d["model_id"].dropna() if d is not None and "model_id" in d else []
+    names = [x.split(":")[0] for x in str(ids.iloc[-1]).split("+") if x.strip()] if len(ids) else []
+    return [str(Path(stem).parent / n) for n in names] if names else [stem]
+
+
+def drift(ok, now_ep, recent_d=DRIFT_RECENT_D, base_d=DRIFT_BASE_D):
+    """The DRIFT check of one model's matched OK frames (columns epoch, hs_m, buoy) -> dict(recent,
+    expected, base, slope, shift, z, n_recent, n_base, flag), or None when too few days.
+
+    Daily means of camera - buoy and of the buoy, on days with DRIFT_MIN_FRAMES frames. The models read
+    big waves low and small ones high (they shrink toward the training mean: slopes 0.45-0.76 on the
+    validation frames), so the bias moves with the weather; a calm week after a rough month is not drift.
+    The base_d days before the last recent_d (today included) give the bias as a line in the buoy's
+    height, bias = a + b Hs (b = 0 when their daily heights span under DRIFT_MIN_SPREAD_M); the shift
+    is the last days' mean departure from that line, and its standard error the departures' scatter
+    plus the line's own uncertainty at the last days' mean height (wide when they lie outside it)."""
+    if ok is None or not len(ok):
+        return None
+    d = ok[np.isfinite(ok["hs_m"].to_numpy(float)) & np.isfinite(ok["buoy"].to_numpy(float))]
+    ref = d["buoy"].to_numpy(float)
+    f = pd.DataFrame({"diff": d["hs_m"].to_numpy(float) - ref, "ref": ref},
+                     index=(d["epoch"].to_numpy(float) // 86400).astype(int))
+    g = f.groupby(level=0)
+    daily = g.mean()[g.size() >= DRIFT_MIN_FRAMES]
+    today = int(now_ep // 86400)
+    recent = daily[(daily.index > today - recent_d) & (daily.index <= today)]
+    base = daily[(daily.index > today - recent_d - base_d) & (daily.index <= today - recent_d)]
+    if len(recent) < DRIFT_MIN_RECENT or len(base) < DRIFT_MIN_BASE:
+        return None
+    xb, yb = base["ref"].to_numpy(float), base["diff"].to_numpy(float)
+    xr, yr = recent["ref"].to_numpy(float), recent["diff"].to_numpy(float)
+    sxx = float(((xb - xb.mean()) ** 2).sum())
+    if np.ptp(xb) >= DRIFT_MIN_SPREAD_M and sxx > 0:
+        slope = float(np.sum((xb - xb.mean()) * (yb - yb.mean())) / sxx)
+        a = float(yb.mean() - slope * xb.mean())
+        s2 = float(np.sum((yb - a - slope * xb) ** 2) / (len(xb) - 2))
+        lev = 1.0 / len(xb) + (xr.mean() - xb.mean()) ** 2 / sxx
+    else:
+        slope, a = 0.0, float(yb.mean())
+        s2, lev = float(yb.var(ddof=1)), 1.0 / len(xb)
+    dep = yr - (a + slope * xr)
+    shift = float(dep.mean())
+    se = float(np.sqrt(dep.var(ddof=1) / len(dep) + s2 * lev))
+    z = abs(shift) / se if se > 0 else (np.inf if shift else 0.0)
+    return {"recent": float(yr.mean()), "expected": float(yr.mean() - shift), "base": float(yb.mean()),
+            "slope": slope, "shift": shift, "z": float(z), "n_recent": len(recent), "n_base": len(base),
+            "flag": abs(shift) >= DRIFT_MIN_M and z >= DRIFT_SIGMAS}
+
+
 def compass(deg):
     return "" if not np.isfinite(deg) else COMPASS[int((deg % 360) / 22.5 + 0.5) % 16]
 
@@ -172,13 +261,24 @@ def to_dt(ep):
     return pd.to_datetime(np.asarray(ep, float), unit="s").to_numpy()
 
 
-def plot_7day(models, waves, gauge, fit, start, end, out, mw=None):
+def plot_7day(models, waves, gauge, fit, start, end, out, mw=None, rmse=None, screen=None):
+    """screen: the archive (epoch, status, hs_m) whose frames screened out for the view are shaded and whose
+    low-sharpness frames are drawn hollow -- the headline's own, or for the ensemble (which keeps only the
+    frames its members measured) a member's; default the headline's."""
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
     fig, ax = plt.subplots(3, 1, figsize=(12, 9), dpi=110, sharex=True,
                            gridspec_kw={"height_ratios": [2.2, 1, 1]})
     fig.patch.set_facecolor("white")
     s0, s1 = start.timestamp(), end.timestamp()
+    # night on every panel; the headline's frames screened out for the view on the wave panel
+    head = headline_of(models, s0)
+    if screen is None:
+        screen = next((d for l, d in models if l == head), None)
+    night = marks.night_spans(s0, s1)
+    screened = marks.screened_spans(screen["epoch"], screen["status"], s0, s1) if screen is not None else []
+    for i, x in enumerate(ax):
+        marks.shade(x, night, screened if i == 0 else (), labels=i == 0)
 
     a = ax[0]
     if waves is not None:
@@ -195,22 +295,41 @@ def plot_7day(models, waves, gauge, fit, start, end, out, mw=None):
         for i, (t, v) in enumerate(split_gaps(bst["epoch"], bst["hs_best"], 3 * 3600)):
             a.plot(to_dt(t), v, color=INK, lw=2.4,
                    label="Best estimate (camera + converted buoy)" if i == 0 else None)
-    for (label, d), colour in zip(models, PALETTE):
+    # the headline camera reading with its frames and tested error; the other models thin grey behind it
+    # (each keeps its colour in the scatter and frames plots)
+    others = []
+    for i, (label, d) in enumerate(models):
+        colour = PALETTE[i] if i < len(PALETTE) else BLUE
         if d is None:
             continue
         ok = d[(d["status"] == "ok") & (d["epoch"] >= s0)]
         if not len(ok):
             continue
-        a.scatter(to_dt(ok["epoch"]), ok["hs_m"], s=10, color=colour, alpha=0.3, lw=0)
         t, v = averaged(ok)
-        for i, (tt, vv) in enumerate(split_gaps(t, v, 45 * 60)):
-            a.plot(to_dt(tt), vv, color=colour, lw=2,
+        pieces = split_gaps(t, v, 45 * 60)
+        if label != head:
+            others.append(label)
+            for tt, vv in pieces:
+                a.plot(to_dt(tt), vv, color=GREY, lw=1.0, zorder=1.5)
+            continue
+        a.scatter(to_dt(ok["epoch"]), ok["hs_m"], s=10, color=colour, alpha=0.3, lw=0)
+        # measured with the view degraded: drawn hollow, left out of the mean (as owg_live.py draws them)
+        low = screen[(screen["status"] == LOW_SHARPNESS) & (screen["epoch"] >= s0)
+                     & screen["hs_m"].notna()] if screen is not None else None
+        if low is not None and len(low):
+            a.scatter(to_dt(low["epoch"]), low["hs_m"], s=14, facecolors="none", edgecolors=MUTED, lw=0.8,
+                      label="view degraded (may read low; not used)")
+        marks.error_band(a, [(to_dt(tt), vv) for tt, vv in pieces], rmse, colour)
+        for i, (tt, vv) in enumerate(pieces):
+            a.plot(to_dt(tt), vv, color=colour, lw=2.2, zorder=3,
                    label=f"Camera {label} (2-h mean; dots: frames)" if i == 0 else None)
+    if others:
+        a.plot([], [], color=GREY, lw=1.0, label=f"other camera models ({', '.join(others)}), 2-h means")
     a.set_ylim(bottom=0)
     a.set_ylabel("Significant wave\nheight (m)", color=INK)
     fig.suptitle(f"Optical wave gauge, CACO05 c2 -- last {round((end - start).total_seconds() / 86400)} "
                  f"days (UTC)", x=0.01, ha="left", fontsize=11, color=INK)
-    h, lab = a.get_legend_handles_labels()
+    h, lab = marks.background_last(*a.get_legend_handles_labels())
     fig.legend(h, lab, loc="upper left", bbox_to_anchor=(0.01, 0.965), ncol=3, frameon=False, fontsize=8.5)
 
     a = ax[1]
@@ -568,6 +687,23 @@ def main():
         check(len(recent) > 0 and n_ok > 0,
               f"camera {label}: {n_ok} of {len(recent)} frames measured in 24 h"
               + (f" (screened: {detail})" if detail else ""))
+    # drift: each model's bias against the buoy, the last week against the four before (DRIFT)
+    ref_name = "the converted buoy" if converted else "buoy 44008"
+    for label, mt in matched:
+        if label == "ensemble" or mt is None:
+            continue
+        r = drift(mt, now.timestamp())
+        if r is None:
+            check(True, f"camera {label}: drift not judged yet (needs {DRIFT_MIN_RECENT} of the last "
+                        f"{DRIFT_RECENT_D} days and {DRIFT_MIN_BASE} of the {DRIFT_BASE_D} before, "
+                        f"{DRIFT_MIN_FRAMES}+ frames a day)")
+            continue
+        check(not r["flag"], f"camera {label}: bias against {ref_name} {r['recent']:+.2f} m over the last "
+                             f"{DRIFT_RECENT_D} days, {r['expected']:+.2f} m expected for those wave heights "
+                             f"from the {DRIFT_BASE_D} before (shift {r['shift']:+.2f} m, {r['z']:.1f} "
+                             f"standard errors)"
+                             + (" -- drifting: clean the window? check the pointing and the residuals plot"
+                                if r["flag"] else ""))
     # the station's GPS water level (GNSS-R): a day or two behind is normal (orbits)
     if fit.s_ep is not None and len(fit.s_ep):
         age = now.timestamp() - fit.s_ep[-1]
@@ -602,7 +738,14 @@ def main():
     # ---- plots
     plots = []
     p = out_dir / "owg_report_7day.png"
-    plot_7day(models, waves, gauge, fit, start, end, p, mw); plots.append(p)
+    # the headline's tested error and the frames to shade: the ensemble's are its members'
+    head = headline_of(models, start.timestamp())
+    stem_of, df_of = dict(zip([l for l, _ in models], stems)), dict(models)
+    parts_of = [l for l in ens if l in df_of] if head == "ensemble" else [head]
+    member_stems = [members_of(df_of.get(l), stem_of.get(l)) for l in parts_of]
+    rmse = marks.model_rmse([s for m in member_stems for s in m]) if member_stems and all(member_stems) else None
+    screen = df_of.get(parts_of[0]) if parts_of else None
+    plot_7day(models, waves, gauge, fit, start, end, p, mw, rmse, screen); plots.append(p)
     p = out_dir / "owg_report_scatter.png"
     if plot_scatter(matched, start, p):
         plots.append(p)
@@ -614,7 +757,6 @@ def main():
         plots.append(p)
     p = out_dir / "owg_report_view.png"
     try:
-        stem_of = dict(zip([l for l, _ in models], stems))
         view_time = plot_view(stem_of.get("Run C") or str(HERE / "owg_models" / "owg_c2_H_current_C"),
                               stem_of.get("patch") or str(HERE / "owg_models" / "owg_c2_H_patch"),
                               args.image_dir, p)
