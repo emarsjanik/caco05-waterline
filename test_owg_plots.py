@@ -18,10 +18,13 @@ WHAT.
     band, and night and screened shading in the legend after the data;
   * owg_report.py: the headline model (composite, else ensemble, else Run C,
     else the first with data), the model stems behind an archive
-    (model_id), the 7-day plot (the others grey, one legend entry), the
-    drift check (a 0.3 m shift flagged; a small one, a noisy one and too
-    few days not), and the whole report run end to end on a synthetic
-    archive with the drift lines in its checks.
+    (model_id), the 7-day plot (the others grey, one legend entry, the
+    low-sharpness frames hollow, a headline past the palette still drawn),
+    the drift check (a 0.3 m shift flagged; a small one, a noisy one, too
+    few days, and a calm week after a rough month for a camera that reads
+    big waves low, not), and the whole report run end to end on a
+    synthetic archive: the drift lines in its checks, and the ensemble as
+    the headline with its members' error band and screened shading.
 Exit status 0 when every check passes.
 """
 
@@ -248,6 +251,20 @@ def test_report_parts():
     with tempfile.TemporaryDirectory() as tmp, figures() as kept:
         R.plot_7day(models, w, None, Fit(), now - timedelta(days=7), now, Path(tmp) / "r.png", None, rmse=0.32)
         texts = legend_texts(kept[0]) if kept else []
+    scr = models[3][1].copy()
+    scr.loc[scr.index[scr["status"] == "ok"][::5], "status"] = "low sharpness (may read low)"
+    six = models + [("a", models[0][1]), ("ensemble", models[1][1])]
+    with tempfile.TemporaryDirectory() as tmp, figures() as kept2:
+        R.plot_7day(models, w, None, Fit(), now - timedelta(days=7), now, Path(tmp) / "r.png", None, 0.32, scr)
+        R.plot_7day(six[:4] + six[5:6] + [("b", models[0][1])] + six[4:5], w, None, Fit(),
+                    now - timedelta(days=7), now, Path(tmp) / "s.png", None, None)
+    t_low = legend_texts(kept2[0]) if kept2 else []
+    t_six = legend_texts(kept2[1]) if len(kept2) > 1 else []
+    check("7-day plot: the headline's low-sharpness frames drawn hollow, in the legend",
+          "view degraded (may read low; not used)" in t_low, t_low)
+    check("... a headline past the five palette colours is still drawn",
+          any(t.startswith("Camera composite") for t in t_six) or any(t.startswith("Camera ensemble") for t in t_six),
+          t_six)
     check("7-day plot: the headline with its band, the others one grey entry, the shades last",
           "Camera composite (2-h mean; dots: frames)" in texts
           and "other camera models (Run C, patch, v2), 2-h means" in texts
@@ -266,6 +283,21 @@ def drift_frames(now, shift=0.0, noise=0.03, days=35, per_day=10, recent=7, seed
         for j in range(per_day):
             e = dday * 86400 + 12 * 3600 + 1800 * j
             rows.append((e, 1.0 + off, 1.0))
+    return pd.DataFrame(rows, columns=["epoch", "hs_m", "buoy"])
+
+
+def shrink_frames(now, step=0.0, k=0.55, seed=4):
+    """A camera that reads big waves low and small ones high: camera = 0.5 + k Hs (+ step over the last
+    7 days); the buoy rough (1.0-1.6 m) for four weeks, then a calm week (0.5-0.6 m)."""
+    rng = np.random.default_rng(seed)
+    today = int(now.timestamp() // 86400)
+    rows = []
+    for kday in range(35):
+        h = 0.55 + 0.05 * np.sin(kday) if kday < 7 else 1.3 + 0.3 * np.sin(kday * 0.9)
+        for j in range(10):
+            hs = h + rng.normal(0, 0.05)
+            cam = 0.5 + k * hs + (step if kday < 7 else 0.0) + rng.normal(0, 0.1)
+            rows.append(((today - kday) * 86400 + 12 * 3600 + 1800 * j, cam, hs))
     return pd.DataFrame(rows, columns=["epoch", "hs_m", "buoy"])
 
 
@@ -294,6 +326,15 @@ def test_drift():
     f.loc[f.index[:5], "buoy"] = np.nan
     check("frames without a buoy reading are left out", R.drift(f, n) is not None and R.drift(f, n)["flag"])
     check("no frames: not judged", R.drift(None, n) is None and R.drift(f.iloc[0:0], n) is None)
+    r = R.drift(shrink_frames(now), n)
+    plain = R.drift(drift_frames(now), n)
+    check("a calm week after a rough month, the camera unchanged: not flagged (its bias read off the "
+          "earlier weeks' line in wave height)", r is not None and not r["flag"] and abs(r["shift"]) < 0.1
+          and abs(r["slope"] + 0.45) < 0.15 and r["expected"] > r["base"] + 0.15, r)
+    check("... the same camera with a 0.3 m step in that calm week: flagged",
+          R.drift(shrink_frames(now, step=0.3), n)["flag"], R.drift(shrink_frames(now, step=0.3), n))
+    check("earlier weeks of one wave height (spread < 0.3 m): a plain comparison, slope 0",
+          plain is not None and plain["slope"] == 0.0)
 
 
 def test_report_end_to_end():
@@ -341,6 +382,34 @@ def test_report_end_to_end():
         check("composite jumped 0.4 m in the last week: its drift line FAIL, with what to do",
               any("[FAIL] camera composite: bias" in x and "drifting" in x for x in lines), lines)
         check("the exit status counts the drift failure with the others", isinstance(rc, int) and rc >= 1, rc)
+
+        # no composite: the ensemble (Run C + v2) leads, with its members' error and screened frames
+        e2 = e[e >= now.timestamp() - 8 * 86400]
+        st2 = np.where(M.sun_elevation_deg(e2) < 0, "dark", "ok").astype(object)
+        st2[np.flatnonzero(st2 == "ok")[::9]] = "blurred (fog, rain or wet lens)"
+        for name, stem, err in (("owg_c2_H.csv", "owg_c2_H_current_C", 0.30), ("owg_c2_H_v2.csv", "owg_c2_H_v2", 0.34)):
+            pd.DataFrame({"filename": [f"{int(x)}.c2.bright.jpg" for x in e2], "epoch": e2.astype(int),
+                          "time_utc": "", "status": st2, "hs_m": np.where(st2 == "ok", 1.0, np.nan),
+                          "model_id": f"{stem}:abc"}).to_csv(arch / name, index=False)
+            (models_dir / f"{stem}.onnx").write_bytes(b"x")
+            (models_dir / f"{stem}.report.json").write_text(json.dumps({"holdback_rmse": err}))
+        sys.argv = ["owg_report.py", "--archive", str(arch), "--out-dir", str(tmp / "out2"),
+                    "--models", f"Run C=owg_c2_H.csv={models_dir / 'owg_c2_H_current_C'}",
+                    f"v2=owg_c2_H_v2.csv={models_dir / 'owg_c2_H_v2'}", "--ensemble", "Run C,v2",
+                    "--gnssr-spline", str(tmp / "no_spline.txt"), "--image-dir", str(tmp),
+                    "--last-run", str(tmp / "no_last_run")]
+        try:
+            with figures() as kept, contextlib.redirect_stdout(io.StringIO()):
+                R.main()
+            crash = None
+        except Exception as exc:              # noqa: BLE001
+            kept, crash = [], repr(exc)
+        texts = legend_texts(kept[0]) if kept else []
+        check("the ensemble leads when there is no composite: its band is its members' mean error "
+              "(0.30, 0.34 -> 0.32 m), the frames its members screened out shaded",
+              crash is None and "Camera ensemble (2-h mean; dots: frames)" in texts
+              and "tested error per frame, \u00b10.32 m" in texts and M.SCREENED_LABEL in texts,
+              crash or texts)
 
 
 def test_syntax_38():

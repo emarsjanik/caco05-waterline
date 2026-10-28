@@ -15,9 +15,11 @@ SCREENED. A lighter shade over each daylight frame the quality screen
 rejected because of the view -- too dark (dusk, a black squall), fog, rain or
 a wet lens, sun glare, an unreadable image, the sea patch out of view. Each
 frame covers half the frame interval either side of it (the median spacing
-of the frames, 10-60 min), and touching frames merge into one band. A gap
-in the camera's line with no shade under it is a gap in the images
-themselves (camera or transfer down), not the weather.
+of the frames, 10-60 min), and touching frames merge into one band. Frames
+measured with the view degraded (low sharpness: spray, rain, a wet lens)
+are not shaded: both plots draw them as hollow dots, left out of the
+average. A gap in the camera's line with neither under it is a gap in the
+images themselves (camera or transfer down), not the weather.
 
 ERROR BAND. Around the camera's 2-hour average, +/- the model's tested
 error per frame: its holdback RMSE (frames it never saw in training), else
