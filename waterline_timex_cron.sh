@@ -415,6 +415,37 @@ prune_debug_images() {
     return 0
 }
 
+# The 7-day DEM as a GeoTIFF (step 6b), for the GPS daily email, which
+# attaches it (GPS_code station_health_mail.sh): asc_to_geotiff.py's
+# baseline float32 GeoTIFF, NAD83(2011) / UTM 19N with NAVD88 heights,
+# nodata -9999, written next to the .asc. It is made in a scratch folder
+# beside it and moved into place, so the email never attaches a
+# half-written file. A failed conversion (or no .asc) removes the old
+# GeoTIFF, with a WARNING: the email then says the file is missing instead
+# of sending an older surface as the day's.
+dem_geotiff() {
+    local asc="$1" tif="${1%.asc}.tif" tmp name
+    name="$(basename "$tif")"
+    if [ ! -f "$asc" ]; then
+        rm -f "$tif"
+        log "WARNING: no $(basename "$asc"): window DEM GeoTIFF NOT written"
+        return 0
+    fi
+    if ! tmp=$(mktemp -d "$(dirname "$asc")/.geotiff.XXXXXX"); then
+        rm -f "$tif"
+        log "WARNING: window DEM GeoTIFF NOT written (no scratch folder beside $(basename "$asc"))"
+        return 0
+    fi
+    if cp "$asc" "$tmp/" && python3 "$BASE/asc_to_geotiff.py" "$tmp/$(basename "$asc")" >> "$LOG" 2>&1             && [ -s "$tmp/$name" ] && mv -f "$tmp/$name" "$tif"; then
+        log "window DEM GeoTIFF written: $name"
+    else
+        rm -f "$tif"
+        log "WARNING: window DEM GeoTIFF NOT written (asc_to_geotiff.py, see above); the GPS email will say it is missing"
+    fi
+    rm -rf "$tmp"
+    return 0
+}
+
 # The model-only DEM series (step 6c; only while SETUP_SOURCE is on): the
 # measured setups must stand on DEMs built with the MODEL's setup
 # (measured_setup.py, rule 2), so the contour, consistency, georectification
@@ -820,6 +851,8 @@ else
                         else
                             log "WARNING: window DEM map NOT drawn (dem_map.py, see above); the grids and page are fine"
                         fi
+                        # ... and the same DEM as a GeoTIFF, for the GPS daily email
+                        dem_geotiff "${DEM_STEM}_${DEM_WINDOW_DAYS}day_dem.asc"
                         if [ $win_rc -eq 0 ]; then
                             log "window DEM written: $(basename "$DEM_STEM")_${DEM_WINDOW_DAYS}day_dem.asc (+ dated copy in $DEM_SERIES)"
                         else
