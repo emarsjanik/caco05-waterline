@@ -3648,9 +3648,10 @@ def apply_setup(src, dst, cam, coef, skip_days=()):
     setups = {}
     with open(src, newline="") as fi, open(str(dst) + ".tmp", "w", newline="") as fo:
         rd = csv.DictReader(fi)
-        # the slope-aware model's columns (the cron's SETUP_MODEL="stockdon") go too: these rows get C's setup
+        # the slope-aware model's columns (the cron's SETUP_MODEL="stockdon") go too: these rows get C's setup;
+        # and the measured setup's label (the cron's opt-in SETUP_SOURCE), which would misname C's setup
         fields = [k for k in rd.fieldnames if k not in ("setup_correction_m", "beach_elevation_navd88",
-                                                        "setup_beta_f", "setup_model")]
+                                                        "setup_beta_f", "setup_model", "setup_source")]
         st["had_setup"] = "setup_correction_m" in rd.fieldnames
         if "offshore_hs_m" not in rd.fieldnames or "offshore_tp_s" not in rd.fieldnames:
             raise StepFailed(f"{src}: no offshore_hs_m / offshore_tp_s columns (the cron ran without --waves?)")
