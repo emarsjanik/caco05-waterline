@@ -222,9 +222,11 @@ def load_tide_model(path, time_col=None, level_col=None, tide_timezone="UTC"):
 
 GNSSR_GAP_SENTINEL = 999.0
 
-# The detector's MIN_SIGNAL_COLUMN_FRACTION (waterline_detector_v5.py): a line saved with fewer of its
-# columns flagged Has_Signal is a PARTIAL line (detector v6.11), judged by --partial-min-coverage.
-FULL_LINE_SIGNAL_FRACTION = 0.60
+# The column that marks a PARTIAL line (detector v6.11, waterline_detector_v5.py PARTIAL_LINE_COLUMN):
+# only its long clear runs are flagged Has_Signal, and it is judged by --partial-min-coverage. A line's
+# share of Has_Signal columns does not say this: a frame detected with a lower --min-signal-fraction,
+# or cut by --column-limits, is a whole line with few columns flagged.
+PARTIAL_LINE_COLUMN = "Partial_Line"
 
 
 def looks_like_gnssr_spline(path):
@@ -740,6 +742,16 @@ def local_coverage_mask(has_signal, window, min_fraction):
     return fraction >= min_fraction
 
 
+def is_partial_line(path):
+    """True for a detection CSV the detector marked as a partial line (PARTIAL_LINE_COLUMN)."""
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        if PARTIAL_LINE_COLUMN not in (reader.fieldnames or []):
+            return False
+        row = next(reader, None)
+    return row is not None and (row.get(PARTIAL_LINE_COLUMN) or "").strip() in ("1", "1.0", "True", "true")
+
+
 def load_shoreline_csv(path):
     """
     Returns (columns, rows, peak_sharpness). Prefers the sub-pixel
@@ -875,13 +887,14 @@ def main():
                              "elevation ordering, because a mean over unrepresentative "
                              "fragments is meaningless. Set 0 to disable.")
     parser.add_argument("--partial-min-coverage", type=float, default=0.25,
-                        help="--min-coverage for a PARTIAL line (default 0.25): one the detector "
-                             "(v6.11) saved with under FULL_LINE_SIGNAL_FRACTION (60%%) of its columns "
-                             "carrying signal, keeping only its long clear runs (at least 30%% of "
-                             "the columns in runs of at least 10%%; the hazy rest flagged "
-                             "no-signal). Those are contiguous stretches of waterline, not the "
-                             "scattered survivors --min-coverage keeps out; every other frame is "
-                             "judged by --min-coverage exactly as before. Set 0 to disable.")
+                        help="--min-coverage for a PARTIAL line (default 0.25; never more than "
+                             "--min-coverage): a CSV the detector (v6.11) marked Partial_Line, "
+                             "saved with under 60%% of its columns carrying signal and keeping only "
+                             "its long clear runs (at least 30%% of the columns in runs of at least "
+                             "10%%; the hazy rest flagged no-signal). Those are contiguous stretches "
+                             "of waterline, not the scattered survivors --min-coverage keeps out; "
+                             "every other frame is judged by --min-coverage exactly as before. Set "
+                             "0 to disable.")
     parser.add_argument("--include-no-signal", action="store_true",
                         help="Keep columns the detector flagged Has_Signal=0. By default they "
                              "are DROPPED: the detector found no usable energy there, so the "
@@ -1068,7 +1081,7 @@ def main():
     level_epoch_of, level_offset_of = {}, {}
     skipped_other_mode = defaultdict(int)
     used, skipped_no_epoch, skipped_no_camera, skipped_stale = 0, 0, 0, 0
-    partial_used = 0
+    partial_stems = set()
     dropped_no_signal = 0
     skipped_all_no_signal = 0
     skipped_low_coverage = 0
@@ -1111,8 +1124,7 @@ def main():
 
         columns, rows, sharpness, col_has_signal = load_shoreline_csv(path)
         capture_time = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
-        # under the detector's whole-frame signal fraction: a partial line (v6.11)
-        partial_line = len(col_has_signal) > 0 and float(np.mean(col_has_signal)) < FULL_LINE_SIGNAL_FRACTION
+        partial_line = is_partial_line(path)
 
         # Straightness is judged on the FULL row series before any
         # columns are removed: dropping columns first would leave gaps
@@ -1177,7 +1189,8 @@ def main():
                     col_has_signal = col_has_signal[run_keep]
 
             coverage = len(columns) / max(total_columns, 1)
-            floor = args.partial_min_coverage if partial_line else args.min_coverage
+            # a partial line is never held to more than --min-coverage
+            floor = min(args.partial_min_coverage, args.min_coverage) if partial_line else args.min_coverage
             if floor > 0.0 and coverage < floor:
                 skipped_low_coverage += 1
                 low_coverage_detail.append((path.stem, coverage, len(columns), total_columns))
@@ -1194,7 +1207,8 @@ def main():
         level_epoch_of[path.stem] = level_epoch
         level_offset_of[path.stem] = level_offset
         used += 1
-        partial_used += partial_line
+        if partial_line:
+            partial_stems.add(path.stem)
 
     if skipped_other_mode:
         for mode, n in sorted(skipped_other_mode.items()):
@@ -1397,6 +1411,7 @@ def main():
         writer.writerows(output_rows)
 
     used = len({r[0] for r in output_rows})
+    partial_used = len({r[0] for r in output_rows} & partial_stems)   # after the tide-agreement filter
     print(f"Frames used              : {used}"
           + (f" ({partial_used} partial line(s): the detector's clear runs, the hazy rest dropped)"
              if partial_used else ""))

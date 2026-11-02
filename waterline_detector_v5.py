@@ -13,13 +13,14 @@
 #      frames a day were saved against 24-36 on the clear days before,
 #      22-34 a day rejected here. Such a frame's clear columns are now
 #      kept when they form long runs adding up to PARTIAL_MIN_FRACTION of
-#      the columns: the line is saved with only those flagged Has_Signal,
-#      so everything downstream uses the clear stretch and drops the
-#      hazy far end. Frames at or above 60% are untouched (the same CSV
-#      to the byte); a partial line never seeds the next frame's temporal
-#      blend; --partial-min-fraction 0 restores the old behaviour.
+#      the columns (after --column-limits): the line is saved with only
+#      those flagged Has_Signal and a trailing Partial_Line column, so
+#      everything downstream uses the clear stretch and drops the hazy
+#      far end. Frames at or above 60% are untouched (the same CSV to the
+#      byte); a partial line never seeds the next frame's temporal blend;
+#      --partial-min-fraction 0 restores the old behaviour.
 #      extract_elevation_contours.py --partial-min-coverage is its
-#      downstream floor.
+#      downstream floor, for CSVs marked Partial_Line.
 #
 #  CHANGES IN V6.10:
 #    - TIMING MODE (--timing-mode, or the TIMING_MODE environment
@@ -312,11 +313,12 @@ import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from fractions import Fraction
 
 import timex_timing
 
 
-VERSION = "6.10"
+VERSION = "6.11"
 PROGRAM_NAME = "USGS Waterline Detector"
 
 SOURCE_FOLDER = "/mnt/I2Rgus_Data/ImageProducts"
@@ -426,18 +428,23 @@ MIN_SIGNAL_COLUMN_FRACTION = 0.60
 #     PARTIAL LINES (v6.11). Below that fraction a frame is no longer
 #     always thrown away: haze or spray can hide the far field while the
 #     near field still shows a clear waterline. Its clear columns are taken
-#     in long runs (clear_runs): dropouts of up to PARTIAL_MAX_GAP_COLUMNS
-#     are bridged (still flagged no-signal), and a run shorter than
-#     PARTIAL_MIN_RUN_FRACTION of the columns, or with under
-#     PARTIAL_MIN_RUN_DENSITY of its own columns carrying signal (a comb of
-#     single columns would otherwise bridge into a "run"), is left out --
-#     scattered survivors are what broke the elevation ordering
+#     in long runs (clear_runs): a gap of more than PARTIAL_MAX_GAP_COLUMNS
+#     always ends a run; within that, a run ends where its share of
+#     clear columns would fall below PARTIAL_MIN_RUN_DENSITY (the maximal
+#     segments scoring 1 - density per clear column and -density per
+#     other: Ruzzo & Tompa 1999), so a dropout is bridged (still flagged
+#     no-signal) only when the clear columns either side outweigh it, and
+#     the haze's chance clear columns neither extend a run nor join a
+#     comb of single columns into one. A run shorter than
+#     PARTIAL_MIN_RUN_FRACTION of the columns is left out -- scattered
+#     survivors are what broke the elevation ordering
 #     (extract_elevation_contours.py --min-coverage) -- and
 #     PARTIAL_EDGE_TRIM_COLUMNS are cut where a run meets noise, since the
 #     solver's continuous path is pulled toward the noise there. If the
-#     runs kept add up to PARTIAL_MIN_FRACTION of the columns, the line is
-#     saved with only them flagged Has_Signal and the confidence gate is
-#     judged on them; otherwise the frame is rejected as before.
+#     runs kept, inside --column-limits, add up to PARTIAL_MIN_FRACTION of
+#     the columns, the line is saved with only them flagged Has_Signal
+#     (and Partial_Line=1) and the confidence gate is judged on them;
+#     otherwise the frame is rejected as before.
 #     PROVISIONAL: to be checked on the station's late-Oct 2026 c2 frames
 #     (docs/VALIDATION.md 2.9); --partial-min-fraction 0 turns them off.
 PARTIAL_MIN_FRACTION = 0.30
@@ -445,6 +452,8 @@ PARTIAL_MIN_RUN_FRACTION = 0.10
 PARTIAL_MIN_RUN_DENSITY = 0.80
 PARTIAL_MAX_GAP_COLUMNS = 8
 PARTIAL_EDGE_TRIM_COLUMNS = 12
+# the CSV column that marks a partial line (export_csv)
+PARTIAL_LINE_COLUMN = "Partial_Line"
 
 # (2) WHOLE-FRAME loss. Uniform degradation (fog, glare, a dirty lens)
 #     weakens every column together, so the relative tests above see
@@ -1676,37 +1685,86 @@ def assess_signal(energy, envelope=None):
     }
 
 
-def clear_runs(column_has_signal, min_run=None, max_gap=None, edge_trim=None):
+def maximal_segments(scores):
     """
-    The columns of a partial line (see PARTIAL_MIN_FRACTION): the signal
-    columns in runs at least `min_run` columns long and at least
-    PARTIAL_MIN_RUN_DENSITY signal, a dropout of up to `max_gap` columns
-    not ending a run, each run cut by `edge_trim`
-    columns at an end that meets a column without signal (not at the
-    frame's own edge). Returns (mask, number of runs kept); the mask is a
-    subset of column_has_signal, so a bridged dropout stays no-signal.
+    All maximal scoring segments of a score sequence (Ruzzo & Tompa 1999,
+    "A linear time algorithm for finding all maximal scoring
+    subsequences"): disjoint (start, end) index pairs, inclusive, each
+    with a positive total that no segment overlapping it beats. Each
+    starts and ends on a positive score.
+    """
+    found = []          # [start, end, cumulative before start, cumulative through end]
+    cum = 0
+    for i, x in enumerate(scores):
+        if x <= 0:
+            cum += x
+            continue
+        cur = [i, i, cum, cum + x]
+        cum += x
+        while True:
+            j = len(found) - 1
+            while j >= 0 and found[j][2] >= cur[2]:
+                j -= 1
+            if j < 0 or found[j][3] >= cur[3]:
+                found.append(cur)
+                break
+            cur = [found[j][0], cur[1], found[j][2], cur[3]]
+            del found[j:]
+    return [(f[0], f[1]) for f in found]
+
+
+def clear_runs(column_has_signal, min_run=None, max_gap=None, edge_trim=None, density=None):
+    """
+    The columns of a partial line (see PARTIAL_MIN_FRACTION). A gap of
+    more than `max_gap` no-signal columns always ends a run. Within that,
+    the runs are the maximal segments (maximal_segments) scoring
+    1 - `density` per signal column and -`density` per other: each holds
+    more than `density` signal, and ends where adding more columns would
+    take it below that -- so a dropout is bridged only when the signal
+    either side outweighs it, and chance signal columns in haze beyond a
+    run neither extend it nor join into a run of their own. Runs shorter
+    than `min_run` columns are left out; each kept run is cut by
+    `edge_trim` columns at an end that is not the frame's own edge.
+    Returns (mask, number of runs kept); the mask is a subset of
+    column_has_signal, so a bridged dropout stays no-signal.
     """
     s = np.asarray(column_has_signal, bool)
     n = len(s)
     min_run = int(round(PARTIAL_MIN_RUN_FRACTION * n)) if min_run is None else int(min_run)
     max_gap = PARTIAL_MAX_GAP_COLUMNS if max_gap is None else int(max_gap)
     edge_trim = PARTIAL_EDGE_TRIM_COLUMNS if edge_trim is None else int(edge_trim)
+    d = Fraction(PARTIAL_MIN_RUN_DENSITY if density is None else density).limit_denominator(1000)
+    # integer scores, so a tie is exact: q - p per signal column, -p per other (density p/q)
+    up, down = d.denominator - d.numerator, -d.numerator
     keep = np.zeros(n, bool)
     idx = np.flatnonzero(s)
     if not len(idx):
         return keep, 0
     runs = 0
-    for run in np.split(idx, np.flatnonzero(np.diff(idx) > max_gap + 1) + 1):
-        a, b = int(run[0]), int(run[-1])
-        if b - a + 1 < max(min_run, 1) or len(run) < PARTIAL_MIN_RUN_DENSITY * (b - a + 1):
-            continue
-        lo = a + (edge_trim if a > 0 else 0)
-        hi = b - (edge_trim if b < n - 1 else 0)
-        if hi < lo:
-            continue
-        keep[lo:hi + 1] = True
-        runs += 1
+    for group in np.split(idx, np.flatnonzero(np.diff(idx) > max_gap + 1) + 1):
+        g0 = int(group[0])
+        part = s[g0:int(group[-1]) + 1]
+        for i, j in maximal_segments(np.where(part, up, down).tolist()):
+            a, b = g0 + i, g0 + j
+            if b - a + 1 < max(min_run, 1):
+                continue
+            lo = a + (edge_trim if a > 0 else 0)
+            hi = b - (edge_trim if b < n - 1 else 0)
+            if hi < lo:
+                continue
+            keep[lo:hi + 1] = True
+            runs += 1
     return keep & s, runs
+
+
+def column_limit_mask(data, n):
+    """The columns inside this camera's --column-limits (None: no limits)."""
+    limits = COLUMN_LIMITS.get(data.profile.name)
+    if limits is None:
+        return None
+    width = data.original.shape[1]
+    frac = (np.arange(n) + data.crop_left) / max(width - 1, 1)
+    return (frac >= limits[0]) & (frac <= limits[1])
 
 
 def solve_shoreline_vectorized(energy, profile):
@@ -1899,7 +1957,7 @@ def draw_shoreline(image, shoreline, offset_y, offset_x, color=(0, 0, 255), thic
     return overlay
 
 
-def export_csv(data, shoreline, confidence, peak_sharpness=None, column_has_signal=None):
+def export_csv(data, shoreline, confidence, peak_sharpness=None, column_has_signal=None, partial=False):
     """
     Writes the detected shoreline. "Row" stays a rounded integer for
     backward compatibility with every existing consumer script
@@ -1924,6 +1982,11 @@ def export_csv(data, shoreline, confidence, peak_sharpness=None, column_has_sign
     the mode's own timex bias. extract_elevation_contours.py gives a line
     a water level only in the mode it was detected in. Legacy output has
     no such column, exactly as before.
+
+    "Partial_Line" (last, only on a partial line, v6.11) is 1 on every
+    row: the line kept only its long clear runs (PARTIAL_MIN_FRACTION),
+    which extract_elevation_contours.py judges by --partial-min-coverage.
+    Every other line has no such column, exactly as before.
     """
     if not EXPORT_CSV:
         return
@@ -1932,7 +1995,8 @@ def export_csv(data, shoreline, confidence, peak_sharpness=None, column_has_sign
     with open(csv_name, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Column", "Row", "Confidence", "Row_Precise", "Peak_Sharpness",
-                         "Has_Signal"] + ([timex_timing.TIMING_COLUMN] if timing else []))
+                         "Has_Signal"] + ([timex_timing.TIMING_COLUMN] if timing else [])
+                        + ([PARTIAL_LINE_COLUMN] if partial else []))
         for x in range(len(shoreline)):
             precise_row = float(shoreline[x]) + data.crop_top
             full_image_row = int(round(precise_row))
@@ -1946,7 +2010,7 @@ def export_csv(data, shoreline, confidence, peak_sharpness=None, column_has_sign
             # and the ground-truth files both use full-image pixels. (Only
             # correct by luck before, while every crop_left was 0.)
             writer.writerow([x + data.crop_left, full_image_row, float(confidence[x]), precise_row,
-                             sharpness, has_sig] + timing)
+                             sharpness, has_sig] + timing + ([1] if partial else []))
 
 
 def export_overlay(data, shoreline, keep=None):
@@ -2045,9 +2109,15 @@ def process_image(image_path):
         partial = False
         if sig["signal_fraction"] < MIN_SIGNAL_COLUMN_FRACTION:
             kept, runs = clear_runs(column_has_signal) if PARTIAL_MIN_FRACTION > 0.0 else (None, 0)
+            inside = column_limit_mask(data, len(column_has_signal)) if kept is not None else None
+            if inside is not None:
+                # judged on what would be saved: --column-limits flags the rest no-signal below
+                kept = kept & inside
+                runs = int(np.count_nonzero(np.diff(np.concatenate(([0], kept.astype(np.int8), [0]))) == 1))
             if kept is None or kept.mean() < PARTIAL_MIN_FRACTION:
-                note = (f"; its long clear runs cover {100 * kept.mean():.1f}%, need "
-                        f"{100 * PARTIAL_MIN_FRACTION:.0f}% for a partial line" if kept is not None else "")
+                note = (f"; its long clear runs{' inside --column-limits' if inside is not None else ''} "
+                        f"cover {100 * kept.mean():.1f}%, need {100 * PARTIAL_MIN_FRACTION:.0f}% "
+                        f"for a partial line" if kept is not None else "")
                 print(f"DISCARDED (only {100*sig['signal_fraction']:.1f}% of columns carry signal, "
                       f"need {100*MIN_SIGNAL_COLUMN_FRACTION:.0f}%{note}) -- the solver would be "
                       f"drawing a line through noise across most of the frame. "
@@ -2105,15 +2175,12 @@ def process_image(image_path):
 
         limits = COLUMN_LIMITS.get(data.profile.name)
         if limits is not None and column_has_signal is not None:
-            width = data.original.shape[1]
-            frac = (np.arange(len(shoreline)) + data.crop_left) / max(width - 1, 1)
-            column_has_signal = np.asarray(column_has_signal, bool) & \
-                (frac >= limits[0]) & (frac <= limits[1])
+            column_has_signal = np.asarray(column_has_signal, bool) & column_limit_mask(data, len(shoreline))
             print(f"Column limits   : {limits[0]:.2f}-{limits[1]:.2f} of the width "
                   f"(--column-limits); {100 * column_has_signal.mean():.1f}% of columns kept")
 
         export_csv(data, shoreline, result.confidence, result.peak_sharpness,
-                   column_has_signal)
+                   column_has_signal, partial=partial)
         export_overlay(data, shoreline, column_has_signal if partial else None)
 
         print("Finished.")
