@@ -758,9 +758,11 @@ error, the cells' relative quality, and where the lines are too far apart (nmse)
 
 **Claim.** A frame with fewer than 60% of its columns carrying signal was always discarded. After
 the 20-24 Oct 2026 storm, c2's far field stayed hazy for a week while the near field was clear
-(median frame sharpness 29-88, as on any clear day): 1-12 frames a day were saved against 24-36 on
-the clear days before, 22-34 a day rejected for signal. Such a frame is now saved as a PARTIAL line
-when its clear run from the near edge (column 0, nearest the camera; starting within 8 columns of
+(median frame sharpness 29-88, as on any clear day): the cron log shows 1-12 detections a day saved
+against 24-36 on the clear days before, 22-34 a day rejected for signal (the cron detects a photo
+again on later runs, so these count some photos twice: about 46 detections a day of about 31 c2
+photos). Such a frame is now saved as a PARTIAL line
+when its clear run from the near edge (column 0, the left edge, which the detector calls near; starting within 8 columns of
 it) covers 30% of the columns, inside `--column-limits`: the hazy far end is dropped. The run is at
 least 10% of the columns and never spans a gap of more than 8 columns; within that, it is a stretch
 whose every part starting at either end is more than 80% clear, and that no longer such stretch

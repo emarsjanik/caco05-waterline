@@ -9,10 +9,11 @@
 #      fewer than MIN_SIGNAL_COLUMN_FRACTION (60%) of its columns
 #      carrying signal was always discarded. After the 20-24 Oct 2026
 #      storm, c2's far field stayed hazy for a week while the near field
-#      was clear (median frame sharpness 29-88, as on any clear day): 1-12
-#      frames a day were saved against 24-36 on the clear days before,
-#      22-34 a day rejected here. Such a frame's clear run from the near
-#      edge (column 0, nearest the camera) is now kept when it covers
+#      was clear (median frame sharpness 29-88, as on any clear day): the
+#      cron log shows 1-12 detections a day saved against 24-36 on the
+#      clear days before, 22-34 a day rejected here (it detects a photo
+#      again on later runs, so these count some photos twice). Such a frame's clear run from the near
+#      edge (column 0, the left edge: the detector's near end) is now kept when it covers
 #      PARTIAL_MIN_FRACTION of the columns (after --column-limits): the
 #      line is saved with only those columns flagged Has_Signal and a
 #      trailing Partial_Line column, so everything downstream uses the
@@ -1740,7 +1741,7 @@ def clear_runs(column_has_signal, min_run=None, max_gap=None, edge_trim=None, de
     one. With `near_edge` (a number of columns), only the first run (of
     at least `min_run`) is taken, and only if it starts within that many
     columns of the near edge (column 0): a partial line is the clear run
-    from the camera out, its hazy far end dropped. Returns (mask, number of runs kept); the
+    from column 0 out, its hazy far end dropped. Returns (mask, number of runs kept); the
     mask is a subset of column_has_signal, so a bridged dropout stays
     no-signal.
     """
