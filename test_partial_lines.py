@@ -295,6 +295,9 @@ def test_flat_end():
     end = int(np.flatnonzero(m)[-1]) if m.any() else -1
     check("level and on no edge for its last 200 columns: cut back to where it levels (within a third of the "
           "window), 12 columns more", abs((end + 1) - (500 - trim)) <= w // 3 and cut == 700 - (end + 1), (end, cut))
+    _, cut0 = D.flat_end(kept, flat_rows, flat_sharp, edge_trim=0)
+    _, cut12 = D.flat_end(kept, flat_rows, flat_sharp)
+    check("PARTIAL_EDGE_TRIM_COLUMNS (12) more where the cut line ends", cut12 == cut0 + trim, (cut0, cut12))
     m, cut = D.flat_end(kept, flat_rows, sharp)
     check("level but on an edge (a level stretch of waterline): not cut", cut == 0)
     m, cut = D.flat_end(kept, rows, flat_sharp)
