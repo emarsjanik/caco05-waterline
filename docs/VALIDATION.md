@@ -48,6 +48,10 @@ python3 test_station_status.py                  # ends "all station status tests
 python3 test_setup_model.py                      # ends "all setup model tests passed" (section 4.1)
 python3 test_evaluate_setup_model.py             # ends "all setup-model evaluation tests passed" (section 4.1)
 python3 test_dem_loess.py                        # ends "all loess DEM tests passed" (section 2.8)
+python3 test_partial_lines.py                    # ends "all partial-line tests passed" (section 2.9)
+python3 test_dem_diagnostics.py                  # ends "all DEM diagnostics tests passed"
+python3 test_dem_geotiff_cron.py                 # ends "all DEM GeoTIFF cron tests passed"
+python3 test_owg_plots.py                        # ends "all wave-gauge plot tests passed"
 python3 test_georectify_uncertainty.py           # ends "all georectification uncertainty tests passed" (section 4.10)
 python3 test_timestack_wave_height.py            # ends "all timestack wave height tests passed" (section 4.11, opt-in)
 python3 test_measured_setup.py                   # ends "all measured setup tests passed" (section 4.12, opt-in)
@@ -757,29 +761,38 @@ the 20-24 Oct 2026 storm, c2's far field stayed hazy for a week while the near f
 (median frame sharpness 29-88, as on any clear day): 1-12 frames a day were saved against 24-36 on
 the clear days before, 22-34 a day rejected for signal. Such a frame is now saved as a PARTIAL line
 when its clear columns form long runs adding up to 30% of the columns, inside `--column-limits`.
-A run is at least 10% of the columns, more than 80% clear, and never spans a gap of more than 8
-columns; its ends are where its share of clear columns would fall below 80% (the maximal scoring
-segments of Ruzzo & Tompa 1999, +0.2 per clear column and -0.8 per other), so a dropout is bridged
-(still no-signal) only when the clear columns either side outweigh it, and the haze's chance clear
-columns neither carry a run into the haze nor sink it; 12 columns are cut where a run meets noise.
+A run is at least 10% of the columns and never spans a gap of more than 8 columns; within that, it
+is a stretch whose every part starting at either end is more than 80% clear, and that no longer such
+stretch contains (the maximal scoring segments of Ruzzo & Tompa 1999, +0.2 per clear column and
+-0.8 per other), so a dropout is bridged (still no-signal) only when the clear columns either side
+outweigh it, and the haze's chance clear columns neither carry a run into the haze nor sink it; 12
+columns are cut where a run meets noise. A whole frame (60% or more) that fails the confidence gate
+is tried the same way: its mean confidence counts its hazy columns, and with haze at the near end
+(early in the solver's path) a frame 60-75% clear failed the gate while a hazier one passed as a
+partial line on its clear run.
 Only those columns are flagged `Has_Signal`, and the CSV gains a last column `Partial_Line` = 1, so
 the extractor, the maps and the DEM use the clear stretch and drop the hazy far end. The extractor
 judges a CSV marked `Partial_Line` by `--partial-min-coverage` (0.25, never more than
 `--min-coverage`) and every other frame by `--min-coverage` (0.50) as before, however few of its
 columns carry signal (a line detected with a lower `--min-signal-fraction`, or cut by
-`--column-limits`, is a whole line). A frame at or above 60% is untouched; a partial line never
+`--column-limits`, is a whole line). Every frame saved before is untouched; a partial line never
 seeds the next frame's temporal blend; `--partial-min-fraction 0` turns partial lines off.
+`batch_bias_analysis.py` skips partial lines (it scores every row, and theirs are haze where
+`Has_Signal` = 0); `compare_to_ground_truth.py` and `bias_analysis.py` warn on one.
 PROVISIONAL until the real-data check below.
 
 | what | data | number | reproduce here | check on the NUC |
 |---|---|---|---|---|
 | Whole frames unchanged | [SYNTH] signal in every column; whole -> partial -> whole with the temporal blend on | the CSV the same to the byte as the v6.10 detector's (from git, `fd7d021`), and the third frame of the sequence too (v6.10 discarded the second); the blend state after the partial line is the first frame's | `python3 test_partial_lines.py` | same |
-| A hazy far half kept as a partial line | [SYNTH] far half flat haze | discarded with partial lines off; saved with them on, only the clear half flagged, marked `Partial_Line`, rows within 1.5 px of the true line, cut 12 columns from the haze, the overlay drawing only the kept stretch | same | the rerun below |
+| A hazy half kept as a partial line | [SYNTH] near or far half flat haze | discarded with partial lines off; saved with them on, only the clear half flagged, marked `Partial_Line`, rows within 1.5 px of the true line, cut 12 columns from the haze, the overlay drawing only the kept stretch | same | the rerun below |
+| The thresholds at their edges | [SYNTH] the module's defaults | a 9.9% run left out, 10% kept; an 8-column dropout bridged, 9 not; 28% kept discarded, 31.3% saved | same | - |
+| A whole frame failing the gate for its hazy near columns | [SYNTH] 65% clear, the near 35% hazy; 85% clear | 65%: saved as a partial line (v6.10 and partial lines off: discarded, low confidence); 85%: passes whole, the same CSV to the byte as v6.10's | same | - |
 | The haze's chance clear columns | [SYNTH] a 40% clear run (2448 columns) with 12%, 25% or 50% of the haze's columns clear at random (400 frames each), or every 4th / 10th | no hazy column flagged at 12% and 25% (at most 1% of frames at 50%); half the 12 cut columns kept in under 1% (10% at 50%); every 4th: the run kept, not lost. The first cut of v6.11 (plain bridging) flagged hazy columns in 21% of frames at 12% and lost the every-4th frame | same | - |
 | `--column-limits` | [SYNTH] the right half clear, limits 0-0.5, 0-0.6, 0.4-1 | discarded, discarded, partial with every flagged column inside the limits (the first cut saved the first two with 0% and 8% flagged) | same | - |
 | Scattered clear bits are not a line | [SYNTH] 40% of columns in 40-column bits; a comb of single columns | discarded ("long clear runs cover ..."); clear_runs keeps nothing | same | - |
-| The extractor's floors | [SYNTH] 100%, 62%, 40% and 27% lines; unmarked 27% and 59% lines | 40% partial used, 27% (19% after the fragment trim) not; whole lines judged by `--min-coverage` whatever their share (the unmarked 27% used at 0.15, the 59% dropped at 0.50); `--min-coverage 0` turns every floor off; the log's partial count is of the frames left after the tide-agreement filter | same | - |
-| The tests catch the faults | 13 faults put in by hand (the blend state, the overlay, the confidence, the limits, the marker, the floors, the count, the version, the run finder) | each fails the suite | - | - |
+| The extractor's floors | [SYNTH] 100%, 62%, 40% and 27% lines (300 columns); unmarked 27% and 59% lines | 40% partial used, 27% (22.7% after the fragment trim) not; whole lines judged by `--min-coverage` whatever their share (the unmarked 27%, 23% after the trim, used at 0.15; the 59% dropped at 0.50); `--min-coverage 0` turns every floor off; the log's partial count is of the frames left after the tide-agreement filter | same | - |
+| Ground-truth tools | [SYNTH] a whole and a partial detection with their ground truth | `batch_bias_analysis.py` scores the whole one and lists the partial one as skipped; `compare_to_ground_truth.py` and `bias_analysis.py` warn on the partial one only | same | - |
+| The tests catch the faults | 23 faults put in by hand (the blend state, the overlay, the confidence and its retry, the limits, the marker, the floors, the count, the log, the version, the run finder's gap, run length, ties and trim, the 30%, the ground-truth tools) | each fails the suite | - | - |
 | Real frames | [REAL] pending: c2 18 Oct (clear), 22 Oct (fog), 25-31 Oct 2026, rerun in a scratch folder | partial lines per day, and their overlays: does the kept stretch sit on the waterline; does fog still save nothing? | - | the scratch rerun in the PR description; then `waterline_consistency.py`'s report on the next week |
 
 ## 3. Survey-date products (`survey_products.py`)
@@ -2016,7 +2029,7 @@ than the series, or more than 7 days from its nearest DEM, keep C's setup.
 | Waterline strata | flood / ebb beyond +/-0.1 m/h, flood - ebb within camera-days; Hs thirds; intervals by camera-day, >= 5 | `survey_compare.py` STAGE_RATE | section 2.4a (text and json only) |
 | Change: day-block LoD | report only, off (`--day-block-lod`; cron `DEM_DAY_BLOCK_LOD`) | `dem_change.py` | section 2.4a |
 | Detector: whole-frame signal | >= 60% of columns | `waterline_detector_v5.py` `MIN_SIGNAL_COLUMN_FRACTION` | no line through noise |
-| Detector: partial lines | runs >= 10% of the columns, > 80% clear (ends where they fall below it), no gap over 8, 12-column edge trim, >= 30% in all inside `--column-limits` (PROVISIONAL) | `PARTIAL_*`, `--partial-min-fraction` | section 2.9 |
+| Detector: partial lines | runs >= 10% of the columns, every part from either end > 80% clear, no gap over 8, 12-column edge trim, >= 30% in all inside `--column-limits`; also tried for a whole frame failing the confidence gate (PROVISIONAL) | `PARTIAL_*`, `--partial-min-fraction` | section 2.9 |
 | Extractor: coverage | >= 50% (whole lines), >= 25% (lines marked `Partial_Line`; never above the whole-line floor) | `--min-coverage`, `--partial-min-coverage` | section 2.9 |
 
 ### 4.10 Georectification uncertainty (`georectify_uncertainty.py`; opt-in `--sigma-obs`)

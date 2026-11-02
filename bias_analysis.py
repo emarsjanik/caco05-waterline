@@ -29,6 +29,12 @@ def load_csv_rows(path):
     return np.array(columns), np.array(rows)
 
 
+def is_partial_line(path):
+    """A detector CSV marked Partial_Line (detector v6.11): its Has_Signal=0 rows are haze."""
+    with open(path, "r", newline="") as f:
+        return "Partial_Line" in next(csv.reader(f), [])
+
+
 def main():
     if len(sys.argv) != 3:
         print("Usage: python3 bias_analysis.py <detector_csv> <ground_truth_csv>")
@@ -37,6 +43,9 @@ def main():
     det_path = Path(sys.argv[1])
     gt_path = Path(sys.argv[2])
 
+    if is_partial_line(det_path):
+        print(f"WARNING: {det_path.name} is a partial line (Partial_Line): only its columns flagged "
+              f"Has_Signal are a waterline, the rest is haze; every row is scored below.")
     _, det_rows = load_csv_rows(det_path)
     _, gt_rows = load_csv_rows(gt_path)
 

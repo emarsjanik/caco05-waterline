@@ -1413,8 +1413,9 @@ def main():
     used = len({r[0] for r in output_rows})
     partial_used = len({r[0] for r in output_rows} & partial_stems)   # after the tide-agreement filter
     print(f"Frames used              : {used}"
-          + (f" ({partial_used} partial line(s): the detector's clear runs, the hazy rest dropped)"
-             if partial_used else ""))
+          + ((f" ({partial_used} partial line(s): the detector's clear runs"
+              + (", their no-signal columns kept by --include-no-signal)" if args.include_no_signal
+                 else ", the hazy rest dropped)")) if partial_used else ""))
     print(f"Skipped (no epoch prefix): {skipped_no_epoch}")
     print(f"Skipped (no c1/c2 in name): {skipped_no_camera}")
     if args.include_no_signal:

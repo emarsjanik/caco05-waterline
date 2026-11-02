@@ -36,6 +36,12 @@ def load_csv_rows(path, has_confidence):
     return np.array(columns), np.array(rows)
 
 
+def is_partial_line(path):
+    """A detector CSV marked Partial_Line (detector v6.11): its Has_Signal=0 rows are haze."""
+    with open(path, "r", newline="") as f:
+        return "Partial_Line" in next(csv.reader(f), [])
+
+
 def compute_rms_error(reference, detected):
     reference = np.asarray(reference, dtype=np.float32)
     detected = np.asarray(detected, dtype=np.float32)
@@ -103,6 +109,9 @@ def main():
         print(f"ERROR: ground truth CSV not found: {ground_truth_csv}")
         sys.exit(1)
 
+    if is_partial_line(detector_csv):
+        print(f"WARNING: {detector_csv.name} is a partial line (Partial_Line): only its columns flagged "
+              f"Has_Signal are a waterline, the rest is haze; every row is scored below.")
     det_columns, det_rows = load_csv_rows(detector_csv, has_confidence=True)
     gt_columns, gt_rows = load_csv_rows(ground_truth_csv, has_confidence=False)
 

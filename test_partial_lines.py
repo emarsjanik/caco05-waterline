@@ -7,13 +7,17 @@ Plain python3 (no pytest needed on the station):
     python3 test_partial_lines.py
 
 WHAT.
-  * maximal_segments: the Ruzzo & Tompa (1999) example, and the recursive
-    definition (best segment, then the same either side) on random scores.
+  * maximal_segments: the Ruzzo & Tompa (1999) example, the recursive
+    definition (best segment, then the same either side) on random scores,
+    and what a run is: a stretch whose every part from either end is more
+    than 80% clear, that no longer such stretch contains; ties.
   * clear_runs: long runs of signal columns kept, short ones and scattered
-    columns not; dropouts up to PARTIAL_MAX_GAP_COLUMNS bridged but still
-    no-signal; runs cut where they meet noise, not at the frame's edge; the
-    haze's chance clear columns neither extend a run past the haze's edge
-    nor undo the cut there, nor lose a frame that has more signal.
+    columns not; PARTIAL_MAX_GAP_COLUMNS (8 bridged, 9 not) and
+    PARTIAL_MIN_RUN_FRACTION (9.9% out, 10% in) at their boundaries; a
+    bridged dropout still no-signal; runs cut where they meet noise, not at
+    the frame's edge; the haze's chance clear columns neither extend a run
+    past the haze's edge nor undo the cut there, nor lose a frame that has
+    more signal; --column-limits (inside) keeps and counts runs the same.
   * process_image on a synthetic energy field (the real smoothing, solver,
     signal test, confidence gate, temporal blend and CSV export; only the
     photo and its energy are made up):
@@ -28,11 +32,20 @@ WHAT.
         untouched), and the third frame's CSV is the v6.10 detector's;
       - --column-limits: judged on the columns inside them, so a partial
         line is never saved with fewer than 30% of its columns kept;
+      - PARTIAL_MIN_FRACTION at the module's default: 28% kept discarded,
+        31.3% saved; the far half hazy (c2's case) saved as a partial line;
+      - a whole frame failing the confidence gate only for hazy near
+        columns: saved as a partial line (v6.10 discarded it); one that
+        passes, the same CSV to the byte as v6.10's;
       - only scattered short stretches clear: discarded either way, saying why.
   * extract_elevation_contours.py: a CSV marked Partial_Line is judged by
     --partial-min-coverage (0.25, never above --min-coverage), every other
     frame by --min-coverage as before, however few of its columns carry
-    signal; the log's partial count is of the frames used.
+    signal; the log's partial count is of the frames used, and says so
+    under --include-no-signal.
+  * batch_bias_analysis.py skips a partial line (listing it); the single-pair
+    compare_to_ground_truth.py and bias_analysis.py warn on one: they score
+    every row, and a partial line's no-signal rows are haze.
 Exit status 0 when every check passes.
 """
 
@@ -97,6 +110,18 @@ def test_maximal_segments():
             bad.append(k)
     check("300 random sequences: the same as the recursive definition", not bad, bad[:5])
     check("nothing positive: no segment", D.maximal_segments([-1, 0, -2]) == [])
+    bad = []
+    for k in range(400):
+        n = int(rng.integers(1, 22))
+        x = [int(v) for v in np.where(rng.random(n) < rng.uniform(0.3, 0.97), 1, -4)]
+        ends_clear = [(i, j) for i in range(n) for j in range(i, n)
+                      if all(sum(x[i:t + 1]) > 0 for t in range(i, j + 1))
+                      and all(sum(x[t:j + 1]) > 0 for t in range(i, j + 1))]
+        want = sorted(a for a in ends_clear if not any(b != a and b[0] <= a[0] and a[1] <= b[1] for b in ends_clear))
+        if D.maximal_segments(x) != want:
+            bad.append(x)
+    check("400 random clear/no-signal sequences (+1/-4, i.e. 80%): each segment is a stretch whose every part "
+          "from either end is more than 80% clear, and no longer such stretch contains it", not bad, bad[:2])
     check("a tie ends a segment (the paper's R_j >= R_k): a dropout is bridged only when what lies "
           "beyond it outweighs it", D.maximal_segments([1, 1, 1, 1, -2, 2]) == [(0, 3), (5, 5)]
           and D.maximal_segments([1, 1, 1, 1, -2, 3]) == [(0, 5)])
@@ -137,8 +162,20 @@ def test_clear_runs():
     s[10:60] = True
     s[80:95] = True
     m, k = D.clear_runs(s, min_run=20, max_gap=8, edge_trim=12)
-    check("a gap over 8 columns splits; a 15-column run under min_run is left out",
+    check("a 15-column run past a 20-column gap: left out (under min_run)",
           k == 1 and m[30] and not m[80:95].any())
+    g, trim = D.PARTIAL_MAX_GAP_COLUMNS, D.PARTIAL_EDGE_TRIM_COLUMNS
+    s = np.ones(n, bool)
+    s[100:100 + g] = False
+    m, k = D.clear_runs(s)
+    s9 = np.ones(n, bool)
+    s9[100:101 + g] = False
+    m9, k9 = D.clear_runs(s9)
+    check(f"PARTIAL_MAX_GAP_COLUMNS ({g}): a {g}-column dropout bridged, a {g + 1}-column one ends the run "
+          f"(12 columns cut either side), though the clear columns either side would outweigh it",
+          g == 8 and k == 1 and m.sum() == n - g and k9 == 2 and m9.sum() == n - (g + 1) - 2 * trim
+          and not m9[100 - trim:101 + g + trim].any() and m9[100 - trim - 1] and m9[101 + g + trim],
+          (k, m.sum(), k9, m9.sum()))
     s = np.zeros(n, bool)
     s[::7] = True
     m, k = D.clear_runs(s, min_run=20, max_gap=8, edge_trim=12)
@@ -154,8 +191,26 @@ def test_clear_runs():
           (m.sum(), k2, m2.sum(), s2.sum()))
     m, k = D.clear_runs(np.zeros(n, bool))
     check("no signal: nothing", not m.any() and k == 0)
+    s = np.zeros(1000, bool)
+    s[:99] = True                                     # 9.9% of the columns, from the frame's edge
     m, _ = D.clear_runs(s)
-    check("the defaults: PARTIAL_MIN_RUN_FRACTION of the columns", not m.any())
+    s[99] = True                                      # 10%
+    m2, _ = D.clear_runs(s)
+    check("PARTIAL_MIN_RUN_FRACTION (10%): a run of 9.9% of the columns left out, one of 10% kept",
+          D.PARTIAL_MIN_RUN_FRACTION == 0.10 and not m.any() and m2.sum() == 100 - trim, (m.sum(), m2.sum()))
+    s = np.zeros(600, bool)
+    s[250:] = True
+    s[400:404] = False
+    s[500:504] = False                                # two bridged dropouts: one run
+    _, k0 = D.clear_runs(s)
+    m1, k1 = D.clear_runs(s, inside=np.ones(600, bool))
+    lim = np.arange(600) < 300
+    m2, k2 = D.clear_runs(s, inside=lim)
+    m3, k3 = D.clear_runs(s, inside=np.arange(600) < 255)
+    check("inside (--column-limits): the same run counted once however the limits fall; only columns inside "
+          "kept; a run with none inside not counted",
+          k0 == k1 == k2 == 1 and m1.sum() == s[250 + trim:].sum() and not (m2 & ~lim).any()
+          and m2.sum() == 300 - 250 - trim and k3 == 0 and not m3.any(), (k0, k1, k2, k3, m2.sum()))
 
     # The haze's chance clear columns (2.7-12% of a dead far field's columns pass the signal test;
     # bridging them used to carry a run into the haze, or sink it under the density test).
@@ -234,7 +289,7 @@ def detector(mod, tmp, energy, partial_min, blend=False, limits=None):
     mod.build_shoreline_energy = lambda data: (energy, {"envelope": np.ones((ROWS, COLS), bool)})
     mod.save_energy_debug = lambda *a, **k: None
     mod.OUTPUT_FOLDER, mod.EXPORT_CSV = str(tmp), True
-    if "PARTIAL_MIN_FRACTION" in saved:
+    if "PARTIAL_MIN_FRACTION" in saved and partial_min is not None:   # None: the module's own default
         mod.PARTIAL_MIN_FRACTION = partial_min
     mod.TEMPORAL_FILTER_ENABLED = blend
     mod.COLUMN_LIMITS = dict(limits or {})
@@ -285,7 +340,7 @@ def test_detector():
     old = v610_detector()
     full = np.ones(COLS, bool)
     hazy = np.zeros(COLS, bool)
-    hazy[COLS // 2:] = True                           # the far half hidden
+    hazy[COLS // 2:] = True                           # the left (near, low-column) half hidden
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         st_on, rows_on, _, p_on = run_frame(tmp / "on", full, 0.30)
@@ -301,7 +356,7 @@ def test_detector():
                   st_old == "saved" and p_old.read_bytes() == p_on.read_bytes())
 
         st, rows, out, _ = run_frame(tmp / "h_off", hazy, 0.0)
-        check("the far half hazy, partial lines off: discarded as before",
+        check("the near half hazy, partial lines off: discarded as before",
               st == "no_signal" and not rows and "DISCARDED (only" in out, (st, out[-300:]))
         st, rows, out, p_csv = run_frame(tmp / "h_on", hazy, 0.30)
         sig = np.array([int(r["Has_Signal"]) for r in rows], bool) if rows else np.zeros(0, bool)
@@ -359,6 +414,42 @@ def test_detector():
                      ", at least 30% of the columns flagged, all inside the limits"),
                   good and (want == "partial" or "inside --column-limits" in out), (st, sig.mean() if len(sig) else None))
 
+        # PARTIAL_MIN_FRACTION itself, at the module's default
+        st28, _, out28, _ = run_frame(tmp / "b28", np.arange(COLS) >= 420, None)     # 28% kept after the cut
+        st31, rows31, _, _ = run_frame(tmp / "b31", np.arange(COLS) >= 400, None)    # 31.3%
+        sig31 = np.array([int(r["Has_Signal"]) for r in rows31], bool) if rows31 else np.zeros(0, bool)
+        check("PARTIAL_MIN_FRACTION (30%, the default): 28% of the columns kept is discarded, 31.3% saved",
+              D.PARTIAL_MIN_FRACTION == 0.30 and st28 == "no_signal" and "cover 28.0%, need 30%" in out28
+              and st31 == "partial" and abs(sig31.mean() - 188 / 600) < 1e-9, (st28, st31))
+
+        # the far (high-column) half hazy: c2's case after the Oct 2026 storm
+        far = np.arange(COLS) < COLS // 2
+        st, rows, _, _ = run_frame(tmp / "far", far, None)
+        sig = np.array([int(r["Has_Signal"]) for r in rows], bool) if rows else np.zeros(0, bool)
+        check("the far half hazy: saved as a partial line, only the near half flagged, cut 12 columns from the haze",
+              st == "partial" and len(sig) and not sig[COLS // 2 - D.PARTIAL_EDGE_TRIM_COLUMNS:].any()
+              and sig[:COLS // 2 - D.PARTIAL_EDGE_TRIM_COLUMNS].all(), st)
+
+        # a whole frame failing the confidence gate only for its hazy near columns
+        near_haze = np.arange(COLS) >= int(0.35 * COLS)                  # 65% clear, the near 35% hazy
+        st, rows, out, p65 = run_frame(tmp / "c65", near_haze, None)
+        sig = np.array([int(r["Has_Signal"]) for r in rows], bool) if rows else np.zeros(0, bool)
+        check("65% clear with the near 35% hazy (whole-line confidence under 0.9): tried and saved as a partial "
+              "line on its clear run, marked, not the blend reference",
+              st == "partial" and "the whole line's mean confidence" in out and len(sig)
+              and not sig[:int(0.35 * COLS) + D.PARTIAL_EDGE_TRIM_COLUMNS].any()
+              and all(r.get(D.PARTIAL_LINE_COLUMN) == "1" for r in rows) and state()[0] is None, (st, out[-300:]))
+        st, _, out, _ = run_frame(tmp / "c65off", near_haze, 0.0)
+        check("... and with partial lines off, discarded for its confidence as before",
+              st == "low_confidence" and "DISCARDED (mean confidence" in out, st)
+        if old is not None:
+            st_old, _, _, p65_old = run_frame(tmp / "c65old", near_haze, None, mod=old)
+            st85, _, _, p85 = run_frame(tmp / "c85", np.arange(COLS) >= int(0.15 * COLS), None)
+            st85o, _, _, p85o = run_frame(tmp / "c85old", np.arange(COLS) >= int(0.15 * COLS), None, mod=old)
+            check("... which v6.10 discarded; 85% clear passes the gate whole, the same CSV to the byte as v6.10's",
+                  st_old == "low_confidence" and not p65_old.exists() and st85 == st85o == "saved"
+                  and p85.read_bytes() == p85o.read_bytes(), (st_old, st85, st85o))
+
         bits = np.zeros(COLS, bool)
         for a in range(0, COLS, 100):
             bits[a:a + 40] = True                     # 40% of columns, in 40-column stretches
@@ -414,12 +505,12 @@ def test_extractor():
         frames = {
             "full": (EPOCH, np.ones(300, bool), False),
             "partial40": (EPOCH + 1800, run_of(150, 270), True),      # 40%: a partial line's clear run
-            "partial27": (EPOCH + 3600, run_of(200, 280), True),      # 27%: ~19% left after the fragment trim
-            "full62": (EPOCH + 5400, run_of(100, 286), False),        # 62%: a whole line, truncated coverage ~0.54
+            "partial27": (EPOCH + 3600, run_of(200, 280), True),      # 27%: 22.7% (68/300) left after the fragment trim
+            "full62": (EPOCH + 5400, run_of(100, 286), False),        # 62%: a whole line, 58% (174/300) left after the trim
             # whole lines with few columns flagged, NOT partial lines: detected with a lower
             # --min-signal-fraction (process_chelsea.py, detect_original_view.py: 0.15), or cut by
             # --column-limits; the share of Has_Signal columns does not make a line partial
-            "near27": (EPOCH + 7200, run_of(0, 80), False),          # ~0.20 left after the fragment trim
+            "near27": (EPOCH + 7200, run_of(0, 80), False),          # 23% (69/300) left after the fragment trim
             "scatter59": (EPOCH + 9000, run_of(0, 115) | (np.arange(300) % 3 == 0) & (np.arange(300) >= 115), False),
         }
         for ep, sig, partial in frames.values():
@@ -428,7 +519,7 @@ def test_extractor():
         ep = {k: str(v[0]) for k, v in frames.items()}
 
         rc, used, out = extract(d)
-        check("the defaults: the whole line and the 40% partial line used, the one left with 19% not",
+        check("the defaults: the whole line and the 40% partial line used, the one left with 22.7% not",
               rc == 0 and ep["full"] in used and ep["partial40"] in used and ep["partial27"] not in used,
               (rc, used, out[-600:]))
         check("the log counts the partial lines used", "(1 partial line(s)" in out, out[-400:])
@@ -443,11 +534,14 @@ def test_extractor():
         rc, used, _ = extract(d, ["--partial-min-coverage", "0"])
         check("--partial-min-coverage 0: no coverage floor for partial lines", ep["partial27"] in used, used)
         rc, used, _ = extract(d, ["--min-coverage", "0.15"])
-        check("--min-coverage 0.15 (the Chelsea runs): an unmarked 27% line (0.20 left) used as before, and a partial "
+        check("--min-coverage 0.15 (the Chelsea runs): an unmarked 27% line (23% left) used as before, and a partial "
               "line never held to more than --min-coverage", ep["near27"] in used and ep["partial27"] in used, used)
         rc, used, _ = extract(d, ["--min-coverage", "0"])
         check("--min-coverage 0 turns the floor off for every line, partial ones too",
               all(ep[k] in used for k in ("near27", "partial27", "scatter59")), used)
+        rc, used, out = extract(d, ["--include-no-signal"])
+        check("--include-no-signal: the log says the partial lines' no-signal columns were kept, not dropped",
+              "kept by --include-no-signal" in out and "the hazy rest dropped" not in out, out[-400:])
 
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
@@ -469,9 +563,46 @@ def test_extractor():
           X.PARTIAL_LINE_COLUMN == D.PARTIAL_LINE_COLUMN)
 
 
+def test_ground_truth_tools():
+    print("ground-truth tools: a partial line's hazy rows are not scored silently")
+    import batch_bias_analysis as B
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "processed").mkdir()
+        (d / "gt").mkdir()
+        whole, part = EPOCH, EPOCH + 1800
+        write_frame(d / "processed", whole, np.ones(300, bool))
+        write_frame(d / "processed", part, run_of(150, 270), True)
+        for ep in (whole, part):
+            src = next((d / "processed").glob(f"{ep}.*.csv"))
+            (d / "gt" / src.name).write_text(src.read_text().split("\n", 1)[0].split(",Partial_Line")[0] + "\n"
+                                             + "\n".join(f"{c},{500 + c // 10}" for c in range(300)) + "\n")
+        saved = B.PROCESSED_FOLDER, B.GROUND_TRUTH_FOLDER
+        B.PROCESSED_FOLDER, B.GROUND_TRUTH_FOLDER = str(d / "processed"), str(d / "gt")
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                B.main()
+        finally:
+            B.PROCESSED_FOLDER, B.GROUND_TRUTH_FOLDER = saved
+        out = buf.getvalue()
+        check("batch_bias_analysis.py: the partial line listed as skipped, the whole one scored",
+              "Images compared     : 1" in out and "1 detector output(s) are partial lines" in out
+              and f"  - {next((d / 'processed').glob(f'{part}.*.csv')).stem}" in out, out[-500:])
+        for tool in ("compare_to_ground_truth.py", "bias_analysis.py"):
+            warned = []
+            for ep in (whole, part):
+                det = next((d / "processed").glob(f"{ep}.*.csv"))
+                r = subprocess.run([sys.executable, str(HERE / tool), str(det), str(d / "gt" / det.name)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+                warned.append(r.returncode == 0 and "is a partial line (Partial_Line)" in r.stdout)
+            check(f"{tool}: a WARNING on the partial line, none on the whole one", warned == [False, True], warned)
+
+
 def test_syntax_38():
     print("Python 3.8")
-    for f in ("waterline_detector_v5.py", "extract_elevation_contours.py", "test_partial_lines.py"):
+    for f in ("waterline_detector_v5.py", "extract_elevation_contours.py", "test_partial_lines.py",
+              "batch_bias_analysis.py", "compare_to_ground_truth.py", "bias_analysis.py"):
         try:
             ast.parse((HERE / f).read_text(), filename=f, feature_version=(3, 8))
             good = True
@@ -486,6 +617,7 @@ def main():
     test_clear_runs()
     test_detector()
     test_extractor()
+    test_ground_truth_tools()
     test_syntax_38()
     if failures:
         print(f"{len(failures)} check(s) FAILED")

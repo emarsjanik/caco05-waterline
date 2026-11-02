@@ -16,9 +16,11 @@
 #      the columns (after --column-limits): the line is saved with only
 #      those flagged Has_Signal and a trailing Partial_Line column, so
 #      everything downstream uses the clear stretch and drops the hazy
-#      far end. Frames at or above 60% are untouched (the same CSV to the
-#      byte); a partial line never seeds the next frame's temporal blend;
-#      --partial-min-fraction 0 restores the old behaviour.
+#      far end. A whole frame (60% or more) that fails the confidence
+#      gate is tried the same way, since its mean confidence counts its
+#      hazy columns. Every frame saved before is untouched (the same CSV
+#      to the byte); a partial line never seeds the next frame's temporal
+#      blend; --partial-min-fraction 0 restores the old behaviour.
 #      extract_elevation_contours.py --partial-min-coverage is its
 #      downstream floor, for CSVs marked Partial_Line.
 #
@@ -429,8 +431,9 @@ MIN_SIGNAL_COLUMN_FRACTION = 0.60
 #     always thrown away: haze or spray can hide the far field while the
 #     near field still shows a clear waterline. Its clear columns are taken
 #     in long runs (clear_runs): a gap of more than PARTIAL_MAX_GAP_COLUMNS
-#     always ends a run; within that, a run ends where its share of
-#     clear columns would fall below PARTIAL_MIN_RUN_DENSITY (the maximal
+#     always ends a run; within that, a run is a stretch in which every
+#     part starting at either end is more than PARTIAL_MIN_RUN_DENSITY
+#     clear, and that no longer such stretch contains (the maximal
 #     segments scoring 1 - density per clear column and -density per
 #     other: Ruzzo & Tompa 1999), so a dropout is bridged (still flagged
 #     no-signal) only when the clear columns either side outweigh it, and
@@ -444,7 +447,9 @@ MIN_SIGNAL_COLUMN_FRACTION = 0.60
 #     runs kept, inside --column-limits, add up to PARTIAL_MIN_FRACTION of
 #     the columns, the line is saved with only them flagged Has_Signal
 #     (and Partial_Line=1) and the confidence gate is judged on them;
-#     otherwise the frame is rejected as before.
+#     otherwise the frame is rejected as before. A whole frame that fails
+#     the confidence gate (its mean counts the hazy columns) is tried the
+#     same way.
 #     PROVISIONAL: to be checked on the station's late-Oct 2026 c2 frames
 #     (docs/VALIDATION.md 2.9); --partial-min-fraction 0 turns them off.
 PARTIAL_MIN_FRACTION = 0.30
@@ -1713,19 +1718,21 @@ def maximal_segments(scores):
     return [(f[0], f[1]) for f in found]
 
 
-def clear_runs(column_has_signal, min_run=None, max_gap=None, edge_trim=None, density=None):
+def clear_runs(column_has_signal, min_run=None, max_gap=None, edge_trim=None, density=None, inside=None):
     """
     The columns of a partial line (see PARTIAL_MIN_FRACTION). A gap of
     more than `max_gap` no-signal columns always ends a run. Within that,
     the runs are the maximal segments (maximal_segments) scoring
-    1 - `density` per signal column and -`density` per other: each holds
-    more than `density` signal, and ends where adding more columns would
-    take it below that -- so a dropout is bridged only when the signal
-    either side outweighs it, and chance signal columns in haze beyond a
-    run neither extend it nor join into a run of their own. Runs shorter
-    than `min_run` columns are left out; each kept run is cut by
-    `edge_trim` columns at an end that is not the frame's own edge.
-    Returns (mask, number of runs kept); the mask is a subset of
+    1 - `density` per signal column and -`density` per other: each is a
+    stretch in which every part starting at either of its ends is more
+    than `density` signal, and that no longer such stretch contains -- so
+    a dropout is bridged only when the signal either side outweighs it,
+    and chance signal columns in haze beyond a run neither extend it nor
+    join into a run of their own. Runs shorter than `min_run` columns are
+    left out; each kept run is cut by `edge_trim` columns at an end that
+    is not the frame's own edge. `inside` (column_limit_mask) keeps only
+    the columns inside --column-limits, a run counting only if it keeps
+    one. Returns (mask, number of runs kept); the mask is a subset of
     column_has_signal, so a bridged dropout stays no-signal.
     """
     s = np.asarray(column_has_signal, bool)
@@ -1752,9 +1759,12 @@ def clear_runs(column_has_signal, min_run=None, max_gap=None, edge_trim=None, de
             hi = b - (edge_trim if b < n - 1 else 0)
             if hi < lo:
                 continue
+            if inside is not None and not (s[lo:hi + 1] & inside[lo:hi + 1]).any():
+                continue
             keep[lo:hi + 1] = True
             runs += 1
-    return keep & s, runs
+    keep &= s
+    return (keep if inside is None else keep & inside), runs
 
 
 def column_limit_mask(data, n):
@@ -2107,15 +2117,14 @@ def process_image(image_path):
             return result, "no_signal"
 
         partial = False
+        whole_signal = column_has_signal
+        limited = COLUMN_LIMITS.get(data.profile.name) is not None
         if sig["signal_fraction"] < MIN_SIGNAL_COLUMN_FRACTION:
-            kept, runs = clear_runs(column_has_signal) if PARTIAL_MIN_FRACTION > 0.0 else (None, 0)
-            inside = column_limit_mask(data, len(column_has_signal)) if kept is not None else None
-            if inside is not None:
-                # judged on what would be saved: --column-limits flags the rest no-signal below
-                kept = kept & inside
-                runs = int(np.count_nonzero(np.diff(np.concatenate(([0], kept.astype(np.int8), [0]))) == 1))
+            # judged on what would be saved: --column-limits flags the rest no-signal below
+            kept, runs = (clear_runs(column_has_signal, inside=column_limit_mask(data, len(column_has_signal)))
+                          if PARTIAL_MIN_FRACTION > 0.0 else (None, 0))
             if kept is None or kept.mean() < PARTIAL_MIN_FRACTION:
-                note = (f"; its long clear runs{' inside --column-limits' if inside is not None else ''} "
+                note = (f"; its long clear runs{' inside --column-limits' if limited else ''} "
                         f"cover {100 * kept.mean():.1f}%, need {100 * PARTIAL_MIN_FRACTION:.0f}% "
                         f"for a partial line" if kept is not None else "")
                 print(f"DISCARDED (only {100*sig['signal_fraction']:.1f}% of columns carry signal, "
@@ -2160,6 +2169,23 @@ def process_image(image_path):
         conf = result.confidence[column_has_signal] if partial else result.confidence
         mean_confidence = float(np.mean(conf))
         print("Mean confidence :", mean_confidence)
+
+        # A whole line's confidence is its mean over every column, hazy ones
+        # included: haze at the near end (low columns, early in the solver's
+        # path) can fail the gate for a frame whose clear stretch is as sure
+        # as any, which a hazier frame of the same scene would pass as a
+        # partial line. Such a frame is tried as a partial line instead of
+        # discarded; a frame that passes is untouched.
+        if (mean_confidence < CONFIDENCE_DISCARD_THRESHOLD and not partial and PARTIAL_MIN_FRACTION > 0.0
+                and whole_signal is not None):
+            kept, runs = clear_runs(whole_signal, inside=column_limit_mask(data, len(whole_signal)))
+            if kept.mean() >= PARTIAL_MIN_FRACTION:
+                kept_confidence = float(np.mean(result.confidence[kept]))
+                if kept_confidence >= CONFIDENCE_DISCARD_THRESHOLD:
+                    print(f"PARTIAL LINE    : the whole line's mean confidence {mean_confidence:.4f} < "
+                          f"{CONFIDENCE_DISCARD_THRESHOLD}; kept {100 * kept.mean():.1f}% in {runs} clear "
+                          f"run(s), mean confidence {kept_confidence:.4f}, the rest flagged no-signal")
+                    column_has_signal, partial, mean_confidence = kept, True, kept_confidence
 
         if mean_confidence < CONFIDENCE_DISCARD_THRESHOLD:
             print(f"DISCARDED (mean confidence {mean_confidence:.4f} < "
