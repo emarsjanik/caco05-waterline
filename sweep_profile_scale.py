@@ -117,6 +117,10 @@ def main():
             if not out_csv.exists():
                 print(f"{value:6.2f} | frame not saved (status: {status})")
                 continue
+            if status == "partial":
+                # a partial line's Has_Signal=0 rows are haze, and every row is scored here
+                print(f"{value:6.2f} | partial line, not scored (status: {status})")
+                continue
 
             det_cols, det_rows = load_two_column_csv(out_csv)
             gt_interp = np.interp(det_cols, gt_cols, gt_rows)
