@@ -222,6 +222,10 @@ def load_tide_model(path, time_col=None, level_col=None, tide_timezone="UTC"):
 
 GNSSR_GAP_SENTINEL = 999.0
 
+# The detector's MIN_SIGNAL_COLUMN_FRACTION (waterline_detector_v5.py): a line saved with fewer of its
+# columns flagged Has_Signal is a PARTIAL line (detector v6.11), judged by --partial-min-coverage.
+FULL_LINE_SIGNAL_FRACTION = 0.60
+
 
 def looks_like_gnssr_spline(path):
     """
@@ -870,6 +874,14 @@ def main():
                              "447 far-field columns were the ones breaking the physical "
                              "elevation ordering, because a mean over unrepresentative "
                              "fragments is meaningless. Set 0 to disable.")
+    parser.add_argument("--partial-min-coverage", type=float, default=0.25,
+                        help="--min-coverage for a PARTIAL line (default 0.25): one the detector "
+                             "(v6.11) saved with under FULL_LINE_SIGNAL_FRACTION (60%%) of its columns "
+                             "carrying signal, keeping only its long clear runs (at least 30%% of "
+                             "the columns in runs of at least 10%%; the hazy rest flagged "
+                             "no-signal). Those are contiguous stretches of waterline, not the "
+                             "scattered survivors --min-coverage keeps out; every other frame is "
+                             "judged by --min-coverage exactly as before. Set 0 to disable.")
     parser.add_argument("--include-no-signal", action="store_true",
                         help="Keep columns the detector flagged Has_Signal=0. By default they "
                              "are DROPPED: the detector found no usable energy there, so the "
@@ -1056,6 +1068,7 @@ def main():
     level_epoch_of, level_offset_of = {}, {}
     skipped_other_mode = defaultdict(int)
     used, skipped_no_epoch, skipped_no_camera, skipped_stale = 0, 0, 0, 0
+    partial_used = 0
     dropped_no_signal = 0
     skipped_all_no_signal = 0
     skipped_low_coverage = 0
@@ -1098,6 +1111,8 @@ def main():
 
         columns, rows, sharpness, col_has_signal = load_shoreline_csv(path)
         capture_time = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+        # under the detector's whole-frame signal fraction: a partial line (v6.11)
+        partial_line = len(col_has_signal) > 0 and float(np.mean(col_has_signal)) < FULL_LINE_SIGNAL_FRACTION
 
         # Straightness is judged on the FULL row series before any
         # columns are removed: dropping columns first would leave gaps
@@ -1162,7 +1177,8 @@ def main():
                     col_has_signal = col_has_signal[run_keep]
 
             coverage = len(columns) / max(total_columns, 1)
-            if args.min_coverage > 0.0 and coverage < args.min_coverage:
+            floor = args.partial_min_coverage if partial_line else args.min_coverage
+            if floor > 0.0 and coverage < floor:
                 skipped_low_coverage += 1
                 low_coverage_detail.append((path.stem, coverage, len(columns), total_columns))
                 continue
@@ -1178,6 +1194,7 @@ def main():
         level_epoch_of[path.stem] = level_epoch
         level_offset_of[path.stem] = level_offset
         used += 1
+        partial_used += partial_line
 
     if skipped_other_mode:
         for mode, n in sorted(skipped_other_mode.items()):
@@ -1380,7 +1397,9 @@ def main():
         writer.writerows(output_rows)
 
     used = len({r[0] for r in output_rows})
-    print(f"Frames used              : {used}")
+    print(f"Frames used              : {used}"
+          + (f" ({partial_used} partial line(s): the detector's clear runs, the hazy rest dropped)"
+             if partial_used else ""))
     print(f"Skipped (no epoch prefix): {skipped_no_epoch}")
     print(f"Skipped (no c1/c2 in name): {skipped_no_camera}")
     if args.include_no_signal:

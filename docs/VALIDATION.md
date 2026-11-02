@@ -750,6 +750,28 @@ error, the cells' relative quality, and where the lines are too far apart (nmse)
 
 ---
 
+### 2.9 Partial waterlines (detector v6.11: `PARTIAL_MIN_FRACTION`, `--partial-min-coverage`)
+
+**Claim.** A frame with fewer than 60% of its columns carrying signal was always discarded. After
+the 20-24 Oct 2026 storm, c2's far field stayed hazy for a week while the near field was clear
+(median frame sharpness 29-88, as on any clear day): 1-12 frames a day were saved against 24-36 on
+the clear days before, 22-34 a day rejected for signal. Such a frame is now saved as a PARTIAL line
+when its clear columns form long runs (each at least 10% of the columns and 80% clear; dropouts of
+up to 8 columns bridged but still no-signal; 12 columns cut where a run meets noise) adding up to
+30% of the columns: only those columns are flagged `Has_Signal`, so the extractor, the maps and the
+DEM use the clear stretch and drop the hazy far end. The extractor judges a partial line by
+`--partial-min-coverage` (0.25) and every other frame by `--min-coverage` (0.50) as before. A
+frame at or above 60% is untouched; a partial line never seeds the next frame's temporal blend;
+`--partial-min-fraction 0` turns partial lines off. PROVISIONAL until the real-data check below.
+
+| what | data | number | reproduce here | check on the NUC |
+|---|---|---|---|---|
+| Whole frames unchanged | [SYNTH] signal in every column | the CSV the same to the byte with partial lines on and off | `python3 test_partial_lines.py` | same |
+| A hazy far half kept as a partial line | [SYNTH] far half flat haze | discarded with partial lines off; saved with them on, only the clear half flagged, rows within 1.5 px of the true line, cut 12 columns from the haze; not the next frame's blend reference | same | the rerun below |
+| Scattered clear bits are not a line | [SYNTH] 40% of columns in 40-column bits; a comb of single columns | discarded ("long clear runs cover ..."); clear_runs keeps nothing | same | - |
+| The extractor's floors | [SYNTH] 100%, 62%, 40% and 27% lines | 40% partial used, 27% (19% after the fragment trim) not; a whole 62% line still judged by `--min-coverage` | same | - |
+| Real frames | [REAL] pending: c2 25-31 Oct 2026, rerun in a scratch folder | partial lines per day, and their overlays: does the kept stretch sit on the waterline? | - | the scratch rerun in the PR description; then `waterline_consistency.py`'s report on the next week |
+
 ## 3. Survey-date products (`survey_products.py`)
 
 One command per survey date builds the waterlines, a filtered copy, a DEM (+ GeoTIFFs), maps
@@ -1983,6 +2005,9 @@ than the series, or more than 7 days from its nearest DEM, keep C's setup.
 | Intervals of DEM - survey | stretches >= 50 m (`--block-m`), as long as the residual correlation stays above 0.1; >= 5 stretches; 1000 resamples, seed 1 | `survey_compare.py` ALONGSHORE_BLOCK_M, RHO_GONE, MIN_CI_BLOCKS | section 2.4a (text and json only) |
 | Waterline strata | flood / ebb beyond +/-0.1 m/h, flood - ebb within camera-days; Hs thirds; intervals by camera-day, >= 5 | `survey_compare.py` STAGE_RATE | section 2.4a (text and json only) |
 | Change: day-block LoD | report only, off (`--day-block-lod`; cron `DEM_DAY_BLOCK_LOD`) | `dem_change.py` | section 2.4a |
+| Detector: whole-frame signal | >= 60% of columns | `waterline_detector_v5.py` `MIN_SIGNAL_COLUMN_FRACTION` | no line through noise |
+| Detector: partial lines | runs >= 10% of the columns, >= 80% clear, gaps <= 8 bridged, 12-column edge trim, >= 30% in all (PROVISIONAL) | `PARTIAL_*`, `--partial-min-fraction` | section 2.9 |
+| Extractor: coverage | >= 50% (whole lines), >= 25% (partial lines) | `--min-coverage`, `--partial-min-coverage` | section 2.9 |
 
 ### 4.10 Georectification uncertainty (`georectify_uncertainty.py`; opt-in `--sigma-obs`)
 
