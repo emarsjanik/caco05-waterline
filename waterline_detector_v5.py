@@ -468,21 +468,27 @@ PARTIAL_MIN_RUN_FRACTION = 0.10
 PARTIAL_MIN_RUN_DENSITY = 0.80
 PARTIAL_MAX_GAP_COLUMNS = 49
 PARTIAL_EDGE_TRIM_COLUMNS = 12
-#     FLAT END. Where a partial line meets the haze the solver, with no edge
-#     left to follow, holds its row: the line runs horizontal, and the energy
-#     at its row is no local maximum (peak sharpness 0), though the columns
-#     still pass the signal test (an edge somewhere in them, not under the
-#     line). On c2's late-Oct 2026 frames it ran on for the last 10-20% of
-#     4 of 19 partial lines, tens of pixels off the waterline, and passed
-#     the extractor's straightness test. flat_end cuts it: from the far end
-#     back, every PARTIAL_FLAT_END_WINDOW columns both more level than
-#     PARTIAL_FLAT_END_SLOPE px per column and with mean peak sharpness under
-#     PARTIAL_FLAT_END_SHARPNESS (measured in tenths of those lines: the flat
-#     ends 0.03 px/column at most and 0.00-0.02; the ends of the others 0.11
-#     at least, but for one level tenth at 0.04, which is not cut). Both, so
-#     a level waterline (on an edge) or an edgeless sloping one is not cut.
+#     FLAT END. Where a partial line meets the haze the solver, past its
+#     last clear edge, holds its row: the line runs level, on no edge or on
+#     a faint level streak (the swash band's), though the columns still pass
+#     the signal test (an edge somewhere in them, not under the line). On
+#     c2's late-Oct 2026 frames it ran on for the last 10-20% of 4-6 of 19
+#     partial lines, tens of pixels above the sand edge, and passed the
+#     extractor's straightness test. flat_end cuts it: from the far end back,
+#     every PARTIAL_FLAT_END_WINDOW columns at once more level than
+#     PARTIAL_FLAT_END_SLOPE px per column, with the line on a local energy
+#     maximum (peak sharpness > 0) in under PARTIAL_FLAT_END_PEAK_SHARE of
+#     them, and of mean peak sharpness under PARTIAL_FLAT_END_SHARPNESS
+#     (relative to the frame's sharpest column, normalize_float). Measured in
+#     tenths of those lines: the flat ends 0.03 px/column at most, on a
+#     peak in 12-73% of their columns, sharpness 0.00-0.02; the others'
+#     tenths sloping 0.11 px/column at least, on a peak in 82-100% but near
+#     their ends (54-100%, sloping). All three, so a level waterline whose
+#     row sits on a peak nearly everywhere is never cut however faint, nor
+#     a sloping one however edgeless.
 PARTIAL_FLAT_END_WINDOW = 61
 PARTIAL_FLAT_END_SLOPE = 0.05
+PARTIAL_FLAT_END_PEAK_SHARE = 0.85
 PARTIAL_FLAT_END_SHARPNESS = 0.03
 # the CSV column that marks a partial line (export_csv)
 PARTIAL_LINE_COLUMN = "Partial_Line"
@@ -1801,18 +1807,24 @@ def clear_runs(column_has_signal, min_run=None, max_gap=None, edge_trim=None, de
     return (keep if inside is None else keep & inside), runs
 
 
-def flat_end(kept, rows, sharpness, window=None, max_slope=None, max_sharpness=None, edge_trim=None):
+def flat_end(kept, rows, sharpness, window=None, max_slope=None, max_sharpness=None, edge_trim=None,
+             max_peak_share=None):
     """
     A partial line's mask with its flat end cut (see PARTIAL_FLAT_END_WINDOW):
     from the last kept column back, while the `window` columns ending there
-    are both more level than `max_slope` px per column (a straight-line
-    fit to `rows`) and of mean `sharpness` under `max_sharpness`, they go,
-    `edge_trim` more where the line then ends (it meets noise there).
-    Returns (mask, number of columns cut).
+    are at once more level than `max_slope` px per column (a straight-line
+    fit to `rows`), on a local energy maximum (`sharpness` > 0) in under
+    `max_peak_share` of them and of mean `sharpness` under `max_sharpness`,
+    they go, `edge_trim` more where the line then ends (it meets noise
+    there). Windows ending in the last `window` kept columns are all tried
+    until one is flat, so a few sharp columns or a step at the very end do
+    not keep a long flat end; after that the first window that is not flat
+    stops the cut. Returns (mask, number of columns cut).
     """
     window = PARTIAL_FLAT_END_WINDOW if window is None else int(window)
     max_slope = PARTIAL_FLAT_END_SLOPE if max_slope is None else float(max_slope)
     max_sharpness = PARTIAL_FLAT_END_SHARPNESS if max_sharpness is None else float(max_sharpness)
+    max_peak_share = PARTIAL_FLAT_END_PEAK_SHARE if max_peak_share is None else float(max_peak_share)
     edge_trim = PARTIAL_EDGE_TRIM_COLUMNS if edge_trim is None else int(edge_trim)
     kept = np.asarray(kept, bool)
     idx = np.flatnonzero(kept)
@@ -1825,10 +1837,11 @@ def flat_end(kept, rows, sharpness, window=None, max_slope=None, max_sharpness=N
     while end - window + 1 >= idx[0]:
         w = slice(end - window + 1, end + 1)
         level = abs(np.polyfit(x, rows[w], 1)[0]) < max_slope
-        edgeless = np.nanmean(sharpness[w]) < max_sharpness
-        if not (level and edgeless):
+        edgeless = (np.mean(sharpness[w] > 0) < max_peak_share) and (np.nanmean(sharpness[w]) < max_sharpness)
+        if level and edgeless:
+            cut = end - window + 1
+        elif cut is not None or end < idx[-1] - window:
             break
-        cut = end - window + 1
         end -= max(window // 3, 1)
     if cut is None:
         return kept, 0
@@ -2214,7 +2227,7 @@ def process_image(image_path):
             print(f"PARTIAL LINE    : {100*sig['signal_fraction']:.1f}% of columns carry signal "
                   f"(< {100*MIN_SIGNAL_COLUMN_FRACTION:.0f}%): kept {100 * kept.mean():.1f}%, the clear "
                   f"run from the near edge, the hazy far end flagged no-signal"
-                  + (f" ({flat} columns of it a flat end: the line level and on no edge)" if flat else ""))
+                  + (f" ({flat} columns of it a flat end: the line level, on no clear edge)" if flat else ""))
 
         shoreline = smooth_shoreline(result.subpixel_shoreline, CONFIG.smoothing_kernel)
         epoch = extract_epoch_from_filename(image_path.name)

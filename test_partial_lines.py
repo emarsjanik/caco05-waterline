@@ -19,10 +19,12 @@ WHAT.
     past the haze's edge nor undo the cut there, nor lose a frame that has
     more signal; --column-limits (inside) keeps and counts runs the same;
     near_edge takes only the first run, from within so many columns of column 0.
-  * flat_end: a level, edgeless end (the solver holding its row with no edge
-    under it) cut back to where it levels, 12 columns more; a level line on an
-    edge, or an edgeless sloping one, not; PARTIAL_FLAT_END_SLOPE and
-    PARTIAL_FLAT_END_SHARPNESS at their edges; a line shorter than the window.
+  * flat_end: a level end, mostly off any peak and faint (the solver holding
+    its row past the last clear edge) cut back to where it levels, 12 columns
+    more; a level line on a clear or a faint but real edge, or a sloping one
+    off any peak, not; PARTIAL_FLAT_END_SLOPE, _PEAK_SHARE and _SHARPNESS at
+    their edges; a few sharp columns or a step at the very end; a line
+    shorter than the window.
   * process_image on a synthetic energy field (the real smoothing, solver,
     signal test, confidence gate, temporal blend and CSV export; only the
     photo and its energy are made up):
@@ -42,8 +44,10 @@ WHAT.
         frames are the blend reference, the partial one is not (its state
         untouched), and the third frame's CSV is the v6.10 detector's;
       - a flat end from column 200 cut, the line saved as partial and logged;
-        one from column 150 leaving under 30%, discarded saying so; one
-        shorter than the window left to the 12-column cut;
+        one from column 150 leaving under 30%, discarded saying so; a 48-column
+        one after a sharp line left to the 12-column cut, at c2's sharpness cut;
+      - process_image's near-edge allowance: the near 49 columns hazy saved,
+        50 discarded;
       - --column-limits: judged on the columns inside them, so a partial
         line is never saved with fewer than 30% of its columns kept;
       - PARTIAL_MIN_FRACTION at the module's default: 28% kept discarded,
@@ -239,7 +243,7 @@ def test_clear_runs():
     t6[:D.PARTIAL_MAX_GAP_COLUMNS + 1] = False        # starting at 50
     _, j5 = D.clear_runs(t5, near_edge=D.PARTIAL_MAX_GAP_COLUMNS)
     _, j6 = D.clear_runs(t6, near_edge=D.PARTIAL_MAX_GAP_COLUMNS)
-    check(f"the detector's allowance (PARTIAL_MAX_GAP_COLUMNS, {D.PARTIAL_MAX_GAP_COLUMNS}): a run starting at "
+    check(f"clear_runs at the detector's allowance (PARTIAL_MAX_GAP_COLUMNS, {D.PARTIAL_MAX_GAP_COLUMNS}): a run starting at "
           f"column {D.PARTIAL_MAX_GAP_COLUMNS} taken, at {D.PARTIAL_MAX_GAP_COLUMNS + 1} not", j5 == 1 and j6 == 0, (j5, j6))
     check("near_edge: only the first run, from within 8 columns of the near edge (a speck before it no matter); "
           "a run starting at column 8 taken, at 9 not",
@@ -289,19 +293,26 @@ def test_flat_end():
     check("a sloping line on an edge: not cut", cut == 0 and (m == kept).all())
     flat_rows = rows.copy()
     flat_rows[500:] = flat_rows[500] + rng.normal(0, 0.3, n - 500)
+    # as on c2's flat ends: the level row on a faint peak in about a third of the columns
     flat_sharp = sharp.copy()
-    flat_sharp[500:] = 0.004 * rng.random(n - 500)
+    flat_sharp[500:] = np.where(rng.random(n - 500) < 0.3, 0.01 * rng.random(n - 500), 0.0)
     m, cut = D.flat_end(kept, flat_rows, flat_sharp)
     end = int(np.flatnonzero(m)[-1]) if m.any() else -1
-    check("level and on no edge for its last 200 columns: cut back to where it levels (within a third of the "
-          "window), 12 columns more", abs((end + 1) - (500 - trim)) <= w // 3 and cut == 700 - (end + 1), (end, cut))
+    check("level, mostly off any peak and faint for its last 200 columns: cut back to where it levels (within "
+          "a third of the window), 12 columns more", abs((end + 1) - (500 - trim)) <= w // 3 and cut == 700 - (end + 1),
+          (end, cut))
     _, cut0 = D.flat_end(kept, flat_rows, flat_sharp, edge_trim=0)
     _, cut12 = D.flat_end(kept, flat_rows, flat_sharp)
     check("PARTIAL_EDGE_TRIM_COLUMNS (12) more where the cut line ends", cut12 == cut0 + trim, (cut0, cut12))
     m, cut = D.flat_end(kept, flat_rows, sharp)
-    check("level but on an edge (a level stretch of waterline): not cut", cut == 0)
+    check("level but on a clear edge (a level stretch of waterline): not cut", cut == 0)
+    faint = sharp.copy()
+    faint[500:] = 0.02                                # on a peak in every column, however faint
+    m, cut = D.flat_end(kept, flat_rows, faint)
+    check("level on a faint but real edge (the line on a peak in every column, sharpness 0.02): not cut",
+          cut == 0, cut)
     m, cut = D.flat_end(kept, rows, flat_sharp)
-    check("on no edge but sloping: not cut", cut == 0)
+    check("off any peak but sloping: not cut", cut == 0)
     lvl = flat_rows.copy()
     lvl[500:] += 0.04 * np.arange(n - 500)
     m, cut = D.flat_end(kept, lvl, flat_sharp)
@@ -309,13 +320,30 @@ def test_flat_end():
     lvl2[500:] += 0.06 * np.arange(n - 500)
     m2, cut2 = D.flat_end(kept, lvl2, flat_sharp)
     check("PARTIAL_FLAT_END_SLOPE (0.05 px per column): 0.04 cut, 0.06 not", cut > 0 and cut2 == 0, (cut, cut2))
+    k = np.arange(n - 500)
+    on80 = sharp.copy()
+    on80[500:] = np.where(k % 10 < 8, 0.001, 0.0)     # on a peak in 80% of the columns, faint
+    on90 = sharp.copy()
+    on90[500:] = np.where(k % 10 < 9, 0.001, 0.0)     # 90%
+    _, c80 = D.flat_end(kept, flat_rows, on80)
+    _, c90 = D.flat_end(kept, flat_rows, on90)
+    check("PARTIAL_FLAT_END_PEAK_SHARE (85%): on a peak in 80% of the columns cut, 90% not", c80 > 0 and c90 == 0,
+          (c80, c90))
     s2 = flat_sharp.copy()
-    s2[500:] = 0.025
+    s2[500:] = np.where(k % 2 == 0, 0.05, 0.0)        # on a peak in half the columns, mean 0.025
     s3 = flat_sharp.copy()
-    s3[500:] = 0.035
+    s3[500:] = np.where(k % 2 == 0, 0.07, 0.0)        # mean 0.035
     _, c2 = D.flat_end(kept, flat_rows, s2)
     _, c3 = D.flat_end(kept, flat_rows, s3)
     check("PARTIAL_FLAT_END_SHARPNESS (0.03): mean sharpness 0.025 cut, 0.035 not", c2 > 0 and c3 == 0, (c2, c3))
+    tip = flat_sharp.copy()
+    tip[670:690] = 0.15                               # a few sharp columns among the last kept ones
+    step = flat_rows.copy()
+    step[680:] += 3.0                                 # a 3 px step 20 columns from the end
+    _, ct = D.flat_end(kept, flat_rows, tip)
+    _, cs = D.flat_end(kept, step, flat_sharp)
+    check("a few sharp columns, or a 3 px step, in the last window do not keep a 200-column flat end",
+          ct > 150 and cs > 150, (ct, cs))
     short = np.zeros(n, bool)
     short[:w - 1] = True
     m, cut = D.flat_end(short, flat_rows * 0, flat_sharp * 0)
@@ -488,19 +516,46 @@ def test_detector():
             sig = signal_of(rows)
             last = int(np.flatnonzero(sig)[-1]) if sig.any() else -1
             check("a flat end from column 200 (88 of the kept columns): cut where it levels (within a third of "
-                  "the window), 12 columns more, the rest saved as a partial line, logged",
+                  "the window), 12 columns more, none of it kept, the rest saved as a partial line, logged",
                   st == "partial" and abs((last + 1) - (200 - trim)) <= D.PARTIAL_FLAT_END_WINDOW // 3
-                  and "a flat end" in out, (st, last))
+                  and last < 200 and "a flat end" in out, (st, last))
             D.solve_shoreline_vectorized = flattened(240)
             st, rows, _, _ = run_frame(tmp / "flat240", far, None)
-            check("a flat end shorter than the window (48 kept columns): left to the 12-column cut",
+            check("a flat end of 48 kept columns after a sharp line: the one window over it holds 13 columns of "
+                  "the line, whose sharpness lifts its mean -- left to the 12-column cut",
                   st == "partial" and signal_of(rows)[:COLS // 2 - trim].all(), st)
+
+            def faint(F):
+                def solver(energy, profile):
+                    res = flattened(F)(energy, profile)
+                    res.peak_sharpness = res.peak_sharpness * 0.1      # c2's sharpness scale
+                    return res
+                return solver
+
+            D.solve_shoreline_vectorized = faint(240)
+            st, rows, _, _ = run_frame(tmp / "faint240", far, None)
+            sig = signal_of(rows)
+            last = int(np.flatnonzero(sig)[-1]) if sig.any() else -1
+            check("the same at c2's sharpness: cut, at most a third of the window into the line, 12 columns more",
+                  st == "partial" and abs((last + 1) - (240 - trim)) <= D.PARTIAL_FLAT_END_WINDOW // 3
+                  and last < 240 - trim, (st, last))
             D.solve_shoreline_vectorized = flattened(150)
             st, rows, out, _ = run_frame(tmp / "flat150", far, None)
             check("a flat end from column 150: under 30% left, discarded, saying so",
                   st == "no_signal" and not rows and "after its flat end" in out, (st, out[-300:]))
         finally:
             D.solve_shoreline_vectorized = real_solver
+
+        # process_image's allowance for haze at the near edge (PARTIAL_MAX_GAP_COLUMNS)
+        g = D.PARTIAL_MAX_GAP_COLUMNS
+        st49, rows49, _, _ = run_frame(tmp / "near49", far & (c >= g), None)
+        st50, rows50, out50, _ = run_frame(tmp / "near50", far & (c >= g + 1), None)
+        sig49 = signal_of(rows49)
+        check(f"process_image's near-edge allowance ({g}): the near {g} columns hazy, the run from column {g} saved "
+              f"as a partial line; the near {g + 1} hazy, discarded",
+              st49 == "partial" and len(sig49) and sig49[g + trim:COLS // 2 - trim].all() and not sig49[:g].any()
+              and st50 == "no_signal" and not rows50 and "clear run from the near edge covers 0.0%" in out50,
+              (st49, st50))
 
         # haze at the near end or in the middle: the solver's line starts free in it, and a stronger edge
         # beside the clear stretch can take it, which no confidence shows -- discarded, as v6.10 did
