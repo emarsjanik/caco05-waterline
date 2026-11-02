@@ -10,17 +10,20 @@
 #      carrying signal was always discarded. After the 20-24 Oct 2026
 #      storm, c2's far field stayed hazy for a week while the near field
 #      was clear (median frame sharpness 29-88, as on any clear day): the
-#      cron log shows 1-12 detections a day saved against 24-36 on the
-#      clear days before, 22-34 a day rejected here (it detects a photo
-#      again on later runs, so these count some photos twice). Such a frame's clear run from the near
-#      edge (column 0, the left edge: the detector's near end) is now kept when it covers
-#      PARTIAL_MIN_FRACTION of the columns (after --column-limits): the
-#      line is saved with only those columns flagged Has_Signal and a
-#      trailing Partial_Line column, so everything downstream uses the
-#      clear stretch and drops the hazy far end. Haze at the near end or
-#      in the middle still discards the frame: the solver's line would
-#      start free in it, and a stronger edge beside the clear stretch
-#      (swash, wet/dry sand) can take it there, which no confidence shows.
+#      station saved 1-6 of its 31 c2 photos a day on 25-31 Oct (27 in
+#      all), against 18 on the clear 18 Oct. Such a frame's clear run from
+#      the near edge (column 0, the left edge: the detector's near end;
+#      starting within PARTIAL_MAX_GAP_COLUMNS of it, gaps up to that
+#      bridged) is now kept when it covers PARTIAL_MIN_FRACTION of the
+#      columns (after --column-limits), its flat end cut (flat_end: where
+#      the solver, out of edges, holds a level line on no edge): the line
+#      is saved with only those columns flagged Has_Signal and a trailing
+#      Partial_Line column, so everything downstream uses the clear
+#      stretch and drops the hazy far end. Haze at the near end or in the
+#      middle still discards the frame, as the late-Oct haze lay at the
+#      far end; a stronger edge beside the end of a kept stretch (swash,
+#      wet/dry sand) can take the line there wherever the haze lies, as it
+#      can at the frame's own edges, and no confidence shows it.
 #      Every frame saved before is untouched (the same CSV to the byte);
 #      a partial line never seeds the next frame's temporal blend;
 #      --partial-min-fraction 0 restores the old behaviour.
@@ -434,10 +437,12 @@ MIN_SIGNAL_COLUMN_FRACTION = 0.60
 #     always thrown away: haze or spray can hide the far field while the
 #     near field still shows a clear waterline. Its clear run from the near
 #     edge (starting within PARTIAL_MAX_GAP_COLUMNS of column 0) is kept;
-#     haze at the near end or in the middle discards the frame as before,
-#     since the solver's line starts free there and a stronger edge beside
-#     the clear stretch can take it. Runs are found by clear_runs: a gap of
-#     more than PARTIAL_MAX_GAP_COLUMNS
+#     haze at the near end or in the middle discards the frame as before
+#     (the late-Oct 2026 haze lay at the far end; the solver's line can be
+#     taken by a stronger edge beside the end of a kept stretch wherever
+#     the haze lies). Runs are found by clear_runs: a gap of more than
+#     PARTIAL_MAX_GAP_COLUMNS (49, 2% of c2's 2448 columns; at 8 the
+#     late-Oct 2026 frames lost clear stretches split by short dropouts)
 #     always ends a run; within that, a run is a stretch in which every
 #     part starting at either end is more than PARTIAL_MIN_RUN_DENSITY
 #     clear, and that no longer such stretch contains (the maximal
@@ -450,7 +455,8 @@ MIN_SIGNAL_COLUMN_FRACTION = 0.60
 #     survivors are what broke the elevation ordering
 #     (extract_elevation_contours.py --min-coverage) -- and
 #     PARTIAL_EDGE_TRIM_COLUMNS are cut where a run meets noise, since the
-#     solver's continuous path is pulled toward the noise there. If the
+#     solver's continuous path is pulled toward the noise there; a flat
+#     end (below) is cut first. If the
 #     near run, inside --column-limits, covers PARTIAL_MIN_FRACTION of
 #     the columns, the line is saved with only it flagged Has_Signal
 #     (and Partial_Line=1) and the confidence gate is judged on it;
@@ -460,8 +466,24 @@ MIN_SIGNAL_COLUMN_FRACTION = 0.60
 PARTIAL_MIN_FRACTION = 0.30
 PARTIAL_MIN_RUN_FRACTION = 0.10
 PARTIAL_MIN_RUN_DENSITY = 0.80
-PARTIAL_MAX_GAP_COLUMNS = 8
+PARTIAL_MAX_GAP_COLUMNS = 49
 PARTIAL_EDGE_TRIM_COLUMNS = 12
+#     FLAT END. Where a partial line meets the haze the solver, with no edge
+#     left to follow, holds its row: the line runs horizontal, and the energy
+#     at its row is no local maximum (peak sharpness 0), though the columns
+#     still pass the signal test (an edge somewhere in them, not under the
+#     line). On c2's late-Oct 2026 frames it ran on for the last 10-20% of
+#     4 of 19 partial lines, tens of pixels off the waterline, and passed
+#     the extractor's straightness test. flat_end cuts it: from the far end
+#     back, every PARTIAL_FLAT_END_WINDOW columns both more level than
+#     PARTIAL_FLAT_END_SLOPE px per column and with mean peak sharpness under
+#     PARTIAL_FLAT_END_SHARPNESS (measured in tenths of those lines: the flat
+#     ends 0.03 px/column at most and 0.00-0.02; the ends of the others 0.11
+#     at least, but for one level tenth at 0.04, which is not cut). Both, so
+#     a level waterline (on an edge) or an edgeless sloping one is not cut.
+PARTIAL_FLAT_END_WINDOW = 61
+PARTIAL_FLAT_END_SLOPE = 0.05
+PARTIAL_FLAT_END_SHARPNESS = 0.03
 # the CSV column that marks a partial line (export_csv)
 PARTIAL_LINE_COLUMN = "Partial_Line"
 
@@ -1779,6 +1801,42 @@ def clear_runs(column_has_signal, min_run=None, max_gap=None, edge_trim=None, de
     return (keep if inside is None else keep & inside), runs
 
 
+def flat_end(kept, rows, sharpness, window=None, max_slope=None, max_sharpness=None, edge_trim=None):
+    """
+    A partial line's mask with its flat end cut (see PARTIAL_FLAT_END_WINDOW):
+    from the last kept column back, while the `window` columns ending there
+    are both more level than `max_slope` px per column (a straight-line
+    fit to `rows`) and of mean `sharpness` under `max_sharpness`, they go,
+    `edge_trim` more where the line then ends (it meets noise there).
+    Returns (mask, number of columns cut).
+    """
+    window = PARTIAL_FLAT_END_WINDOW if window is None else int(window)
+    max_slope = PARTIAL_FLAT_END_SLOPE if max_slope is None else float(max_slope)
+    max_sharpness = PARTIAL_FLAT_END_SHARPNESS if max_sharpness is None else float(max_sharpness)
+    edge_trim = PARTIAL_EDGE_TRIM_COLUMNS if edge_trim is None else int(edge_trim)
+    kept = np.asarray(kept, bool)
+    idx = np.flatnonzero(kept)
+    if len(idx) < window:
+        return kept, 0
+    rows = np.asarray(rows, float)
+    sharpness = np.asarray(sharpness, float)
+    x = np.arange(window, dtype=float)
+    end, cut = int(idx[-1]), None
+    while end - window + 1 >= idx[0]:
+        w = slice(end - window + 1, end + 1)
+        level = abs(np.polyfit(x, rows[w], 1)[0]) < max_slope
+        edgeless = np.nanmean(sharpness[w]) < max_sharpness
+        if not (level and edgeless):
+            break
+        cut = end - window + 1
+        end -= max(window // 3, 1)
+    if cut is None:
+        return kept, 0
+    out = kept.copy()
+    out[max(cut - edge_trim, 0):] = False
+    return out, int(kept.sum() - out.sum())
+
+
 def column_limit_mask(data, n):
     """The columns inside this camera's --column-limits (None: no limits)."""
     limits = COLUMN_LIMITS.get(data.profile.name)
@@ -2136,10 +2194,15 @@ def process_image(image_path):
             kept, runs = (clear_runs(column_has_signal, inside=column_limit_mask(data, len(column_has_signal)),
                                      near_edge=PARTIAL_MAX_GAP_COLUMNS)
                           if PARTIAL_MIN_FRACTION > 0.0 else (None, 0))
+            flat = 0
+            if kept is not None:
+                kept, flat = flat_end(kept, result.subpixel_shoreline, result.peak_sharpness)
             if kept is None or kept.mean() < PARTIAL_MIN_FRACTION:
                 note = (f"; its clear run from the near edge{' inside --column-limits' if limited else ''} "
                         f"covers {100 * kept.mean():.1f}%, need {100 * PARTIAL_MIN_FRACTION:.0f}% "
                         f"for a partial line" if kept is not None else "")
+                if flat:
+                    note += f" after its flat end ({flat} columns) was cut"
                 print(f"DISCARDED (only {100*sig['signal_fraction']:.1f}% of columns carry signal, "
                       f"need {100*MIN_SIGNAL_COLUMN_FRACTION:.0f}%{note}) -- the solver would be "
                       f"drawing a line through noise across most of the frame. "
@@ -2150,7 +2213,8 @@ def process_image(image_path):
             partial = True
             print(f"PARTIAL LINE    : {100*sig['signal_fraction']:.1f}% of columns carry signal "
                   f"(< {100*MIN_SIGNAL_COLUMN_FRACTION:.0f}%): kept {100 * kept.mean():.1f}%, the clear "
-                  f"run from the near edge, the hazy far end flagged no-signal")
+                  f"run from the near edge, the hazy far end flagged no-signal"
+                  + (f" ({flat} columns of it a flat end: the line level and on no edge)" if flat else ""))
 
         shoreline = smooth_shoreline(result.subpixel_shoreline, CONFIG.smoothing_kernel)
         epoch = extract_epoch_from_filename(image_path.name)

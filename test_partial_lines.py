@@ -12,13 +12,17 @@ WHAT.
     and what a run is: a stretch whose every part from either end is more
     than 80% clear, that no longer such stretch contains; ties.
   * clear_runs: long runs of signal columns kept, short ones and scattered
-    columns not; PARTIAL_MAX_GAP_COLUMNS (8 bridged, 9 not) and
+    columns not; PARTIAL_MAX_GAP_COLUMNS (49 bridged, 50 not) and
     PARTIAL_MIN_RUN_FRACTION (9.9% out, 10% in) at their boundaries; a
     bridged dropout still no-signal; runs cut where they meet noise, not at
     the frame's edge; the haze's chance clear columns neither extend a run
     past the haze's edge nor undo the cut there, nor lose a frame that has
     more signal; --column-limits (inside) keeps and counts runs the same;
-    near_edge takes only the first run, from within 8 columns of column 0.
+    near_edge takes only the first run, from within so many columns of column 0.
+  * flat_end: a level, edgeless end (the solver holding its row with no edge
+    under it) cut back to where it levels, 12 columns more; a level line on an
+    edge, or an edgeless sloping one, not; PARTIAL_FLAT_END_SLOPE and
+    PARTIAL_FLAT_END_SHARPNESS at their edges; a line shorter than the window.
   * process_image on a synthetic energy field (the real smoothing, solver,
     signal test, confidence gate, temporal blend and CSV export; only the
     photo and its energy are made up):
@@ -37,6 +41,9 @@ WHAT.
       - whole -> partial -> whole with the temporal blend on: the whole
         frames are the blend reference, the partial one is not (its state
         untouched), and the third frame's CSV is the v6.10 detector's;
+      - a flat end from column 200 cut, the line saved as partial and logged;
+        one from column 150 leaving under 30%, discarded saying so; one
+        shorter than the window left to the 12-column cut;
       - --column-limits: judged on the columns inside them, so a partial
         line is never saved with fewer than 30% of its columns kept;
       - PARTIAL_MIN_FRACTION at the module's default: 28% kept discarded,
@@ -171,16 +178,16 @@ def test_clear_runs():
     check("a 15-column run past a 20-column gap: left out (under min_run)",
           k == 1 and m[30] and not m[80:95].any())
     g, trim = D.PARTIAL_MAX_GAP_COLUMNS, D.PARTIAL_EDGE_TRIM_COLUMNS
-    s = np.ones(n, bool)
-    s[100:100 + g] = False
+    s = np.ones(1000, bool)
+    s[400:400 + g] = False
     m, k = D.clear_runs(s)
-    s9 = np.ones(n, bool)
-    s9[100:101 + g] = False
+    s9 = np.ones(1000, bool)
+    s9[400:401 + g] = False
     m9, k9 = D.clear_runs(s9)
     check(f"PARTIAL_MAX_GAP_COLUMNS ({g}): a {g}-column dropout bridged, a {g + 1}-column one ends the run "
           f"(12 columns cut either side), though the clear columns either side would outweigh it",
-          g == 8 and k == 1 and m.sum() == n - g and k9 == 2 and m9.sum() == n - (g + 1) - 2 * trim
-          and not m9[100 - trim:101 + g + trim].any() and m9[100 - trim - 1] and m9[101 + g + trim],
+          g == 49 and k == 1 and m.sum() == 1000 - g and k9 == 2 and m9.sum() == 1000 - (g + 1) - 2 * trim
+          and not m9[400 - trim:401 + g + trim].any() and m9[400 - trim - 1] and m9[401 + g + trim],
           (k, m.sum(), k9, m9.sum()))
     s = np.zeros(n, bool)
     s[::7] = True
@@ -226,6 +233,14 @@ def test_clear_runs():
     t4 = t.copy()
     t4[:8] = False                                    # the near run starting at column 8
     e4, j4 = D.clear_runs(t4, near_edge=8)
+    t5 = t.copy()
+    t5[:D.PARTIAL_MAX_GAP_COLUMNS] = False            # the default allowance: starting at 49
+    t6 = t.copy()
+    t6[:D.PARTIAL_MAX_GAP_COLUMNS + 1] = False        # starting at 50
+    _, j5 = D.clear_runs(t5, near_edge=D.PARTIAL_MAX_GAP_COLUMNS)
+    _, j6 = D.clear_runs(t6, near_edge=D.PARTIAL_MAX_GAP_COLUMNS)
+    check(f"the detector's allowance (PARTIAL_MAX_GAP_COLUMNS, {D.PARTIAL_MAX_GAP_COLUMNS}): a run starting at "
+          f"column {D.PARTIAL_MAX_GAP_COLUMNS} taken, at {D.PARTIAL_MAX_GAP_COLUMNS + 1} not", j5 == 1 and j6 == 0, (j5, j6))
     check("near_edge: only the first run, from within 8 columns of the near edge (a speck before it no matter); "
           "a run starting at column 8 taken, at 9 not",
           j1 == 1 and e1[:400 - trim].all() and not e1[400 - trim:].any() and j2 == 0 and not e2.any()
@@ -260,6 +275,48 @@ def test_clear_runs():
               f"the clear run whole",
               hazy <= (0 if p < 0.5 else 4) and boundary <= max_boundary * 400 and short == 0,
               (hazy, boundary, short))
+
+
+def test_flat_end():
+    print("flat_end")
+    n, w, trim = 1000, D.PARTIAL_FLAT_END_WINDOW, D.PARTIAL_EDGE_TRIM_COLUMNS
+    rng = np.random.default_rng(2)
+    kept = np.zeros(n, bool)
+    kept[:700] = True
+    rows = 100 + 0.3 * np.arange(n) + rng.normal(0, 0.4, n)
+    sharp = 0.3 + 0.05 * rng.random(n)
+    m, cut = D.flat_end(kept, rows, sharp)
+    check("a sloping line on an edge: not cut", cut == 0 and (m == kept).all())
+    flat_rows = rows.copy()
+    flat_rows[500:] = flat_rows[500] + rng.normal(0, 0.3, n - 500)
+    flat_sharp = sharp.copy()
+    flat_sharp[500:] = 0.004 * rng.random(n - 500)
+    m, cut = D.flat_end(kept, flat_rows, flat_sharp)
+    end = int(np.flatnonzero(m)[-1]) if m.any() else -1
+    check("level and on no edge for its last 200 columns: cut back to where it levels (within a third of the "
+          "window), 12 columns more", abs((end + 1) - (500 - trim)) <= w // 3 and cut == 700 - (end + 1), (end, cut))
+    m, cut = D.flat_end(kept, flat_rows, sharp)
+    check("level but on an edge (a level stretch of waterline): not cut", cut == 0)
+    m, cut = D.flat_end(kept, rows, flat_sharp)
+    check("on no edge but sloping: not cut", cut == 0)
+    lvl = flat_rows.copy()
+    lvl[500:] += 0.04 * np.arange(n - 500)
+    m, cut = D.flat_end(kept, lvl, flat_sharp)
+    lvl2 = flat_rows.copy()
+    lvl2[500:] += 0.06 * np.arange(n - 500)
+    m2, cut2 = D.flat_end(kept, lvl2, flat_sharp)
+    check("PARTIAL_FLAT_END_SLOPE (0.05 px per column): 0.04 cut, 0.06 not", cut > 0 and cut2 == 0, (cut, cut2))
+    s2 = flat_sharp.copy()
+    s2[500:] = 0.025
+    s3 = flat_sharp.copy()
+    s3[500:] = 0.035
+    _, c2 = D.flat_end(kept, flat_rows, s2)
+    _, c3 = D.flat_end(kept, flat_rows, s3)
+    check("PARTIAL_FLAT_END_SHARPNESS (0.03): mean sharpness 0.025 cut, 0.035 not", c2 > 0 and c3 == 0, (c2, c3))
+    short = np.zeros(n, bool)
+    short[:w - 1] = True
+    m, cut = D.flat_end(short, flat_rows * 0, flat_sharp * 0)
+    check("a line shorter than the window: not cut", cut == 0 and (m == short).all())
 
 
 def truth_row(c, shift=0.0):
@@ -408,6 +465,39 @@ def test_detector():
             check("the overlay draws the kept stretch only, not the hazy half",
                   len(kept) and len(red) > 0.9 * len(kept) and red.min() <= 2 and red.max() <= kept[-1] + 2,
                   (len(red), red.max() if len(red) else None, kept[-1] if len(kept) else None))
+
+        # the flat end: the solver's line made level and edgeless from column F on (as on c2's frames)
+        real_solver = D.solve_shoreline_vectorized
+
+        def flattened(F):
+            def solver(energy, profile):
+                res = real_solver(energy, profile)
+                res.subpixel_shoreline = res.subpixel_shoreline.copy()
+                res.subpixel_shoreline[F:] = res.subpixel_shoreline[F]
+                res.peak_sharpness = res.peak_sharpness.copy()
+                res.peak_sharpness[F:] = 0.0
+                return res
+            return solver
+
+        try:
+            D.solve_shoreline_vectorized = flattened(200)
+            st, rows, out, _ = run_frame(tmp / "flat200", far, None)
+            sig = signal_of(rows)
+            last = int(np.flatnonzero(sig)[-1]) if sig.any() else -1
+            check("a flat end from column 200 (88 of the kept columns): cut where it levels (within a third of "
+                  "the window), 12 columns more, the rest saved as a partial line, logged",
+                  st == "partial" and abs((last + 1) - (200 - trim)) <= D.PARTIAL_FLAT_END_WINDOW // 3
+                  and "a flat end" in out, (st, last))
+            D.solve_shoreline_vectorized = flattened(240)
+            st, rows, _, _ = run_frame(tmp / "flat240", far, None)
+            check("a flat end shorter than the window (48 kept columns): left to the 12-column cut",
+                  st == "partial" and signal_of(rows)[:COLS // 2 - trim].all(), st)
+            D.solve_shoreline_vectorized = flattened(150)
+            st, rows, out, _ = run_frame(tmp / "flat150", far, None)
+            check("a flat end from column 150: under 30% left, discarded, saying so",
+                  st == "no_signal" and not rows and "after its flat end" in out, (st, out[-300:]))
+        finally:
+            D.solve_shoreline_vectorized = real_solver
 
         # haze at the near end or in the middle: the solver's line starts free in it, and a stronger edge
         # beside the clear stretch can take it, which no confidence shows -- discarded, as v6.10 did
@@ -686,6 +776,7 @@ def test_syntax_38():
 def main():
     test_maximal_segments()
     test_clear_runs()
+    test_flat_end()
     test_detector()
     test_extractor()
     test_ground_truth_tools()

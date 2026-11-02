@@ -758,37 +758,40 @@ error, the cells' relative quality, and where the lines are too far apart (nmse)
 
 **Claim.** A frame with fewer than 60% of its columns carrying signal was always discarded. After
 the 20-24 Oct 2026 storm, c2's far field stayed hazy for a week while the near field was clear
-(median frame sharpness 29-88, as on any clear day): the cron log shows 1-12 detections a day saved
-against 24-36 on the clear days before, 22-34 a day rejected for signal (the cron detects a photo
-again on later runs, so these count some photos twice: about 46 detections a day of about 31 c2
-photos). Such a frame is now saved as a PARTIAL line
-when its clear run from the near edge (column 0, the left edge, which the detector calls near; starting within 8 columns of
-it) covers 30% of the columns, inside `--column-limits`: the hazy far end is dropped. The run is at
-least 10% of the columns and never spans a gap of more than 8 columns; within that, it is a stretch
-whose every part starting at either end is more than 80% clear, and that no longer such stretch
-contains (the maximal scoring segments of Ruzzo & Tompa 1999, +0.2 per clear column and -0.8 per
-other), so a dropout is bridged (still no-signal) only when the clear columns either side outweigh
-it, and the haze's chance clear columns neither carry the run into the haze nor sink it; 12 columns
-are cut where it meets the haze. Only those columns are flagged `Has_Signal`, and the CSV gains a
-last column `Partial_Line` = 1, so the extractor, the maps and the DEM use the clear stretch. The
-extractor judges a CSV marked `Partial_Line` by `--partial-min-coverage` (0.25, never more than
-`--min-coverage`) and every other frame by `--min-coverage` (0.50) as before, however few of its
-columns carry signal (a line detected with a lower `--min-signal-fraction`, or cut by
+(median frame sharpness 29-88, as on any clear day): the station saved 1-6 of its 31 c2 photos a day
+on 25-31 Oct, 27 in all, against 18 on the clear 18 Oct (its archive, one CSV per photo; the cron
+log's 1-12 and 24-36 "saved" count some photos twice, as the cron detects a photo again on later
+runs). Such a frame is now saved as a PARTIAL line when its clear run from the near edge (column 0,
+the left edge, which the detector calls near; starting within 49 columns of it) covers 30% of the
+columns, inside `--column-limits`: the hazy far end is dropped. The run is at least 10% of the
+columns and never spans a gap of more than 49 columns (2% of c2's width); within that, it is a
+stretch whose every part starting at either end is more than 80% clear, and that no longer such
+stretch contains (the maximal scoring segments of Ruzzo & Tompa 1999, +0.2 per clear column and -0.8
+per other), so a dropout is bridged (still no-signal) only when the clear columns either side
+outweigh it, and the haze's chance clear columns neither carry the run into the haze nor sink it.
+Its flat end is cut (`flat_end`): from the far end back, every 61 columns both more level than 0.05
+px per column and with mean peak sharpness under 0.03, where the solver, out of edges, holds its row
+on no edge; then 12 columns where it meets the haze. Only those columns are flagged `Has_Signal`, and
+the CSV gains a last column `Partial_Line` = 1, so the extractor, the maps and the DEM use the clear
+stretch. The extractor judges a CSV marked `Partial_Line` by `--partial-min-coverage` (0.25, never
+more than `--min-coverage`) and every other frame by `--min-coverage` (0.50) as before, however few
+of its columns carry signal (a line detected with a lower `--min-signal-fraction`, or cut by
 `--column-limits`, is a whole line). Every frame saved before is untouched; a partial line never
 seeds the next frame's temporal blend; `--partial-min-fraction 0` turns partial lines off.
 `batch_bias_analysis.py` skips partial lines and `sweep_profile_scale.py` does not score them (both
 score every row, and theirs are haze where `Has_Signal` = 0); `compare_to_ground_truth.py` and
-`bias_analysis.py` warn on one. PROVISIONAL until the real-data check below.
+`bias_analysis.py` warn on one. PROVISIONAL until the rerun with the flat-end cut below.
 
-**Why only the far end.** The solver's line may start and end anywhere, so where it starts or ends
-beside a stronger edge (swash, a wet/dry sand line) that edge can take it, and the confidence there
-is as high as on the waterline: v6.10 already does this at the frame's far edge (below). Far haze
-moves that free end to where the haze begins; haze at the near end, or in the middle, adds a free
-start. Such frames are discarded as v6.10 did: a review found a first version that saved them (and
-retried whole frames that failed the confidence gate) keeping 205 of 408 columns 80 px off the
-waterline on a synthetic frame v6.10 discarded. A synthetic waterline with a ridge 1.3 times as
+**Where it can go wrong.** The solver's line may start and end anywhere, so where it ends beside a
+stronger edge (swash, a wet/dry sand line) that edge can take it, and the confidence there is as high
+as on the waterline: v6.10 already does this at the frame's own edges (below). A partial line moves
+one of those free ends to where the haze begins -- at the far end or the near end alike; neither is
+safer. Partial lines take only the run from the near edge because the late-Oct 2026 haze lay at the
+far end, which is what this change was asked to keep; a first version that also kept runs beyond
+near or middle haze, and retried whole frames failing the confidence gate, saved a synthetic frame
+v6.10 discarded with 205 of 408 columns 80 px off. A synthetic waterline with a ridge 1.3 times as
 strong 80 px off beside the end of the clear stretch, by where the haze is (columns flagged / of
-them more than 15 px off):
+them more than 15 px off; the 8-column limits of the first real-frame run):
 
 | haze | v6.10 | v6.11 |
 |---|---|---|
@@ -799,22 +802,29 @@ them more than 15 px off):
 | far 50%, a ridge 1.05 times as strong 60 px off | discarded (no signal) | partial 288 / 0 |
 | near 30% / 50% | discarded | discarded |
 
-So a partial line fails as a whole line already fails at the far edge, no other way; how often a
-stronger edge lies there on real frames is what the real-data check below shows.
+So a partial line fails as a whole line already fails at the frame's edges, no other way. On the
+real frames below no line was taken by another edge; a milder failure showed instead, the flat end:
+past its last edge the solver held a level line on no edge (peak sharpness 0: the energy at its row
+no local maximum), tens of pixels off the waterline, in columns that still passed the signal test
+and the extractor's straightness test. `flat_end` cuts it; its two thresholds were set on those
+same lines, so the rerun with it is their check.
 
 | what | data | number | reproduce here | check on the NUC |
 |---|---|---|---|---|
 | Whole frames unchanged | [SYNTH] signal in every column; 85% clear; whole -> partial -> whole with the temporal blend on | the CSV the same to the byte as the v6.10 detector's (from git, `fd7d021`), and the third frame of the sequence too (v6.10 discarded the second); the blend state after the partial line is the first frame's | `python3 test_partial_lines.py` | same |
 | The far half hazy kept as a partial line | [SYNTH] far half flat haze | discarded with partial lines off; saved with them on, only the near half flagged, marked `Partial_Line`, rows within 1.5 px of the true line, cut 12 columns from the haze, the overlay drawing only the kept stretch | same | the rerun below |
 | Near or middle haze not | [SYNTH] near half; near 35%; clear near third and far sixth; the review's ridge case | discarded (no signal); discarded for confidence, not retried; only the near run kept; not saved | same | the rerun below |
-| The thresholds at their edges | [SYNTH] the module's defaults | a 9.9% run left out, 10% kept; an 8-column dropout bridged, 9 not; a run starting at column 8 taken as the near run, at 9 not; 28% kept discarded, 31.3% saved | same | - |
+| The thresholds at their edges | [SYNTH] the module's defaults | a 9.9% run left out, 10% kept; a 49-column dropout bridged, 50 not; a run starting at column 49 taken as the near run, at 50 not; 28% kept discarded, 31.3% saved; a flat end 0.04 px per column level cut, 0.06 not; mean sharpness 0.025 cut, 0.035 not | same | - |
+| The flat end | [SYNTH] a line level and edgeless for its last 200 of 700 kept columns; level on an edge; edgeless but sloping; in the detector, from column 200, 150 and 240 of a 288-column run | cut back to where it levels (within 20 columns), 12 more; not cut; not cut; cut and saved, logged; under 30% left, discarded saying so; shorter than the 61-column window, left to the 12-column cut | same | the rerun below |
 | The haze's chance clear columns | [SYNTH] a 40% clear run (2448 columns) with 12%, 25% or 50% of the haze's columns clear at random (400 frames each), or every 4th / 10th | no hazy column flagged at 12% and 25% (at most 1% of frames at 50%); half the 12 cut columns kept in under 1% (10% at 50%); every 4th: the run kept, not lost. The first cut of v6.11 (plain bridging) flagged hazy columns in 21% of frames at 12% and lost the every-4th frame | same | - |
 | `--column-limits` | [SYNTH] the near half clear, limits 0.5-1, 0.4-1, 0-0.6, 0.1-1 | discarded, discarded (8% inside), partial, partial, every flagged column inside the limits | same | - |
 | Scattered clear bits are not a line | [SYNTH] 40% of columns in 40-column bits; a comb of single columns | discarded ("clear run from the near edge covers ..."); clear_runs keeps nothing | same | - |
 | The extractor's floors | [SYNTH] 100%, 62%, 40% and 27% lines (300 columns); unmarked 27% and 59% lines | 40% partial used, 27% (22.7% after the fragment trim) not; whole lines judged by `--min-coverage` whatever their share (the unmarked 27%, 23% after the trim, used at 0.15; the 59% dropped at 0.50); `--min-coverage 0` turns every floor off; the log's partial count is of the frames left after the tide-agreement filter | same | - |
 | Ground-truth tools | [SYNTH] a whole and a partial detection with their ground truth | `batch_bias_analysis.py` scores the whole one and lists the partial one as skipped; `sweep_profile_scale.py` scores the whole one only; `compare_to_ground_truth.py` and `bias_analysis.py` warn on the partial one only | same | - |
 | The tests catch the faults | 28 faults put in by hand (the blend state, the overlay, the limits, the marker, the floors, the count, the log, the version, the run finder's gap, run length, ties, trim and near edge, the 30%, the ground-truth tools, the confidence) | 27 fail the suite. Not: a partial line's confidence judged over all its columns instead of the kept ones -- on these frames the two agree to within 0.003 (the far haze takes the clear stretch's lead), so the stricter kept-column gate is kept without a frame that tells them apart | - | - |
-| Real frames | [REAL] pending: c2 18 Oct (clear), 22 Oct (fog), 25-31 Oct 2026, rerun in a scratch folder | partial lines per day, and their overlays: does the kept stretch sit on the waterline; does fog still save nothing? | - | the scratch rerun in the PR description; then `waterline_consistency.py`'s report on the next week |
+| Real frames, 8-column limits | [REAL] c2's 279 photos of 18 Oct (clear), 22 Oct (fog) and 25-31 Oct 2026, rerun in a scratch folder | every photo the station saved (its archive) saved again and no whole line added; 6 partial lines (27, 30, 31 Oct): 25-31 Oct 27 -> 33; on their photos all six on the sand/water boundary; none on 18 or 22 Oct; of the 119 weak-signal frames 25-31 Oct, 88 had no clear run from the near edge (most under 25% signal, scattered: fog, rain, low light) and 31 a near run under 30%, often split by a dropout of more than 8 columns | - | done, 2 Nov 2026 |
+| Real frames, 49-column limits | [REAL] those frames' 143 weak-signal ones, rerun | 13 more partial lines (25-31 Oct 33 -> 46), none on 18 or 22 Oct; on their photos 4 (25 Oct 17:00, 26 Oct 12:30, 13:00, 14:00) ended level for their last 10-20%: slope 0.03 px per column at most and mean peak sharpness 0.00-0.02 in those tenths, against 0.11 at least on the other lines' last two tenths but for 26 Oct 15:00's last tenth, level at sharpness 0.04 (not cut at 0.03); the extractor kept 70-96% of those last quarters | - | done, 2 Nov 2026 |
+| Real frames, with the flat-end cut | [REAL] pending: the 279 photos again | partial lines per day; the flat ends gone; the kept stretches on the waterline; fog still nothing | - | the rerun in the PR description; then `waterline_consistency.py`'s report on the next week |
 
 ## 3. Survey-date products (`survey_products.py`)
 
@@ -2050,7 +2060,7 @@ than the series, or more than 7 days from its nearest DEM, keep C's setup.
 | Waterline strata | flood / ebb beyond +/-0.1 m/h, flood - ebb within camera-days; Hs thirds; intervals by camera-day, >= 5 | `survey_compare.py` STAGE_RATE | section 2.4a (text and json only) |
 | Change: day-block LoD | report only, off (`--day-block-lod`; cron `DEM_DAY_BLOCK_LOD`) | `dem_change.py` | section 2.4a |
 | Detector: whole-frame signal | >= 60% of columns | `waterline_detector_v5.py` `MIN_SIGNAL_COLUMN_FRACTION` | no line through noise |
-| Detector: partial lines | the clear run from the near edge (starting within 8 columns of it): >= 10% of the columns, every part from either end > 80% clear, no gap over 8, 12-column cut at the haze, >= 30% inside `--column-limits` (PROVISIONAL) | `PARTIAL_*`, `--partial-min-fraction` | section 2.9 |
+| Detector: partial lines | the clear run from the near edge (starting within 49 columns of it): >= 10% of the columns, every part from either end > 80% clear, no gap over 49, its flat end cut (61 columns more level than 0.05 px/column and of mean peak sharpness under 0.03), 12-column cut at the haze, >= 30% inside `--column-limits` (PROVISIONAL) | `PARTIAL_*`, `--partial-min-fraction` | section 2.9 |
 | Extractor: coverage | >= 50% (whole lines), >= 25% (lines marked `Partial_Line`; never above the whole-line floor) | `--min-coverage`, `--partial-min-coverage` | section 2.9 |
 
 ### 4.10 Georectification uncertainty (`georectify_uncertainty.py`; opt-in `--sigma-obs`)
