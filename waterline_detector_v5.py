@@ -461,8 +461,9 @@ MIN_SIGNAL_COLUMN_FRACTION = 0.60
 #     the columns, the line is saved with only it flagged Has_Signal
 #     (and Partial_Line=1) and the confidence gate is judged on it;
 #     otherwise the frame is rejected as before.
-#     PROVISIONAL: to be checked on the station's late-Oct 2026 c2 frames
-#     (docs/VALIDATION.md 2.9); --partial-min-fraction 0 turns them off.
+#     Checked on the station's c2 frames of 18, 22 and 25-31 Oct 2026
+#     (docs/VALIDATION.md 2.9: 25-31 Oct 27 -> 45 photos, none lost); not
+#     yet on c1. --partial-min-fraction 0 turns them off.
 PARTIAL_MIN_FRACTION = 0.30
 PARTIAL_MIN_RUN_FRACTION = 0.10
 PARTIAL_MIN_RUN_DENSITY = 0.80
