@@ -30,6 +30,12 @@ def load_csv_rows(path, row_col_index):
     return np.array(rows, dtype=np.float32)
 
 
+def is_partial_line(path):
+    """A detector CSV marked Partial_Line (detector v6.11): its Has_Signal=0 rows are haze."""
+    with open(path, "r", newline="") as f:
+        return "Partial_Line" in next(csv.reader(f), [])
+
+
 N_SEGMENTS = 5
 
 
@@ -100,6 +106,7 @@ def main():
 
     results = []
     missing = []
+    partial = []
 
     for gt_path in gt_files:
         base_name = gt_path.stem  # e.g. "1763666100...c2.snap"
@@ -107,6 +114,10 @@ def main():
 
         if not detector_path.exists():
             missing.append(base_name)
+            continue
+        if is_partial_line(detector_path):
+            # only its clear runs are a waterline; every row is scored here (Has_Signal is not read)
+            partial.append(base_name)
             continue
 
         stats = analyze_pair(detector_path, gt_path)
@@ -124,6 +135,13 @@ def main():
         print(f"WARNING: {len(missing)} ground truth file(s) had no matching "
               f"detector output in {PROCESSED_FOLDER} (skipped):")
         for name in missing:
+            print(f"  - {name}")
+
+    if partial:
+        print()
+        print(f"NOTE: {len(partial)} detector output(s) are partial lines (Partial_Line: only their "
+              f"clear runs carry signal, the rest is haze), not scored here (skipped):")
+        for name in partial:
             print(f"  - {name}")
 
     if results:
