@@ -783,8 +783,9 @@ seeds the next frame's temporal blend; `--partial-min-fraction 0` turns partial 
 `batch_bias_analysis.py` skips partial lines and `sweep_profile_scale.py` does not score them (both
 score every row, and theirs are haze where `Has_Signal` = 0); `compare_to_ground_truth.py` and
 `bias_analysis.py` warn on one. Checked on the station's c2 frames of 18, 22 and 25-31 Oct 2026 (below:
-25-31 Oct 27 -> 45 photos, none of the station's lost, the flat ends gone); not yet on c1, nor on a
-second hazy spell (`waterline_consistency.py`'s report on the next one).
+25-31 Oct 27 -> 45 photos, none of the station's lost, the flat ends gone), and on c1's for the
+same days (69 -> 70, none lost); not yet on a second hazy spell (`waterline_consistency.py`'s report
+on the next one).
 
 **Where it can go wrong.** The solver's line may start and end anywhere, so where it ends beside a
 stronger edge (swash, a wet/dry sand line) that edge can take it, and the confidence there is as high
@@ -833,6 +834,7 @@ the frame; the on-a-peak share, which does not depend on the rest of the frame, 
 | Real frames, 8-column limits | [REAL] c2's 279 photos of 18 Oct (clear), 22 Oct (fog) and 25-31 Oct 2026, rerun in a scratch folder | every photo the station saved (its archive) saved again and no whole line added; 6 partial lines (27, 30, 31 Oct): 25-31 Oct 27 -> 33; on their photos all six on the sand/water boundary; none on 18 or 22 Oct; of the 119 weak-signal frames 25-31 Oct, 88 had no clear run from the near edge (most under 25% signal, scattered: fog, rain, low light) and 31 a near run under 30%, often split by a dropout of more than 8 columns | - | done, 2 Nov 2026 |
 | Real frames, 49-column limits | [REAL] those frames' 143 weak-signal ones, rerun | 13 more partial lines (25-31 Oct 33 -> 46), none on 18 or 22 Oct; on their photos 4 (25 Oct 17:00, 26 Oct 12:30, 13:00, 14:00) ended level for their last 10-20%: slope 0.03 px per column at most and mean peak sharpness 0.00-0.02 in those tenths, against 0.11 at least on the other lines' last two tenths but for 26 Oct 15:00's last tenth, level at sharpness 0.04 (not cut at 0.03); the extractor kept 70-96% of those last quarters | - | done, 2 Nov 2026 |
 | Real frames, with the flat-end cut | [REAL] the 279 photos again, this code (2 Nov 2026) | every photo the station saved saved again, no whole line added; 18 partial lines, 25-31 Oct 27 -> 45 photos (+67%), none on 18 or 22 Oct; the flat ends gone: on the full-resolution crops of the 6 flattest ends the kept line stops where it stops sloping (two keep a level tip of about 30-45 columns, under the 61-column window), every tenth of every line sloping 0.09-0.61 px per column; all 18 used by the contour step, 91-97% of each last quarter kept, on the sand/water boundary by eye. One line kept at the 8-column limits (31 Oct 16:30, 31%) is not saved now: its run from the near edge, bridged to about 50% at 49 columns, keeps 28.5% after a 520-column flat end is cut (the detector's log), under the 30% | - | done, 2 Nov 2026; then `waterline_consistency.py`'s report on the next hazy spell |
+| Real frames, c1 | [REAL] c1's 279 photos of the same days, this code (3 Nov 2026) | every photo the station saved saved again, no whole line added; 1 partial line (31 Oct 19:30, 34% kept, used): 25-31 Oct 69 -> 70. c1's 70 weak-signal frames that week had their clear columns in patches across the frame: none with a clear run of 30% from either edge (from column 0 17% at most, from the last column 12%, anywhere 35%), so a partial line from the other edge would gain nothing. The one c1 line runs nearly level in the photo (5 of its 10 tenths 0.05 px per column or less) and on a local energy maximum in 86-100% of each tenth's columns: the on-a-peak condition is what keeps the flat-end cut off a level waterline | - | done, 3 Nov 2026 |
 
 ## 3. Survey-date products (`survey_products.py`)
 
