@@ -852,6 +852,66 @@ never labelled better than its weakest step, and the reason is printed next to t
 Sign convention everywhere: **DEM (or waterline) minus survey; negative = the camera product
 is LOW.**
 
+### 3.0 Pass rule (set 5 Nov 2026, before the rebuilds of the 2025 dates)
+
+Set by the owner on 5 Nov 2026, before any number of the rebuilds that follow was read, and
+fitted to no survey. A change is a new dated entry under this one; a result is judged by the
+rule in force when it was first read.
+
+**What it judges.** Every DEM - survey and waterline - survey comparison of a survey-date
+build labelled INDEPENDENT or CROSS-VALIDATED, separately for c1, c2 and both pooled, and
+separately for the DEM and the waterlines. A PARTLY-CIRCULAR or CIRCULAR comparison is reported
+and gets no verdict, nor does a [SYNTH] fixture build (it tests the pipeline, not the beach).
+A camera with fewer than 10 values (`MIN_BAND_N`, `survey_compare.py`) gets no verdict.
+Waterlines against RTK transects are judged on the report's above-the-floor rows: only the
+lines at least 0.10 m above their transect's lowest shot (`SURVEY_FLOOR_MARGIN`,
+`above_floor_summary`), as a line below it can only read low (section 3.3).
+
+**The five tests**, all read from the comparison's own report:
+
+1. Level: |median| <= 0.10 m.
+2. Scatter: NMAD <= 0.20 m.
+3. The cameras agree: |median c1 - median c2| <= 0.10 m, when each has 10 or more values
+   (`CAMERA_SPLIT_M`, the same 0.10 m at which the report already lists the split).
+4. No elevation band is off: no 0.5 m band of survey elevation holding 10 or more values has a
+   median beyond +/-0.15 m (the DEM's day test limit, `--max-day-offset 0.15`, section 2.3a).
+5. The uncertainty: where the comparison has an interval (the DEM: 5 or more alongshore
+   stretches of >= 50 m; the waterlines: 5 or more camera-days; section 4.9), the 95% interval
+   of the median lies within +/-0.10 m.
+
+**Verdict.**
+- FAIL: any of tests 1-4 fails.
+- PASS: tests 1-5 hold.
+- PASS, NO INTERVAL: tests 1-4 hold and there are too few stretches (or camera-days) for an
+  interval: a pass on the numbers, not on their uncertainty.
+- UNDECIDED: tests 1-4 hold but the interval reaches beyond +/-0.10 m.
+
+The interval holds only the errors that differ from one stretch or camera-day to the next
+(section 2.4a); an error every cell shares moves the median, not the interval, so test 1 is the
+only test of it.
+
+**A fix found from a comparison.** A change made after a comparison was read (a pointing, lens,
+setup or detector change found from its residuals) makes that comparison PARTLY-CIRCULAR for the
+changed product: its pass then has to come from a survey the change was not found from.
+
+**The record before the rule** (read before it was set, so not a test of it):
+
+| comparison | label | numbers | tests failed | verdict |
+|---|---|---|---|---|
+| 2025-01-23 DEM - Jan lidar, owner's build of 15 Oct 2026 | INDEPENDENT | pooled +0.044 m, NMAD 0.218 m; c1 -0.218 m (52 cells), c2 +0.131 m (106) (section 2.1) | 2 (pooled), 1 (c1, c2), 3 (split 0.349 m) | FAIL |
+| 2025-01-23 waterlines - Jan lidar, same build | INDEPENDENT | c1 -0.180 m (16 frames), c2 +0.135 m (21) (section 2.1) | 1 (c1, c2), 3 (split 0.315 m) | FAIL |
+| 2025-03-06 DEM - Mar lidar (c2), same date | INDEPENDENT | -0.288 m, 249 cells, ~3 stretches, no interval (sections 2.1, 2.4a) | 1 | FAIL |
+| 2026-09-29 waterlines - RTK, C = 0.037 | CIRCULAR (C fitted to these shots) | -0.127 m, 16 frames; above the floor -0.069 m on 7 (section 3.3) | - | no verdict |
+| 2026-09-29 waterlines - RTK, C = 0 build | INDEPENDENT | -0.330 m on 12 frames, every one below the lowest shot: none above the floor (section 3.3) | - | no verdict (no line above the floor) |
+| 2026-09-29 DEM - RTK | CIRCULAR at C = 0.037, INDEPENDENT at C = 0 | 2 cells (C = 0.037), 3 (C = 0) (section 3.3) | - | no verdict (under 10 values) |
+
+The first results judged by the rule are the rebuilds of 2025-01-23 and 2025-03-06 with the code
+of 5 Nov 2026 (detector v6.11 with its partial lines, pointing rule version 11), in their own
+output root, `/mnt/I2Rgus_Data/survey_products_2026-11-05`; the builds of 15 Oct 2026 stay in
+the default root for the comparison of the two. Both rebuilds are expected to fail as their
+builds of 15 Oct did, unless the code since then changes their numbers: their verdicts are
+recorded here when they are read, with the build's commit.
+
 ### 3.1 2025-01-23: Jan 2025 lidar (c1 + c2, 18-23 Jan)
 
 **Label: INDEPENDENT.** Calibration `CACO03_<cam>_20250123_EO` solved from GCPs surveyed that
