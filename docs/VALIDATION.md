@@ -783,8 +783,9 @@ seeds the next frame's temporal blend; `--partial-min-fraction 0` turns partial 
 `batch_bias_analysis.py` skips partial lines and `sweep_profile_scale.py` does not score them (both
 score every row, and theirs are haze where `Has_Signal` = 0); `compare_to_ground_truth.py` and
 `bias_analysis.py` warn on one. Checked on the station's c2 frames of 18, 22 and 25-31 Oct 2026 (below:
-25-31 Oct 27 -> 45 photos, none of the station's lost, the flat ends gone); not yet on c1, nor on a
-second hazy spell (`waterline_consistency.py`'s report on the next one).
+25-31 Oct 27 -> 45 photos, none of the station's lost, the flat ends gone), and on c1's for the
+same days (69 -> 70, none lost); not yet on a second hazy spell (`waterline_consistency.py`'s report
+on the next one).
 
 **Where it can go wrong.** The solver's line may start and end anywhere, so where it ends beside a
 stronger edge (swash, a wet/dry sand line) that edge can take it, and the confidence there is as high
@@ -833,6 +834,7 @@ the frame; the on-a-peak share, which does not depend on the rest of the frame, 
 | Real frames, 8-column limits | [REAL] c2's 279 photos of 18 Oct (clear), 22 Oct (fog) and 25-31 Oct 2026, rerun in a scratch folder | every photo the station saved (its archive) saved again and no whole line added; 6 partial lines (27, 30, 31 Oct): 25-31 Oct 27 -> 33; on their photos all six on the sand/water boundary; none on 18 or 22 Oct; of the 119 weak-signal frames 25-31 Oct, 88 had no clear run from the near edge (most under 25% signal, scattered: fog, rain, low light) and 31 a near run under 30%, often split by a dropout of more than 8 columns | - | done, 2 Nov 2026 |
 | Real frames, 49-column limits | [REAL] those frames' 143 weak-signal ones, rerun | 13 more partial lines (25-31 Oct 33 -> 46), none on 18 or 22 Oct; on their photos 4 (25 Oct 17:00, 26 Oct 12:30, 13:00, 14:00) ended level for their last 10-20%: slope 0.03 px per column at most and mean peak sharpness 0.00-0.02 in those tenths, against 0.11 at least on the other lines' last two tenths but for 26 Oct 15:00's last tenth, level at sharpness 0.04 (not cut at 0.03); the extractor kept 70-96% of those last quarters | - | done, 2 Nov 2026 |
 | Real frames, with the flat-end cut | [REAL] the 279 photos again, this code (2 Nov 2026) | every photo the station saved saved again, no whole line added; 18 partial lines, 25-31 Oct 27 -> 45 photos (+67%), none on 18 or 22 Oct; the flat ends gone: on the full-resolution crops of the 6 flattest ends the kept line stops where it stops sloping (two keep a level tip of about 30-45 columns, under the 61-column window), every tenth of every line sloping 0.09-0.61 px per column; all 18 used by the contour step, 91-97% of each last quarter kept, on the sand/water boundary by eye. One line kept at the 8-column limits (31 Oct 16:30, 31%) is not saved now: its run from the near edge, bridged to about 50% at 49 columns, keeps 28.5% after a 520-column flat end is cut (the detector's log), under the 30% | - | done, 2 Nov 2026; then `waterline_consistency.py`'s report on the next hazy spell |
+| Real frames, c1 | [REAL] c1's 279 photos of the same days, this code (3 Nov 2026) | every photo the station saved saved again, no whole line added; 1 partial line (31 Oct 19:30, 34% kept, used): 25-31 Oct 69 -> 70. c1's 70 weak-signal frames that week had their clear columns in patches across the frame: none with a clear run of 30% from either edge (from column 0 17% at most, from the last column 12%, anywhere 35%), so a partial line from the other edge would gain nothing. The one c1 line runs nearly level in the photo (5 of its 10 tenths 0.05 px per column or less) and on a local energy maximum in 86-100% of each tenth's columns: the on-a-peak condition is what keeps the flat-end cut off a level waterline | - | done, 3 Nov 2026 |
 
 ## 3. Survey-date products (`survey_products.py`)
 
@@ -849,6 +851,100 @@ never labelled better than its weakest step, and the reason is printed next to t
 
 Sign convention everywhere: **DEM (or waterline) minus survey; negative = the camera product
 is LOW.**
+
+### 3.0 Pass rule (set 5 Nov 2026, before the rebuilds of the 2025 dates)
+
+Set by the owner on 5 Nov 2026, before any number of the rebuilds that follow was read, and
+fitted to no survey. Amended the same day, still before any rebuild number was read, after an
+independent check of its first version (`69304b3`): the record's 2025 rows, the day check's
+circularity and what the report can compute. The numbers are this entry's, not the code's: a
+constant named here that changes in the code does not change the rule. A later change is a new
+dated entry under this one and judges only surveys none of whose comparisons was read before
+it; a result is judged by the rule in force when it was first read.
+
+**What it judges.** Every DEM - survey and waterline - survey comparison of a survey-date
+build, separately for the DEM and for the waterlines. A verdict is that build's (its commit,
+output root and options), not its date's: a pointing-corrected or C = 0 build in another root
+is judged apart, and its pass is not the default build's.
+- INDEPENDENT or CROSS-VALIDATED: judged as below.
+- PARTLY-CIRCULAR or CIRCULAR: it can only FAIL; if tests 1-4 hold it is NOT JUDGED. The label
+  is the build's as first read: a surveys.csv `label_override_reason` added after that does not
+  count.
+- A fix found from a comparison: a change made after a comparison was read and found from it (a
+  pointing, lens, setup, detector or filter change found from its residuals) makes every later
+  comparison of the changed product with that survey PARTLY-CIRCULAR, whatever label its report
+  prints. The waterline filter's day check was found from the Jan 2025 lidar comparison
+  (section 2.1), so every build of 2025-01-23 since 15 Oct 2026, the rebuild included, can only
+  FAIL against the Jan lidar, the DEM and the waterlines alike.
+- A [SYNTH] fixture build is NOT JUDGED (it tests the pipeline, not the beach).
+- Fewer than 10 values, pooled or for a camera, are NOT JUDGED (`MIN_BAND_N`,
+  `survey_compare.py`). Values are counted as the report's "(few)" mark counts them: DEM cells
+  or survey points for the DEM; for the waterlines, frames (distinct survey points against
+  isolated points), never line points. Tests 3 and 4 count values the same way.
+
+**The numbers read.** All from the comparison's own report (txt or json), each as it prints
+it, to 0.001 m: for the DEM over every compared cell or point (not the fully covered cells
+alone); for the waterlines over the frames the DEM gridded at the build's own C (not the frames
+it left out, nor the C = 0 sensitivity). Waterlines against RTK transects are read on the
+report's above-the-floor rows only (`SURVEY_FLOOR_MARGIN` 0.10 m, `above_floor_summary`): the
+transect points whose line lies at least 0.10 m above their transect's lowest shot, 3 of them
+to a frame, as a line below it can only read low (section 3.3). Those rows give a median and
+NMAD, pooled and per camera, and no bands and no interval: tests 4 and 5 are not applied to
+them, and the all-frames bands and strata are not read in their place.
+
+**The five tests.**
+
+1. Level: |median| <= 0.10 m, pooled and for each camera.
+2. Scatter: NMAD <= 0.20 m, pooled and for each camera.
+3. The cameras agree: |median c1 - median c2| <= 0.10 m, when each has 10 or more values.
+4. No elevation band is off: no 0.5 m band of survey elevation holding 10 or more values has a
+   median beyond +/-0.15 m (the DEM's day test limit, `--max-day-offset 0.15`, section 2.3a).
+   The report's bands pool both cameras, so test 4, like test 3, is judged on the pooled values.
+5. The uncertainty: where the report gives a 95% interval of the median, it lies within
+   +/-0.10 m. For the DEM: the INTERVAL line (pooled) and the UNCERTAINTY table's camera rows,
+   on 5 or more alongshore stretches of >= 50 m (section 2.4a). For the waterlines: the strata's
+   `all frames` row (one value per frame, pooled only, on 5 or more camera-days; section 4.9),
+   read with that row's own median. An interval the report calls too narrow (errors correlated
+   over the whole stretch), or whose stretches it resampled as if independent, is no interval.
+
+A test not applied (a camera under 10 values, no band of 10, no interval) is not failed. The
+interval holds only the errors that differ from one stretch or camera-day to the next (section
+2.4a); an error every cell shares moves the median, not the interval, so test 1 is the only
+test of it.
+
+**Verdict**, for the DEM and for the waterlines of a build:
+- FAIL: any of tests 1-4 fails, pooled or for a camera.
+- PASS: tests 1-5 hold.
+- PASS, NO INTERVAL: tests 1-4 hold and test 5 has no interval to read, whatever the reason the
+  report gives (too few stretches or camera-days, none for these values, not computed): a pass
+  on the numbers, not on their uncertainty.
+- UNDECIDED: tests 1-4 hold but an interval reaches beyond +/-0.10 m.
+- NOT JUDGED: as above (too few values, a fixture build, or a circular comparison whose tests
+  1-4 hold).
+
+A pooled pass does not pass a camera that fails: the DEM's verdict, and the waterlines', is the
+worst of the pooled and per-camera ones, in the order FAIL, UNDECIDED, PASS, NO INTERVAL, PASS.
+
+**The record before the rule** (read before it was set, so not a test of it):
+
+| comparison | label | numbers | tests failed | verdict |
+|---|---|---|---|---|
+| 2025-01-23 DEM - Jan lidar, the owner's build of 15 Oct 2026 | INDEPENDENT | pooled +0.023 m, NMAD 0.271 m; c1 -1.799 m, c2 +0.117 m (section 2.1, before; c1's snow) | 2 (pooled), 1 (c1, c2), 3 (split 1.916 m) | FAIL |
+| 2025-01-23 waterlines - Jan lidar, the build of 15 Oct 2026 | INDEPENDENT | c1 -1.826 m, c2 +0.099 m (section 2.1, before) | 1 (c1), 3 (split 1.925 m) | FAIL |
+| 2025-01-23 DEM - Jan lidar, the 15 Oct lines through the Oct 2026 day check and cross-shore rule, built here | PARTLY-CIRCULAR (the day check was found from this comparison, section 2.1) | pooled +0.044 m, NMAD 0.218 m; c1 -0.218 m (52 cells), c2 +0.131 m (106) (section 2.1, after) | 2 (pooled), 1 (c1, c2), 3 (split 0.349 m) | FAIL |
+| 2025-01-23 waterlines - Jan lidar, the same, built here | PARTLY-CIRCULAR (the same) | c1 -0.180 m (16 frames), c2 +0.135 m (21) (section 2.1, after) | 1 (c1, c2), 3 (split 0.315 m) | FAIL |
+| 2025-03-06 DEM - Mar lidar (c2), the build of 15 Oct 2026 | INDEPENDENT | -0.293 m (section 2.1, before) | 1 | FAIL |
+| 2025-03-06 DEM - Mar lidar (c2), the same lines through the Oct 2026 filter, built here | INDEPENDENT | -0.288 m, 249 cells, ~3 stretches, no interval (sections 2.1, 2.4a) | 1 | FAIL |
+| 2026-09-29 waterlines - RTK, C = 0.037 | CIRCULAR (C fitted to these shots) | above the floor -0.069 m on 7 frames (section 3.3) | - | NOT JUDGED (under 10 frames) |
+| 2026-09-29 waterlines - RTK, C = 0 build | INDEPENDENT | -0.330 m on 12 frames, every one below the lowest shot: none above the floor (section 3.3) | - | NOT JUDGED (no frame above the floor) |
+| 2026-09-29 DEM - RTK | CIRCULAR at C = 0.037, INDEPENDENT at C = 0 | 2 cells (C = 0.037), 3 (C = 0) (section 3.3) | - | NOT JUDGED (under 10 cells) |
+
+The first results read under the rule are the rebuilds of 2025-01-23 (PARTLY-CIRCULAR for the
+day check: it can only FAIL) and 2025-03-06 (judged) with the code of 5 Nov 2026 (detector
+v6.11 with its partial lines, pointing rule version 11), in their own output root,
+`/mnt/I2Rgus_Data/survey_products_2026-11-05`; the builds of 15 Oct 2026 stay in the default
+root for the comparison of the two. Their verdicts are recorded, when they are read, in a new
+dated entry under this one, with each build's commit, output root and options.
 
 ### 3.1 2025-01-23: Jan 2025 lidar (c1 + c2, 18-23 Jan)
 
