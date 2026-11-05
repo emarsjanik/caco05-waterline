@@ -15,6 +15,11 @@ Setups (the station ID in the image file names):
 | CACO04 | 2025-02-19, 2025-11-04 | set up 2025-01-24: cameras moved ~5.7 m and turned back ~15 deg. `CACO05_<cam>_20250219_EO.yaml` holds the same values under an older name. |
 | CACO05 | 2025-11-13 (`_EO-CV`) | the live station EO. c1 has the 2025-11-04 values; c2 moved 3.1 m. |
 
+`calibrate_eo.py --out-dir <dir>` re-solves the CACO05 2025-11-13 EO from
+its targets as a diagnostic (leave-one-out, covariances, lens and horizon
+checks; docs/VALIDATION.md 4.6c). It writes only into `<dir>`, never here,
+and nothing adopts its output.
+
 `c1_geom_sigma.csv`, `c2_geom_sigma.csv`: how far off the live CACO05
 2025-11-13 calibration can place each pixel on the ground, written by
 `georectify_uncertainty.py` from that solve's own targets

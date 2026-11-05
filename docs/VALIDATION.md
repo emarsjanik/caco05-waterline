@@ -53,6 +53,7 @@ python3 test_dem_diagnostics.py                  # ends "all DEM diagnostics tes
 python3 test_dem_geotiff_cron.py                 # ends "all DEM GeoTIFF cron tests passed"
 python3 test_owg_plots.py                        # ends "all wave-gauge plot tests passed"
 python3 test_georectify_uncertainty.py           # ends "all georectification uncertainty tests passed" (section 4.10)
+python3 test_calibrate_eo.py                     # ends "all calibrate_eo tests passed" (section 4.6c, a diagnostic)
 python3 test_timestack_wave_height.py            # ends "all timestack wave height tests passed" (section 4.11, opt-in)
 python3 test_measured_setup.py                   # ends "all measured setup tests passed" (section 4.12, opt-in)
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
@@ -2126,6 +2127,171 @@ than the series, or more than 7 days from its nearest DEM, keep C's setup.
     outside the search, and the detector can follow another edge. c1's +1.17 m lines already sit
     ~33 px below its envelope floor at the calibration (`waterline_consistency.py`). The gates still
     allow up to 2.5 deg, so read such a day's lines in the comparison before trusting them.
+
+### 4.6c Re-solving the live calibration (`calibrate_eo.py`, a diagnostic)
+
+* **What it does.** It solves the live CACO05 2025-11-13 EO of each camera again from the targets
+  that calibration was made from (`calibration/2025-11-13_Marconi_Extrinsic_Targets_<cam>_xyz.csv`,
+  `gcp_uv_<cam>.csv`, the 2024-08-01 IO, the live EO as the start), and reports how well the pointing
+  is known, with one solver for every check, so each check describes the EO it writes. The solver
+  is whitened least squares on the pixel residuals (Levenberg-Marquardt, numpy only). The pixel
+  sigma is each parameter set's own residual RMS per coordinate. A surveyed camera position can be
+  added as a prior (`--camera-position E N Z SIGMA_H SIGMA_Z`). It runs:
+  * **The free set.** `--free auto` solves all six parameters and the three angles (the position held
+    at the live EO's), leaves each target out with this solver, and keeps the set with the lower
+    leave-one-out ground RMS. The other set is a sensitivity, with its cross-shore difference at the
+    data's ranges (the model-choice term).
+  * **The checks.** Multi-start (12 starts, +/-1 m, +/-2 deg). A soft-L1 robust re-run with each
+    target's weight (a check: the plain solve is the one written). Jacobian and jackknife
+    covariances, with Student's t intervals and correlations.
+  * **On the ground.** The cross-shore sigma at the data's ranges (c1 60/75/90 m, c2 100-300 m;
+    z = 0 and 1 m; the middle columns; `georectify_uncertainty.monte_carlo`), its DEM equivalent
+    at slope 0.10, the shift from the live EO, 1 px of pick origin and the pixel footprint.
+  * **The lens test.** d1, and d1 + d2, freed with each set. The verdict is the best leave-one-out
+    RMS with the lens term against the best without it, flagged above a 10% gain. Each verdict
+    (d1 and d1 + d2) is re-tested with each target dropped in turn, to say whether one target
+    carries it. It is not an F-test on 2n pixel coordinates, which treats U and V of one target
+    as independent.
+  * **The sea horizon.** `--horizon <frames>` only: frames within 3 days of the EO's day unless
+    `--horizon-any-epoch`, judged with `survey_products`' clear-horizon tests. It is diagnostic
+    only and never a constraint: on the frame's one-sided segment, tilt, roll and the lens cannot
+    be told apart.
+* **Outputs.** It writes `<out-dir>/CACO05_<cam>_20251113_EO-refit.yaml` (the plain solve, headed
+  `# NOT ADOPTED: ...`, with its inputs' sha256s, the free set and why, the pixel sigma, the
+  leave-one-out RMS and the sds) and `<cam>_eo_report.txt` / `.json`.
+* **What it refuses.** It refuses (exit 2) an out-dir in `calibration/`, any output that exists, a
+  calibration's name, inputs named for 23 Oct 2024, `calibration_history.csv`, and any survey file
+  (lidar, RTK, `.tif`, `.asc`, DEM, a lidar-fitted EO).
+  * **The day's names.** The common spellings count: 2024-10-23, 20241023, 2024-Oct-23,
+    10-23-2024, Oct_23_2024, October 23 2024, 23Oct2024 and the station's frame names
+    (`...Wed.Oct.23_16_00_00.GMT.2024...`). So does a horizon frame whose epoch falls on that day.
+  * **Links and folders.** Every name counts: the path's folders, each link it goes through and
+    the file it reaches. The path is resolved as the system opens it, so in `link/..` the `..`
+    climbs from where the link leads. Horizon frames are screened (camera, station, date) on the
+    name of the file they reach, not on a link's.
+  * **Usage errors (exit 6).** A NaN or infinite `--camera-position`, and a `--seed` outside
+    0 to 2^32 - 1.
+* **What it never does.** It never writes an IO, never touches `<cam>_geom_sigma.csv`, and nothing
+  reads its output.
+* **[REAL] The live inputs** (`python3 calibrate_eo.py --out-dir <dir>`: both cameras, 2000 draws,
+  12 starts, seed 0; ~22 s on 3.11, ~34 s on the floor venv, the same numbers):
+
+  | | c1 (14 targets, 29-92 m) | c2 (13 targets, 36-150 m) |
+  |---|---|---|
+  | leave-one-out ground RMS: all six / angles | 0.589 / **0.453** m | 1.060 / **0.410** m |
+  | set used (`--free auto`) | angles | angles |
+  | pixel sigma (all six / angles) | 8.66 / 8.14 px | 5.60 / 6.57 px |
+  | the refit against the live EO | 0.000 m, 0.008 deg (reproduces) | 0.000 m, 0.076 deg (roll; reproduces) |
+  | multi-start, both sets | 12 of 12 at one minimum | 12 of 12 at one minimum |
+  | leave-one-out over 3 x the median | #214 (1.28 m, 92 m out) | none (worst #214, 0.63 m) |
+  | robust: lowest weights; its move | #110 0.52, #214 0.52, #111 0.57; 0.023 deg | #212 0.23, #214 0.42, #310 0.58; 0.030 deg |
+  | sd (angles), Jacobian | azimuth 0.052, tilt 0.053, roll 0.184 deg | azimuth 0.034, tilt 0.029, roll 0.175 deg |
+  | sd (angles), jackknife | azimuth 0.066, tilt 0.026, roll 0.088 deg | azimuth 0.026, tilt 0.027, roll 0.084 deg |
+  | tilt sd, all six (Jacobian / jackknife); z-tilt correlation | 0.203 / 0.170 deg; -0.90 | 0.089 / 0.129 deg; -0.90 |
+  | cross-shore sigma, z = 0 (Jacobian, the larger) | 0.17 / 0.26 / 0.37 m at 60 / 75 / 90 m | 0.14 / 0.31 / 0.54 / 0.84 / 1.20 m at 100 / 150 / 200 / 250 / 300 m |
+  | its DEM equivalent at slope 0.10 | 0.02 / 0.03 / 0.04 m | 0.01 / 0.03 / 0.05 / 0.08 / 0.12 m |
+  | model choice (all six minus angles), cross-shore | 0.01 / 0.02 / 0.03 m | 0.12 / 0.62 / 1.46 / 2.65 / 4.16 m |
+  | the refit's shift from the live EO | 0.00 m | +0.10 / 0.22 / 0.37 / 0.57 / 0.80 m (seaward) |
+  | 1 px of pick origin (excluded) | 0.022 deg of tilt: 0.07 / 0.11 / 0.15 m | 0.016 deg: 0.07 / 0.15 / 0.26 / 0.41 / 0.58 m |
+
+  On z = 1 m the sigmas are 4-6% larger. The cross-shore pixel footprint at those ranges is 0.07-0.16 m (c1)
+  and 0.09-0.67 m (c2).
+* **How this differs from 4.10.** For c1, `georectify_uncertainty.py`'s table is made with all six
+  parameters (the most free set that reproduces the calibration). Leave-one-out prefers the angles,
+  whose cross-shore sigma at 60 / 75 / 90 m is 0.17 / 0.26 / 0.37 m, against 0.24 / 0.45 / 0.75 m
+  with all six (`--free all`). That smaller sigma holds only if c1's position is exact. Where the live positions came from, and how accurate they are, is not documented:
+  * c1's EO is the 2025-11-04 values (calibration/README.md). If it was solved on 4 Nov, its
+    2025-11-13 targets are an out-of-sample check.
+  * c2's solve held its position.
+
+  For c2, the two sets agree within the sigma at 100 m, and differ by 2.0 times it at 150 m and
+  2.7-3.5 times at 200-300 m. Holding the position predicts the left-out targets far better (0.410 against 1.060 m;
+  all six miss the far #314 and #317 by 2.3-2.7 m). So the far field rests on a position nobody
+  has documented. The angles refit on the same targets also moves c2's lines 0.8 m at 300 m from
+  the live EO (a 0.076 deg roll, inside the 0.1 deg reproduction rule).
+* **[REAL] The lens model.**
+  * **Where the targets sit.** The picks reach normalised lens radius 0.43 (c1) and 0.28 (c2).
+    The frame's corners are at 0.63 and 0.51. The horizon is at 0.42-0.56 (rows 1-140) and
+    0.32-0.37 (rows 0-67), where the highest picks are at rows 690 and 420. The targets can test
+    the lens model, not refit it near the top.
+  * **c1, flagged.** d1 with all six gives a leave-one-out RMS of 0.400 m against the best without
+    a lens term, 0.453 m (angles): +12%. The verdict is marginal: without any one of 7 targets it
+    is no longer flagged (without #214, -4%). The fitted d1 is -0.328 against the IO's -0.216, and
+    the camera moves 0.78 m. With d1 + d2 the RMS is 0.347 m (+24%), with d1 -0.73 and d2 +1.83
+    and a 1.63 m move: no lens anyone measured. That verdict is marginal too: without #214 (-5%)
+    or #216 (-14%) it is no longer flagged.
+  * **c2, not flagged.** d1 gains nothing: 0.410 m with or without it. Without #212 (the robust
+    loss's lowest weight) it would be flagged (+26%). With all six, d1 lowers the RMS from 1.060
+    to 0.718 m, still worse than the angles alone. With d1 + d2 the best is 1.085 m (all six),
+    far worse than the angles (-164%), yet without #317 alone it would be flagged (+31%). Both of
+    c2's verdicts rest on one target.
+  * **What the d1 refit does to the horizon.** With all six free, the targets-only d1 refit moves
+    the predicted horizon down the frame: +31 px for c1 (as +0.42 deg of tilt) and +18 px for c2
+    (+0.26 deg). That is the direction of the 7 Oct 2026 offset of section 4.6 (41 / 34 px, +0.90 /
+    +0.57 deg of tilt), so it is evidence that part of that offset may be the lens model. It is
+    not a decision. The roll the segment gives (-1.29 / +0.58 deg) is not reliable: the horizon is
+    on 9-10 columns on one side of the frame.
+  * **The synthetic rates.** On c1's geometry with 3 px of noise, the verdict is flagged in 2 of 50
+    trials with the lens unchanged, and in 10 of 10 with d1 off by -0.1 [SYNTH]. On c2's geometry,
+    in a scratch run, it was flagged in 8 of 50 with the lens unchanged and 16 of 30 with d1 off
+    [SYNTH, SCRATCH]. So c2's verdict is the weaker one.
+* **[SYNTH] Checks** (`test_calibrate_eo.py`, all on the real target geometry and lens):
+  * A known EO (0.3 m, 0.2 deg off) is recovered within 3 sd from picks with 3 px of noise. Over
+    200 trials, the Jacobian's 68 / 95% intervals (Student's t) cover tilt 68.0 / 91.5% of the
+    time (azimuth 65.5 / 94.5%, roll 67.5 / 94.0%).
+  * A 40 px blunder on #117 gets a robust weight of 0.14, the robust solve lands nearer the truth
+    (0.033 against 0.210 m cross-shore), and leave-one-out flags it.
+  * 12 starts reach one minimum. A start 5 deg off with `--starts 1` reaches the same minimum and
+    is reported as one start that does not reproduce the start EO.
+  * `--free auto` takes all six when the position is 1 m off (0.484 against 1.457 m), and the
+    angles when the position is exact.
+  * A 3 cm position prior cuts c1's six-parameter tilt sd from 0.066 to 0.036 deg.
+  * A rendered horizon (+0.3 / -0.2 deg) reads back as +0.294 / -0.200 deg. A frame 10 days late
+    is refused, and used with `--horizon-any-epoch` with the moved-camera warning. A grey frame
+    is not clear.
+  * The horizon screen: a frame 1 day before the EO's day or 4 days after is refused, and one
+    3 days after is used. A 4-day frame is used with `--horizon-max-days 5`. Another station's
+    frame is refused, and so is a link with a c1 name to a c2 frame. An inverted frame and a bent
+    horizon (36.8 px left by the tilt + roll fit, over `horizon_check.FIT_OK_PX`) are not clear. A
+    half-size frame is refused.
+  * Every guard refuses without opening the file. An audit hook records every open, and
+    `cv2.imread` is recorded with it, since cv2 reads outside the hook's sight. The guard cases
+    include frames of 23 Oct 2024 by name, by epoch and behind links with innocent names (all
+    refused before anything is solved), a chain whose middle link alone has the day's name,
+    `link/..` paths, a link to a `.tif` and a dozen spellings of the day.
+  * The prior is used by every start and every leave-one-out fold. SIGMA_H holds x and y and
+    SIGMA_Z holds z. A tie within 1 mm goes to the fewer parameters.
+  * On the live inputs, the test pins the table's numbers: the leave-one-out RMS (within 0.01 m
+    of the design review's figures), the cross-shore sigma, model choice, shift and pick origin
+    at the data's ranges, the angles' sds, and the lens verdicts with the targets that carry them.
+* **What it cannot settle.**
+  * **Lens, pointing or a move.** It cannot tell a lens error from a pointing error from a camera
+    moved since 2025-11-13. The 7 Oct 2026 horizon is 11 months later, and c1 panned on 26-28 Sep
+    2026.
+  * **The far field.** It cannot pin the tilt beyond the targets (c2's waterlines reach 307 m, its
+    targets 150 m).
+* **What would settle it.**
+  * A GNSS survey of both mounts, including the antenna-to-lens offset (`--camera-position`). A
+    3 cm prior halves the tilt sd here [SYNTH].
+  * Targets at 200-400 m in c2's view.
+  * An in-situ lens calibration through the housing window, with the focus unchanged.
+  * Frames of the calibration days for the horizon (`--horizon`, [NUC]: no such frame is in this
+    repository, so the horizon diagnostic has not been run on real frames). New data calibrate
+    the pointing of the day they are taken, and each later day would need tying to it
+    (section 4.6b).
+* **Nothing adopts its output.** Adopting a re-solved calibration is a separate change. It is
+  decided only on target leave-one-out and horizon evidence from the right days, never on
+  residuals against the 2026-09-29 RTK or the 2025 lidar. It is recorded as a dated entry here
+  (section 3.0's fix clause applies), and is followed by a rerun of
+  `georectify_uncertainty.py`.
+* **[NUC] Re-check.**
+  ```
+  python3 test_calibrate_eo.py                       # ends "all calibrate_eo tests passed" (~57 s here, ~90 s on the floor venv)
+  python3 calibrate_eo.py --out-dir ~/eo_refit       # the table above, in ~/eo_refit/c?_eo_report.txt
+  python3 calibrate_eo.py --out-dir ~/eo_refit_hz --cameras c1 --horizon archive/images_timex/*.Nov.1[3-6]_*.GMT.2025.CACO05.c1.timex.jpg
+  ```
+  On 5 Nov 2026 no frame of 13-16 Nov 2025 was found on the NUC under that name; a pattern that
+  matches nothing is listed as refused in the report and the run goes on without the horizon.
 
 ### 4.7 Detector edge position
 
