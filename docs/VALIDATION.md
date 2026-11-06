@@ -974,8 +974,8 @@ these builds' numbers.
     filter's day check left out 22 Jan for both cameras (c1 10 lines, c2 2). The DEM left out 4
     frames with Hs > 1.5 m and gridded 37 (c1 16, c2 21) on 3 days.
   * **Mar.** c2 only (station CACO04), 70 photos of 3-9 Mar. The waterlines the DEM was given are
-    on 4, 8 and 9 Mar only (10 / 8 / 10); none on 3 Mar or on 5-7 Mar, the lidar's day included.
-    The filter dropped no March line. The DEM's day test left out 4 Mar, "+0.429 m from the DEM of
+    on 4, 8 and 9 Mar only (10 / 8 / 10); none on 3 Mar or on 5-7 Mar, the lidar's day included
+    (see "Where 3 and 5-7 Mar went" below). The filter dropped no March line. The DEM's day test left out 4 Mar, "+0.429 m from the DEM of
     the kept days", and warned: "the day test could not judge every camera-day -- kept over the
     limit without being judged: c2 2025-03-08". It gridded 18 frames on 8-9 Mar.
   * Both lidars lie 2 days outside the days of the frames gridded.
@@ -1030,16 +1030,28 @@ DEM gridded, at the build's own C, not the C = 0 sensitivity.
   +0.102 m with it, on the shared points).
 - **March's frames.** March's DEM rests on 2 days of frames (8-9 Mar), 2-3 days after the
   lidar. The only earlier day with frames, 4 Mar, was left out by the day test at +0.429 m from
-  them. The test could not judge 8 Mar and kept it over the limit (README.txt, above). Where the
-  frames of 3 and 5-7 Mar went is not read. Two steps can drop them: the detector
-  (`waterlines/c2/processing.log`), and the merge, which drops frames with no wave record
-  (`waterlines/no_setup_frames.csv`).
+  them. The test could not judge 8 Mar and kept it over the limit (README.txt, above).
+- **Where 3 and 5-7 Mar went** (`2025-03-06/waterlines/`, read 6 Nov 2026):
+  * **The detector.** It ran on 10 photos on each day of 3-9 Mar and discarded 3, for low mean
+    confidence: 1 on 6 Mar, 2 on 8 Mar (`c2/processing.log`).
+  * **The merge.** It dropped no frame for a missing wave record (`no_setup_frames.csv` holds
+    only its header).
+  * **The contour extraction.** `extract_elevation_contours.py`'s tide-direction agreement test
+    (`--min-tide-agreement`, default 0.70) rejects a whole camera-day when the line moves with
+    the tide on fewer than 70% of its consecutive-frame transitions. It rejected 3 Mar (5 of 9,
+    56%), 5 Mar (6 of 9, 67%), 6 Mar (5 of 8, 62%) and 7 Mar (3 of 7, 43%): "dropped 76805
+    point(s) from 4 camera-day(s)". It kept 4 Mar (7 of 8, 88%), 8 Mar (6 of 6) and 9 Mar (9 of
+    9). No frame was skipped for coverage or a tide gap. It wrote 58,915 points from 28 frames.
+  * **Together.** Of the lidar day's 10 photos, the detector kept 9, and the agreement test then
+    dropped all 9. The days the DEM gridded are the two that passed both that test and the day
+    test.
 - **The sea horizon against the calibration over each window** (README.txt): Jan c1 tilt/roll
   +1.54 / +0.35 deg (71.2 px, 6 clear days), Jan c2 +0.43 / -0.47 deg (31.1 px), Mar c2
   +0.33 / +0.17 deg (21.5 px, 5 clear days).
 - **Read after the comparison.** The frame and day facts above were read after the comparison's
   residuals. This entry does not change the rule. A change suggested by them comes after the
-  residuals were read: to the day test, the frame selection or the pointing, for example. Whether
+  residuals were read: to the day test, the tide-direction agreement test, the frame selection
+  or the pointing, for example. Whether
   the fix clause covers it is for that change's own dated entry to argue. The safe test of it is
   a survey not yet read.
 
