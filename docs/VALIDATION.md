@@ -958,24 +958,26 @@ these builds' numbers.
   `python3 survey_products.py --date 2025-01-23 --output-root /mnt/I2Rgus_Data/survey_products_2026-11-05`,
   the same with `--date 2025-03-06`, then
   `python3 survey_products.py --summary --output-root /mnt/I2Rgus_Data/survey_products_2026-11-05`
-  (the run log shows all three exiting 0). Each build's README.txt confirms its rebuild line:
+  (the run log shows all three exiting 0). Each build's README.txt gives its rebuild line, made
+  from the settings its outputs were built with and listing every option that changes the result
+  and is not at its default:
   `/usr/bin/python3 /mnt/I2Rgus_Data/waterline/survey_products.py --date 2025-01-23 --output-root
-  /mnt/I2Rgus_Data/survey_products_2026-11-05` (and `--date 2025-03-06`), with no other option.
+  /mnt/I2Rgus_Data/survey_products_2026-11-05` (and `--date 2025-03-06`): no other such option.
 - Settings: C = 0.037 (fitted to the 2026-09-29 RTK), era adcp.
 - Run on the NUC on 5 Nov 2026, 21:35-21:55 CST (built 2026-11-06T03:47:09Z and 03:54:53Z).
   Both exited 0 with status complete (729 s and 463 s).
 - Commit: `4a9e644d058c7c9ff0e49fa7f554f9c2a39e29ab` for both builds. Each README.txt says
   "every output was built at commit 4a9e644... with the scripts as committed".
 - Frames used (README.txt `WHAT WAS USED`):
-  * **Jan.** Photos 18-23 Jan, 57 per camera. The detector saved frames on 18-21 Jan: c1 17
-    (10 / 4 / 1 / 2 a day), c2 24 (3 / 10 / 3 / 8). The filter's day check left out 22 Jan for
-    both cameras (c1 10 lines, c2 2). The DEM left out 4 frames with Hs > 1.5 m and gridded 37
-    (c1 16, c2 21) on 3 days.
-  * **Mar.** c2 only (station CACO04), 70 photos of 3-9 Mar. The detector saved frames on 4, 8
-    and 9 Mar only (10 / 8 / 10); none on 3 Mar or on 5-7 Mar, the lidar's day included. The DEM's
-    day test left out 4 Mar, "+0.429 m from the DEM of the kept days", and warned: "the day test
-    could not judge every camera-day -- kept over the limit without being judged: c2 2025-03-08".
-    It gridded 18 frames on 8-9 Mar.
+  * **Jan.** Photos 18-23 Jan, 57 per camera. The waterlines the DEM was given (after the merge
+    and the filter) are on 18-21 Jan: c1 17 (10 / 4 / 1 / 2 a day), c2 24 (3 / 10 / 3 / 8). The
+    filter's day check left out 22 Jan for both cameras (c1 10 lines, c2 2). The DEM left out 4
+    frames with Hs > 1.5 m and gridded 37 (c1 16, c2 21) on 3 days.
+  * **Mar.** c2 only (station CACO04), 70 photos of 3-9 Mar. The waterlines the DEM was given are
+    on 4, 8 and 9 Mar only (10 / 8 / 10); none on 3 Mar or on 5-7 Mar, the lidar's day included.
+    The filter dropped no March line. The DEM's day test left out 4 Mar, "+0.429 m from the DEM of
+    the kept days", and warned: "the day test could not judge every camera-day -- kept over the
+    limit without being judged: c2 2025-03-08". It gridded 18 frames on 8-9 Mar.
   * Both lidars lie 2 days outside the days of the frames gridded.
 
 **The numbers** were read from the root `summary.txt`. `survey_products.py --summary` copies
@@ -1028,16 +1030,18 @@ DEM gridded, at the build's own C, not the C = 0 sensitivity.
   +0.102 m with it, on the shared points).
 - **March's frames.** March's DEM rests on 2 days of frames (8-9 Mar), 2-3 days after the
   lidar. The only earlier day with frames, 4 Mar, was left out by the day test at +0.429 m from
-  them. The test could not judge 8 Mar and kept it over the limit (README.txt, above). How many
-  photos the detector discarded on 3 and 5-7 Mar, and why, is in `waterlines/c2/processing.log`
-  (not read).
+  them. The test could not judge 8 Mar and kept it over the limit (README.txt, above). Where the
+  frames of 3 and 5-7 Mar went is not read. Two steps can drop them: the detector
+  (`waterlines/c2/processing.log`), and the merge, which drops frames with no wave record
+  (`waterlines/no_setup_frames.csv`).
 - **The sea horizon against the calibration over each window** (README.txt): Jan c1 tilt/roll
   +1.54 / +0.35 deg (71.2 px, 6 clear days), Jan c2 +0.43 / -0.47 deg (31.1 px), Mar c2
   +0.33 / +0.17 deg (21.5 px, 5 clear days).
-- **Read after the comparison.** The frame and day facts above were read after the comparison.
-  A change found from them is a fix found from a comparison (section 3.0): to the day test, the
-  frame selection or the pointing, for example. It makes later comparisons of the changed
-  product with that lidar PARTLY-CIRCULAR.
+- **Read after the comparison.** The frame and day facts above were read after the comparison's
+  residuals. This entry does not change the rule. A change suggested by them comes after the
+  residuals were read: to the day test, the frame selection or the pointing, for example. Whether
+  the fix clause covers it is for that change's own dated entry to argue. The safe test of it is
+  a survey not yet read.
 
 ### 3.1 2025-01-23: Jan 2025 lidar (c1 + c2, 18-23 Jan)
 
