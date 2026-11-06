@@ -947,6 +947,85 @@ v6.11 with its partial lines, pointing rule version 11), in their own output roo
 root for the comparison of the two. Their verdicts are recorded, when they are read, in a new
 dated entry under this one, with each build's commit, output root and options.
 
+#### 3.0a The first verdicts under the rule: the 2025 rebuilds (read 6 Nov 2026)
+
+Judged by section 3.0 as set on 5 Nov 2026 (unchanged since `ba424bb`), on the first reading of
+these builds' numbers.
+
+**The builds.**
+- Output root `/mnt/I2Rgus_Data/survey_products_2026-11-05`. The run script (`~/rebuild_2025.sh`,
+  given to the owner on 5 Nov) runs
+  `python3 survey_products.py --date 2025-01-23 --output-root /mnt/I2Rgus_Data/survey_products_2026-11-05`,
+  the same with `--date 2025-03-06`, then
+  `python3 survey_products.py --summary --output-root /mnt/I2Rgus_Data/survey_products_2026-11-05`
+  (the run log shows all three exiting 0), with no other option. Each build's own rebuild line
+  (README.txt `[survey_products]`, provenance.json `commands.survey_products`) is still to be
+  read.
+- Settings: C = 0.037 (fitted to the 2026-09-29 RTK), era adcp.
+- Run on the NUC on 5 Nov 2026, 21:35-21:55 CST. Both exited 0 with status complete (729 s and
+  463 s).
+- Commit: `4a9e644`, from the owner's output of 5 Nov: the NUC was pulled to it just before the
+  run script was started. That was main's head until `0f4870f` was merged on 6 Nov.
+  `survey_products.py`, `survey_compare.py` and the detector are the same at `0f4870f`. Each
+  build's own record of its commit (README.txt `software:`, provenance.json `software.now.commit`)
+  is still to be read.
+- Frames used: Jan, c1 + c2, 18-21 Jan, from a photo window of 18-23 Jan. Mar, c2 only, 8-9 Mar,
+  from a photo window of 3-9 Mar. Both lidars lie 2 days outside the days of the frames used.
+
+**The numbers** were read from the root `summary.txt`. `survey_products.py --summary` copies
+them, unrounded, from each `compare/<date>_<survey>_comparison.json` (`summary_comparison`) and prints them to
+0.001 m as the report does (`summary`). Its "lines" value is the report's headline: the frames the
+DEM gridded, at the build's own C, not the C = 0 sensitivity.
+
+| comparison | label as the rule judges it | numbers | tests failed | verdict |
+|---|---|---|---|---|
+| 2025-01-23 DEM - Jan lidar | PARTLY-CIRCULAR (the day check, the fix clause; it prints INDEPENDENT) | pooled +0.044 m, NMAD 0.218 m, 159 cells; c1 -0.218 m (52 cells), c2 +0.131 m (106) | 1 (c1, c2), 2 (pooled), 3 (split 0.349 m) | FAIL |
+| 2025-01-23 waterlines - Jan lidar | PARTLY-CIRCULAR (the same) | pooled -0.026 m (37 frames); c1 -0.180 m (16 frames), c2 +0.135 m (21) | 1 (c1, c2), 3 (split 0.315 m) | FAIL |
+| 2025-03-06 DEM - Mar lidar (c2) | INDEPENDENT | -0.288 m, NMAD 0.255 m, 248 cells | 1, 2 | FAIL |
+| 2025-03-06 waterlines - Mar lidar (c2) | INDEPENDENT | -0.265 m (18 frames) | 1 | FAIL |
+
+- **Not read.** The per-camera NMADs, the waterlines' NMAD, the bands (test 4) and the intervals
+  (test 5) are not in `summary.txt`. None of them can change a FAIL.
+- **Counts.** All counts are 10 or more: frames for the lines, not line points. Mar's c1 has no
+  photos, so test 3 is not applied there.
+- **The Jan label.** Jan could only FAIL, and it does under either label.
+
+**What the verdicts mean.**
+- **March.** This build of 2025-03-06 (c2) fails both of its judged comparisons: the DEM is
+  0.288 m low and the lines 0.265 m low. The verdict is this build's (its commit, root and
+  options), not the date's.
+- **January.** The Jan comparisons could only FAIL. They fail test 1 on both cameras and test 3
+  on the camera split.
+- **What a change found from these residuals can still be tested on.** Such a change might be to
+  the pointing, lens, setup, detector or filter. By the fix clause it makes every later
+  comparison of the changed product with that lidar PARTLY-CIRCULAR, for 2025-01-23 and
+  2025-03-06 alike: such a comparison can still FAIL the change, but never pass it. Only these
+  can pass it:
+  * the blind 2024-10-23 product (section 3.5), for the DEM only;
+  * the 2026-09-29 RTK where its label allows (section 3.3: CIRCULAR at C = 0.037);
+  * surveys not yet read.
+
+**Facts beside the verdicts** (not causes):
+- **Jan reproduces the earlier rebuild.** It matches the record's "built here" rows (section
+  2.1, after) to 0.001 m in every per-camera median and count (52 / 106 cells, 16 / 21
+  frames). Mar's median is the same, -0.288 m, on 248 cells
+  against 249.
+- **No partial lines in this era.** Partial lines (detector v6.11, section 2.9) cannot occur in
+  these builds. `detect_original_view.py` passes `--min-signal-fraction 0.15`, and the detector
+  tries a partial line only below that fraction. There its run, a subset of the signal columns,
+  can never reach `PARTIAL_MIN_FRACTION` (0.30). So "detector v6.11 with its partial lines" in
+  section 3.0 describes the code, not these builds: their lines are whole lines, as before v6.11.
+- **Against section 3.1's expectation.** It expected c1 -0.29 to -0.24 m and c2 +0.02 to
+  +0.07 m. The lines read c1 -0.180 and c2 +0.135 m: 0.060 and 0.065 m above the top of their ranges. Their
+  split, 0.315 m, is inside the 0.26-0.36 m the expectation implies.
+- **The setup in March.** At C = 0 the same March line points read -0.489 m. The setup at
+  C = 0.037 raises them 0.224 m, to -0.265 m. Jan at C = 0: c1 -0.345,
+  c2 -0.074 m (-0.180 and +0.102 m with it, on the shared points).
+- **Frames used.** March's DEM rests on 2 days of frames (8-9 Mar) from a 7-day window, both
+  days 2-3 days after the lidar. Why 3-7 Mar are not used is not read yet. The README.txt's
+  `WHAT WAS USED` gives the frames per day and what the DEM left out (high waves, the day test).
+  Frames the detector discarded are counted only in `waterlines/c2/processing.log`.
+
 ### 3.1 2025-01-23: Jan 2025 lidar (c1 + c2, 18-23 Jan)
 
 **Label: INDEPENDENT.** Calibration `CACO03_<cam>_20250123_EO` solved from GCPs surveyed that
