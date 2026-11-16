@@ -19,9 +19,13 @@ forecast within the lead time (default 4 days) starts an EVENT:
   5. it maps the change, pre against post, with dem_change.py (like for
      like: the pre DEM is rebuilt from the current ground file with the
      post DEM's options), and emails the erosion/accretion map and volumes.
-A forecast storm that never arrives is closed as a FALSE ALARM. A storm the
-forecast missed is opened from the observed waves, and its pre DEM is built
-after the fact from the saved waterline points.
+A forecast storm that never arrives is closed as a FALSE ALARM; one whose
+waves came as part of another event's storm is closed as MERGED into it. A
+storm the forecast missed is opened from the observed waves at once (also
+inside another event's post window), and its pre DEM is built after the fact
+from the saved waterline points. A trigger while a storm is still going on
+belongs to it only when its onset is within a day; a later one is a storm of
+its own, with its own heads-up.
 
 WHAT THE CAMERA DEM COVERS: ONLY THE INTERTIDAL BEACH, between the low and
 high waterlines the cameras see (about -0.8 to +1.0 m NAVD88 on a 7-day DEM).
@@ -1732,7 +1736,8 @@ def scan_ground(path, d_min, d_max, out_csv, max_hs):
 def ground_suspect(new, old, cron_log):
     """Why a freshly read ground file looks truncated or half-written (or ''): the last row is short, a
     camera seen before is gone, the passing frames on dates both passes covered dropped by > 20 %, or the
-    cron's last run did not end, or logged 'georectification failed'."""
+    cron's last run did not end, or its main chain logged 'ERROR: georectification failed' (the step that writes
+    $GROUND; the model-only series' 'WARNING: model-only DEM series: georectification failed' writes elsewhere)."""
     if not new["last_fields_ok"]:
         return "its last line is short (a write cut off?)"
     if old:
@@ -1754,8 +1759,8 @@ def ground_suspect(new, old, cron_log):
         starts = [i for i, l in enumerate(lines) if "=== run start ===" in l]
         if starts:
             tail = lines[starts[-1]:]
-            if any("georectification failed" in l for l in tail):
-                return "the cron's last run logged 'georectification failed'"
+            if any("ERROR: georectification failed" in l for l in tail):
+                return "the cron's last run logged 'ERROR: georectification failed'"
             if not any("=== run end ===" in l for l in tail):
                 return "the cron's last run did not log its end (killed mid-run?)"
     return ""
@@ -2179,11 +2184,37 @@ def fresh_state(now):
 
 
 def load_state(ctx):
-    """-> state. Missing: a fresh one (segments that ended before now are 'seen': no email for old storms).
-    Unreadable: moved aside, the previous copy (state.json.prev) restored, else rebuilt from events/*/event.json,
-    with a WARNING. An unknown version: SettingsError (exit 1)."""
+    """-> (state, fresh). Missing with no trace of earlier runs: a fresh one (segments that ended before now are
+    'seen': no email for old storms). Unreadable, or missing while state.json.prev or events/*/event.json exist:
+    the previous copy (state.json.prev) restored, else rebuilt from events/*/event.json, with a WARNING; an
+    unreadable file is moved aside only by a run that writes (never by --status or --dry-run). An unknown version:
+    SettingsError (exit 1)."""
     p = ctx.state_path
+    prev = Path(str(p) + ".prev")
+
+    def recover():
+        try:
+            st = json.loads(prev.read_text())
+            if not isinstance(st, dict):
+                raise ValueError("not an object")
+            ctx.warn("WARNING: restored the previous state (state.json.prev)")
+        except (OSError, ValueError):
+            st = fresh_state(ctx.now)
+            for ej in sorted(ctx.events_dir.glob("*/event.json")):
+                try:
+                    st["events"].append(json.loads(ej.read_text()))
+                except (OSError, ValueError):
+                    pass
+            ctx.warn(f"WARNING: state rebuilt from {len(st['events'])} events/*/event.json")
+        if st.get("version") != STATE_VERSION:
+            raise SettingsError(f"{prev} has state version {st.get('version')!r}; this storm_watch.py reads "
+                                f"version {STATE_VERSION}")
+        return st
+
     if not p.exists():
+        if prev.exists() or any(ctx.events_dir.glob("*/event.json")):
+            ctx.warn("WARNING: state file missing, but earlier runs left state.json.prev or event folders")
+            return recover(), False
         return fresh_state(ctx.now), True
     try:
         st = json.loads(p.read_text())
@@ -2196,20 +2227,10 @@ def load_state(ctx):
                 os.replace(str(p), str(bad))
             except OSError:
                 pass
-        ctx.warn(f"WARNING: state file unreadable ({str(exc)[:60]}); moved aside to {bad.name}")
-        prev = Path(str(p) + ".prev")
-        try:
-            st = json.loads(prev.read_text())
-            ctx.warn("WARNING: restored the previous state (state.json.prev)")
-        except (OSError, ValueError):
-            st = fresh_state(ctx.now)
-            for ej in sorted(ctx.events_dir.glob("*/event.json")):
-                try:
-                    st["events"].append(json.loads(ej.read_text()))
-                except (OSError, ValueError):
-                    pass
-            ctx.warn(f"WARNING: state rebuilt from {len(st['events'])} events/*/event.json")
-        return st, False
+            ctx.warn(f"WARNING: state file unreadable ({str(exc)[:60]}); moved aside to {bad.name}")
+        else:
+            ctx.warn(f"WARNING: state file unreadable ({str(exc)[:60]}); left in place (this run writes nothing)")
+        return recover(), False
     if st.get("version") != STATE_VERSION:
         raise SettingsError(f"{p} has state version {st.get('version')!r}; this storm_watch.py reads version "
                             f"{STATE_VERSION}")
@@ -2319,13 +2340,11 @@ def owned_by(state, s, now_h, exclude=None):
 
 
 def claimed(state, s, now_h):
+    """A segment an event owns, or one seen at install. The wave event that cuts a post window while its cut is
+    pending is NOT claimed: a storm the forecast missed opens its own event at once (its email goes out then),
+    and merge_or_cut closes that event as merged when fewer than 3 usable dates lie between the two storms."""
     if owned_by(state, s, now_h):
         return True
-    for E in state["events"]:
-        c = E["observed"].get("cut_segment")
-        if E["status"] == "post" and c and E["observed"].get("cut_state") == "pending":
-            if seg_overlaps_spans(s, [stored_span(c)], now_h):
-                return True
     return seg_overlaps_spans(s, [stored_span(x) for x in state.get("seen_segments", [])], now_h)
 
 
@@ -2410,14 +2429,19 @@ def plan_pre(ctx, state, E, segs, gi, od, end=None, extend=True):
 
 
 def planned_pre_fc(ctx, state, E, segs):
-    """A forecast event's planned pre window, ended before any observed rough spell that started near the
-    forecast onset (a storm that came early, or a sea that never confirmed)."""
+    """A forecast event's planned pre window: ended before a wave event that cuts windows (breaks()) and started
+    between 48 h before the forecast onset and 60 h after it (a storm that came early, or a sea that never
+    confirmed); started after one that lies earlier inside the window (the storm before, or a wave event). A rough
+    spell that cuts nothing (a short blip above the calm level) changes nothing: --max-hs leaves its frames out.
+    The window can come out empty (start > end) while the storm before is still going on."""
     od = onset_date(E)
     start, end, _ = plan_pre(ctx, state, E, segs, None, od, extend=False)
     on = iso_hour(E["forecast"]["onset_fc"])
-    for s in segs:
-        if s["start"] >= date_hour0(start) and s["start"] <= on + 48 + 12:
-            end = min(end, dadd(hour_date(s["start"]), -1))
+    for d0, d1, s in sorted(breaking_dates(segs, ctx.cfg, E, ctx.now_h), key=lambda x: x[2]["start"]):
+        if on - 48 <= s["start"] <= on + 48 + 12:
+            end = min(end, dadd(d0, -1))
+        elif s["start"] < on - 48 and d1 >= start and d0 <= end:
+            start = dadd(d1, 1)
     return [start, end]
 
 
@@ -2464,12 +2488,38 @@ def try_pre(ctx, state, E, segs, gi, obs, provisional=False, window=None):
     od = onset_date(E)
     ed = evdir(ctx, E)
     if provisional:
-        latest = gi["latest"]
+        # the beach as recently as the ground file allows: the PRE_DAYS dates up to its last complete date (never
+        # past the planned window), started after the previous storm and after any wave event that cuts windows and
+        # came before this storm (also one after the window: the window would show the beach before it, not before
+        # this storm); ended before this storm's own sea come early (from 48 h before the forecast onset)
+        latest = (gi or {}).get("latest")
+        if not latest:
+            E["pre_provisional"] = {"status": "none", "why": "the ground file has no georectified rows"}
+            return True
         planned = E["pre"]["planned"]
         end = min(dadd(latest, -1), planned[1])
         start = dadd(end, -(cfg["STORM_PRE_DAYS"] - 1))
+        after = []
+        fl = floor_date(state, E, od)
+        if fl and fl > start:
+            start = fl
+            after.append("the previous storm")
+        on = iso_hour((E.get("forecast") or {}).get("onset_fc")) or date_hour0(od)
+        for d0, d1, s in sorted(breaking_dates(segs, cfg, E, ctx.now_h), key=lambda x: x[2]["start"]):
+            if s["start"] >= on - 48:
+                end = min(end, dadd(d0, -1))
+            elif d1 >= start:
+                start = dadd(d1, 1)
+                after.append(f"the wave event {seg_text(s)}")
         if end < start or not covered(gi, end):
-            E["pre_provisional"] = {"status": "none", "why": "the ground file does not reach the window yet"}
+            why = (f"no date after {after[-1]} that the ground file covers yet" if after and end < start
+                   else "the ground file does not reach the window yet")
+            E["pre_provisional"] = {"status": "none", "why": why}
+            return True
+        u = usable_dates(gi, start, end, cfg)
+        if len(u) < cfg["STORM_MIN_USABLE_DAYS"]:
+            E["pre_provisional"] = {"status": "none", "why": f"{len(u)} usable date(s) in {start}..{end}"
+                                    + (f" (after {after[-1]})" if after else "")}
             return True
         rec = build_dem(ctx, E, ed / "pre_provisional" / f"pre_{start}_{end}", start, end,
                         title=part_title(E, "pre", start, end) + " (PROVISIONAL)", kind="pre (provisional)")
@@ -2483,9 +2533,26 @@ def try_pre(ctx, state, E, segs, gi, obs, provisional=False, window=None):
         start, end = window
         flags = []
         if gi:
+            # extended back like plan_pre: never past the previous storm or into a wave event that cuts windows
             lo = dadd(od, -cfg["STORM_PRE_MAX_DAYS"])
+            fl = floor_date(state, E, od)
+            if fl and fl > lo:
+                lo = fl
+            br = breaking_dates(segs, cfg, E, ctx.now_h)
+            for d0, d1, s in sorted(br, key=lambda x: x[0]):
+                if d1 < start or d0 > end:
+                    continue
+                after = dadd(d1, 1)
+                if after <= end and len(usable_dates(gi, after, end, cfg)) >= cfg["STORM_MIN_USABLE_DAYS"]:
+                    start = max(start, after)
+                else:
+                    flags.append(f"a wave event ({seg_text(s)}) lies inside the pre window: the pre DEM pools the "
+                                 "beach before and after it")
             while len(usable_dates(gi, start, end, cfg)) < cfg["STORM_MIN_USABLE_DAYS"] and start > lo:
-                start = dadd(start, -1)
+                prev = dadd(start, -1)
+                if any(d0 <= prev <= d1 for d0, d1, _ in br):
+                    break
+                start = prev
     else:
         start, end, flags = plan_pre(ctx, state, E, segs, gi, od)
     if not covered(gi, end):
@@ -2652,6 +2719,7 @@ def merge_or_cut(ctx, state, E, segs, gi):
                 X["status"], X["closed_reason"] = "closed", "merged"
                 X["notes"].append(f"merged into {E['id']} (one compound event)")
                 hist(ctx, X, f"closed: merged into {E['id']}")
+                queue_email(ctx, X, "merged", into=E["id"], peak=X["observed"].get("peak_hs"))
                 merged.append(X["id"])
         E["merged_from"] += merged
         E["notes"].append(f"COMPOUND: the next storm ({cs['start'][:13]}Z) came before 3 usable post-storm dates "
@@ -2678,26 +2746,31 @@ def waits(ctx, state, E, gi):
     if not need or covered(gi, need[1]):
         return
     late = ddiff(ctx.today, need[1])
-    latest = (gi or {}).get("latest") or "?"
+    # a date is complete once the file reaches the date after it (covered()): name the last complete one
+    latest = (gi or {}).get("latest")
+    last = dadd(latest, -1) if latest else "?"
     if late > 7 and not E["notices"].get("waiting_ground"):
         E["notices"]["waiting_ground"] = ctx.today
-        queue_email(ctx, E, "waiting_ground", part=need[0], date=need[1], latest=latest)
+        queue_email(ctx, E, "waiting_ground", part=need[0], date=need[1], latest=last)
     if late > cfg["STORM_MAX_WAIT_DAYS"]:
         E["status"], E["closed_reason"] = "closed", "gave_up"
-        hist(ctx, E, f"closed: gave up waiting for the ground file to reach {need[1]} (it ends {latest})")
-        queue_email(ctx, E, "gave_up", part=need[0], date=need[1], latest=latest)
+        why = f"gave up waiting for the ground file to complete {need[1]} (its last complete date is {last})"
+        hist(ctx, E, "closed: " + why)
+        queue_email(ctx, E, "gave_up", part=need[0], date=need[1], latest=last, why=why)
 
 
 # ---- updates that need no ground ------------------------------------------------------------
 
 
 def obs_coverage(obs, h0, h1):
+    """The share of hours in [h0, h1] with a buoy-based value (obs.prim): the layers that can confirm a storm.
+    Camera-only hours never confirm (segments()), so they never count towards a false-alarm verdict."""
     if obs is None or h1 < h0:
         return 0.0
     a, b = max(h0 - obs.h0, 0), min(h1 - obs.h0, obs.n - 1)
     if b < a:
         return 0.0
-    return float(np.isfinite(obs.val[a:b + 1]).sum()) / (h1 - h0 + 1)
+    return float(np.isfinite(obs.prim[a:b + 1]).sum()) / (h1 - h0 + 1)
 
 
 def adopt_segment(ctx, E, s):
@@ -2743,6 +2816,14 @@ def update_watch(ctx, state, E, segs, T, t_hit, obs):
             update_storm(ctx, state, E, segs)
             return
     cov = obs_coverage(obs, on - 24, min(en + 48, ctx.now_h))
+    receding = (ddiff(ctx.today, E["opened_utc"][:10]) > 10 and ctx.now_h <= en + 48
+                and not (t_hit and iso_hour(T["onset_fc"]) <= ctx.now_h + 24))
+    if (ctx.now_h > en + 48 and not t_hit) or receding:
+        # the storm came, but its waves belong to another event's segment (a compound event): not a false alarm
+        X, s, pk = merged_owner(ctx, state, E, segs, obs, on - 24, en + 48)
+        if X is not None:
+            close_merged_watch(ctx, E, X, s, pk)
+            return
     if ctx.now_h > en + 48 and not t_hit and cov >= 0.5:
         close_false_alarm(ctx, E, segs, obs, "the observed waves never reached the confirm level")
     elif ctx.now_h > en + 7 * 24 and cov < 0.5:
@@ -2750,9 +2831,49 @@ def update_watch(ctx, state, E, segs, T, t_hit, obs):
         E["pending"].append({"what": "pre_final", "window": E["pre"]["planned"], "since": ctx.today})
         hist(ctx, E, f"closed UNVERIFIED: observed waves cover {100 * cov:.0f} % of the storm's window")
         queue_email(ctx, E, "unverified", coverage=round(cov, 2))
-    elif ddiff(ctx.today, E["opened_utc"][:10]) > 10 and ctx.now_h <= en + 48 and \
-            not (t_hit and iso_hour(T["onset_fc"]) <= ctx.now_h + 24):
+    elif receding:
         close_false_alarm(ctx, E, segs, obs, "the forecast onset kept receding for more than 10 days")
+
+
+def merged_owner(ctx, state, E, segs, obs, h0, h1):
+    """A segment that confirms with its waves inside [h0, h1] (Marconi >= STORM_CONFIRM_HS, or 44008 >=
+    STORM_CONFIRM_BUOY_HS in the sector for 2 h, on the hours of the segment inside the window) and that another
+    event owns -> (that event, the segment, the Marconi peak inside the window), else (None, None, None). The
+    owner is the oldest one not itself merged away (merge_or_cut gives the event it merges into the segment too)."""
+    cfg = ctx.cfg
+    if obs is None:
+        return None, None, None
+    for s in sorted(segs, key=lambda x: x["start"]):
+        if not confirms(s, cfg):
+            continue
+        a, b = seg_span(s, ctx.now_h)
+        k0, k1 = max(max(a, h0) - obs.h0, 0), min(min(b, h1, ctx.now_h) - obs.h0, obs.n - 1)
+        if k1 < k0:
+            continue
+        prim = obs.prim[k0:k1 + 1]
+        pk = float(np.nanmax(prim)) if np.isfinite(prim).any() else None
+        raw = np.where(in_sector(obs.raw_dir[k0:k1 + 1], cfg["STORM_DIR_SECTOR"]),
+                       np.nan_to_num(obs.raw_hs[k0:k1 + 1], nan=-1), -1)
+        if not ((pk is not None and pk >= cfg["STORM_CONFIRM_HS"])
+                or first_run(raw >= cfg["STORM_CONFIRM_BUOY_HS"], 2) is not None):
+            continue
+        own = owned_by(state, s, ctx.now_h, exclude=E)
+        if own:
+            live = [X for X in own if X["closed_reason"] != "merged"]
+            return (live or own)[0], s, (round(pk, 2) if pk is not None else None)
+    return None, None, None
+
+
+def close_merged_watch(ctx, E, X, s, peak):
+    """A forecast storm whose waves came as part of another event's storm: closed 'merged' into it (no pre DEM of
+    its own: the compound event's DEMs and change maps cover it), with a short email."""
+    E["status"], E["closed_reason"] = "closed", "merged"
+    E["observed"]["peak_hs"] = peak
+    E["notes"].append(f"merged into {X['id']}: the forecast storm came as part of its storm ({seg_text(s)})")
+    hist(ctx, E, f"closed: MERGED into {X['id']} (the forecast storm came as part of its storm: {seg_text(s)})")
+    X["notes"].append(f"COMPOUND: it includes the storm forecast in {E['id']} (heads-up of {E['opened_utc'][:10]})")
+    hist(ctx, X, f"the storm forecast in {E['id']} came as part of this event's storm")
+    queue_email(ctx, E, "merged", into=X["id"], peak=peak)
 
 
 def close_false_alarm(ctx, E, segs, obs, why):
@@ -2788,7 +2909,8 @@ def update_storm(ctx, state, E, segs):
         if ctx.now_h > ph + 14 * 24:
             E["status"], E["closed_reason"] = "closed", "gave_up"
             hist(ctx, E, "closed: no end of the storm 14 days after its peak")
-            queue_email(ctx, E, "gave_up", part="end", date=None, latest=None)
+            queue_email(ctx, E, "gave_up", part="end", date=None, latest=None,
+                        why="no end of the storm 14 days after its peak")
 
 
 def update_post(ctx, state, E, segs):
@@ -2811,18 +2933,26 @@ def update_post(ctx, state, E, segs):
 # ---- the forecast's events ---------------------------------------------------------------------
 
 
+RUNNING_STORM_MARGIN_H = 24
+
+
 def event_refs(ctx, E):
-    """(onset_ref, end_ref) hours of an open event, for matching a new trigger."""
+    """(onset_ref, end_ref) hours of an open event, for matching a new trigger. A running storm (no end yet) ends
+    'now' for this purpose."""
     ob, fc = E["observed"], E["forecast"] or {}
     if E["status"] == "watch":
         return iso_hour(fc["onset_fc"]), iso_hour(fc["end_fc"])
     on = iso_hour(ob["onset"]) if ob["onset"] else iso_hour(fc.get("onset_fc"))
     if E["status"] == "storm":
-        return on, iso_hour(ob["end"]) if ob["end"] else ctx.now_h + 24
+        return on, iso_hour(ob["end"]) if ob["end"] else ctx.now_h
     return on, iso_hour(ob["end"])
 
 
 def trigger_match(ctx, state, T):
+    """The open events a trigger belongs to. A watch or post event: an onset up to 72 h after its (forecast or
+    observed) end. A running storm: only an onset by now + RUNNING_STORM_MARGIN_H (the forecast onset is the start
+    of its rough run minus 12 h, so a storm still forecast rough from now on has its onset in the past); a later
+    onset is a storm of its own, with its own watch event and heads-up (merge_or_cut can still join the two)."""
     if not T["triggered"]:
         return []
     on, en = iso_hour(T["onset_fc"]), iso_hour(T["end_fc"])
@@ -2833,7 +2963,8 @@ def trigger_match(ctx, state, T):
         a, b = event_refs(ctx, E)
         if a is None or b is None:
             continue
-        if on <= b + 72 and en >= a - 48:
+        margin = RUNNING_STORM_MARGIN_H if (E["status"] == "storm" and not E["observed"]["end"]) else 72
+        if on <= b + margin and en >= a - 48:
             out.append(E)
     return out
 
@@ -2897,13 +3028,14 @@ def handle_trigger(ctx, state, fc, T, matches, segs):
         for E in posts:
             E["notes"].append(f"{ctx.today}: forecast still triggering (onset ~{T['onset_fc'][:13]}Z) after the storm")
         return None
-    in_post = [X for X in state["events"] if X["status"] == "post"]
+    in_post = [X for X in state["events"] if X["status"] in ("post", "storm")]
     E = new_event(ctx, state, "fc", T["onset_fc"][:10])
     E["forecast"] = fc_record(ctx, fc, T)
     E["forecast"].update(first_trigger_utc=iso_z(ctx.now), last_trigger_utc=iso_z(ctx.now), runs=[])
     record_run(E, ctx, T)
     if in_post:
-        # the storm before this one: its post-storm DEMs are still being built (and may be cut by this one)
+        # the storm before this one: still going on, or its post-storm DEMs are still being built (and may be cut by
+        # this one)
         E["prev_event"] = max(in_post, key=lambda e: e["opened_utc"])["id"]
     E["pre"]["planned"] = planned_pre_fc(ctx, state, E, segs)
     hist(ctx, E, f"OPENED on the forecast: rules {','.join(T['rules'])}, onset ~{T['onset_fc'][:13]}Z, "
@@ -2982,15 +3114,18 @@ def ground_steps(ctx, state, E, gi, obs, segs):
 
 
 def pending_steps(ctx, state, E, gi, obs, segs):
+    """The pre DEM of a closed false alarm or unverified event: kept until it is built (try_pre waits up to 3 days
+    for a wave record with a gap, then builds with a flag), or dropped when the ground file never covers it."""
     keep = []
     for p in E["pending"]:
         if p["what"] == "pre_final" and p.get("window"):
             if covered(gi, p["window"][1]):
-                if ctx.cron.get("DEM_ENABLE") == "1":
-                    try_pre(ctx, state, E, segs, gi, obs, window=list(p["window"]))
-                continue
+                if ctx.cron.get("DEM_ENABLE") != "1" or try_pre(ctx, state, E, segs, gi, obs, window=list(p["window"])):
+                    continue
             if ddiff(ctx.today, p["window"][1]) > ctx.cfg["STORM_MAX_WAIT_DAYS"]:
-                E["notes"].append(f"{ctx.today}: pre {p['window']} never covered by the ground file: dropped")
+                E["notes"].append(f"{ctx.today}: pre {p['window']} " + (
+                    "not built (the wave record)" if covered(gi, p["window"][1]) else
+                    "never covered by the ground file") + ": dropped")
                 continue
         keep.append(p)
     E["pending"] = keep
@@ -3020,6 +3155,7 @@ def needed_from(ctx, state):
 MIME = {".png": ("image", "png"), ".jpg": ("image", "jpeg"), ".jpeg": ("image", "jpeg"), ".tif": ("image", "tiff"),
         ".tiff": ("image", "tiff"), ".txt": ("text", "plain"), ".json": ("application", "json")}
 MAX_ATTACH = 10 * 1024 * 1024
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
 
 
 def send(subject, to, body, attachments, dry_run, waits=(30, 60, 0), msmtp="msmtp", sleep=time.sleep):
@@ -3051,7 +3187,8 @@ def send(subject, to, body, attachments, dry_run, waits=(30, 60, 0), msmtp="msmt
         if r.returncode == 0:
             print(f"email sent to {len(to)} recipient(s) ({size:.1f} MB)")
             return 0
-        print(f"msmtp attempt {attempt} failed: {r.stderr.decode(errors='replace').strip()[:200]}", file=sys.stderr)
+        err = EMAIL_RE.sub("<address>", r.stderr.decode(errors="replace").strip())   # never an address in a log
+        print(f"msmtp attempt {attempt} failed: {err[:200]}", file=sys.stderr)
         if wait:
             sleep(wait)
     return 1
@@ -3132,8 +3269,13 @@ def plan_lines(ctx, E, observed=False):
     if ctx.cron.get("DEM_ENABLE") != "1":
         out.append(f"  DEM stage disabled in the cron (DEM_ENABLE={ctx.cron.get('DEM_ENABLE')}): no DEMs will be built")
         return out
-    out.append(f"  pre-storm DEM: {win[0]} to {win[1]}, built with the cron's 7-day DEM options ({opts_text(ctx)}); "
-               f"fixed about 2 days after the onset (GNSS-R runs ~2 days behind), expected ~{dadd(od, 3)}")
+    if win[0] > win[1]:
+        out.append(f"  pre-storm DEM: no calm date yet between the wave event or storm before (to {dadd(win[0], -1)}) "
+                   f"and this one; if fewer than {cfg['STORM_MIN_USABLE_DAYS']} usable dates lie between them, the two "
+                   "storms become one compound event")
+    else:
+        out.append(f"  pre-storm DEM: {win[0]} to {win[1]}, built with the cron's 7-day DEM options ({opts_text(ctx)}); "
+                   f"fixed about 2 days after the onset (GNSS-R runs ~2 days behind), expected ~{dadd(od, 3)}")
     pp = E.get("pre_provisional")
     if pp and pp.get("status") in ("built", "inadequate") and pp.get("window"):
         out.append(f"  provisional pre-storm DEM attached: {pp['window'][0]} to {pp['window'][1]}, "
@@ -3265,7 +3407,10 @@ def compose(ctx, state, E, m):
                  "heads-up is for planning a GPS or drone survey before and after it.", "",
                  f"FORECAST (run {iso_z(ctx.now)[:16]}Z; wave heights offshore, deep water):"] + forecast_lines(ctx, E)
         if E.get("prev_event"):
-            lines.append(f"  this storm follows {E['prev_event']}, whose post-storm DEMs are still being built")
+            X = next((x for x in state["events"] if x["id"] == E["prev_event"]), None)
+            lines.append(f"  this storm follows {E['prev_event']}, " + (
+                "whose storm is still going on" if X is not None and X["status"] == "storm" else
+                "whose post-storm DEMs are still being built"))
         lines += [""] + plan_lines(ctx, E)
         p = map_png(ctx, E, "pre_provisional")
         att += [p] if p else []
@@ -3288,6 +3433,16 @@ def compose(ctx, state, E, m):
                  f"peak between the forecast onset minus 24 h and its end plus 48 h was {fnum(data.get('peak'))} m "
                  f"(a storm is confirmed at {cfg['STORM_CONFIRM_HS']:g} m). The pre-storm DEM of {pw[0]} to "
                  f"{pw[1]} is kept as a calm-days DEM in {evdir(ctx, E)}/pre/ (built once the ground file covers it)."]
+    elif kind == "merged":
+        into = data.get("into")
+        what = (f"the storm forecast for {od} came, but its waves are" if E.get("forecast") and not E["observed"]["onset"]
+                else f"the storm of {od} is")
+        subj = f"Storm of {od}: part of event {into} (one compound event)"
+        lines = [f"Event {E['id']} is closed: {what} part of the storm that event {into} follows (one compound "
+                 "event: fewer than 3 usable calm dates between the two storms)"
+                 + (f"; observed Marconi peak {fnum(data.get('peak'))} m" if data.get("peak") is not None else "")
+                 + f". Its pre-storm and post-storm DEMs and change maps come with the emails of {into}; this event "
+                 "builds none of its own."]
     elif kind == "unverified":
         subj = f"Storm forecast for {od}: closed without verification"
         lines = [f"Event {E['id']} is closed UNVERIFIED: the observed wave record covers only "
@@ -3300,12 +3455,13 @@ def compose(ctx, state, E, m):
                  "The post-storm DEMs wait for the end. The event is given up 14 days after the peak."] + storm_lines(E)
     elif kind == "waiting_ground":
         subj = f"Storm of {od}: waiting for the ground file"
-        lines = [f"The {data.get('part')} DEM needs the waterline points of {data.get('date')}, but the ground file "
-                 f"ends {data.get('latest')}: GNSS-R or the cron stopped? (station_status.txt; GNSS-R normally runs "
-                 f"~2 days behind). The event is given up after {cfg['STORM_MAX_WAIT_DAYS']} days."]
+        lines = [f"The {data.get('part')} DEM needs the waterline points of {data.get('date')}, but the ground file's "
+                 f"last complete date is {data.get('latest')}: GNSS-R or the cron stopped? (station_status.txt; GNSS-R "
+                 f"normally runs ~2 days behind). The event is given up {cfg['STORM_MAX_WAIT_DAYS']} days after "
+                 f"{data.get('date')}."]
     elif kind == "gave_up":
         subj = f"Storm of {od}: given up"
-        lines = [f"Event {E['id']} is closed: " + (E["history"][-1].split(": ", 1)[-1] if E["history"] else "gave up"),
+        lines = [f"Event {E['id']} is closed: " + (data.get("why") or "gave up") + ".",
                  "", "What was built:", dem_line("pre", E["pre"]), dem_line("post3", E["post3"]),
                  dem_line("post7", E["post7"])]
         att += [p for p in (map_png(ctx, E, "pre"), map_png(ctx, E, "post3")) if p]
@@ -3357,58 +3513,95 @@ def compose(ctx, state, E, m):
     return f"{pre} {subj}", "\n".join(lines) + "\n", keep
 
 
+COMPOSE_TRIES = 3
+
+
 def send_emails(ctx, state):
+    """Sends every pending email. One that cannot be composed (a bug or a broken record) stays pending and is
+    composed again on the next runs (COMPOSE_TRIES in all, then 'failed'); a short stand-in naming the event goes
+    out once, the first time, so the event is never silent."""
     to, where = recipients(ctx.base, ctx.cfg)
     sent = []
+    mailer = ctx.mailer or (lambda s, t, b, a: send(s, t, b, a, False, waits=ctx.send_waits, msmtp=ctx.msmtp,
+                                                    sleep=ctx.sleep))
     for E in state["events"]:
         for m in E["emails"]:
             if m["status"] not in ("pending",):
                 continue
+            stub = False
             try:
                 subj, body, att = compose(ctx, state, E, m)
             except Exception as exc:
                 traceback.print_exc(file=sys.stdout)
-                ctx.warn(f"ERROR: the {m['kind']} email of {E['id']} could not be composed ({type(exc).__name__})")
+                m["compose_failed"] = int(m.get("compose_failed") or 0) + 1
+                last = m["compose_failed"] >= COMPOSE_TRIES
+                ctx.warn(f"ERROR: the {m['kind']} email of {E['id']} could not be composed ({type(exc).__name__}; "
+                         f"try {m['compose_failed']} of {COMPOSE_TRIES}" + (", given up)" if last else ")"))
                 ctx.errors.append(E["id"])
-                subj = f"{SUBJECT} {m['kind']} ({E['id']})"
-                body = (f"The {m['kind']} email of event {E['id']} could not be composed ({exc!r}); see the event "
-                        f"folder {evdir(ctx, E)} and logs/storm_watch_detail.log.\n\n{INTERTIDAL_NOTE}\n")
+                if last:
+                    m["status"] = "failed"
+                if m.get("stub_sent"):
+                    continue
+                stub = True
+                subj = f"{SUBJECT} {m['kind']} ({E['id']}): could not be composed"
+                body = (f"The {m['kind']} email of event {E['id']} could not be composed ({exc!r}). "
+                        + ("It is not tried again" if last else
+                           f"It is composed again on the next runs (up to {COMPOSE_TRIES} in all) and sent then")
+                        + f"; see the event folder {evdir(ctx, E)} and logs/storm_watch_detail.log."
+                        f"\n\n{INTERTIDAL_NOTE}\n")
                 att = []
-            m["subject"] = subj
+            kind = m["kind"] + ("_stub" if stub else "")
+            if not stub:
+                m["subject"] = subj
             if ctx.writes:
                 d = evdir(ctx, E) / "emails"
                 d.mkdir(parents=True, exist_ok=True)
-                f = d / f"{ctx.now:%Y%m%dT%H%MZ}_{m['kind']}.txt"
+                f = d / f"{ctx.now:%Y%m%dT%H%MZ}_{kind}.txt"
                 f.write_text(f"Subject: {subj}\nAttachments: {', '.join(p.name for p in att) or 'none'}\n\n{body}")
-                m["body_file"] = os.path.relpath(str(f), str(evdir(ctx, E)))
+                if not stub:
+                    m["body_file"] = os.path.relpath(str(f), str(evdir(ctx, E)))
             if ctx.mode == "dry":
-                print(f"\n=== {E['id']}: {m['kind']} ===")
+                print(f"\n=== {E['id']}: {kind} ===")
                 send(subj, to, body, att, dry_run=True)
                 print(body)
-                m["status"] = "dry"
-                sent.append(f"{m['kind']} dry")
+                if stub:
+                    m["stub_sent"] = "dry"
+                else:
+                    m["status"] = "dry"
+                sent.append(f"{kind} dry")
                 continue
             if not ctx.email:
-                m["status"] = "dry"
-                sent.append(f"{m['kind']} written")
+                if stub:
+                    m["stub_sent"] = "written"
+                else:
+                    m["status"] = "dry"
+                sent.append(f"{kind} written")
                 continue
             if not to:
-                m["status"] = "failed"
-                ctx.warn(f"WARNING: no email recipients ({where}): {m['kind']} not sent")
+                if not stub:
+                    m["status"] = "failed"
+                ctx.warn(f"WARNING: no email recipients ({where}): {kind} not sent")
                 continue
-            m["status"] = "sending"
-            m["tries"] += 1
+            if stub:
+                m["stub_sent"] = "sending"      # never sent twice, even if this run stops while sending
+            else:
+                m["status"] = "sending"
+                m["tries"] += 1
             save_state(ctx, state)
-            mailer = ctx.mailer or (lambda s, t, b, a: send(s, t, b, a, False, waits=ctx.send_waits, msmtp=ctx.msmtp,
-                                                            sleep=ctx.sleep))
             rc = mailer(subj, to, body, att)
-            if rc == 0:
+            if stub:
+                if rc == 0:
+                    m["stub_sent"] = "sent"
+                else:
+                    m.pop("stub_sent", None)    # tried again with the next compose
+                sent.append(f"{kind} " + (f"sent ({len(to)} recipients, {where})" if rc == 0 else "NOT sent"))
+            elif rc == 0:
                 m["status"] = "sent"
-                sent.append(f"{m['kind']} sent ({len(to)} recipients, {where})")
+                sent.append(f"{kind} sent ({len(to)} recipients, {where})")
             else:
                 m["status"] = "pending" if m["tries"] < 3 else "failed"
-                ctx.warn(f"WARNING: email {m['kind']} of {E['id']} not sent (try {m['tries']} of 3)")
-                sent.append(f"{m['kind']} NOT sent")
+                ctx.warn(f"WARNING: email {kind} of {E['id']} not sent (try {m['tries']} of 3)")
+                sent.append(f"{kind} NOT sent")
             save_state(ctx, state)
     return sent
 
@@ -3426,14 +3619,15 @@ def newest_epoch(path):
 def observe(ctx):
     """Reads the observed waves under owg.sh's lock (released before the ground pass: the cron takes its own lock
     first and owg.sh's second, so holding owg's while waiting for the cron's would deadlock). Fetches 44008 itself
-    when its archive is stale (live runs only)."""
+    into archive/waves_44008.csv when that archive is stale (live runs only, and only while it holds owg.sh's
+    lock: owg.sh writes the same file)."""
     lockf = None
     if ctx.mode == "live":
         lockf = take_lock(ctx.base / "logs/owg.lock", ctx.cfg["STORM_OWG_LOCK_WAIT_S"], sleep=ctx.sleep)
         if lockf is None:
-            ctx.note("owg.sh holds logs/owg.lock: waves read without it")
+            ctx.note("owg.sh holds logs/owg.lock: waves read without it (44008 not fetched)")
     try:
-        if ctx.mode == "live" and ctx.fetch:
+        if ctx.mode == "live" and ctx.fetch and lockf is not None:
             p = ctx.base / "archive/waves_44008.csv"
             nh = newest_epoch(p)
             if nh is None or ctx.now_h - nh > ctx.cfg["STORM_BUOY_STALE_H"]:
@@ -3882,7 +4076,15 @@ def climatology(cfg, inputs=None, station="44008", years=None, opener=None):
 
 
 def print_status(ctx):
-    state, _ = load_state(ctx)
+    """The events and what each waits for. Read-only (ctx.mode 'status'): an unreadable or missing state file is
+    reported and read from its previous copy, never moved."""
+    try:
+        state, _ = load_state(ctx)
+    except SettingsError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    for w in ctx.warnings:
+        print(w)
     lr = state.get("last_run") or {}
     print(f"storm watch state: {ctx.state_path}  (last run {lr.get('utc', 'never')}: {lr.get('result', '')})")
     if not state["events"]:
@@ -3973,11 +4175,12 @@ def main(argv=None):
     except ValueError as exc:
         print(exc)
         return 1
+    if args.status:
+        # read-only: never moves, restores or writes a file (Ctx.writes is False in this mode)
+        return print_status(Ctx(base, now, cfg, cron, mode="status", email=False, fetch=False))
     mode = "dry" if args.dry_run else "live"
     ctx = Ctx(base, now, cfg, cron, mode=mode, forecast_dir=args.forecast_dir, save_raw=args.save_raw,
               email=not args.no_email, fetch=not args.no_fetch)
-    if args.status:
-        return print_status(ctx)
     for n in cron_notes + set_notes:
         ctx.note(n)
     lockf = None

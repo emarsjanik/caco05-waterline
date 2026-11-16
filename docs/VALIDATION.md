@@ -854,7 +854,9 @@ read from the cron's `DEM_*` lines at run time, never copied), over explicit UTC
 the storm dates out; the change is `dem_change.py --a/--b` with the pre DEM rebuilt from the current
 ground file like for like. **INTERTIDAL ONLY**: the camera DEM covers the beach between the low and high
 waterlines (about -0.8 to +1.0 m NAVD88 on a 7-day DEM); dune and bluff change are not seen, and every
-email says so. Nothing in the cron changes; the job writes only under `archive/storm_watch/` and `logs/`.
+email says so. Nothing in the cron changes; the job writes only under `archive/storm_watch/` and `logs/`,
+plus `archive/waves_44008.csv` (`fetch_buoy_waves.py`, the file owg.sh keeps) when that archive is over 6 h
+old, and then only while it holds owg.sh's lock.
 
 * **Trigger** (offshore Hs, deep water; settings in `storm_watch_settings.conf.example`): (a) Hs >= 3.5 m
   from 0-160 deg for >= 3 h on either Open-Meteo point (offshore Marconi 41.90N 69.80W, the 44008
@@ -878,24 +880,43 @@ email says so. Nothing in the cron changes; the job writes only under `archive/s
   is earlier than the end; post3 = from the first post date to its 3rd usable date; post7 = 7 dates. A wave
   event inside the post window (peak >= 2.0 m, >= 24 rough hours, or a confirming storm) cuts it; with
   fewer than 3 usable dates before it the two storms are MERGED into one compound event. A date is built
-  only once the ground file covers it (GNSS-R runs ~2 days behind) and the wave record has >= 20 h on it.
+  only once the ground file covers it (GNSS-R runs ~2 days behind) and the wave record has >= 20 h on it
+  (waited for 3 days, then built with a flag). A forecast event's planned pre window ends before a wave
+  event that starts from 48 h before its forecast onset and starts after one lying earlier in it (a short
+  blip above 1.5 m that cuts nothing changes nothing); the provisional pre DEM sent with the heads-up is the
+  7 dates up to the ground file's last complete date, only after any storm or wave event that came before
+  this one (none until the ground file has 3 usable dates after it: never the beach before the storm
+  before); a thin window is extended back, but never past the storm before or into a wave event.
+* **Events.** A trigger belongs to an open event when its onset is within 72 h of that event's (forecast or
+  observed) end; to a storm still going on only when its onset is by now + 24 h (a later onset is a storm
+  of its own: its own watch event and heads-up, the storm before named). A forecast storm whose waves never
+  reach the confirm level is a FALSE ALARM (its planned pre DEM is kept as a calm-days DEM); one whose
+  waves came as part of another event's storm is closed MERGED into it, with a short email; one whose
+  window has buoy-based waves on < 50 % of its hours (camera-only hours do not count) is UNVERIFIED. A storm
+  the forecast missed opens its own event at once, also inside another event's post window while that
+  window's cut is pending (merged into it later when fewer than 3 usable dates lie between). Given up: no
+  end 14 days after the peak (a note after 7), a date the ground file has not completed 21 days on (a note
+  after 7), a forecast onset still receding after 10 days (a false alarm).
 * **Locks.** The cron's lock (`.timex_cron.lock`) is held only for the one pass that copies the dates
   needed into `archive/storm_watch/work/`, never when a cron run starts within 15 min; owg.sh's lock only
   while the waves are read, and released first (the cron takes its own lock before owg.sh's). A ground file
   that looks cut or half-written (short last line, a camera gone, frames on read dates down > 20 %, the
-  cron's last run unfinished or "georectification failed") is not used that run.
+  cron's last run unfinished, or its main chain's "ERROR: georectification failed"; the model-only
+  series' WARNING does not count, it does not write the ground file) is not used that run (accepted after 3
+  runs in a row: a reprocessing). The 44008 archive is fetched only while owg.sh's lock is held.
 
 | what | data | number | reproduce here | check on the NUC |
 |---|---|---|---|---|
-| Observed rules, day by day, on a whole winter | [REAL] ADCP 9 Dec 2024 - 10 Mar 2025 (`sig1000_waves_ALL.csv`) as `waves_marconi.csv`; [SYNTH] ground: 1 frame per hour per camera at 13-20 UTC, coverage = run date - 2 | the table below: 4 events, all closed complete by 26 Feb; no event for 20 Jan (2.87 m, one hour at 2.5 m); again with 4 missed run days: the same windows | `python3 test_storm_watch.py` (T7) | same |
+| Observed rules, day by day, on a whole winter | [REAL] ADCP 9 Dec 2024 - 10 Mar 2025 (`sig1000_waves_ALL.csv`) as `waves_marconi.csv`; [SYNTH] ground: 1 frame per hour per camera at 13-20 UTC, coverage = run date - 2 | the table below: 4 events, all closed complete by 26 Feb, and the 16 Feb storm's own event (2025-02-16_obs: opened on the 02-17 run, closed as merged into 2025-02-12_obs on 02-18); no event for 20 Jan (2.87 m, one hour at 2.5 m); no event's own storm listed as a wave event in its windows; again with 4 missed run days: the same windows | `python3 test_storm_watch.py` (T7) | same |
 | The wave rule on the ADCP as a perfect forecast (ADCP / 0.83) | [REAL] the same record | of the 5 storms that open an event: 3.5 m for >= 6 h catches 1, >= 3 h 3, >= 1 h 5; 3.0 m for >= 3 h 4 (so `STORM_MIN_HOURS` = 3; the observed rule catches the rest) | `python3 storm_watch.py --climatology --input sig1000_waves_ALL.csv` (T12) | - |
 | Trigger rules (a)-(e), onset, outlook, gating | [SYNTH] hourly series and alerts | as specified; a 4.5 m SW sea, 3.6 m for 2 h, a CF.W beyond 96 h and a day-5 peak do not trigger | `python3 test_storm_watch.py` (T3) | - |
 | Parsers | [SYNTH] responses written from the providers' documentation (`test_fixtures/storm_watch/`): **no real response could be fetched from the sandbox** (its network policy refused every forecast host) | durations, units, alert filter (Actual only, no Cancel/CAN/EXP/UPG), offsets and "Z", Open-Meteo arrays and the Cape Cod Bay cell, the bulletin's month rollover and staleness, headers (generic User-Agent; `NWS_CONTACT` on api.weather.gov only), retries | `python3 test_storm_watch.py` (T2) | `./storm_watch.sh --dry-run --save-raw /tmp/sw_raw; python3 test_storm_watch.py --real-captures /tmp/sw_raw` |
 | Cron-option drift | [SYNTH] the cron's own text run by bash with a python3 shim | its window-DEM call (minus `--last-days 7 --series-dir`) and its `dem_change.py` call give exactly the options storm_watch builds with, in all 8 cases of waves / `DEM_DAY_BLOCK_LOD` / `DEM_MAX_DAY_OFFSET`; each needed VAR set once at column 0 | `python3 test_storm_watch.py` (T1) | - |
 | Planted erosion, real builds | [SYNTH] station of 25 frames a day per camera, 0.2 m per 2 m row; storm 10-11 Nov (Hs 3.0, lines +0.5 m); 0.30 m cut west of E 420020 tapering to 0 at 420030 | pre 3-9 Nov (390 cells), storm dates in no window; post3 12-14 Nov: 255 cells, full-cut median -0.328 m, erosion -98.7 m3 against -95.0 m3 planted over the compared cells, 0 significant cells where nothing was planted, no accretion; post7 12-18 Nov: 365 cells, -174.7 m3 against -167.0 m3 planted; ~16 s for the whole event | `python3 test_storm_watch.py` (T8) | - |
 | Like for like | [SYNTH] the same; every row +0.10 m before post7 (a reprocessing) | post7 change outside the cut +0.000 m; the rebuilt pre +0.100 m from the original pre record (reported) | same | - |
-| Failures and locks | [SYNTH] | every source down or invalid JSON: exit 0, "blind", no event, the observed side still opens a storm; the cron's or owg.sh's lock held by another process; a cron run due; a cut ground file; a crash while sending (never sent twice); msmtp failing (retried 3 runs) | `python3 test_storm_watch.py` (T4, T6, T9, T10, T13) | - |
-| No foreign writes | [SYNTH] | every file created or changed lies under `archive/storm_watch/` or `logs/`; `contour_points_timex.csv`, `archive/dems/` and `dem_intertidal_7day_dem.tif` untouched; no `--series-dir` / `--last-days`; `--dry-run` leaves the folder byte-for-byte as it was; a replay writes only under its `--out-dir` | same (T8, T10, T11) | - |
+| Failures and locks | [SYNTH] | every source down or invalid JSON: exit 0, "blind", no event, the observed side still opens a storm; the cron's or owg.sh's lock held by another process (no 44008 fetch without the latter); a cron run due; a cut ground file (the cron's model-only series failing is not one); a crash while sending (never sent twice); msmtp failing (retried 3 runs; its error text logged without addresses); an email that cannot be composed (a stand-in once, the real email on the next run that composes it, given up after 3 runs); `--status` read-only; a missing or unreadable `state.json` restored from `state.json.prev` | `python3 test_storm_watch.py` (T4, T6, T9, T9b, T10, T13) | - |
+| Event edge cases | [SYNTH] | a missed storm inside a pending post-window cut, GNSS-R stalled: its own event and email on the first run; a storm forecast while the one before is still rough: its own heads-up on the first triggering run; a forecast storm merged into a compound event: closed MERGED, no false-alarm email, no pre DEM; a heads-up 3 days after a storm: no provisional pre DEM over it; camera-only waves: UNVERIFIED; a false alarm or unverified event's pre DEM built after the wave-record wait; the give-up rules on their days | `python3 test_storm_watch.py` (T9, T9b) | - |
+| No foreign writes | [SYNTH] | every file created or changed lies under `archive/storm_watch/` or `logs/` (T8 does not fetch; a fetching run also refreshes a stale `archive/waves_44008.csv`, see the claim); `contour_points_timex.csv`, `archive/dems/` and `dem_intertidal_7day_dem.tif` untouched; no `--series-dir` / `--last-days`; `--dry-run` leaves the folder byte-for-byte as it was, also when it fetches every source (and `--save-raw` keeps each response, which passes `--real-captures`); a live run archives each response gzipped and prunes after 730 days; a replay writes only under its `--out-dir` and reads the archived forecasts of each day | same (T8, T10, T11) | - |
 | Replay of the Sep 2026 storm | [NUC] the live ground file and wave archives | expect one event for the 23-28 Sep storm (from the 44008 perfect forecast about 4 days ahead, or the buoy), pre ending ~22 Sep, post from ~29 Sep, and a POST7 change close to 2.4's like-for-like (median -0.12 m over 354 cells, LoD 0.156 m; the windows are not the same) | - | `python3 storm_watch.py --replay 2026-09-15 2026-10-20 --out-dir /tmp/sw_replay` |
 | Events per year | [NUC] NDBC 44008 history | the counts at 3.0 / 3.5 / 4.0 m per year and month; the 6-10 a year at 3.5 m expected from one winter may be off by 2x | - | `python3 storm_watch.py --climatology --station 44008 --years 2010-2025` |
 
@@ -906,7 +927,7 @@ The ADCP winter, run day by day at 12:50Z (T7; dates UTC, "(run)" = the run that
 | 2024-12-10_obs | 12-12 | 12-10 03Z | 3.06 m, 12-12 03Z | 12-12 08Z (12-13) | 12-10..12-11 | INADEQUATE (12-12): 0 usable dates, the record starts 12-09 18Z | 12-12..12-14 (12-17) | 12-12..12-18 (12-21) |
 | 2024-12-20_obs | 12-21 | 12-20 13Z | 3.56 m, 12-21 03Z | 12-23 02Z (12-24); MERGED with the 25-27 Dec wave event (2.29 m, 47 h; 2 usable dates between) on 12-27: 12-27 13Z (12-28) | 12-20..12-26 | 12-13..12-19 (12-22) | 12-27..12-29 (01-01) | 12-27..12-31, cut by the 1 Jan wave event (2.24 m) (01-03) |
 | 2025-02-01_obs | 02-02 | 02-01 11Z | 3.27 m, 02-01 18Z | 02-02 13Z (02-03); the first frame of 02-02 (13:00) is not before it, so 02-02 is a post date | 02-01..02-01 | 01-25..01-31 (02-03), flagged: the 30 Jan wave event (2.09 m) lies inside | 02-02..02-04 (02-07) | 02-02..02-08 (02-11) |
-| 2025-02-12_obs | 02-14 | 02-12 16Z | 3.16 m, 02-16 16Z (after the merge) | 02-14 03Z (02-15); MERGED with the 16 Feb storm (2 usable dates between) on 02-18: 02-17 02Z (02-19) | 02-12..02-16 | 02-05..02-11 (02-14), flagged: 9-10 Feb (2.05 m) inside | 02-17..02-19 (02-22) | 02-17..02-23 (02-26) |
+| 2025-02-12_obs | 02-14 | 02-12 16Z | 3.16 m, 02-16 16Z (after the merge) | 02-14 03Z (02-15); MERGED with the 16 Feb storm (2 usable dates between) on 02-18, closing that storm's own event 2025-02-16_obs (opened 02-17): 02-17 02Z (02-19) | 02-12..02-16 | 02-05..02-11 (02-14), flagged: 9-10 Feb (2.05 m) inside | 02-17..02-19 (02-22) | 02-17..02-23 (02-26) |
 
 Files: `archive/storm_watch/state.json` (the events; written atomically, its previous copy kept),
 `events/<id>/` (`pre/`, `pre_provisional/`, `post3/`, `post7/`, `change_post3/`, `change_post7/` with
