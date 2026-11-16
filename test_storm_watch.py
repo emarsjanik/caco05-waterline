@@ -30,8 +30,9 @@ WHAT (docs/VALIDATION.md 2.10):
   T8  a whole event with the REAL dem_from_contours.py and dem_change.py on a synthetic station: planted
       erosion recovered, storm dates in no DEM, like for like after a +0.10 m reprocessing shift, no write
       outside archive/storm_watch/ and logs/, no --series-dir or --last-days.
-  T9  false alarm, unverified, a missed storm, an update, a second storm after the first, first install,
-      a crash while sending, the first post date, wave gaps.
+  T9  false alarm, unverified, a missed storm, an update, a second storm after the first, a camera that turned,
+      first install, a crash while sending, a build that raises, the cron's DEM_ENABLE=0, msmtp retries, the
+      first post date, wave gaps.
   T10 email: MIME types, recipients, retries; --dry-run writes nothing and sends nothing.
   T11 replay: writes only under --out-dir, a hindcast, emails never sent; its refusals.
   T12 climatology: synthetic NDBC text; the real ADCP as a perfect forecast (finding 7).
@@ -549,6 +550,16 @@ def t2():
         grids = [u for u, _ in net2.seen if u.endswith("/gridpoints/BOX/9,9")]
         check(len(grids) == 2 and len([u for u, _ in net2.seen if "/points/" in u]) == 1 and "nws_points" not in state,
               "a grid 404: not retried as such; /points refetched once, and the cache dropped when the grid still 404s")
+        arch = Path(tmp) / "forecasts/2026-11-16"
+        arch.mkdir(parents=True)
+        for name, src in (("nws_grid.json", "nws_grid_SYNTHETIC.json"), ("om_marine.json", "om_marine_SYNTHETIC.json")):
+            with gzip.open(str(arch / f"1250Z_{name}.gz"), "wb") as g:
+                g.write((FIX / src).read_bytes())
+        ctx3 = ctx_for(base, NOW, mode="replay", forecast_dir=arch, opener=FakeNet([], default=OSError("no network")))
+        f3 = sw.fetch_forecast(ctx3, {})
+        check(f3.raw["nws_grid.json"][0] == 200 and f3.raw["om_marine.json"][0] == 200 and not f3.calls,
+              "archived responses (forecasts/<date>/<HHMMZ>_<name>.gz) are read without the network, the grid "
+              "without a saved /points answer")
         st, body, why = sw.http_get("https://x/", {}, 1, opener=FakeNet([("x", [(503, b""), (503, b"")])]), sleep=nosleep)
         check(st == 503 and why.startswith("HTTP 503"), "two 5xx: unavailable with its status")
         n3 = FakeNet([("x", [(429, b""), (200, b"ok")])])
@@ -740,8 +751,8 @@ def adcp_rows():
     import pandas as pd
     a = pd.read_csv(HERE / "sig1000_waves_ALL.csv", parse_dates=["time"])
     t = pd.DatetimeIndex(a["time"]).tz_localize("UTC")
-    return list(zip((t.astype("int64") // 10 ** 9).tolist(), a["wh_4061"].tolist(), a["wp_peak"].tolist(),
-                    a["wvdir"].tolist()))
+    secs = ((t - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1s")).tolist()   # any datetime resolution
+    return list(zip([int(x) for x in secs], a["wh_4061"].tolist(), a["wp_peak"].tolist(), a["wvdir"].tolist()))
 
 
 def t5():
@@ -927,6 +938,13 @@ def t6():
                   "owg.sh's lock held: the waves are read without it (noted), never waited for long")
         finally:
             drop_lock(p)
+        rows = ground_rows_simple(["2026-11-02", "2026-11-03"], 6, hs=lambda d, k: 2.0 if k == 0 else (0.8 if d < "2026-11-03" else ""))
+        write_ground_file(Path(tmp) / "ws.csv", rows)
+        ws = sw.window_stats(Path(tmp) / "ws.csv", "2026-11-02", "2026-11-03", 1.5)
+        check(ws["frames"] == {"c1": 10, "c2": 10} and ws["blank_hs"] == 10 and ws["setup_m"] == 0.05
+              and ws["hs_m"] == 0.8 and ws["level_range_m"] == [0.55, 0.55],
+              "window statistics: frames passing --max-hs per camera, frames with no wave height (kept, counted), "
+              "the median setup and Hs and the level range of the frames used")
         src = (HERE / "storm_watch.py").read_text()
         i_obs = src.index("    obs = observe(ctx)")
         i_gr = src.index("        gi = ground_info(ctx, state, need)")
@@ -1383,6 +1401,19 @@ def t9():
         E = ev["2026-11-14_obs"]
         check(E["pre"]["status"] == "final" and E["pre"]["window"] == ["2026-11-07", "2026-11-13"],
               "its pre DEM built after the fact from the saved waterline points (7-13 Nov)")
+        # a camera that turned in the post window (pointing_daily.py's log): each camera's change on its own
+        log = {"days": {"2026-11-16": {"status": "MOVED", "d_deg": [-1.2, 0.0, 0.0]}}}
+        (base / "archive/pointing_daily_c1.json").write_text(json.dumps(log))
+        (base / "archive/pointing_daily_c2.json").write_text(json.dumps({"days": {}}))
+        for d in ("2026-11-18", "2026-11-19", "2026-11-20"):
+            ev, _, _ = run_day(base, d, gi)
+        c3 = ev["2026-11-14_obs"]["change"].get("post3") or {}
+        rep = evdir_file(base, ev["2026-11-14_obs"], "report_post3")
+        check((c3.get("per_camera") or {}).get("turned") == ["c1"] and (c3["per_camera"].get("c1") or {}).get("cells_compared")
+              and rep is not None and "CAMERA POINTING: c1 turned on 2026-11-16 MOVED" in rep.read_text()
+              and "not yet logged" in rep.read_text(),
+              "c1 MOVED on a post date (not in the pre window): the change of each camera on its own, flagged in the "
+              "report; dates the pointing log has not reached are named")
         # a second storm forecast after the first one's end: its own watch event, with a heads-up
         pk2 = datetime(2026, 11, 19, 18, tzinfo=UTC)
         ev, _, _ = run_day(base, "2026-11-17", gi, lambda c: storm_fc(c, pk2))
@@ -1420,6 +1451,41 @@ def t9():
         E = ev["2026-11-14_obs"]
         check(len(sent) == 1 and E["emails"][0]["status"] == "unknown" and "not resent" in line,
               "a run stopped while sending: the next run marks it 'unknown' and never sends it twice")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "broken")
+        storm = datetime(2026, 11, 14, 3, tzinfo=UTC)
+        write_marconi(base / "archive/waves_marconi.csv",
+                      [(e, h, "blend", 1, 60, 9) for e, h in storm_hours(start, 45, storm_at=storm)])
+        run_day(base, "2026-11-12", gi)
+
+        def broken(argv, log_path=None):
+            raise RuntimeError("a build that broke")
+        with contextlib.redirect_stdout(io.StringIO()):
+            ev, _, line = run_day(base, "2026-11-17", gi, runner=broken)
+        stamp = (base / "logs/storm_watch_last_run").read_text()
+        check("ERROR: event 2026-11-14_obs: RuntimeError" in line and stamp.startswith("error in: 2026-11-14_obs")
+              and ev["2026-11-14_obs"]["pre"]["status"] == "planned",
+              "a build that raises: the run goes on (exit 0), its line says ERROR with the event, the stamp 'error in'")
+        ev, _, line = run_day(base, "2026-11-18", gi)
+        check(ev["2026-11-14_obs"]["pre"]["status"] == "final" and "ERROR" not in line
+              and (base / "logs/storm_watch_last_run").read_text().startswith(("ok", "blind")),
+              "... and the next run builds it")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "nodem")
+        (base / "waterline_timex_cron.sh").write_text(CRON_TEXT.replace("\nDEM_ENABLE=1\n", "\nDEM_ENABLE=0\n"))
+        storm = datetime(2026, 11, 14, 3, tzinfo=UTC)
+        write_marconi(base / "archive/waves_marconi.csv",
+                      [(e, h, "blend", 1, 60, 9) for e, h in storm_hours(start, 45, storm_at=storm)])
+        runner = fake_runner_factory()
+        for d in [f"2026-11-{x:02d}" for x in (12, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)]:
+            ev, _, _ = run_day(base, d, gi, runner=runner)
+        E = ev["2026-11-14_obs"]
+        rep = evdir_file(base, E, "report_post7")
+        check(E["status"] == "closed" and E["pre"]["status"] == "disabled"
+              and not any(Path(a[1]).name == "dem_from_contours.py" for a in runner.calls)
+              and rep is not None and "DEM_ENABLE=0" in rep.read_text()
+              and "DEM_ENABLE=0" in evdir_file(base, E, "missed_storm").read_text(),
+              "the cron's DEM_ENABLE=0: no DEM is built; the event runs its course and the emails say why")
     with tempfile.TemporaryDirectory() as tmp:
         base = make_base(tmp, "retry")
         storm = datetime(2026, 11, 14, 3, tzinfo=UTC)

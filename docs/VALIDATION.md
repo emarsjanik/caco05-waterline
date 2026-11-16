@@ -56,6 +56,8 @@ python3 test_georectify_uncertainty.py           # ends "all georectification un
 python3 test_calibrate_eo.py                     # ends "all calibrate_eo tests passed" (section 4.6c, a diagnostic)
 python3 test_timestack_wave_height.py            # ends "all timestack wave height tests passed" (section 4.11, opt-in)
 python3 test_measured_setup.py                   # ends "all measured setup tests passed" (section 4.12, opt-in)
+python3 test_storm_watch.py                      # ends "all storm watch tests passed" (section 2.10, opt-in)
+bash -n storm_watch.sh && echo "storm watch syntax OK"
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
 
@@ -536,7 +538,7 @@ The station's record started on 2026-07-09 when this was written (start file "20
 | what | number | reproduce |
 |---|---|---|
 | Python 3.8 syntax of every `.py` changed since `af8e1bd` | vermin: minimum 3.8, no violations; `py_compile` passes on the station-floor venv | `pip install vermin && vermin -t=3.8- --no-tips $(git diff --name-only af8e1bd -- '*.py')` |
-| Shell syntax | `bash -n` passes on both `.sh` files | `bash -n waterline_timex_cron.sh` |
+| Shell syntax | `bash -n` passes on the three `.sh` files (`waterline_timex_cron.sh`, `owg.sh`, `storm_watch.sh`) | `for f in *.sh; do bash -n "$f"; done` |
 | Self-tests on three Python setups (section "How to read this file") | all pass, except `view_reproject.py` on the two 3.8 venvs (no scipy) | section 1 |
 | Whole cron on the station-floor venv, synthetic station | rc 0 in 381 s, every processing stage rc 0 (the network fetch stubs exit 1 and station_status exits 2, as expected offline) | scratch harness |
 
@@ -836,6 +838,94 @@ the frame; the on-a-peak share, which does not depend on the rest of the frame, 
 | Real frames, 49-column limits | [REAL] those frames' 143 weak-signal ones, rerun | 13 more partial lines (25-31 Oct 33 -> 46), none on 18 or 22 Oct; on their photos 4 (25 Oct 17:00, 26 Oct 12:30, 13:00, 14:00) ended level for their last 10-20%: slope 0.03 px per column at most and mean peak sharpness 0.00-0.02 in those tenths, against 0.11 at least on the other lines' last two tenths but for 26 Oct 15:00's last tenth, level at sharpness 0.04 (not cut at 0.03); the extractor kept 70-96% of those last quarters | - | done, 2 Nov 2026 |
 | Real frames, with the flat-end cut | [REAL] the 279 photos again, this code (2 Nov 2026) | every photo the station saved saved again, no whole line added; 18 partial lines, 25-31 Oct 27 -> 45 photos (+67%), none on 18 or 22 Oct; the flat ends gone: on the full-resolution crops of the 6 flattest ends the kept line stops where it stops sloping (two keep a level tip of about 30-45 columns, under the 61-column window), every tenth of every line sloping 0.09-0.61 px per column; all 18 used by the contour step, 91-97% of each last quarter kept, on the sand/water boundary by eye. One line kept at the 8-column limits (31 Oct 16:30, 31%) is not saved now: its run from the near edge, bridged to about 50% at 49 columns, keeps 28.5% after a 520-column flat end is cut (the detector's log), under the 30% | - | done, 2 Nov 2026; then `waterline_consistency.py`'s report on the next hazy spell |
 | Real frames, c1 | [REAL] c1's 279 photos of the same days, this code (3 Nov 2026) | every photo the station saved saved again, no whole line added; 1 partial line (31 Oct 19:30, 34% kept, used): 25-31 Oct 69 -> 70. c1's 70 weak-signal frames that week had their clear columns in patches across the frame: none with a clear run of 30% from either edge (from column 0 17% at most, from the last column 12%, anywhere 35%), so a partial line from the other edge would gain nothing. The one c1 line runs nearly level in the photo (5 of its 10 tenths 0.05 px per column or less) and on a local energy maximum in 86-100% of each tenth's columns: the on-a-peak condition is what keeps the flat-end cut off a level waterline | - | done, 3 Nov 2026 |
+
+### 2.10 Storm watch (daily, its own crontab line, opt-in until `storm_watch.sh --install-cron`: `storm_watch.py`)
+
+**Claim.** Once a day (07:50 on the NUC's clock) `storm_watch.py` reads the forecast for Marconi Beach
+(NWS alerts for ANZ254 and MAZ022, the NWS grid's wind and waves, Open-Meteo marine and wind, the
+GFS-Wave 44008 bulletin) and, when the rule below is met within 96 h, opens an EVENT: a pre-storm DEM from
+the calm days before, a heads-up email (for planning a GPS or drone survey), the storm followed on the
+observed waves, post-storm DEMs from post-storm days only (a first one from 3 usable days, then a 7-day
+one) and the change, pre against post, by email. A source that fails is unavailable for that run: it
+never triggers and never crashes the job (exit 0, the run line says which). A storm the forecast missed
+is opened from the observed waves and its pre DEM built after the fact from the saved waterline points.
+Every DEM is built with exactly the cron's 7-day window-DEM method and options (`dem_from_contours.py`,
+read from the cron's `DEM_*` lines at run time, never copied), over explicit UTC date windows that leave
+the storm dates out; the change is `dem_change.py --a/--b` with the pre DEM rebuilt from the current
+ground file like for like. **INTERTIDAL ONLY**: the camera DEM covers the beach between the low and high
+waterlines (about -0.8 to +1.0 m NAVD88 on a 7-day DEM); dune and bluff change are not seen, and every
+email says so. Nothing in the cron changes; the job writes only under `archive/storm_watch/` and `logs/`.
+
+* **Trigger** (offshore Hs, deep water; settings in `storm_watch_settings.conf.example`): (a) Hs >= 3.5 m
+  from 0-160 deg for >= 3 h on either Open-Meteo point (offshore Marconi 41.90N 69.80W, the 44008
+  position), else the GFS-Wave 44008 bulletin, else the NWS grid waves; (b) a strong NWS warning (High
+  Surf, Coastal Flood, Storm Surge, Storm, Hurricane Force Wind, Hurricane, Tropical Storm); (c) Hs >= 3.0
+  m with a support alert (Gale Warning, High Surf / Coastal Flood Advisory, Coastal Flood Watch, ...);
+  (d) Hs >= 3.0 m at a peak period >= 12 s (mean period >= 10 s on Open-Meteo, whose `wave_period` is a
+  mean); (e) only without any wave forecast: NE-E wind of gale force for 6 h. A source with an implausible
+  value (Hs over 20 m, a bulletin row whose total height does not match its partitions) is unusable for
+  the run. Days 5-10 are an outlook in the email, never a trigger.
+* **Observed waves** (Marconi currency: `hs_best` of `archive/waves_marconi.csv` from its blend/buoy rows,
+  else 44013 converted, else 44008 x 0.83; camera-only rows count only in the calm test, as the larger of
+  the two, and never open or confirm). A storm segment is the run of hours above 1.5 m (the cron's
+  `DEM_MAX_HS`) ending at the first of 24 calm hours with >= 20 values (a missing hour is never calm).
+  Confirm 2.5 m (or 44008 >= 3.0 m for 2 h in the sector); open a missed storm at a 3.0 m peak with 2 h >=
+  2.5 m (or 44008 >= 3.5 m for 2 h).
+* **Windows** (UTC dates, as `dem_from_contours.py` filters them): pre = the 7 dates before the onset date
+  (extended back to 14 while fewer than 3 dates are usable: a camera with >= 4 frames passing `--max-hs`;
+  started after a wave event inside it when 3 usable dates remain, else flagged); storm dates = the onset
+  date to the date before the first post date, which is the end's date when no ground frame of that date
+  is earlier than the end; post3 = from the first post date to its 3rd usable date; post7 = 7 dates. A wave
+  event inside the post window (peak >= 2.0 m, >= 24 rough hours, or a confirming storm) cuts it; with
+  fewer than 3 usable dates before it the two storms are MERGED into one compound event. A date is built
+  only once the ground file covers it (GNSS-R runs ~2 days behind) and the wave record has >= 20 h on it.
+* **Locks.** The cron's lock (`.timex_cron.lock`) is held only for the one pass that copies the dates
+  needed into `archive/storm_watch/work/`, never when a cron run starts within 15 min; owg.sh's lock only
+  while the waves are read, and released first (the cron takes its own lock before owg.sh's). A ground file
+  that looks cut or half-written (short last line, a camera gone, frames on read dates down > 20 %, the
+  cron's last run unfinished or "georectification failed") is not used that run.
+
+| what | data | number | reproduce here | check on the NUC |
+|---|---|---|---|---|
+| Observed rules, day by day, on a whole winter | [REAL] ADCP 9 Dec 2024 - 10 Mar 2025 (`sig1000_waves_ALL.csv`) as `waves_marconi.csv`; [SYNTH] ground: 1 frame per hour per camera at 13-20 UTC, coverage = run date - 2 | the table below: 4 events, all closed complete by 26 Feb; no event for 20 Jan (2.87 m, one hour at 2.5 m); again with 4 missed run days: the same windows | `python3 test_storm_watch.py` (T7) | same |
+| The wave rule on the ADCP as a perfect forecast (ADCP / 0.83) | [REAL] the same record | of the 5 storms that open an event: 3.5 m for >= 6 h catches 1, >= 3 h 3, >= 1 h 5; 3.0 m for >= 3 h 4 (so `STORM_MIN_HOURS` = 3; the observed rule catches the rest) | `python3 storm_watch.py --climatology --input sig1000_waves_ALL.csv` (T12) | - |
+| Trigger rules (a)-(e), onset, outlook, gating | [SYNTH] hourly series and alerts | as specified; a 4.5 m SW sea, 3.6 m for 2 h, a CF.W beyond 96 h and a day-5 peak do not trigger | `python3 test_storm_watch.py` (T3) | - |
+| Parsers | [SYNTH] responses written from the providers' documentation (`test_fixtures/storm_watch/`): **no real response could be fetched from the sandbox** (its network policy refused every forecast host) | durations, units, alert filter (Actual only, no Cancel/CAN/EXP/UPG), offsets and "Z", Open-Meteo arrays and the Cape Cod Bay cell, the bulletin's month rollover and staleness, headers (generic User-Agent; `NWS_CONTACT` on api.weather.gov only), retries | `python3 test_storm_watch.py` (T2) | `./storm_watch.sh --dry-run --save-raw /tmp/sw_raw; python3 test_storm_watch.py --real-captures /tmp/sw_raw` |
+| Cron-option drift | [SYNTH] the cron's own text run by bash with a python3 shim | its window-DEM call (minus `--last-days 7 --series-dir`) and its `dem_change.py` call give exactly the options storm_watch builds with, in all 8 cases of waves / `DEM_DAY_BLOCK_LOD` / `DEM_MAX_DAY_OFFSET`; each needed VAR set once at column 0 | `python3 test_storm_watch.py` (T1) | - |
+| Planted erosion, real builds | [SYNTH] station of 25 frames a day per camera, 0.2 m per 2 m row; storm 10-11 Nov (Hs 3.0, lines +0.5 m); 0.30 m cut west of E 420020 tapering to 0 at 420030 | pre 3-9 Nov (390 cells), storm dates in no window; post3 12-14 Nov: 255 cells, full-cut median -0.328 m, erosion -98.7 m3 against -95.0 m3 planted over the compared cells, 0 significant cells where nothing was planted, no accretion; post7 12-18 Nov: 365 cells, -174.7 m3 against -167.0 m3 planted; ~16 s for the whole event | `python3 test_storm_watch.py` (T8) | - |
+| Like for like | [SYNTH] the same; every row +0.10 m before post7 (a reprocessing) | post7 change outside the cut +0.000 m; the rebuilt pre +0.100 m from the original pre record (reported) | same | - |
+| Failures and locks | [SYNTH] | every source down or invalid JSON: exit 0, "blind", no event, the observed side still opens a storm; the cron's or owg.sh's lock held by another process; a cron run due; a cut ground file; a crash while sending (never sent twice); msmtp failing (retried 3 runs) | `python3 test_storm_watch.py` (T4, T6, T9, T10, T13) | - |
+| No foreign writes | [SYNTH] | every file created or changed lies under `archive/storm_watch/` or `logs/`; `contour_points_timex.csv`, `archive/dems/` and `dem_intertidal_7day_dem.tif` untouched; no `--series-dir` / `--last-days`; `--dry-run` leaves the folder byte-for-byte as it was; a replay writes only under its `--out-dir` | same (T8, T10, T11) | - |
+| Replay of the Sep 2026 storm | [NUC] the live ground file and wave archives | expect one event for the 23-28 Sep storm (from the 44008 perfect forecast about 4 days ahead, or the buoy), pre ending ~22 Sep, post from ~29 Sep, and a POST7 change close to 2.4's like-for-like (median -0.12 m over 354 cells, LoD 0.156 m; the windows are not the same) | - | `python3 storm_watch.py --replay 2026-09-15 2026-10-20 --out-dir /tmp/sw_replay` |
+| Events per year | [NUC] NDBC 44008 history | the counts at 3.0 / 3.5 / 4.0 m per year and month; the 6-10 a year at 3.5 m expected from one winter may be off by 2x | - | `python3 storm_watch.py --climatology --station 44008 --years 2010-2025` |
+
+The ADCP winter, run day by day at 12:50Z (T7; dates UTC, "(run)" = the run that did it):
+
+| event | opened | onset | peak | end (found) | storm dates | pre (run) | post3 (run) | post7 (run) |
+|---|---|---|---|---|---|---|---|---|
+| 2024-12-10_obs | 12-12 | 12-10 03Z | 3.06 m, 12-12 03Z | 12-12 08Z (12-13) | 12-10..12-11 | INADEQUATE (12-12): 0 usable dates, the record starts 12-09 18Z | 12-12..12-14 (12-17) | 12-12..12-18 (12-21) |
+| 2024-12-20_obs | 12-21 | 12-20 13Z | 3.56 m, 12-21 03Z | 12-23 02Z (12-24); MERGED with the 25-27 Dec wave event (2.29 m, 47 h; 2 usable dates between) on 12-27: 12-27 13Z (12-28) | 12-20..12-26 | 12-13..12-19 (12-22) | 12-27..12-29 (01-01) | 12-27..12-31, cut by the 1 Jan wave event (2.24 m) (01-03) |
+| 2025-02-01_obs | 02-02 | 02-01 11Z | 3.27 m, 02-01 18Z | 02-02 13Z (02-03); the first frame of 02-02 (13:00) is not before it, so 02-02 is a post date | 02-01..02-01 | 01-25..01-31 (02-03), flagged: the 30 Jan wave event (2.09 m) lies inside | 02-02..02-04 (02-07) | 02-02..02-08 (02-11) |
+| 2025-02-12_obs | 02-14 | 02-12 16Z | 3.16 m, 02-16 16Z (after the merge) | 02-14 03Z (02-15); MERGED with the 16 Feb storm (2 usable dates between) on 02-18: 02-17 02Z (02-19) | 02-12..02-16 | 02-05..02-11 (02-14), flagged: 9-10 Feb (2.05 m) inside | 02-17..02-19 (02-22) | 02-17..02-23 (02-26) |
+
+Files: `archive/storm_watch/state.json` (the events; written atomically, its previous copy kept),
+`events/<id>/` (`pre/`, `pre_provisional/`, `post3/`, `post7/`, `change_post3/`, `change_post7/` with
+`change_summary.json` and `dem_change.txt`, `emails/`, `event.json`, `log.txt`), `forecasts/<date>/` (each
+run's raw responses, gzipped, kept 2 years), `logs/storm_watch.log` (one line per run),
+`logs/storm_watch_last_run` (read by `station_status.py`: WARN over 36 h, ALERT over 96 h, WARN when no
+forecast source answered for 3 days running). `change_summary.json` also gives: the rebuilt pre against
+its original record (processing drift), the wave setup of the frames used pre and post and what a 25 %
+error in C would move the change by (flagged when over the LoD), frames without a wave height, the wave
+events above 1.5 m inside each window, each window's camera pointing from `archive/pointing_daily_<cam>.json`,
+and, when a camera turned in the post window only, each camera's change on its own.
+
+Not built (yet): the USGS Total Water Level and Coastal Change forecast (Marconi's coverage and whether
+its API needs a key are not confirmed); the NOMADS copy of the GFS-Wave bulletin (its folder is not
+verified); the tgftp marine text; the IEM archive of past warnings for replays (a replay uses the
+archived forecasts of each day, else the observed waves as a perfect forecast); a spring-tide flag; an
+entry in `survey_products.py`'s station job list (that file is not edited; it already keeps clear of
+07:50). The job fetches 44008 itself (`fetch_buoy_waves.py`, under owg.sh's lock) only when its archive is
+over 6 h old.
 
 ## 3. Survey-date products (`survey_products.py`)
 
@@ -2442,6 +2532,13 @@ than the series, or more than 7 days from its nearest DEM, keep C's setup.
 | Detector: whole-frame signal | >= 60% of columns | `waterline_detector_v5.py` `MIN_SIGNAL_COLUMN_FRACTION` | no line through noise |
 | Detector: partial lines | the clear run from the near edge (starting within 49 columns of it): >= 10% of the columns, every part from either end > 80% clear, no gap over 49, its flat end cut (61 columns more level than 0.05 px/column, on a peak in under 85% and of mean peak sharpness under 0.03), 12-column cut at the haze, >= 30% inside `--column-limits` (set on one hazy week of c2 frames) | `PARTIAL_*`, `--partial-min-fraction` | section 2.9 |
 | Extractor: coverage | >= 50% (whole lines), >= 25% (lines marked `Partial_Line`; never above the whole-line floor) | `--min-coverage`, `--partial-min-coverage` | section 2.9 |
+| Storm watch: wave trigger | offshore Hs >= 3.5 m from 0-160 deg for >= 3 h within 96 h, on either Open-Meteo point (else the GFS-Wave 44008 bulletin, else the NWS grid) | `storm_watch_settings.conf` `STORM_HS_M`, `STORM_DIR_SECTOR`, `STORM_MIN_HOURS`, `STORM_LEAD_HOURS` | ~Marconi p99 (2.83 m) / 0.83; 44008 read 3.8-3.9 m in the erosive Sep 2026 storm; >= 3 h caught 3 of 5 ADCP storms, >= 6 h 1 (section 2.10) |
+| Storm watch: alerts | strong on its own: SU.W, CF.W, SS.W, SR.W, HF.W, HU.W, TR.W; support (with Hs >= 3.0 m): SU.Y, CF.Y, CF.A, GL.W, SR.A, HF.A, SE.W, HW.W, TR.A, HU.A, SS.A; zones ANZ254, MAZ022 | `STORM_ALERT_STRONG`, `STORM_ALERT_SUPPORT`, `STORM_ALERT_ZONES` (`STORM_ALERT_WAVE_GATED` makes e.g. CF.W support-only while a wave forecast exists: MAZ022 also covers the bay shore) | the Sep 2026 storm carried a Coastal Flood Warning for Barnstable |
+| Storm watch: swell, wind | Hs >= 3.0 m at Tp >= 12 s (mean period >= 10 s); wind only without a wave forecast: 0-135 deg, >= 17 m/s, or >= 12 m/s with gusts >= 20 m/s, for 6 h | `STORM_SWELL_*`, `STORM_WIND_*` | setup grows with sqrt(Hs L0); the Sep 2026 forecast's NE 20-30 mph, gusts 50-60 mph |
+| Storm watch: calm and end | Marconi Hs <= the cron's `DEM_MAX_HS` (1.5 m) for 24 h with >= 20 values; a missing hour never calm | `STORM_CALM_HS`, `STORM_END_CALM_HOURS`, `STORM_END_MIN_PRESENT` | ADCP: calm returned 5-47 h after the six biggest peaks |
+| Storm watch: confirm / open | confirm: Marconi >= 2.5 m, or 44008 >= 3.0 m for 2 h in the sector; open a missed storm: a 3.0 m peak with 2 h >= 2.5 m, or 44008 >= 3.5 m for 2 h | `STORM_CONFIRM_*`, `STORM_OBS_OPEN_*` | ADCP winter p98; 3 of its 5 storms had only one hour >= 3.0 m |
+| Storm watch: windows | pre 7 dates (to 14); post3 the first 3 usable dates; post7 7 dates (to 14); usable = a camera with >= 4 frames passing `--max-hs`; >= 3 usable dates a DEM; a wave event (>= 2.0 m peak or >= 24 rough hours) cuts a post window, merged (compound) when < 3 usable dates lie before it | `STORM_PRE_*`, `STORM_POST*`, `STORM_MIN_*`, `STORM_BREAK_*` | the day test needs 3 days; 2-day DEMs gave 48-106 comparable cells; `survey_products.py` EVENT_HS_M 2.0 m |
+| Storm watch: change | `dem_change.py` defaults (>= 5 crossings, LoD floor 0.05 m, 200-cell / 0.5 m degenerate rule) | `dem_change.py` | as the week-to-week map |
 
 ### 4.10 Georectification uncertainty (`georectify_uncertainty.py`; opt-in `--sigma-obs`)
 
@@ -3055,6 +3152,16 @@ copy of today's pictures made before the pull (section 1).
   ground-truth photos, and the test of the fix a window of photos, both on the NUC. Until
   `recalibrate_timing.py` has PASSed there, the station stays on `TIMING_MODE=legacy`, whose lines
   are 4-8 min older than their levels (up to ~0.1 m a frame at spring rates).
+* **The storm watch (section 2.10).** Its thresholds rest on one ADCP winter (Dec 2024 - Mar 2025) and
+  one station storm (Sep 2026); the events a year it implies (~6-10 at 3.5 m) may be off by 2x until
+  `--climatology` has run on the 44008 history on the NUC. Its forecast parsers were written from
+  documentation and tested on synthetic responses only (no forecast host could be reached from the
+  sandbox): capture one real response of each on the NUC (`--dry-run --save-raw`, then
+  `test_storm_watch.py --real-captures`) before trusting them, and confirm the NUC reaches
+  api.weather.gov, open-meteo.com and polar.ncep.noaa.gov. Its forecast skill for Marconi at 4 days is not
+  measured. No USGS TWL&CC forecast and no spring-tide flag yet. Open-Meteo's free tier is for
+  non-commercial use (drop `om_*` from `STORM_SOURCES` if USGS use is not covered). And the camera DEM is
+  intertidal only: dune and bluff erosion, often the larger loss in a storm, are invisible to it.
 * **The detector's rate on the NUC10i3.** Measured here at 20-25 s per photo on a 2.8 GHz
   Xeon; the NUC prints its own rate.
 * **Reviews.** The waterline work had three review rounds (the last: all lenses "ship"), the

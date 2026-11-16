@@ -973,6 +973,16 @@ def fetch_forecast(ctx, state):
     /points answer weekly or after a 404 from the grid; never hardcodes the grid numbers."""
     cfg, f = ctx.cfg, Fetcher(ctx)
     srcs = cfg["STORM_SOURCES"]
+    if ctx.forecast_dir:
+        # saved responses (--forecast-dir, or a replay of the archived ones): every file there, no /points logic
+        keep = {"nws": ("nws_grid.json", "nws_forecast.json", "nws_alerts.json"), "om_marine": ("om_marine.json",),
+                "om_wind": ("om_wind.json",), "gfswave": ("gfswave_44008.bull",)}
+        for src, names in keep.items():
+            if src in srcs:
+                for name in names:
+                    if read_saved(ctx.forecast_dir, name) is not None:
+                        f.get(name, "")
+        return f
     if "nws" in srcs:
         pts = state.get("nws_points") or {}
         fresh = pts.get("utc") and (utc(ctx.now) - parse_iso(pts["utc"])).total_seconds() < 7 * 86400
@@ -985,19 +995,16 @@ def fetch_forecast(ctx, state):
                 try:
                     p = parse_nws_points(json.loads(body.decode("utf-8", "replace")))
                     p["utc"] = iso_z(ctx.now)
-                    if not ctx.forecast_dir:
-                        state["nws_points"] = p
+                    state["nws_points"] = p
                     return p
                 except ValueError as exc:
                     ctx.note(f"nws /points unreadable ({exc})")
             return None
-        if ctx.forecast_dir and read_saved(ctx.forecast_dir, "nws_points.json") is not None:
-            pts, refreshed = refresh() or pts, True
-        elif not fresh:
+        if not fresh:
             pts, refreshed = refresh() or {}, True
         if pts.get("forecastGridData"):
             st, _, _ = f.get("nws_grid.json", pts["forecastGridData"])
-            if st == 404 and not refreshed and not ctx.forecast_dir:
+            if st == 404 and not refreshed:
                 state.pop("nws_points", None)
                 pts, refreshed = refresh() or {}, True
                 if pts.get("forecastGridData"):
@@ -1010,7 +1017,7 @@ def fetch_forecast(ctx, state):
             f.raw["nws_grid.json"] = (0, b"", "no /points answer (grid URL unknown)")
         zones = cfg["STORM_ALERT_ZONES"]
         f.get("nws_alerts.json", "https://api.weather.gov/alerts/active?zone=" + ",".join(zones))
-        if refreshed and not ctx.forecast_dir:
+        if refreshed:
             fz = str(pts.get("forecastZone") or "")
             if fz and not any(fz.endswith("/" + z) for z in zones):
                 ctx.note(f"NWS /points names forecast zone {fz.rsplit('/', 1)[-1]}, not in STORM_ALERT_ZONES")
@@ -1020,7 +1027,7 @@ def fetch_forecast(ctx, state):
                     ctx.note(f"NWS zone {z} not found (404): renamed or retired? check STORM_ALERT_ZONES")
     if "om_marine" in srcs:
         st, body, why = f.get("om_marine.json", om_marine_url(cfg))
-        if st == 400 and not ctx.forecast_dir:
+        if st == 400:
             st, body, why = f.get("om_marine.json", om_marine_url(cfg, 10, False))
             if st == 400:
                 f.get("om_marine.json", om_marine_url(cfg, 7, False))
@@ -1882,6 +1889,7 @@ class Ctx:
         self.notes, self.warnings, self.argvs = [], [], []
         self.has_hs = False
         self.touched, self.ground_why = {}, ""
+        self.errors = []
 
     def note(self, text):
         if text not in self.notes:
@@ -2120,7 +2128,9 @@ def do_change(ctx, E, part, segs):
     pre_dates, post_dates = drange(a, b), drange(*post["window"])
     flags = pointing_flags(ctx.base, pre_dates + post_dates)
     res["pointing"] = flags
-    res["waves_in_windows"] = {"pre": segs_in(segs, a, b), "post": segs_in(segs, *post["window"])}
+    own = spans_of(E)
+    others = [s for s in segs or [] if not seg_overlaps_spans(s, own, ctx.now_h)]
+    res["waves_in_windows"] = {"pre": segs_in(others, a, b), "post": segs_in(others, *post["window"])}
     res["build_notes"] = {"pre_rebuilt": rr.get("log_lines", []), "post": post.get("log_lines", [])}
     turned = [c for c in ("c1", "c2") if moved(flags, c, post_dates) and not moved(flags, c, pre_dates)]
     if turned and res["status"] == "map":
@@ -3193,9 +3203,9 @@ def change_lines(c, part):
     for n in c.get("dem_change_notes") or []:
         out.append(f"  dem_change.py: {n}")
     if c.get("drift_rebuilt_minus_original_pre_m") is not None:
-        out.append(f"  pre DEM rebuilt today like for like; it differs from the original pre record by a median "
+        out.append(f"  today's rebuild of the pre DEM differs from its original record by a median "
                    f"{c['drift_rebuilt_minus_original_pre_m']:+.3f} m over {c['drift_cells']} cells (processing "
-                   "changes since)")
+                   "changes since it was built)")
     s = c.get("setup") or {}
     if s.get("post_minus_pre_m") is not None:
         out.append(f"  wave setup in the frames used: pre {s['pre']['setup_m']:.2f} m, post {s['post']['setup_m']:.2f} m"
@@ -3221,10 +3231,12 @@ def pointing_lines(c):
     flags = (c or {}).get("pointing") or {}
     for cam, days in sorted(flags.items()):
         bad = [f"{d} {s}" for d, s in sorted(days.items()) if s.startswith(("moved", "MOVED"))]
-        nl = [d for d, s in sorted(days.items()) if s in ("not logged", "no pointing log")]
+        nl = [d for d, s in sorted(days.items()) if s == "not logged"]
         if bad:
             out.append(f"  CAMERA POINTING: {cam} turned on {', '.join(bad)}: check its maps before trusting them")
-        if nl:
+        if any(s == "no pointing log" for s in days.values()):
+            out.append(f"  no pointing log for {cam} (archive/pointing_daily_{cam}.json): whether it turned is not known")
+        elif nl:
             out.append(f"  pointing of {cam} not yet logged for {len(nl)} date(s) (pointing_daily.py logs 2 a run)")
     pc = (c or {}).get("per_camera")
     if pc:
@@ -3352,7 +3364,16 @@ def send_emails(ctx, state):
         for m in E["emails"]:
             if m["status"] not in ("pending",):
                 continue
-            subj, body, att = compose(ctx, state, E, m)
+            try:
+                subj, body, att = compose(ctx, state, E, m)
+            except Exception as exc:
+                traceback.print_exc(file=sys.stdout)
+                ctx.warn(f"ERROR: the {m['kind']} email of {E['id']} could not be composed ({type(exc).__name__})")
+                ctx.errors.append(E["id"])
+                subj = f"{SUBJECT} {m['kind']} ({E['id']})"
+                body = (f"The {m['kind']} email of event {E['id']} could not be composed ({exc!r}); see the event "
+                        f"folder {evdir(ctx, E)} and logs/storm_watch_detail.log.\n\n{INTERTIDAL_NOTE}\n")
+                att = []
             m["subject"] = subj
             if ctx.writes:
                 d = evdir(ctx, E) / "emails"
@@ -3477,7 +3498,7 @@ def ground_info(ctx, state, d_min):
 def run_once(ctx, ground_override=None, fc_override=None):
     """One storm-watch run at ctx.now. -> (exit code, run line)."""
     cfg = ctx.cfg
-    ctx.touched, ctx.ground_why = {}, ""
+    ctx.touched, ctx.ground_why, ctx.errors = {}, "", []
     state, fresh = load_state(ctx)
     for E in state["events"]:
         for m in E["emails"]:
@@ -3494,7 +3515,7 @@ def run_once(ctx, ground_override=None, fc_override=None):
         fc = fc_override
     elif ctx.mode == "replay":
         d = ctx.forecasts_dir / ctx.today
-        if d.exists() and any(d.glob("*_om_marine.json.gz")) or (d.exists() and any(d.glob("*_nws_alerts.json.gz"))):
+        if d.exists() and any(d.glob("*.gz")):
             ctx.forecast_dir = d
             fc = build_forecast(fetch_forecast(ctx, state).raw, ctx.now, cfg)
             fc["hindcast"] = True
@@ -3509,7 +3530,7 @@ def run_once(ctx, ground_override=None, fc_override=None):
         fc = build_forecast(fetch_forecast(ctx, state).raw, ctx.now, cfg)
     else:
         fc = build_forecast({}, ctx.now, cfg)
-        fc["status"] = {"forecast": "not fetched (--no-fetch)"}
+        fc["status"] = {"sources": "not fetched (--no-fetch)"}
     T = evaluate_trigger(fc, ctx.now, cfg)
     matches = trigger_match(ctx, state, T)
     # updates that need no ground
@@ -3542,10 +3563,17 @@ def run_once(ctx, ground_override=None, fc_override=None):
     if gi is not None:
         ctx.has_hs = bool(gi.get("has_hs"))
         for E in sorted(state["events"], key=lambda e: e["opened_utc"]):
-            if is_open(E):
-                ground_steps(ctx, state, E, gi, obs, segs)
-            if E["pending"]:
-                pending_steps(ctx, state, E, gi, obs, segs)
+            try:
+                if is_open(E):
+                    ground_steps(ctx, state, E, gi, obs, segs)
+                if E["pending"]:
+                    pending_steps(ctx, state, E, gi, obs, segs)
+            except Exception as exc:
+                # one event's failure (a build that broke, a grid that would not read) never stops the others;
+                # it is retried on the next run, and the traceback is in the detail log
+                traceback.print_exc(file=sys.stdout)
+                ctx.warn(f"ERROR: event {E['id']}: {type(exc).__name__}: {str(exc)[:160]}")
+                ctx.errors.append(E["id"])
     sent = send_emails(ctx, state)
     # the run line
     T_text = ""
@@ -3560,7 +3588,7 @@ def run_once(ctx, ground_override=None, fc_override=None):
     nh = obs.newest
     if nh is not None:
         k = nh - obs.h0
-        otext = (f"observed Marconi {obs.val[k]:.1f} m {hour_dt(nh):%d %H}Z ({SRC_LABELS[int(obs.psrc[k])] or '?'})"
+        otext = (f"observed Marconi {obs.val[k]:.1f} m {hour_dt(nh):%d %b %H}Z ({SRC_LABELS[int(obs.psrc[k])] or '?'})"
                  + (" STALE" if ctx.now_h - nh > 12 else ""))
         if ctx.now_h - nh > 12:
             ctx.note(f"observed waves stale (newest {hour_iso(nh)[:13]}Z)")
@@ -3592,8 +3620,12 @@ def run_once(ctx, ground_override=None, fc_override=None):
     if ctx.writes:
         write_line(ctx.log_path, line, ctx.now)
     if ctx.mode == "live":
-        if result == "blind":
-            stamp = (f"blind since {state['blind_since']}: no forecast source ({'; '.join(f'{k} {v}' for k, v in st.items())[:200]})")
+        if ctx.errors:
+            stamp = (f"error in: {', '.join(sorted(set(ctx.errors)))} ({iso_z(ctx.now)[:16].replace('T', ' ')}Z): "
+                     f"{open_n} open event(s); see logs/storm_watch_detail.log")
+        elif result == "blind":
+            why = "; ".join(f"{k} {v}" for k, v in st.items())[:200]
+            stamp = f"blind since {state['blind_since']}: no forecast source" + (f" ({why})" if why else "")
         elif result == "degraded":
             stamp = f"degraded: no wave forecast ({iso_z(ctx.now)[:16].replace('T', ' ')}Z): {open_n} open event(s)"
         else:
