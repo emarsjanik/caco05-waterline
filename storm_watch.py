@@ -847,7 +847,7 @@ def parse_gfs_bull(text, now, lead_h):
             t = datetime(year, month, day, hr, tzinfo=timezone.utc)
         except ValueError:
             continue
-        best = None
+        best, parts = None, []
         for part in line.strip().split("|")[3:]:
             nums = part.replace("*", " ").split()
             if len(nums) == 3:
@@ -855,8 +855,16 @@ def parse_gfs_bull(text, now, lead_h):
                     hs, tp, d = (float(x) for x in nums)
                 except ValueError:
                     continue
+                parts.append(hs)
                 if best is None or hs > best[0]:
                     best = (hs, tp, d)
+        if parts:
+            # Hst is the total of the partitions (sqrt of the sum of squares): a row whose columns were misread
+            # (a period taken for a height) breaks that, and the whole bulletin is refused
+            tot = float(np.sqrt(np.sum(np.square(parts))))
+            if abs(hst - tot) > max(0.3, 0.15 * hst):
+                raise ValueError(f"row {day} {hr}: Hst {hst:g} m does not match its partitions ({tot:.2f} m): "
+                                 "columns misread?")
         h = hour_of(t)
         vals["hs"][h] = hst
         vals["tp"][h] = best[1] if best else np.nan
@@ -993,7 +1001,7 @@ def fetch_forecast(ctx, state):
                 state.pop("nws_points", None)
                 pts, refreshed = refresh() or {}, True
                 if pts.get("forecastGridData"):
-                    f.get("nws_grid.json", pts["forecastGridData"])
+                    st, _, _ = f.get("nws_grid.json", pts["forecastGridData"])
             if st == 404:
                 state.pop("nws_points", None)
             if pts.get("forecast"):
@@ -1221,7 +1229,7 @@ def evaluate_trigger(fc, now, cfg):
             d[nodir] = series_at(fc["wind"], s["h"][nodir], "wdir")
         still = ~np.isfinite(d)
         sec = in_sector(d, sector) | still
-        if (still & w & (s["hs"] >= onset_hs)).any():
+        if (still & w & (np.nan_to_num(s["hs"], nan=-1.0) >= onset_hs)).any():
             T["notes"].append(f"{s['name']}: no wave or wind direction at some rough hours: taken as in the sector")
         return w, sec
 
@@ -1670,6 +1678,8 @@ def scan_ground(path, d_min, d_max, out_csv, max_hs):
             mh = max_hs if kh is not None else None
             nh, last_len, latest = len(head), len(head), ""
             for row in r:
+                if not row:
+                    continue
                 last_len = len(row)
                 if len(row) <= max(kt, ke, kc):
                     continue
@@ -1871,7 +1881,7 @@ class Ctx:
         self.send_waits = send_waits
         self.notes, self.warnings, self.argvs = [], [], []
         self.has_hs = False
-        self.printed = []
+        self.touched, self.ground_why = {}, ""
 
     def note(self, text):
         if text not in self.notes:
@@ -2267,9 +2277,15 @@ def is_open(E):
     return E["status"] != "closed"
 
 
+def stored_span(x):
+    """A stored segment as hours (start, end). One stored while still open matches only the segment that holds
+    its start (its first 12 h): a later segment starts at least 25 h after it (24 calm hours end a segment)."""
+    a = iso_hour(x["start"])
+    return a, (iso_hour(x["end"]) if x.get("end") else a + 12)
+
+
 def spans_of(E):
-    return [(iso_hour(x["start"]), iso_hour(x["end"]) if x.get("end") else None)
-            for x in E["observed"]["segments"]]
+    return [stored_span(x) for x in E["observed"]["segments"]]
 
 
 def overlaps(a0, a1, b0, b1):
@@ -2278,7 +2294,7 @@ def overlaps(a0, a1, b0, b1):
 
 def seg_overlaps_spans(s, spans, now_h):
     a, b = seg_span(s, now_h)
-    return any(overlaps(a, b, x0, x1 if x1 is not None else now_h) for x0, x1 in spans)
+    return any(overlaps(a, b, x0, x1) for x0, x1 in spans)
 
 
 def owned_by(state, s, now_h, exclude=None):
@@ -2298,10 +2314,9 @@ def claimed(state, s, now_h):
     for E in state["events"]:
         c = E["observed"].get("cut_segment")
         if E["status"] == "post" and c and E["observed"].get("cut_state") == "pending":
-            if seg_overlaps_spans(s, [(iso_hour(c["start"]), iso_hour(c["end"]) if c.get("end") else None)], now_h):
+            if seg_overlaps_spans(s, [stored_span(c)], now_h):
                 return True
-    seen = [(iso_hour(x["start"]), iso_hour(x["end"]) if x.get("end") else None) for x in state.get("seen_segments", [])]
-    return seg_overlaps_spans(s, seen, now_h)
+    return seg_overlaps_spans(s, [stored_span(x) for x in state.get("seen_segments", [])], now_h)
 
 
 def span_rec(s):
@@ -2619,12 +2634,11 @@ def merge_or_cut(ctx, state, E, segs, gi):
     if len(u) < cfg["STORM_MIN_USABLE_DAYS"]:
         ob["segments"].append(dict(cs))
         merged = []
-        span = [(iso_hour(cs["start"]), iso_hour(cs["end"]) if cs.get("end") else None)]
+        c0, c1 = stored_span(cs)
         for X in state["events"]:
             if X is E or X["status"] == "closed" and X["closed_reason"] in ("merged", "complete"):
                 continue
-            if any(overlaps(a, b if b is not None else ctx.now_h, span[0][0],
-                            span[0][1] if span[0][1] is not None else ctx.now_h) for a, b in spans_of(X)):
+            if any(overlaps(a, b, c0, c1) for a, b in spans_of(X)):
                 X["status"], X["closed_reason"] = "closed", "merged"
                 X["notes"].append(f"merged into {E['id']} (one compound event)")
                 hist(ctx, X, f"closed: merged into {E['id']}")
@@ -2693,8 +2707,7 @@ def follow_segments(ctx, E, segs_now):
         return None
     recs = []
     for x in ob["segments"]:
-        hit = [s for s in mine if seg_overlaps_spans(s, [(iso_hour(x["start"]), iso_hour(x["end"]) if x.get("end")
-                                                         else None)], ctx.now_h)]
+        hit = [s for s in mine if seg_overlaps_spans(s, [stored_span(x)], ctx.now_h)]
         recs.append(span_rec(hit[0]) if hit else x)
     ob["segments"] = recs
     for s in mine:
@@ -2727,7 +2740,8 @@ def update_watch(ctx, state, E, segs, T, t_hit, obs):
         E["pending"].append({"what": "pre_final", "window": E["pre"]["planned"], "since": ctx.today})
         hist(ctx, E, f"closed UNVERIFIED: observed waves cover {100 * cov:.0f} % of the storm's window")
         queue_email(ctx, E, "unverified", coverage=round(cov, 2))
-    elif ddiff(ctx.today, E["opened_utc"][:10]) > 10 and not (t_hit and iso_hour(T["onset_fc"]) <= ctx.now_h + 24):
+    elif ddiff(ctx.today, E["opened_utc"][:10]) > 10 and ctx.now_h <= en + 48 and \
+            not (t_hit and iso_hour(T["onset_fc"]) <= ctx.now_h + 24):
         close_false_alarm(ctx, E, segs, obs, "the forecast onset kept receding for more than 10 days")
 
 
@@ -2873,12 +2887,14 @@ def handle_trigger(ctx, state, fc, T, matches, segs):
         for E in posts:
             E["notes"].append(f"{ctx.today}: forecast still triggering (onset ~{T['onset_fc'][:13]}Z) after the storm")
         return None
+    in_post = [X for X in state["events"] if X["status"] == "post"]
     E = new_event(ctx, state, "fc", T["onset_fc"][:10])
     E["forecast"] = fc_record(ctx, fc, T)
     E["forecast"].update(first_trigger_utc=iso_z(ctx.now), last_trigger_utc=iso_z(ctx.now), runs=[])
     record_run(E, ctx, T)
-    if posts:
-        E["prev_event"] = max(posts, key=lambda e: e["opened_utc"])["id"]
+    if in_post:
+        # the storm before this one: its post-storm DEMs are still being built (and may be cut by this one)
+        E["prev_event"] = max(in_post, key=lambda e: e["opened_utc"])["id"]
     E["pre"]["planned"] = planned_pre_fc(ctx, state, E, segs)
     hist(ctx, E, f"OPENED on the forecast: rules {','.join(T['rules'])}, onset ~{T['onset_fc'][:13]}Z, "
                  f"pre planned {E['pre']['planned'][0]}..{E['pre']['planned'][1]}")
@@ -2987,3 +3003,997 @@ def needed_from(ctx, state):
                 ds.append(dadd(p["window"][0], -cfg["STORM_PRE_MAX_DAYS"]))
     return min(ds) if ds else None
 
+# --------------------------------------------------------------------------------------------
+# emails (msmtp, as owg_report.py sends the daily report)
+# --------------------------------------------------------------------------------------------
+
+MIME = {".png": ("image", "png"), ".jpg": ("image", "jpeg"), ".jpeg": ("image", "jpeg"), ".tif": ("image", "tiff"),
+        ".tiff": ("image", "tiff"), ".txt": ("text", "plain"), ".json": ("application", "json")}
+MAX_ATTACH = 10 * 1024 * 1024
+
+
+def send(subject, to, body, attachments, dry_run, waits=(30, 60, 0), msmtp="msmtp", sleep=time.sleep):
+    """EmailMessage (no From: msmtp's account sets it) piped to `msmtp addr...`, retried. -> 0 sent, 1 not."""
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["To"] = ", ".join(to)
+    msg.set_content(body)
+    for p in attachments:
+        main, sub = MIME.get(Path(p).suffix.lower(), ("application", "octet-stream"))
+        data = Path(p).read_bytes()
+        if main == "text":
+            msg.add_attachment(data.decode("utf-8", "replace"), subtype=sub, filename=Path(p).name)
+        else:
+            msg.add_attachment(data, maintype=main, subtype=sub, filename=Path(p).name)
+    size = len(msg.as_bytes()) / 1e6
+    if dry_run:
+        print(f"\n--- would send to: {' '.join(to)} ---\nSubject: {subject}\n"
+              f"Attachments: {[Path(p).name for p in attachments]} ({size:.1f} MB)")
+        return 0
+    for attempt, wait in enumerate(waits, 1):
+        try:
+            r = subprocess.run([msmtp] + list(to), input=msg.as_bytes(), stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
+        except (FileNotFoundError, PermissionError):
+            print("msmtp not found -- cannot send", file=sys.stderr)
+            return 1
+        if r.returncode == 0:
+            print(f"email sent to {len(to)} recipient(s) ({size:.1f} MB)")
+            return 0
+        print(f"msmtp attempt {attempt} failed: {r.stderr.decode(errors='replace').strip()[:200]}", file=sys.stderr)
+        if wait:
+            sleep(wait)
+    return 1
+
+
+def ev_path(ctx, E, rel):
+    return evdir(ctx, E) / rel if rel else None
+
+
+def map_png(ctx, E, part):
+    rec = E.get(part) or {}
+    if not rec.get("stem"):
+        return None
+    p = Path(str(ev_path(ctx, E, rec["stem"])) + "_map.png")
+    return p if p.exists() else None
+
+
+def tif_paths(ctx, E, part):
+    rec = E.get(part) or {}
+    if not rec.get("stem"):
+        return []
+    p = Path(str(ev_path(ctx, E, rec["stem"])) + "_dem.tif")
+    return [str(p)] if p.exists() else []
+
+
+def opts_text(ctx):
+    return " ".join(dem_args(ctx.cron, ctx.has_hs))
+
+
+def forecast_lines(ctx, E):
+    f = E.get("forecast") or {}
+    cfg = ctx.cfg
+    out = []
+    pk = f.get("peak")
+    if pk:
+        out.append(f"  peak Hs {pk['hs']:.1f} m (offshore) at {when(parse_iso(pk['time']))}, from "
+                   f"{compass(pk['dir'] if pk['dir'] is not None else float('nan'))}"
+                   + (f", {pk.get('tstat', 'Tp')} {pk['tp']:.0f} s" if pk.get("tp") is not None else "")
+                   + f" ({pk['source']})")
+        out.append(f"  hours at or above {cfg['STORM_HS_M']:g} m in the sector: {f.get('hours_over', 0)}")
+    out.append("  rules met: " + "; ".join(f"({r}) {RULE_WORDS.get(r, r)}" for r in f.get("rules") or []))
+    for b in f.get("by") or []:
+        out.append(f"    {b}")
+    for a in f.get("alerts") or []:
+        out.append(f"  alert {a.get('code') or '-'} {a['event']} ({', '.join(a['zones']) or 'zone ?'}) "
+                   f"{a['start'][:16]}Z to {a['end'][:16]}Z [{a.get('role')}]")
+        if a.get("headline"):
+            out.append(f"    {a['headline']}")
+    w = f.get("wind_peak")
+    if w:
+        out.append(f"  wind peak {w['ws']:.0f} m/s ({w['ws'] / 0.514444:.0f} kt) at {when(parse_iso(w['time']))}, "
+                   f"from {compass(w['dir'] if w['dir'] is not None else float('nan'))}"
+                   + (f", gusts {w['gust']:.0f} m/s ({w['gust'] / 0.514444:.0f} kt)" if w.get("gust") else "")
+                   + f" ({w['source']})")
+    src = f.get("sources") or {}
+    if src:
+        out.append("  sources: " + "; ".join(f"{k} {v}" for k, v in sorted(src.items())))
+    if f.get("outlook"):
+        out.append("  outlook beyond the lead time (information only): "
+                   + ", ".join(f"{d} {h:.1f} m" for d, h, _ in f["outlook"]))
+    for t in f.get("text") or []:
+        out.append(f"  NWS: {t}")
+    return out
+
+
+def plan_lines(ctx, E, observed=False):
+    cfg = ctx.cfg
+    od = onset_date(E)
+    pre = E["pre"]
+    win = pre.get("window") or pre.get("planned") or [dadd(od, -cfg["STORM_PRE_DAYS"]), dadd(od, -1)]
+    out = ["WHAT THE STATION WILL DO (UTC dates):"]
+    if observed:
+        out.append(f"  observed onset {when(parse_iso(E['observed']['onset']))}")
+    else:
+        out.append(f"  provisional onset ~{when(parse_iso(E['forecast']['onset_fc']))}")
+    out.append("  the storm dates (from the onset date to the end) are left out of every DEM: wave setup and "
+               "surge push the waterline up")
+    if ctx.cron.get("DEM_ENABLE") != "1":
+        out.append(f"  DEM stage disabled in the cron (DEM_ENABLE={ctx.cron.get('DEM_ENABLE')}): no DEMs will be built")
+        return out
+    out.append(f"  pre-storm DEM: {win[0]} to {win[1]}, built with the cron's 7-day DEM options ({opts_text(ctx)}); "
+               f"fixed about 2 days after the onset (GNSS-R runs ~2 days behind), expected ~{dadd(od, 3)}")
+    pp = E.get("pre_provisional")
+    if pp and pp.get("status") in ("built", "inadequate") and pp.get("window"):
+        out.append(f"  provisional pre-storm DEM attached: {pp['window'][0]} to {pp['window'][1]}, "
+                   f"{pp.get('cells', 0)} cells with >= 5 crossings"
+                   + ("" if pp.get("adequate") else f" (not adequate for a change map: {pp.get('why')})"))
+    elif pp:
+        out.append(f"  no provisional pre-storm DEM: {pp.get('why')}")
+    elif not observed:
+        out.append(f"  no provisional pre-storm DEM this run: {ctx.ground_why or 'the ground steps did not run'}")
+    out.append("  first post-storm DEM (3 usable days) about 5 days after the storm ends; the 7-day post-storm DEM "
+               "and the main change map about 9-10 days after")
+    if not observed:
+        out.append("  a storm that does not arrive is closed as a false alarm")
+    return out
+
+
+def storm_lines(E):
+    ob = E["observed"]
+    out = [f"  onset {when(parse_iso(ob['onset']))}" if ob.get("onset") else "  onset: not observed"]
+    if ob.get("peak_hs") is not None:
+        out.append(f"  peak {ob['peak_hs']:.2f} m (Marconi, ADCP-equivalent) at {when(parse_iso(ob['peak_time']))}"
+                   + (f"; 44008 up to {ob['raw_max']:.1f} m" if ob.get("raw_max") else ""))
+    if ob.get("end"):
+        out.append(f"  end {when(parse_iso(ob['end']))} (24 calm hours began)")
+    if E.get("storm_dates"):
+        out.append(f"  storm dates left out of every DEM: {E['storm_dates'][0]} to {E['storm_dates'][1]}")
+    if ob.get("sources"):
+        out.append(f"  wave record: {', '.join(ob['sources'])}")
+    f = E.get("forecast")
+    if f:
+        out.append(f"  forecast: first triggered {f.get('first_trigger_utc', '?')[:16]}Z, onset ~{f['onset_fc'][:13]}Z")
+    else:
+        out.append("  not forecast (opened from the observed waves)")
+    for n in E["notes"]:
+        if n.startswith("COMPOUND"):
+            out.append("  " + n)
+    return out
+
+
+def dem_line(name, rec):
+    if not rec:
+        return f"  {name}: not built"
+    if rec.get("status") in ("none", "same as post3", "disabled"):
+        return f"  {name}: {rec['status']} ({rec.get('why', '')})"
+    w = rec.get("window") or ["?", "?"]
+    fr = rec.get("frames") or {}
+    return (f"  {name}: {w[0]} to {w[1]}, {rec.get('cells', 0)} cells with >= 5 crossings"
+            + (f", {rec['range'][0]:+.2f} to {rec['range'][1]:+.2f} m (5-95 %)" if rec.get("range") else "")
+            + (f", frames {', '.join(f'{k} {v}' for k, v in sorted(fr.items()))}" if fr else "")
+            + (f", usable dates {len(rec.get('usable') or [])}" if rec.get("usable") is not None else "")
+            + ("" if rec.get("adequate", True) else f" -- NOT ADEQUATE: {rec.get('why')}"))
+
+
+def change_lines(c, part):
+    out = []
+    if not c or c.get("status") != "map":
+        out.append(f"  NO CHANGE MAP: {(c or {}).get('why', 'not made')}")
+        return out
+    out.append(f"  cells compared (>= 5 crossings in both DEMs): {c['cells_compared']} ({c['area_m2']:.0f} m2)")
+    out.append(f"  change: median {c['median_m']:+.3f} m, p10 {c['p10_m']:+.3f}, p90 {c['p90_m']:+.3f}; level of "
+               f"detection (95 %) median {fnum(c.get('lod_median_m'), '%.3f')} m")
+    e, a = c["erosion"], c["accretion"]
+    out.append(f"  significant erosion: {e['cells']} cells, {e['area_m2']:.0f} m2, {e['volume_m3']:+.1f} m3")
+    out.append(f"  significant accretion: {a['cells']} cells, {a['area_m2']:.0f} m2, {a['volume_m3']:+.1f} m3")
+    out.append(f"  net over the significant cells: {c['net_m3']:+.1f} m3")
+    out.append("  volumes over the compared intertidal cells only: not a sediment budget")
+    for n in c.get("dem_change_notes") or []:
+        out.append(f"  dem_change.py: {n}")
+    if c.get("drift_rebuilt_minus_original_pre_m") is not None:
+        out.append(f"  pre DEM rebuilt today like for like; it differs from the original pre record by a median "
+                   f"{c['drift_rebuilt_minus_original_pre_m']:+.3f} m over {c['drift_cells']} cells (processing "
+                   "changes since)")
+    s = c.get("setup") or {}
+    if s.get("post_minus_pre_m") is not None:
+        out.append(f"  wave setup in the frames used: pre {s['pre']['setup_m']:.2f} m, post {s['post']['setup_m']:.2f} m"
+                   f"; a 25 % error in the setup coefficient C moves this change by ~{s['c_error_25pct_m']:.2f} m"
+                   + (" -- MORE THAN THE LEVEL OF DETECTION: read the change with care" if s.get("flag") else ""))
+    for k, (nb, nt) in (c.get("blank_hs_frames") or {}).items():
+        if nt and nb / nt > 0.10:
+            out.append(f"  {k} window: {nb} of {nt} frames have no wave height (rough frames there could not be "
+                       "left out)")
+    ww = c.get("waves_in_windows") or {}
+    for k in ("pre", "post"):
+        if ww.get(k):
+            out.append(f"  waves above the calm level inside the {k} window (their rough frames are left out; the "
+                       f"sand they moved is not): {'; '.join(ww[k])}")
+    if part == "post3":
+        out.append("  first look: the 3-day DEM is closest to the most eroded state; the 7-day one includes some "
+                   "recovery and more cells")
+    return out
+
+
+def pointing_lines(c):
+    out = []
+    flags = (c or {}).get("pointing") or {}
+    for cam, days in sorted(flags.items()):
+        bad = [f"{d} {s}" for d, s in sorted(days.items()) if s.startswith(("moved", "MOVED"))]
+        nl = [d for d, s in sorted(days.items()) if s in ("not logged", "no pointing log")]
+        if bad:
+            out.append(f"  CAMERA POINTING: {cam} turned on {', '.join(bad)}: check its maps before trusting them")
+        if nl:
+            out.append(f"  pointing of {cam} not yet logged for {len(nl)} date(s) (pointing_daily.py logs 2 a run)")
+    pc = (c or {}).get("per_camera")
+    if pc:
+        for cam in ("c1", "c2"):
+            r = pc.get(cam) or {}
+            if r.get("cells_compared"):
+                out.append(f"  {cam} alone: {r['cells_compared']} cells, median {r['median_m']:+.3f} m, erosion "
+                           f"{r['erosion']['volume_m3']:+.1f} m3, accretion {r['accretion']['volume_m3']:+.1f} m3")
+            elif r:
+                out.append(f"  {cam} alone: {r.get('why')}")
+    return out
+
+
+def compose(ctx, state, E, m):
+    """-> (subject, body, attachments) of a queued email."""
+    cfg, kind, data = ctx.cfg, m["kind"], m.get("data") or {}
+    pre = SUBJECT + (" [HINDCAST]" if E.get("hindcast") else "")
+    od = onset_date(E)
+    att, lines = [], []
+    sd = E.get("storm_dates")
+    sdt = f"{sd[0]}..{sd[1]}" if sd else od
+    if kind == "heads_up":
+        on = parse_iso(E["forecast"]["onset_fc"])
+        subj = f"Storm forecast for Marconi Beach: onset ~{eastern(on)[:10]} (heads-up)"
+        lines = [f"A storm is forecast for Marconi Beach within the next {cfg['STORM_LEAD_HOURS'] / 24:g} days. This "
+                 "heads-up is for planning a GPS or drone survey before and after it.", "",
+                 f"FORECAST (run {iso_z(ctx.now)[:16]}Z; wave heights offshore, deep water):"] + forecast_lines(ctx, E)
+        if E.get("prev_event"):
+            lines.append(f"  this storm follows {E['prev_event']}, whose post-storm DEMs are still being built")
+        lines += [""] + plan_lines(ctx, E)
+        p = map_png(ctx, E, "pre_provisional")
+        att += [p] if p else []
+    elif kind == "missed_storm":
+        subj = f"A storm the forecast missed: {eastern(parse_iso(E['observed']['onset']))[:10]}"
+        lines = ["The observed waves show a storm that no forecast trigger announced. Its pre-storm DEM is built "
+                 "after the fact from the saved waterline points.", "", "STORM (observed):"] + storm_lines(E)
+        lines += [""] + plan_lines(ctx, E, observed=True)
+    elif kind == "update":
+        subj = f"Storm forecast update for Marconi Beach: {'; '.join(data.get('why') or [])[:80]}"
+        lines = ["The forecast for the storm in event " + E["id"] + " has escalated: " + "; ".join(data.get("why") or []),
+                 "", "FORECAST:"] + forecast_lines(ctx, E)
+    elif kind == "false_alarm":
+        f = E["forecast"]
+        pk = f.get("peak") or {}
+        subj = f"False alarm: the storm forecast for {od} did not arrive"
+        pw = E["pre"].get("planned") or ["?", "?"]
+        lines = [f"Event {E['id']} is closed as a FALSE ALARM: {data.get('why')}. The forecast peak was "
+                 f"{fnum(pk.get('hs'), '%.1f')} m offshore at {pk.get('time', '?')[:13]}Z; the observed Marconi "
+                 f"peak between the forecast onset minus 24 h and its end plus 48 h was {fnum(data.get('peak'))} m "
+                 f"(a storm is confirmed at {cfg['STORM_CONFIRM_HS']:g} m). The pre-storm DEM of {pw[0]} to "
+                 f"{pw[1]} is kept as a calm-days DEM in {evdir(ctx, E)}/pre/ (built once the ground file covers it)."]
+    elif kind == "unverified":
+        subj = f"Storm forecast for {od}: closed without verification"
+        lines = [f"Event {E['id']} is closed UNVERIFIED: the observed wave record covers only "
+                 f"{100 * data.get('coverage', 0):.0f} % of the storm's window, so whether the storm came is not "
+                 "known. Check the buoys (archive/waves_44008.csv, waves_44013.csv) and the camera wave gauge."]
+    elif kind == "not_over":
+        subj = f"Storm of {od} not over after 7 days"
+        lines = [f"The waves at Marconi have not stayed below {cfg['STORM_CALM_HS']:g} m for "
+                 f"{cfg['STORM_END_CALM_HOURS']} hours since the peak of {E['observed'].get('peak_time', '?')[:13]}Z. "
+                 "The post-storm DEMs wait for the end. The event is given up 14 days after the peak."] + storm_lines(E)
+    elif kind == "waiting_ground":
+        subj = f"Storm of {od}: waiting for the ground file"
+        lines = [f"The {data.get('part')} DEM needs the waterline points of {data.get('date')}, but the ground file "
+                 f"ends {data.get('latest')}: GNSS-R or the cron stopped? (station_status.txt; GNSS-R normally runs "
+                 f"~2 days behind). The event is given up after {cfg['STORM_MAX_WAIT_DAYS']} days."]
+    elif kind == "gave_up":
+        subj = f"Storm of {od}: given up"
+        lines = [f"Event {E['id']} is closed: " + (E["history"][-1].split(": ", 1)[-1] if E["history"] else "gave up"),
+                 "", "What was built:", dem_line("pre", E["pre"]), dem_line("post3", E["post3"]),
+                 dem_line("post7", E["post7"])]
+        att += [p for p in (map_png(ctx, E, "pre"), map_png(ctx, E, "post3")) if p]
+    elif kind in ("report_post3", "report_post7"):
+        part = kind.split("_")[1]
+        c = E["change"].get(part) or {}
+        subj = (f"Beach change after the {sdt} storm: "
+                + ("first look (3 usable days)" if part == "post3" else "7-day map"))
+        lines = ["STORM:"] + storm_lines(E) + ["", f"DEMS (dem_from_contours.py, the cron's 7-day DEM options: "
+                                                    f"{opts_text(ctx)}):", dem_line("pre", E["pre"]),
+                                               dem_line(part, E[part])]
+        if c.get("status") == "map":
+            lines.append("  the pre DEM was rebuilt today like for like from the current ground file")
+        for k in ("pre", part):
+            for fl in (E.get(k) or {}).get("flags") or []:
+                lines.append(f"  {k}: {fl}")
+        lines += ["", "CHANGE (post minus pre; blue = accretion, red = erosion):"] + change_lines(c, part)
+        pl = pointing_lines(c)
+        if pl:
+            lines += [""] + pl
+        lines += ["", "CAVEATS: one storm's change from two camera DEMs; the level of detection covers the "
+                      "repeatability of the crossings, not errors shared by a whole window (water level, setup, "
+                      "pointing); see docs/VALIDATION.md 2.10."]
+        if c.get("png"):
+            att.append(ev_path(ctx, E, c["png"]))
+        att += [p for p in (map_png(ctx, E, "pre"), map_png(ctx, E, part)) if p]
+        tifs = tif_paths(ctx, E, "pre") + tif_paths(ctx, E, part)
+        if tifs:
+            lines += ["", "GeoTIFFs (EPSG:6348, NAVD88): " + ", ".join(tifs)]
+    else:
+        subj, lines = f"{kind} ({E['id']})", [f"event {E['id']}: {kind}"]
+    keep, size, skipped = [], 0, []
+    for p in att:
+        if p is None or not Path(p).exists():
+            continue
+        n = Path(p).stat().st_size
+        if size + n > MAX_ATTACH:
+            skipped.append(Path(p).name)
+            continue
+        keep.append(Path(p))
+        size += n
+    if skipped:
+        lines += ["", "Not attached (over 10 MB in all): " + ", ".join(skipped)]
+    lines += ["", INTERTIDAL_NOTE]
+    if (E.get("forecast") or {}).get("om_used"):
+        lines.append(OM_ATTRIBUTION)
+    lines += [f"Event folder: {evdir(ctx, E)}",
+              f"Sent by storm_watch.py on {socket.gethostname()} at {iso_z(ctx.now)[:16]}Z."]
+    return f"{pre} {subj}", "\n".join(lines) + "\n", keep
+
+
+def send_emails(ctx, state):
+    to, where = recipients(ctx.base, ctx.cfg)
+    sent = []
+    for E in state["events"]:
+        for m in E["emails"]:
+            if m["status"] not in ("pending",):
+                continue
+            subj, body, att = compose(ctx, state, E, m)
+            m["subject"] = subj
+            if ctx.writes:
+                d = evdir(ctx, E) / "emails"
+                d.mkdir(parents=True, exist_ok=True)
+                f = d / f"{ctx.now:%Y%m%dT%H%MZ}_{m['kind']}.txt"
+                f.write_text(f"Subject: {subj}\nAttachments: {', '.join(p.name for p in att) or 'none'}\n\n{body}")
+                m["body_file"] = os.path.relpath(str(f), str(evdir(ctx, E)))
+            if ctx.mode == "dry":
+                print(f"\n=== {E['id']}: {m['kind']} ===")
+                send(subj, to, body, att, dry_run=True)
+                print(body)
+                m["status"] = "dry"
+                sent.append(f"{m['kind']} dry")
+                continue
+            if not ctx.email:
+                m["status"] = "dry"
+                sent.append(f"{m['kind']} written")
+                continue
+            if not to:
+                m["status"] = "failed"
+                ctx.warn(f"WARNING: no email recipients ({where}): {m['kind']} not sent")
+                continue
+            m["status"] = "sending"
+            m["tries"] += 1
+            save_state(ctx, state)
+            mailer = ctx.mailer or (lambda s, t, b, a: send(s, t, b, a, False, waits=ctx.send_waits, msmtp=ctx.msmtp,
+                                                            sleep=ctx.sleep))
+            rc = mailer(subj, to, body, att)
+            if rc == 0:
+                m["status"] = "sent"
+                sent.append(f"{m['kind']} sent ({len(to)} recipients, {where})")
+            else:
+                m["status"] = "pending" if m["tries"] < 3 else "failed"
+                ctx.warn(f"WARNING: email {m['kind']} of {E['id']} not sent (try {m['tries']} of 3)")
+                sent.append(f"{m['kind']} NOT sent")
+            save_state(ctx, state)
+    return sent
+
+
+# --------------------------------------------------------------------------------------------
+# one run
+# --------------------------------------------------------------------------------------------
+
+
+def newest_epoch(path):
+    rows = read_rows(path, ["epoch"], 0, 10 ** 9)
+    return max((r["h"] for r in rows), default=None)
+
+
+def observe(ctx):
+    """Reads the observed waves under owg.sh's lock (released before the ground pass: the cron takes its own lock
+    first and owg.sh's second, so holding owg's while waiting for the cron's would deadlock). Fetches 44008 itself
+    when its archive is stale (live runs only)."""
+    lockf = None
+    if ctx.mode == "live":
+        lockf = take_lock(ctx.base / "logs/owg.lock", ctx.cfg["STORM_OWG_LOCK_WAIT_S"], sleep=ctx.sleep)
+        if lockf is None:
+            ctx.note("owg.sh holds logs/owg.lock: waves read without it")
+    try:
+        if ctx.mode == "live" and ctx.fetch:
+            p = ctx.base / "archive/waves_44008.csv"
+            nh = newest_epoch(p)
+            if nh is None or ctx.now_h - nh > ctx.cfg["STORM_BUOY_STALE_H"]:
+                rc, out = ctx.run([sys.executable, str(HERE / "fetch_buoy_waves.py"), "--station", "44008",
+                                   "--output", str(p)], ctx.base / "logs/storm_watch_detail_fetch.log")
+                ctx.note("44008 fetched" if rc == 0 else f"44008 fetch failed (exit {rc})")
+        h_end = ctx.now_h if ctx.mode == "replay" else None
+        return read_observed(ctx.base, ctx.now, ctx.cfg, h_end=h_end)
+    finally:
+        release_lock(lockf)
+
+
+def ground_info(ctx, state, d_min):
+    """The ground file's coverage and usable dates, one pass under the cron's lock when it changed."""
+    gpath = Path(ctx.cron["GROUND"])
+    if not gpath.exists():
+        ctx.ground_why = f"no ground file ({gpath.name})"
+        ctx.note(ctx.ground_why)
+        return None
+    st = gpath.stat()
+    key = [int(st.st_mtime), int(st.st_size)]
+    cache = state.get("ground_cache")
+    if (cache and cache.get("key") == key and cache.get("range") and cache["range"][0] <= d_min
+            and ctx.ground_src.exists()):
+        return cache
+    hits = [h for h in station_jobs_due(ctx.cfg["STORM_LOCK_HOLD_S"], ctx.local_now()) if "waterline_timex_cron" in h]
+    if hits:
+        ctx.ground_why = f"cron due ({', '.join(hits)} local): the ground file is not read this run"
+        ctx.note(ctx.ground_why)
+        return None
+    lockf = take_lock(ctx.cron["LOCK"], ctx.cfg["STORM_LOCK_WAIT_S"], sleep=ctx.sleep)
+    if lockf is None:
+        ctx.ground_why = "cron busy (its lock held): ground steps skipped"
+        ctx.note(ctx.ground_why)
+        return None
+    try:
+        ctx.ground_src.parent.mkdir(parents=True, exist_ok=True)
+        mh = float(ctx.cron["DEM_MAX_HS"]) if ctx.cron.get("DEM_MAX_HS") else None
+        info = scan_ground(gpath, d_min, ctx.today, ctx.ground_src, mh)
+    except (OSError, ValueError) as exc:
+        ctx.ground_why = f"ground file unreadable ({str(exc)[:80]})"
+        ctx.warn("WARNING: " + ctx.ground_why)
+        return None
+    finally:
+        release_lock(lockf)
+    why = ground_suspect(info, cache, ctx.base / "logs/timex_cron.log")
+    if why:
+        n = int(state.get("ground_suspect_runs") or 0) + 1
+        state["ground_suspect_runs"] = n
+        if n < 3:
+            ctx.ground_why = f"ground file suspect: {why}"
+            ctx.warn(f"WARNING: ground file suspect ({why}): ground steps skipped ({n} run(s))")
+            return None
+        ctx.note(f"ground file suspect for {n} runs ({why}): accepted (a reprocessing?)")
+    state["ground_suspect_runs"] = 0
+    info["key"] = key
+    state["ground_cache"] = info
+    return info
+
+
+
+def run_once(ctx, ground_override=None, fc_override=None):
+    """One storm-watch run at ctx.now. -> (exit code, run line)."""
+    cfg = ctx.cfg
+    ctx.touched, ctx.ground_why = {}, ""
+    state, fresh = load_state(ctx)
+    for E in state["events"]:
+        for m in E["emails"]:
+            if m["status"] == "sending":
+                m["status"] = "unknown"
+                ctx.warn(f"WARNING: email {m['kind']} of {E['id']} was being sent when a run stopped: not resent")
+    # observed waves (owg.sh's lock is released before anything else)
+    obs = observe(ctx)
+    segs = segments(obs, cfg)
+    if fresh:
+        state["seen_segments"] = [span_rec(s) for s in segs if s["end"] is not None]
+    # forecast
+    if fc_override is not None:
+        fc = fc_override
+    elif ctx.mode == "replay":
+        d = ctx.forecasts_dir / ctx.today
+        if d.exists() and any(d.glob("*_om_marine.json.gz")) or (d.exists() and any(d.glob("*_nws_alerts.json.gz"))):
+            ctx.forecast_dir = d
+            fc = build_forecast(fetch_forecast(ctx, state).raw, ctx.now, cfg)
+            fc["hindcast"] = True
+            ctx.forecast_dir = None
+        else:
+            # the observed waves AHEAD of the run time, read only for this perfect forecast (the observed side
+            # above sees nothing after the run time)
+            lead_h = cfg["STORM_LEAD_HOURS"]
+            ahead = read_observed(ctx.base, ctx.now + timedelta(hours=lead_h), cfg, h_end=ctx.now_h + lead_h)
+            fc = perfect_forecast(ahead, ctx.now, cfg)
+    elif ctx.fetch or ctx.forecast_dir:
+        fc = build_forecast(fetch_forecast(ctx, state).raw, ctx.now, cfg)
+    else:
+        fc = build_forecast({}, ctx.now, cfg)
+        fc["status"] = {"forecast": "not fetched (--no-fetch)"}
+    T = evaluate_trigger(fc, ctx.now, cfg)
+    matches = trigger_match(ctx, state, T)
+    # updates that need no ground
+    for E in sorted([e for e in state["events"] if is_open(e)], key=lambda e: e["opened_utc"]):
+        if E["status"] == "watch":
+            update_watch(ctx, state, E, segs, T, E in matches, obs)
+        elif E["status"] == "storm":
+            update_storm(ctx, state, E, segs)
+        elif E["status"] == "post":
+            update_post(ctx, state, E, segs)
+    # new events: storms the forecast missed, then the forecast's
+    open_observed(ctx, state, segs, obs)
+    handle_trigger(ctx, state, fc, T, trigger_match(ctx, state, T), segs)
+    save_state(ctx, state)
+    # the ground file and the builds
+    need = needed_from(ctx, state)
+    gi = None
+    if need is None:
+        if ctx.mode == "live" and ctx.work.exists():
+            shutil.rmtree(str(ctx.work), ignore_errors=True)
+    elif ctx.mode == "dry":
+        ctx.ground_why = "ground steps are not run in --dry-run"
+    elif ground_override is not None:
+        gi = dict(ground_override)
+        if ctx.coverage_cap and gi.get("latest") and gi["latest"] > ctx.coverage_cap:
+            gi["latest"] = ctx.coverage_cap
+        state["ground_cache"] = {k: gi.get(k) for k in ("latest", "earliest", "has_hs")}
+    else:
+        gi = ground_info(ctx, state, need)
+    if gi is not None:
+        ctx.has_hs = bool(gi.get("has_hs"))
+        for E in sorted(state["events"], key=lambda e: e["opened_utc"]):
+            if is_open(E):
+                ground_steps(ctx, state, E, gi, obs, segs)
+            if E["pending"]:
+                pending_steps(ctx, state, E, gi, obs, segs)
+    sent = send_emails(ctx, state)
+    # the run line
+    T_text = ""
+    if T["triggered"]:
+        T_text = f"TRIGGER {','.join(T['rules'])} onset ~{T['onset_fc'][8:10]} {parse_iso(T['onset_fc']):%b %H}Z"
+    st = fc.get("status") or {}
+    fparts = ", ".join(f"{k} {v.split(' (')[0]}" + (f" ({v.split(' (', 1)[1]}" if k == "nws_alerts" and "(" in v
+                                                   else "") for k, v in st.items())
+    pk = T.get("peak")
+    wtext = (f"waves {pk['hs']:.1f} m {parse_iso(pk['time']):%a %d %b %H}Z from "
+             f"{pk['dir'] if pk['dir'] is not None else '?'} ({pk['source']})" if pk else "waves: no forecast")
+    nh = obs.newest
+    if nh is not None:
+        k = nh - obs.h0
+        otext = (f"observed Marconi {obs.val[k]:.1f} m {hour_dt(nh):%d %H}Z ({SRC_LABELS[int(obs.psrc[k])] or '?'})"
+                 + (" STALE" if ctx.now_h - nh > 12 else ""))
+        if ctx.now_h - nh > 12:
+            ctx.note(f"observed waves stale (newest {hour_iso(nh)[:13]}Z)")
+    else:
+        otext = "observed waves: none"
+        ctx.note("observed waves: no record in the last 60 days")
+    evtext = "; ".join(f"{eid} {next(e['status'] for e in state['events'] if e['id'] == eid).upper()} "
+                       + ", ".join(t.split(':')[0] for t in what) for eid, what in ctx.touched.items())
+    open_n = sum(1 for e in state["events"] if is_open(e))
+    if fc.get("blind"):
+        result = "blind"
+        state["blind_since"] = state.get("blind_since") or ctx.today
+    else:
+        result = "ok" if fc.get("waves") else "degraded"
+        state.pop("blind_since", None)
+    parts = [result, "forecast " + (fparts or "none"), wtext]
+    if T_text:
+        parts.append(T_text)
+    parts += [otext, f"events: {evtext or 'no change'} ({open_n} open)"]
+    if sent:
+        parts.append("email " + ", ".join(sent))
+    parts += ctx.notes + [n for n in T["notes"] if n.startswith("NOTE")]
+    parts += ctx.warnings
+    line = " | ".join(parts)
+    state["last_run"] = {"utc": iso_z(ctx.now), "result": result, "line": line[:2000]}
+    save_state(ctx, state)
+    if ctx.mode == "live" and ctx.fetch:
+        prune_forecasts(ctx)
+    if ctx.writes:
+        write_line(ctx.log_path, line, ctx.now)
+    if ctx.mode == "live":
+        if result == "blind":
+            stamp = (f"blind since {state['blind_since']}: no forecast source ({'; '.join(f'{k} {v}' for k, v in st.items())[:200]})")
+        elif result == "degraded":
+            stamp = f"degraded: no wave forecast ({iso_z(ctx.now)[:16].replace('T', ' ')}Z): {open_n} open event(s)"
+        else:
+            stamp = f"ok ({iso_z(ctx.now)[:16].replace('T', ' ')}Z): {open_n} open event(s)"
+        write_stamp(ctx.stamp_path, stamp)
+    ctx.state, ctx.fc, ctx.T, ctx.segs = state, fc, T, segs
+    return 0, line
+
+
+def write_line(path, line, now=None):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(f"[{iso_z(now or datetime.now(timezone.utc))}] {line}\n")
+
+
+def write_stamp(path, text):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(text.replace("WARNING", "warning").replace("ERROR", "error") + "\n")
+
+
+def prune_forecasts(ctx):
+    keep = ctx.cfg["STORM_FORECAST_KEEP_DAYS"]
+    if not ctx.forecasts_dir.exists():
+        return
+    lim = dadd(ctx.today, -keep)
+    for d in ctx.forecasts_dir.iterdir():
+        if d.is_dir() and re.match(r"^\d{4}-\d{2}-\d{2}$", d.name) and d.name < lim:
+            shutil.rmtree(str(d), ignore_errors=True)
+
+# --------------------------------------------------------------------------------------------
+# replay (a hindcast over a past range), climatology, status
+# --------------------------------------------------------------------------------------------
+
+BLIND_DATE = "2024-10-23"     # the blind check's date: never read, never replayed
+
+
+def live_run_time(d):
+    """07:50 on the NUC's clock (America/Chicago) on date d, in UTC (12:50Z in CDT, 13:50Z in CST)."""
+    import pandas as pd
+    t = pd.Timestamp(f"{d} 07:50").tz_localize("America/Chicago").tz_convert("UTC")
+    return t.to_pydatetime()
+
+
+def replay_refusal(base, start, end, out_dir, cron, cfg, lag):
+    """Why a replay may not run (or '')."""
+    base = Path(base).resolve()
+    out = Path(out_dir).resolve()
+    if end < start:
+        return f"END {end} is before START {start}"
+    for bad in (base / "archive/storm_watch", base / "archive/dems", base / "archive/dems_model"):
+        if out == bad.resolve() or bad.resolve() in out.parents:
+            return f"--out-dir {out} lies inside {bad}: a replay writes only to a folder of its own"
+    if out == base:
+        return f"--out-dir is the station folder itself ({base}): give a folder of its own"
+    if (out / "state.json").exists():
+        return f"{out}/state.json exists: a replay starts from an empty folder"
+    rs = Path(cron["GNSSR_START_FILE"])
+    try:
+        first = rs.read_text().split()[0]
+        date.fromisoformat(first)
+    except (OSError, IndexError, ValueError):
+        return f"no GNSS-R record start ({rs}): a replay runs only over the live record"
+    if start < first:
+        return f"START {start} is before the live GNSS-R record ({first}, {rs.name})"
+    lo = dadd(start, -(cfg["STORM_PRE_MAX_DAYS"] + 7))
+    hi = dadd(end, 7 + max(1, cfg["STORM_LEAD_HOURS"] // 24))
+    if lo <= BLIND_DATE <= hi:
+        return f"the range with its padding ({lo} to {hi}) contains {BLIND_DATE}, the blind check's date: refused"
+    return ""
+
+
+def replay(base, start, end, out_dir, cfg, cron, lag=2, runner=None, local_now=None, sleep=time.sleep,
+           mailer=None):
+    """Day by day from START to END at the live run time: the archived forecasts of that day when there are any,
+    else the observed waves as a perfect forecast; the observed waves cut at the run time; the ground file
+    capped at the day minus `lag`. Writes only under out_dir; emails are bodies only. -> exit code."""
+    why = replay_refusal(base, start, end, out_dir, cron, cfg, lag)
+    if why:
+        print(f"replay refused: {why}")
+        return 1
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    lockf = take_lock(out / ".lock", 0)
+    if lockf is None:
+        print(f"replay refused: another replay holds {out}/.lock")
+        return 1
+    try:
+        local_now = local_now or (lambda: datetime.now())
+        gsrc = out / "ground_replay.csv"
+        gi = None
+        gpath = Path(cron["GROUND"])
+        if gpath.exists():
+            hits = [h for h in station_jobs_due(cfg["STORM_LOCK_HOLD_S"], local_now()) if "waterline_timex_cron" in h]
+            if hits:
+                print(f"replay refused: a cron run is due ({', '.join(hits)} local); its lock is not taken now")
+                return 1
+            lk = take_lock(cron["LOCK"], cfg["STORM_LOCK_WAIT_S"], sleep=sleep)
+            if lk is None:
+                print("replay refused: the cron holds its lock")
+                return 1
+            try:
+                mh = float(cron["DEM_MAX_HS"]) if cron.get("DEM_MAX_HS") else None
+                gi = scan_ground(gpath, dadd(start, -(cfg["STORM_PRE_MAX_DAYS"] + 7)), dadd(end, 7), gsrc, mh)
+            finally:
+                release_lock(lk)
+        else:
+            print(f"NOTE: no ground file ({gpath}): events are followed, no DEM is built")
+        rows = []
+        for d in drange(start, end):
+            ctx = Ctx(base, live_run_time(d), cfg, cron, mode="replay", out_root=out, runner=runner, mailer=mailer,
+                      sleep=sleep, local_now=local_now, coverage_cap=dadd(d, -lag), ground_src=gsrc,
+                      log_path=out / "storm_watch.log", stamp_path=out / "last_run", email=False, fetch=False)
+            ctx.has_hs = bool(gi and gi.get("has_hs"))
+            run_once(ctx, ground_override=gi if gi is not None else {"latest": None, "counts": {}, "earliest": {}})
+            for eid, what in ctx.touched.items():
+                rows.append((d, eid, "; ".join(what)))
+        st = json.loads((out / "state.json").read_text()) if (out / "state.json").exists() else {"events": []}
+        summary = {"start": start, "end": end, "lag_days": lag, "hindcast": True,
+                   "events": [{k: E.get(k) for k in ("id", "kind", "status", "closed_reason", "storm_dates",
+                                                     "first_post", "history")} for E in st["events"]]}
+        for E, s in zip(st["events"], summary["events"]):
+            s["pre"] = (E["pre"] or {}).get("window"), (E["pre"] or {}).get("status")
+            s["post3"] = (E.get("post3") or {}).get("window")
+            s["post7"] = (E.get("post7") or {}).get("window")
+            s["change"] = {p: {k: c.get(k) for k in ("status", "cells_compared", "median_m", "lod_median_m",
+                                                      "erosion", "accretion", "why")}
+                           for p, c in (E.get("change") or {}).items()}
+        (out / "replay_summary.json").write_text(json.dumps(summary, indent=1))
+        print(f"REPLAY {start} to {end} (hindcast; ground capped at the day minus {lag}): {len(st['events'])} event(s)")
+        for d, eid, what in rows:
+            print(f"  {d}  {eid:24s} {what}")
+        for s in summary["events"]:
+            print(f"  {s['id']}: {s['status']} {s['closed_reason'] or ''}; storm {s['storm_dates']}; pre {s['pre']}; "
+                  f"post3 {s['post3']}; post7 {s['post7']}")
+            for p, c in s["change"].items():
+                if c.get("status") == "map":
+                    print(f"     change {p}: {c['cells_compared']} cells, median {c['median_m']:+.3f} m, LoD "
+                          f"{c['lod_median_m']} m, erosion {c['erosion']['volume_m3']:+.1f} m3, accretion "
+                          f"{c['accretion']['volume_m3']:+.1f} m3")
+                else:
+                    print(f"     change {p}: no map ({c.get('why')})")
+        print(f"wrote {out / 'replay_summary.json'}")
+        return 0
+    finally:
+        release_lock(lockf)
+
+
+def climatology_series(path):
+    """-> (DataFrame hs, tp, dir on an hourly UTC index, offshore currency, kind)."""
+    import pandas as pd
+    sys.path.insert(0, str(HERE))
+    import buoy_transfer
+    p = Path(path)
+    raw = p.read_bytes()
+    text = gzip.decompress(raw).decode("utf-8", "replace") if p.suffix == ".gz" else raw.decode("utf-8", "replace")
+    head = text.splitlines()[0] if text else ""
+    if "wh_4061" in head:
+        a = pd.read_csv(io.StringIO(text), parse_dates=["time"])
+        idx = pd.DatetimeIndex(a["time"]).tz_localize("UTC")
+        df = pd.DataFrame({"hs": a["wh_4061"].to_numpy() / 0.83, "tp": a["wp_peak"].to_numpy(),
+                           "dir": a["wvdir"].to_numpy(), "marconi": a["wh_4061"].to_numpy()}, index=idx)
+        return df.resample("1h").mean(), "adcp"
+    if "hs_best" in head:
+        a = pd.read_csv(io.StringIO(text))
+        idx = pd.to_datetime(a["epoch"], unit="s", utc=True)
+        df = pd.DataFrame({"hs": a["hs_best"].to_numpy() / 0.83, "tp": a.get("tp_s", np.nan),
+                           "dir": a.get("dir_deg", np.nan), "marconi": a["hs_best"].to_numpy()}, index=idx)
+        return df.resample("1h").mean(), "waves_marconi"
+    if "wvht_m" in head:
+        w = buoy_transfer.read_buoy_csv(io.StringIO(text))
+        return w, "buoy_csv"
+    return buoy_transfer.parse_ndbc(text), "ndbc"
+
+
+def clim_events(df, thr, cfg):
+    """Rule (a) events: hours >= thr from the sector (no direction: in it), >= MIN_HOURS in a row, events less
+    than 48 h apart merged. -> [(first hour, last hour, peak)]."""
+    df = df.asfreq("1h")
+    hs = df["hs"].to_numpy()
+    d = df["dir"].to_numpy()
+    sec = in_sector(d, cfg["STORM_DIR_SECTOR"]) | ~np.isfinite(d)
+    m = np.nan_to_num(hs, nan=-1) >= thr
+    runs = [r for r in true_runs(m & sec) if r[1] - r[0] + 1 >= cfg["STORM_MIN_HOURS"]]
+    ev = []
+    for a, b in runs:
+        if ev and a - ev[-1][1] < 48:
+            ev[-1] = (ev[-1][0], b)
+        else:
+            ev.append((a, b))
+    idx = df.index
+    return [(idx[a], idx[b], float(np.nanmax(hs[a:b + 1]))) for a, b in ev]
+
+
+def climatology(cfg, inputs=None, station="44008", years=None, opener=None):
+    """Counts rule-(a) events per year and month at 3.0 / 3.5 / 4.0 m and STORM_HS_M. -> (exit code, result)."""
+    import pandas as pd
+    parts = []
+    for p in inputs or []:
+        parts.append(climatology_series(p))
+    if not inputs:
+        y0, y1 = (int(x) for x in (years or "2010-2025").split("-"))
+        sys.path.insert(0, str(HERE))
+        import buoy_transfer
+        for yr in range(y0, y1 + 1):
+            url = buoy_transfer.HIST.format(st=station, yr=yr)
+            st, body, why = http_get(url, {"User-Agent": USER_AGENT}, 120, opener=opener)
+            if st != 200:
+                print(f"{url}: {why} (download it by hand and pass --input FILE)")
+                continue
+            parts.append((buoy_transfer.parse_ndbc(gzip.decompress(body).decode("utf-8", "replace")), "ndbc"))
+    if not parts:
+        print("no input")
+        return 1, None
+    df = pd.concat([p for p, _ in parts]).sort_index()
+    df = df[~df.index.duplicated()]
+    kind = parts[0][1]
+    thrs = sorted({3.0, 3.5, 4.0, cfg["STORM_HS_M"]})
+    res = {"kind": kind, "hours": int(df["hs"].notna().sum()), "first": str(df.index.min()), "last": str(df.index.max()),
+           "min_hours": cfg["STORM_MIN_HOURS"], "sector": cfg["STORM_DIR_SECTOR"], "thresholds": {}}
+    years_span = max(df["hs"].notna().sum() / (365.25 * 24), 1e-9)
+    print(f"CLIMATOLOGY of rule (a): offshore Hs >= threshold from {cfg['STORM_DIR_SECTOR'][0]:g}-"
+          f"{cfg['STORM_DIR_SECTOR'][1]:g} deg for >= {cfg['STORM_MIN_HOURS']} h, events < 48 h apart merged")
+    print(f"  input: {kind}, {res['hours']} hours, {res['first'][:10]} to {res['last'][:10]} "
+          f"({years_span:.2f} years of record)")
+    obs_segs = None
+    if kind == "adcp":
+        o = Obs(hour_of(df.index[0].to_pydatetime()), len(df.asfreq("1h")))
+        o.prim[:] = df.asfreq("1h")["marconi"].to_numpy()
+        o.psrc[:] = 1
+        c2 = dict(cfg)
+        obs_segs = [s for s in segments(o, c2) if opens(s, c2)]
+        res["opening_segments"] = [seg_text(s) for s in obs_segs]
+    for thr in thrs:
+        ev = clim_events(df, thr, cfg)
+        by_year, by_month = {}, {}
+        for a, b, pk in ev:
+            by_year[a.year] = by_year.get(a.year, 0) + 1
+            by_month[a.month] = by_month.get(a.month, 0) + 1
+        r = {"events": len(ev), "per_year": round(len(ev) / years_span, 1), "by_year": by_year, "by_month": by_month,
+             "list": [(str(a)[:16], str(b)[:16], round(pk, 2)) for a, b, pk in ev]}
+        if obs_segs is not None:
+            caught = []
+            for s in obs_segs:
+                s0, s1 = hour_dt(s["start"]), hour_dt(s["end"] if s["end"] is not None else s["last"])
+                if any(a.to_pydatetime() <= s1 and b.to_pydatetime() >= s0 for a, b, _ in ev):
+                    caught.append(seg_text(s))
+            r["catches"] = caught
+        res["thresholds"][str(thr)] = r
+        print(f"  {thr:.1f} m: {len(ev)} event(s), {r['per_year']} a year; by month "
+              + ", ".join(f"{m}:{n}" for m, n in sorted(by_month.items()))
+              + (f"; catches {len(r['catches'])} of the {len(obs_segs)} storms that open an event"
+                 if obs_segs is not None else ""))
+    return 0, res
+
+
+def print_status(ctx):
+    state, _ = load_state(ctx)
+    lr = state.get("last_run") or {}
+    print(f"storm watch state: {ctx.state_path}  (last run {lr.get('utc', 'never')}: {lr.get('result', '')})")
+    if not state["events"]:
+        print("  no events")
+    for E in state["events"]:
+        pre = E["pre"] or {}
+        print(f"  {E['id']}: {E['status'].upper()}" + (f" ({E['closed_reason']})" if E["closed_reason"] else "")
+              + (f", storm dates {E['storm_dates'][0]}..{E['storm_dates'][1]}" if E.get("storm_dates") else ""))
+        print(f"     pre {pre.get('window') or pre.get('planned')} {pre.get('status')}"
+              + (f" ({pre.get('why')})" if pre.get("why") else ""))
+        for part in ("post3", "post7"):
+            r = E.get(part)
+            if r:
+                print(f"     {part} {r.get('window')} {r.get('status')}" + (f" ({r.get('why')})" if r.get("why") else ""))
+        for p, c in (E.get("change") or {}).items():
+            print(f"     change {p}: " + (f"{c.get('cells_compared')} cells, median {c.get('median_m')} m"
+                                         if c.get("status") == "map" else f"no map ({c.get('why')})"))
+        if is_open(E):
+            w = ("the storm's end" if E["status"] == "storm" else
+                 "the forecast storm (or its false-alarm window)" if E["status"] == "watch" else
+                 "the ground file to cover the post dates")
+            print(f"     waiting for: {w}")
+        if E["history"]:
+            print(f"     last: {E['history'][-1]}")
+    return 0
+
+
+# --------------------------------------------------------------------------------------------
+# command line
+# --------------------------------------------------------------------------------------------
+
+
+def parse_now(text):
+    d = parse_iso(text)
+    if d is None or not re.search(r"(Z|[+-]\d\d:?\d\d)$", text.strip()):
+        raise ValueError(f"--now {text!r}: give a time with Z or an offset (the NUC's clock is Central)")
+    return d
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--base", default=str(HERE), help="the station folder (default: this script's)")
+    ap.add_argument("--dry-run", action="store_true", help="fetch and evaluate; write and send nothing")
+    ap.add_argument("--no-fetch", action="store_true", help="no network: the forecast is unavailable")
+    ap.add_argument("--forecast-dir", help="with --dry-run: evaluate saved responses instead of fetching")
+    ap.add_argument("--now", help="with --dry-run: evaluate as of this time (ISO with Z or an offset)")
+    ap.add_argument("--save-raw", help="also write each response, plain, into this folder (for fixtures)")
+    ap.add_argument("--no-email", action="store_true", help="write the email bodies, send nothing")
+    ap.add_argument("--status", action="store_true", help="print the events and what each waits for")
+    ap.add_argument("--settings", help="station settings file (default <base>/storm_watch_settings.conf)")
+    ap.add_argument("--replay", nargs=2, metavar=("START", "END"), help="a past range of UTC dates, day by day")
+    ap.add_argument("--out-dir", help="with --replay: a folder of its own")
+    ap.add_argument("--replay-lag-days", type=int, default=2, help="with --replay: the ground file lag (default 2)")
+    ap.add_argument("--climatology", action="store_true", help="count rule-(a) events per year from a wave record")
+    ap.add_argument("--station", default="44008")
+    ap.add_argument("--years", default="2010-2025")
+    ap.add_argument("--input", action="append", help="with --climatology: NDBC stdmet (.txt/.gz), a "
+                                                       "fetch_buoy_waves CSV, the ADCP CSV or waves_marconi.csv")
+    args = ap.parse_args(argv)
+    base = Path(args.base).resolve()
+    cron, cron_notes = cron_settings(base)
+    spath = Path(args.settings) if args.settings else base / "storm_watch_settings.conf"
+    if args.settings and not spath.exists():
+        print(f"--settings {spath}: no such file")
+        return 1
+    cfg, set_notes = load_settings(spath, cron)
+    if args.no_email:
+        cfg["STORM_EMAIL"] = 0
+    if args.climatology:
+        rc, _ = climatology(cfg, args.input, args.station, args.years)
+        return rc
+    if args.replay:
+        if not args.out_dir:
+            print("--replay needs --out-dir (a folder of its own)")
+            return 1
+        try:
+            a, b = (date.fromisoformat(x).isoformat() for x in args.replay)
+        except ValueError:
+            print("--replay START END: UTC dates YYYY-MM-DD")
+            return 1
+        return replay(base, a, b, args.out_dir, cfg, cron, lag=args.replay_lag_days)
+    if (args.now or args.forecast_dir) and not args.dry_run:
+        print("--now and --forecast-dir go with --dry-run (a live run uses the live forecast)")
+        return 1
+    try:
+        now = parse_now(args.now) if args.now else datetime.now(timezone.utc)
+    except ValueError as exc:
+        print(exc)
+        return 1
+    mode = "dry" if args.dry_run else "live"
+    ctx = Ctx(base, now, cfg, cron, mode=mode, forecast_dir=args.forecast_dir, save_raw=args.save_raw,
+              email=not args.no_email, fetch=not args.no_fetch)
+    if args.status:
+        return print_status(ctx)
+    for n in cron_notes + set_notes:
+        ctx.note(n)
+    lockf = None
+    if mode == "live":
+        lockf = take_lock(base / "logs/storm_watch.lock", 0)
+        if lockf is None:
+            write_line(ctx.log_path, "SKIPPED: another storm watch run holds logs/storm_watch.lock", ctx.now)
+            print("SKIPPED: another storm watch run holds logs/storm_watch.lock")
+            return 0
+    try:
+        rc, line = run_once(ctx)
+        print(line)
+        if mode == "dry":
+            print_dry(ctx)
+        return rc
+    except SettingsError as exc:
+        print(f"ERROR: {exc}")
+        if mode == "live":
+            write_line(ctx.log_path, f"ERROR: {exc}", ctx.now)
+            write_stamp(ctx.stamp_path, f"error in: settings ({iso_z(ctx.now)[:16]}Z): {exc}")
+        return 1
+    except Exception as exc:
+        traceback.print_exc(file=sys.stdout)
+        if mode == "live":
+            write_line(ctx.log_path, f"ERROR: unexpected {type(exc).__name__}: {str(exc)[:200]} "
+                                     "(traceback in logs/storm_watch_detail.log)", ctx.now)
+            write_stamp(ctx.stamp_path, f"error in: run ({iso_z(ctx.now)[:16]}Z): {type(exc).__name__}")
+        return 2
+    finally:
+        release_lock(lockf)
+
+
+def print_dry(ctx):
+    T = ctx.T
+    print("\nDRY RUN: nothing written, nothing sent.")
+    print(f"forecast sources: {json.dumps(ctx.fc.get('status'), indent=None)}")
+    print(f"trigger: {'YES ' + ','.join(T['rules']) if T['triggered'] else 'no'}"
+          + (f"; onset ~{T['onset_fc']}, end ~{T['end_fc']}" if T["triggered"] else ""))
+    for b in T["by"]:
+        print(f"  {b}")
+    for n in T["notes"]:
+        print(f"  {n}")
+    print(f"observed storm segments (last 60 days): {len(ctx.segs)}")
+    for s in ctx.segs[-5:]:
+        print(f"  {seg_text(s)}")
+    for E in ctx.state["events"]:
+        print(f"event {E['id']}: {E['status']}" + (f" ({E['closed_reason']})" if E["closed_reason"] else ""))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,42 @@
+{
+  "_fixture_note": "SYNTHETIC, written from documentation; not a real response. Values invented (NE gale day 2-3).",
+  "id": "https://api.weather.gov/gridpoints/BOX/101,101",
+  "type": "Feature",
+  "geometry": null,
+  "properties": {
+    "@id": "https://api.weather.gov/gridpoints/BOX/101,101",
+    "updateTime": "2026-11-16T10:21:43+00:00",
+    "validTimes": "2026-11-16T04:00:00+00:00/P7DT21H",
+    "elevation": {"unitCode": "wmoUnit:m", "value": 3.0},
+    "forecastOffice": "https://api.weather.gov/offices/BOX",
+    "gridId": "BOX",
+    "gridX": "101",
+    "gridY": "101",
+    "windDirection": {"uom": "wmoUnit:degree_(angle)", "values": [
+      {"validTime": "2026-11-16T12:00:00+00:00/PT6H", "value": 230},
+      {"validTime": "2026-11-16T18:00:00+00:00/P1D", "value": 20},
+      {"validTime": "2026-11-17T18:00:00+00:00/PT12H", "value": 40},
+      {"validTime": "2026-11-18T06:00:00+00:00/P1DT12H", "value": 50}]},
+    "windSpeed": {"uom": "wmoUnit:km_h-1", "values": [
+      {"validTime": "2026-11-16T12:00:00+00:00/PT6H", "value": 18.5},
+      {"validTime": "2026-11-16T18:00:00+00:00/P1D", "value": 33.3},
+      {"validTime": "2026-11-17T18:00:00+00:00/PT12H", "value": 55.6},
+      {"validTime": "2026-11-18T06:00:00+00:00/P1DT12H", "value": 46.3}]},
+    "windGust": {"uom": "wmoUnit:km_h-1", "values": [
+      {"validTime": "2026-11-16T12:00:00+00:00/PT6H", "value": 27.8},
+      {"validTime": "2026-11-16T18:00:00+00:00/P1D", "value": 48.2},
+      {"validTime": "2026-11-17T18:00:00+00:00/PT12H", "value": 79.6},
+      {"validTime": "2026-11-18T06:00:00+00:00/P1DT12H", "value": 66.7}]},
+    "waveHeight": {"uom": "wmoUnit:m", "values": [
+      {"validTime": "2026-11-16T12:00:00+00:00/PT12H", "value": 1.2},
+      {"validTime": "2026-11-17T00:00:00+00:00/P1D", "value": 2.4},
+      {"validTime": "2026-11-18T00:00:00+00:00/P1D", "value": 4.6},
+      {"validTime": "2026-11-19T00:00:00+00:00/P1D", "value": null}]},
+    "wavePeriod": {"uom": "nwsUnit:s", "values": [
+      {"validTime": "2026-11-16T12:00:00+00:00/P1DT12H", "value": 7},
+      {"validTime": "2026-11-18T00:00:00+00:00/P1D", "value": 10}]},
+    "waveDirection": {"uom": "wmoUnit:degree_(angle)", "values": []},
+    "primarySwellHeight": {"uom": "wmoUnit:m", "values": []},
+    "primarySwellDirection": {"uom": "wmoUnit:degree_(angle)", "values": []}
+  }
+}

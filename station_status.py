@@ -23,6 +23,9 @@ CHECKS (OK / WARN / ALERT):
   last cron run     WARNING/ERROR lines logged     WARN on WARNING, ALERT on ERROR
   c2 lens           median sharpness of the day's  WARN < 10 on the newest day,
                     daylight frames (owg_live.py)  ALERT < 10 on the newest 3 days
+  storm watch       logs/storm_watch_last_run      WARN > 36 h old, blind 3+ days or an
+                    (storm_watch.py; only when      error; ALERT > 96 h old (its crontab
+                    it is installed)                line gone?)
 
 LENS. Spray, rain or salt on the camera window leaves frames bright and
 featureless: on 20-24 Oct 2026 the median daylight sharpness of c2 was
@@ -146,6 +149,43 @@ def lens_check(owg_csv, now=None):
     return "OK", detail
 
 
+STORM_WATCH_WARN_H = 36      # a daily job: a missed day and a half
+STORM_WATCH_ALERT_H = 96     # four days: its crontab line is probably gone
+STORM_WATCH_BLIND_DAYS = 3   # no forecast source for this many days running: the NUC cannot reach them?
+
+
+def storm_watch_check(stamp_path, now=None):
+    """(status, detail) of the storm watch from its stamp (logs/storm_watch_last_run, written by storm_watch.py),
+    or None without the stamp (the storm watch is not installed). The age is the file's. 'blind since <date>'
+    (no forecast source answered) is a WARN only from STORM_WATCH_BLIND_DAYS days on, so a station that cannot
+    reach the forecast hosts does not sit at WARN hiding real ones; 'error ...' is a WARN. The detail never holds
+    the words the cron log counts (its WARN rows are copied into logs/timex_cron.log)."""
+    p = Path(stamp_path)
+    if not p.exists():
+        return None
+    now = now if now is not None else datetime.now(timezone.utc).timestamp()
+    h = (now - p.stat().st_mtime) / 3600.0
+    text = p.read_text(errors="replace").strip().splitlines()[0] if p.stat().st_size else ""
+    text = text.replace("WARNING", "warning").replace("ERROR", "error")[:200]
+    age = fmt_age(h)
+    if h > STORM_WATCH_ALERT_H:
+        return "ALERT", f"last ran {age}: is its crontab line there? (storm_watch.sh --install-cron)"
+    if h > STORM_WATCH_WARN_H:
+        return "WARN", f"last ran {age} (daily at 07:50): {text}"
+    if text.startswith("blind since "):
+        try:
+            since = datetime.strptime(text[12:22], "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+            days = (now - since) / 86400.0
+        except ValueError:
+            days = STORM_WATCH_BLIND_DAYS
+        if days >= STORM_WATCH_BLIND_DAYS:
+            return "WARN", f"no forecast source for {int(days)} days: {text}"
+        return "OK", f"last ran {age}: {text}"
+    if text.startswith("error"):
+        return "WARN", f"last ran {age}: {text} (logs/storm_watch_detail.log)"
+    return "OK", f"last ran {age}: {text}"
+
+
 def fmt_age(h):
     return "missing" if h is None else (f"{h:.0f} h ago" if h < 48 else f"{h / 24:.1f} days ago")
 
@@ -235,6 +275,10 @@ def main():
     lens = lens_check(base / args.owg_csv)
     if lens:
         add("c2 lens", *lens)
+
+    sw = storm_watch_check(base / "logs/storm_watch_last_run")
+    if sw:
+        add("storm watch", *sw)
 
     worst = max((LEVELS[s] for _, s, _ in rows), default=0)
     overall = [k for k, v in LEVELS.items() if v == worst][0]

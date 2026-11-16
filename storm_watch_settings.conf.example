@@ -1,0 +1,173 @@
+# storm_watch_settings.conf.example -- the storm watch's station settings (storm_watch.py)
+#
+# Copy to storm_watch_settings.conf (untracked: .gitignore lists it, so 'git pull' is never blocked by
+# a local edit) and uncomment what you change. KEY=VALUE, one per line; '#' starts a comment. An unknown
+# key or a bad value is ignored with a note in logs/storm_watch.log (the default is used).
+#
+# Wave heights: OFFSHORE = deep water (44008, the forecasts); MARCONI = hs_best of
+# archive/waves_marconi.csv, the ADCP-equivalent at 21 m that the cron's DEM_MAX_HS uses
+# (offshore x 0.83 for onshore directions, docs/VALIDATION.md 4.5). The DEM options are NOT here:
+# every storm DEM is built with the cron's own (waterline_timex_cron.sh DEM_* lines, read at run time).
+# Thresholds and their basis: docs/VALIDATION.md 2.10 and 4.9.
+
+# lead time of the trigger (GEFS-Wave skill holds to ~day 4)
+#STORM_LEAD_HOURS=96
+
+# offshore Hs, rule (a): ~Marconi p99 / 0.83; 44008 read 3.8-3.9 m on 23 Sep 2026
+#STORM_HS_M=3.5
+
+# hours at or above, rule (a)/(c)/(d): one 3-hourly step (6 h caught 1 of 5 ADCP storms)
+#STORM_MIN_HOURS=3
+
+# offshore Hs with a support alert, rule (c)
+#STORM_HS_SUPPORT_M=3.0
+
+# offshore Hs of long-period swell, rule (d)
+#STORM_SWELL_HS_M=3.0
+
+# peak period of rule (d)
+#STORM_SWELL_TP_S=12
+
+# mean period of rule (d) where a source gives only a mean period (Tm ~0.8 Tp)
+#STORM_SWELL_TM_S=10
+
+# wave direction FROM, deg true; Marconi faces ~80 deg
+#STORM_DIR_SECTOR=0-160
+
+# wind direction FROM, rule (e)
+#STORM_WIND_DIR_SECTOR=0-135
+
+# sustained wind, rule (e): gale, 34 kt
+#STORM_WIND_MS=17
+
+# sustained wind with gusts, rule (e)
+#STORM_WIND_MIN_MS=12
+
+# gusts, rule (e): the Sep 2026 forecast had 50-60 mph gusts
+#STORM_WIND_GUST_MS=20
+
+# hours of rule (e)
+#STORM_WIND_MIN_HOURS=6
+
+# offshore Hs that marks the forecast onset (~1.5 / 0.83)
+#STORM_ONSET_HS_M=1.8
+
+# Marconi Hs that confirms a forecast storm (ADCP winter p98)
+#STORM_CONFIRM_HS=2.5
+
+# raw 44008 Hs in the sector for 2 h that confirms
+#STORM_CONFIRM_BUOY_HS=3.0
+
+# Marconi peak that opens a storm the forecast missed (with 2 h >= confirm)
+#STORM_OBS_OPEN_HS=3.0
+
+# raw 44008 Hs in the sector for 2 h that opens one
+#STORM_OBS_OPEN_BUOY_HS=3.5
+
+# how far back a missed storm is still opened
+#STORM_OBS_LOOKBACK_DAYS=14
+
+# Marconi peak of a wave event that cuts a post window (survey_products EVENT_HS_M)
+#STORM_BREAK_HS=2.0
+
+# rough hours of a wave event that cuts a post window
+#STORM_BREAK_HOURS=24
+
+# Marconi calm level; empty = the cron's DEM_MAX_HS (1.5)
+#STORM_CALM_HS=""
+
+# calm hours that end a storm
+#STORM_END_CALM_HOURS=24
+
+# hours of the calm run that must have a value
+#STORM_END_MIN_PRESENT=20
+
+# pre window dates; empty = the cron's DEM_WINDOW_DAYS (7)
+#STORM_PRE_DAYS=""
+
+# how far back a thin pre window is extended
+#STORM_PRE_MAX_DAYS=14
+
+# usable dates of the first post DEM
+#STORM_POST1_USABLE=3
+
+# post window dates; empty = the cron's DEM_WINDOW_DAYS (7)
+#STORM_POST_DAYS=""
+
+# how far a thin post window is extended
+#STORM_POST_MAX_DAYS=14
+
+# usable dates a DEM needs (the day test needs 3)
+#STORM_MIN_USABLE_DAYS=3
+
+# frames passing --max-hs that make a camera's date usable
+#STORM_MIN_FRAMES_PER_DAY=4
+
+# observed wave hours each date of a window needs before it is built
+#STORM_MIN_WAVE_HOURS=20
+
+# offshore to Marconi, onshore directions (VALIDATION 4.5)
+#STORM_OFFSHORE_TO_MARCONI=0.83
+
+# offshore to Marconi outside the sector (buoy_transfer.py)
+#STORM_SHELTERED_FACTOR=0.5
+
+# NWS zones: coastal waters off Marconi, Barnstable
+#STORM_ALERT_ZONES=ANZ254,MAZ022
+
+# alerts that trigger on their own
+#STORM_ALERT_STRONG=SU.W,CF.W,SS.W,SR.W,HF.W,HU.W,TR.W
+
+# alerts that trigger with Hs >= STORM_HS_SUPPORT_M
+#STORM_ALERT_SUPPORT=SU.Y,CF.Y,CF.A,GL.W,SR.A,HF.A,SE.W,HW.W,TR.A,HU.A,SS.A
+
+# strong alerts that count only as support when a wave forecast exists (e.g. CF.W,SS.W: MAZ022 also covers the bay shore)
+#STORM_ALERT_WAVE_GATED=""
+
+# forecast sources (drop om_* to stop using Open-Meteo)
+#STORM_SOURCES=om_marine,gfswave,nws,om_wind
+
+# NWS /points and Open-Meteo wind
+#STORM_POINT=41.89,-69.96
+
+# offshore Marconi, Open-Meteo marine
+#STORM_MARINE_POINT=41.90,-69.80
+
+# 44008, Open-Meteo marine
+#STORM_BUOY_POINT=40.50,-69.25
+
+# an Open-Meteo cell west of this is in Cape Cod Bay or behind the shore
+#STORM_MIN_CELL_LON=-69.93
+
+# added to the User-Agent of api.weather.gov requests only; empty by default
+#NWS_CONTACT=""
+
+# 0: email bodies are written to the event folder, nothing is sent
+#STORM_EMAIL=1
+
+# space-separated; empty = owg.sh's RECIPIENTS
+#STORM_EMAIL_TO=""
+
+# per request
+#STORM_HTTP_TIMEOUT_S=45
+
+# all requests of a run
+#STORM_FETCH_DEADLINE_S=300
+
+# wait for the cron's lock
+#STORM_LOCK_WAIT_S=1800
+
+# the cron's lock is not taken when a cron run starts within this
+#STORM_LOCK_HOLD_S=900
+
+# wait for owg.sh's lock
+#STORM_OWG_LOCK_WAIT_S=600
+
+# a date the ground file never covers: give up after this
+#STORM_MAX_WAIT_DAYS=21
+
+# fetch 44008 when its archive is older
+#STORM_BUOY_STALE_H=6
+
+# days of archived forecasts kept
+#STORM_FORECAST_KEEP_DAYS=730
