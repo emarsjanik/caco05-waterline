@@ -102,6 +102,10 @@ WHAT IT SHOWS, AND WHY EACH CHOICE
     frames per camera, the cells filled, blanked and without a value,
     and the frames the build's filters left out. Facts are wrapped
     between, never inside, to the page width; so is the legend.
+  * Another station: the heading names STATION_NAME (environment; a
+    new station's waterline_station.conf exports it, station_env.py),
+    and a build whose <stem>_info.json carries station_provisional
+    (STATION_PROVISIONAL) gets a 'PROVISIONAL: ...' line under it.
 
 WHERE THE FACTS COME FROM. Dates, frames and filters are not in the
 grids: dem_from_contours.py writes them to <stem>_info.json. Without
@@ -127,8 +131,11 @@ from pathlib import Path
 
 import numpy as np
 
+import station_env                          # a new station's settings (waterline_station.conf); CACO-05's by default
+
 HERE = Path(__file__).resolve().parent
-STATION = "CACO05 Marconi Beach"
+# the heading's station: STATION_NAME, which a new station's waterline_station.conf exports; CACO-05's otherwise
+STATION = station_env.station_name("CACO05 Marconi Beach")
 CAMERAS = ("c1", "c2")
 IO_FILE = "CACO05_{cam}_20240801_IO.yaml"
 EO_FILE = "CACO05_{cam}_20251113_EO-CV.yaml"
@@ -883,6 +890,13 @@ def wrap_facts(facts, max_px, width_px, sep="  ·  "):
     return lines
 
 
+def provisional_lines(info, max_px, width_px):
+    """A new station's 'PROVISIONAL: ...' (its <stem>_info.json station_provisional, from STATION_PROVISIONAL),
+    word-wrapped to the page width for the heading; [] without one (CACO-05: the page as before)."""
+    text = ((info or {}).get("station_provisional") or "").strip()
+    return wrap_words("PROVISIONAL: " + text, max_px, width_px) if text else []
+
+
 def wrap_words(text, max_px, width_px):
     """Greedy word wrap to a measured width (px), not a character count."""
     lines, cur = [], ""
@@ -992,6 +1006,8 @@ def draw_message_page(stem, output, info, station, message, detail, cells=None, 
     with plt.rc_context(PAGE_RC):
         fact_lines = wrap_facts(facts, max_px, lambda t: width_px(t, 11))
         out_lines = wrap_facts(left_out, max_px, lambda t: width_px(t, 10)) if left_out else []
+        n_left_out = len(out_lines)                 # then a new station's PROVISIONAL line(s), in ink
+        out_lines += provisional_lines(info, max_px, lambda t: width_px(t, 10))
         msg_lines = wrap_words(message, max_px, lambda t: width_px(t, 14, "bold"))
         det_paras = [wrap_words(t, max_px, lambda x: width_px(x, 10.5)) for t in detail]
         y = [0.42]
@@ -1006,7 +1022,8 @@ def draw_message_page(stem, output, info, station, message, detail, cells=None, 
         for i, t in enumerate(fact_lines):
             fig.text(left / W, 1 - y[1 + i] / H, t, fontsize=11, color=INK2)
         for i, t in enumerate(out_lines):
-            fig.text(left / W, 1 - y[1 + len(fact_lines) + i] / H, t, fontsize=10, color=MUTED)
+            fig.text(left / W, 1 - y[1 + len(fact_lines) + i] / H, t, fontsize=10,
+                     color=MUTED if i < n_left_out else INK)
         fig.add_artist(plt.Line2D([left / W, (W - 0.35) / W], [1 - (y_msg - 0.42) / H] * 2,
                                   color=AXIS, lw=0.8))
         yy = y_msg
@@ -1126,6 +1143,8 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     max_px = (W - left - 0.35) * dpi
     fact_lines = wrap_facts(facts, max_px, lambda t: width_px(t, 11))
     out_lines = wrap_facts(left_out, max_px, lambda t: width_px(t, 10)) if left_out else []
+    n_left_out = len(out_lines)                     # then a new station's PROVISIONAL line(s), in ink
+    out_lines += provisional_lines(info, max_px, lambda t: width_px(t, 10))
     y_text = [0.42]
     for _ in fact_lines:
         y_text.append(y_text[-1] + (0.30 if len(y_text) == 1 else 0.23))
@@ -1287,7 +1306,8 @@ def _draw_page(stem, output, info, calibration, profiles, n_profiles, station, m
     for i, t in enumerate(fact_lines):
         fig.text(left / W, 1 - y_text[1 + i] / H, t, fontsize=11, color=INK2)
     for i, t in enumerate(out_lines):
-        fig.text(left / W, 1 - y_text[1 + len(fact_lines) + i] / H, t, fontsize=10, color=MUTED)
+        fig.text(left / W, 1 - y_text[1 + len(fact_lines) + i] / H, t, fontsize=10,
+                 color=MUTED if i < n_left_out else INK)
 
     # colour scales
     zmin, zmax = np.percentile(dem[filled], [1, 99]) if filled.any() else (0.0, 1.0)

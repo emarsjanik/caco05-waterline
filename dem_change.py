@@ -121,6 +121,8 @@ from datetime import date, timedelta
 
 import numpy as np
 
+import station_env                          # a new station's settings (waterline_station.conf); CACO-05's by default
+
 SERIES_RE = re.compile(r"^dem_(\d{4}-\d{2}-\d{2})_(\d+)d_dem\.asc$")
 NOT_COMPARED = "#c9c8c3"        # panel face: cells not compared
 NOT_SIGNIFICANT = "#ebeae6"     # compared, |change| within the level of detection
@@ -303,7 +305,9 @@ def compare(stem_a, stem_b, min_lod, out_dir=None, plot=True, min_count=5,
                                aspect="equal", interpolation="nearest")
                 ax.set_title(f"{name_b} minus {name_a}: {n_both} cells compared\n{title}",
                              fontsize=10)
-                ax.set_xlabel("easting (m, UTM 19N)"); ax.set_ylabel("northing (m, UTM 19N)")
+                # the grids' frame (GEOTIFF_EPSG, a new station's; CACO-05: 6348, UTM 19N)
+                frame = station_env.frame_label(short=True)
+                ax.set_xlabel(f"easting (m, {frame})"); ax.set_ylabel(f"northing (m, {frame})")
                 ax.ticklabel_format(useOffset=False, style="plain")
                 # 6-digit eastings ran into each other under the narrow panels
                 from matplotlib.ticker import MaxNLocator

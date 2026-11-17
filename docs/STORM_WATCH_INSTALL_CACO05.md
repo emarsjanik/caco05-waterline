@@ -11,6 +11,13 @@ intertidal beach (between the low and high waterlines); the dune and bluff are n
 
 Type each command on its own, one block at a time, and compare with what the text says to expect.
 
+## Not on CACO-05?
+
+This page is for CACO-05 only. A NUC set up by coastcam-station-setup gets the storm watch from setup
+(its own facts in `storm_watch_station.conf`, alerts mode until its beach maps exist, its crontab line
+from `./setup.sh --only 10`): see `docs/STORM_WATCH_ALERTS_MODE.md`. On CACO-05 none of that applies: it
+has no `storm_watch_station.conf`, `STORM_MODE` is `full`, and every step below works as written.
+
 ---
 
 ## 1. Go to the station folder

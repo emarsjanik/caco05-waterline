@@ -1096,11 +1096,11 @@ def test_cron():
         script = (f'log() {{ echo "LOG $*"; }}\nBASE={d}\nLOG={d}/log.txt\nMODEL_WORK={d}/work\n'
                   f'DEM_SERIES_MODEL={d}/dems_model\nGNSSR_SPLINE=/g/spline.txt\nARCHIVE_CSV=/a/csv\n'
                   f'waves_arg="--waves /a/w.csv"\nmodel_setup_arg="--setup-coef 0.037"\nqc_arg="--gnssr-qc-reference /a/g.csv"\n'
-                  f'TIMING_MODE=legacy\nCONSISTENCY_ENABLE=1\nCAL=/cal\n'
+                  'TIMING_MODE=legacy\nCONSISTENCY_ENABLE=1\nCAL=/cal\n'
                   # the cron's calibration names (its CAL_* defaults: CACO-05's, no station file)
                   'CAL_IO_C1=CACO05_c1_20240801_IO.yaml\nCAL_EO_C1=CACO05_c1_20251113_EO-CV.yaml\n'
                   'CAL_IO_C2=CACO05_c2_20240801_IO.yaml\nCAL_EO_C2=CACO05_c2_20251113_EO-CV.yaml\n'
-                  f'hs_arg="--max-hs 1.5"\nDEM_WINDOW_DAYS=7\n'
+                  'hs_arg="--max-hs 1.5"\nDEM_WINDOW_DAYS=7\n'
                   f'DEM_DAY_BLOCK_LOD=""\nDEM_CELL=2.0\nDEM_MIN_POINTS=3\nDEM_MAX_SPREAD=0.5\n{fn}build_model_series\n')
         env = dict(os.environ, PATH=f"{bindir}:{os.environ.get('PATH', '')}", CALLS=str(calls))
         r = subprocess.run(["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

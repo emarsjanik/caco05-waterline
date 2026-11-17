@@ -102,6 +102,13 @@ out. Exit status: 0 built (page drawn; a short one if too few cells),
 written but the page could not be drawn (no PNG), 1 any other failure
 (no PNG). The email attaches the PNG by name, so a stale one would pass
 for current.
+
+ANOTHER STATION (station_env.py; a new station's waterline_station.conf
+exports these, CACO-05 sets none): STATION_TZ gives the local days,
+STATION_PROVISIONAL (what is provisional about the station's products) is
+kept in <stem>_info.json (station_provisional) and printed on the page, and
+--fit-setup's "C in use" is waterline_station.conf's SETUP_COEF when that
+file sets one (the cron sources it after its own lines).
 """
 
 import sys
@@ -113,6 +120,7 @@ from pathlib import Path
 import numpy as np
 
 from setup_model import wave_scale          # sqrt(Hs*L0): the setup formula, once
+import station_env                           # a new station's settings (waterline_station.conf); CACO-05's by default
 
 
 def carries_setup(text):
@@ -241,7 +249,8 @@ def wave_currency_record(frames_used, wave_source_of, setup_share):
            "all_fitted_currency": set(tags) == {WAVE_CURRENCY_FITTED}}
     lines = ["Wave currency     : " + ", ".join(f"{t} {n} frame(s)" for t, n in sorted(tags.items()))
              + f" (C was fitted in {WAVE_CURRENCY_FITTED})"]
-    raw = sum(n for t, n in tags.items() if t.startswith("buoy:"))
+    # (a station whose C was fitted on its raw buoy, STATION_WAVE_CURRENCY buoy:...: those frames are its currency)
+    raw = sum(n for t, n in tags.items() if t.startswith("buoy:") and t != WAVE_CURRENCY_FITTED)
     if raw and setup_share > 0:
         lines.append(f"WARNING: {raw} frame(s) were tagged with the raw buoy waves, not the currency the "
                      f"setup coefficient was fitted in ({WAVE_CURRENCY_FITTED}): their setup, and the "
@@ -399,9 +408,14 @@ def load_frame_info(path):
     return info
 
 
+# The station's local time zone (local days): STATION_TZ, a new station's waterline_station.conf
+# exports it; station_env.py checks the name (zoneinfo, else pytz or dateutil). CACO-05: America/New_York.
+LOCAL_TZ = station_env.station_tz()
+
+
 def local_day(epoch):
     import pandas as pd
-    return pd.Timestamp(int(epoch), unit="s", tz="UTC").tz_convert("America/New_York").strftime("%Y-%m-%d")
+    return pd.Timestamp(int(epoch), unit="s", tz="UTC").tz_convert(LOCAL_TZ).strftime("%Y-%m-%d")
 
 
 def frame_pairs(E, N, frames, cell):
@@ -446,6 +460,9 @@ def median_spread_by_cell(groups, vals, min_frames):
 FIT_SETUP_NEAR_M = 0.005
 FIT_SETUP_FLAT_WIDTH = 0.02
 STATION_CRON = Path(__file__).resolve().parent / "waterline_timex_cron.sh"
+# a new station's settings beside the cron (coastcam-station-setup writes it; CACO-05 has none): the
+# cron sources it after its own lines, so its SETUP_COEF is the one the cron uses
+STATION_FILE_NAME = "waterline_station.conf"
 
 
 def carried_setup_coef(info):
@@ -458,17 +475,37 @@ def carried_setup_coef(info):
     return round(float(np.median(cs)), 4) if cs else None
 
 
-def station_setup_coef(path=STATION_CRON):
-    """SETUP_COEF of the station cron beside this script ('' = no setup = 0); None if unreadable."""
+def station_setup_coef(path=STATION_CRON, source=False):
+    """SETUP_COEF of the station cron beside this script ('' = no setup = 0); None if unreadable.
+    Then, as the cron does, waterline_station.conf beside the cron (a new station's; CACO-05 has none):
+    its SETUP_COEF, when it sets one, is the one in use (the last such line, as the shell takes it; a
+    value that does not read as a number -> None, never the cron's). source=True: (value, the file it
+    came from)."""
     import re
+    pattern = r'\s*SETUP_COEF=["\']?([0-9.]*)["\']?\s*(#.*)?$'
+    value, where = None, Path(path).name
     try:
         for line in Path(path).read_text().splitlines():
-            m = re.match(r'\s*SETUP_COEF=["\']?([0-9.]*)["\']?\s*(#.*)?$', line)
+            m = re.match(pattern, line)
             if m:
-                return float(m.group(1)) if m.group(1) else 0.0
+                value = float(m.group(1)) if m.group(1) else 0.0
+                break
     except (OSError, ValueError):
         pass
-    return None
+    station = Path(path).with_name(STATION_FILE_NAME)
+    if station.is_file():
+        try:
+            lines = [ln for ln in station.read_text().splitlines() if re.match(r"\s*SETUP_COEF=", ln)]
+        except OSError:
+            lines, value = [], None                      # there but unreadable: not the cron's value
+        if lines:
+            m = re.match(pattern, lines[-1])
+            try:
+                value = (float(m.group(1)) if m.group(1) else 0.0) if m else None
+            except ValueError:
+                value = None
+            where = STATION_FILE_NAME
+    return (value, where) if source else value
 
 
 def setup_fit_verdict(valid, spread_at, c_use, use_from=""):
@@ -2433,6 +2470,10 @@ def main():
     if not args.no_plot and page.exists():
         page.unlink()
 
+    # A new station's products are provisional until its own ground truth (STATION_PROVISIONAL, which its
+    # waterline_station.conf exports, says what): _info.json and the page carry the text. CACO-05: none.
+    provisional = station_env.station_provisional()
+
     def no_points_page(message, stats=None):
         """Nothing to grid: the short page says so, with the window and filters."""
         if args.no_plot:
@@ -2442,7 +2483,8 @@ def main():
                 "window_end": args.end_date, "camera": args.camera, "frames": {}, "days": 0,
                 "cell": args.cell, "min_points": args.min_points, "max_spread": args.max_spread,
                 "filters": {"max_hs": args.max_hs, "rough_frames": stats.get("rough_frames", 0),
-                            "excluded_frames": stats.get("excluded_frames", 0)}}
+                            "excluded_frames": stats.get("excluded_frames", 0)},
+                **({"station_provisional": provisional} if provisional else {})}
         try:
             import dem_figure
             out = dem_figure.draw_message_page(
@@ -2579,7 +2621,8 @@ def main():
         elif carried is not None:
             c_use, use_from = carried, "the contours' setup_correction_m"
         else:
-            c_use, use_from = station_setup_coef(), "SETUP_COEF of waterline_timex_cron.sh"
+            c_use, use_from = station_setup_coef(source=True)
+            use_from = f"SETUP_COEF of {use_from}"
         # the C in use is tried too (0.037 is not on the 0.002 grid), so it can be the best
         grid = np.round(np.arange(-0.04, 0.1201, 0.002), 3)
         if c_use and grid[0] < c_use < grid[-1]:
@@ -2955,6 +2998,10 @@ def main():
         page_info["sigma_obs"] = obs_record
     if loess_record is not None:
         page_info["loess"] = loess_record        # --loess only: without it info.json is as before
+    if provisional:
+        # a new station's (STATION_PROVISIONAL): what is provisional, for the page and anyone reading
+        # the record; without it (CACO-05) info.json is as before
+        page_info["station_provisional"] = provisional
     with open(str(stem) + "_info.json", "w") as f:
         json.dump(page_info, f, indent=1)
     print(f"wrote {stem}_info.json   (dates, frames, filters: for the page)")

@@ -49,6 +49,17 @@ WHAT (docs/VALIDATION.md 2.10):
   T12 climatology: synthetic NDBC text; the real ADCP as a perfect forecast (finding 7).
   T13 storm_watch.sh: bash -n, --install-cron / --remove-cron with a fake crontab, the ERROR line, --dry-run
       and --status output kept out of the detail log, the lock.
+  T14 another station (a SYNTHETIC storm_watch_station.conf): no 44008/44013 outside the CACO-05 defaults table; the
+      settings files' order (station file, then settings file: the last value wins); --check-settings (exit 1 on an
+      unknown key, a value that does not parse, 'KEY = v', a missing station fact; WARN on Marconi's facts at another
+      station); waterline_station.conf's DEM_MAX_HS after the cron's; no owg.sh recipients with a station file or in
+      alerts mode (no email, a WARNING); STORM_BUOY / STORM_BUOY2 in the fetch, file names, GFS-Wave bulletin and
+      labels; the Open-Meteo facing test; STORM_TZ through zoneinfo and through pandas (zoneinfo made unimportable).
+  T15 alerts mode: a storm-over email, the event closed 72 h after the storm's end (and a forecast for its tail inside
+      those hours no new event), one events.csv row, no DEM call and no DEM or NAVD88 wording; a false alarm with no
+      pending pre DEM; full mode unchanged.
+  T16 storm_watch.sh: --install-cron / --remove-cron refused on a setup-managed NUC (~/stationTools/
+      crontab_new_station.txt, a temporary HOME); waterline_station.conf checked, sourced, its exports reach python.
 
 HOW. Every network call goes to an injected fake; every subprocess but T8's real builds to a fake runner;
 msmtp and crontab are fakes on PATH. Times are fixed (the trigger tests: 16 Nov 2026 12:50 UTC).
@@ -115,11 +126,13 @@ def make_base(tmp, name="base", settings='STORM_EMAIL_TO="a@example.org b@exampl
 
 
 def cfg_for(base, extra=""):
+    """The settings as main() reads them: storm_watch_station.conf (only T14-T15 write one), then
+    storm_watch_settings.conf (+ extra)."""
     cron, _ = sw.cron_settings(base)
     p = Path(base) / "storm_watch_settings.conf"
     if extra:
         p.write_text((p.read_text() if p.exists() else "") + extra)
-    cfg, _ = sw.load_settings(p, cron)
+    cfg, _ = sw.load_settings([Path(base) / "storm_watch_station.conf", p], cron)
     return cron, cfg
 
 
@@ -2281,6 +2294,566 @@ def t13():
 
 
 # --------------------------------------------------------------------------------------------
+# T14 a station other than CACO-05: the defaults table, the settings files, --check-settings, the station's
+#     DEM_MAX_HS, recipients, the buoys, the Open-Meteo facing test, the time zone
+# --------------------------------------------------------------------------------------------
+
+# A SYNTHETIC station's storm_watch_station.conf, as coastcam-station-setup would write it (a west-facing beach; NDBC
+# ids and zones of that coast; no network is used)
+STATION_TEXT = ('# storm_watch_station.conf -- TEST-01 (SYNTHETIC, for the tests)\n'
+                'STORM_STATION=TEST-01\nSTORM_SITE="Test Beach"\nSTORM_TZ=America/Los_Angeles\n'
+                'STORM_POINT=37.75,-122.51\nSTORM_MARINE_POINT=37.75,-122.70\nSTORM_BUOY_POINT=37.76,-122.83\n'
+                'STORM_BUOY=46026\nSTORM_BUOY2=46237\nSTORM_ALERT_ZONES=PZZ545,CAZ006\nSTORM_FACING=270\n'
+                'STORM_MIN_CELL_LON=""\nSTORM_DIR_SECTOR=190-350\n')
+
+
+def station_base(tmp, name, extra="", settings=None):
+    """A station folder with STATION_TEXT (+ extra) as its storm_watch_station.conf, owg.sh present."""
+    base = make_base(tmp, name, settings=settings)
+    (base / "storm_watch_station.conf").write_text(STATION_TEXT + extra)
+    return base
+
+
+def station_cfg(base):
+    cron, _ = sw.cron_settings(base)
+    return cron, sw.load_settings([base / "storm_watch_station.conf", base / "storm_watch_settings.conf"], cron)[0]
+
+
+def check_settings_run(base):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = sw.main(["--base", str(base), "--check-settings"])
+    return rc, out.getvalue()
+
+
+def t14():
+    print("T14 another station: defaults table, settings files, --check-settings, DEM_MAX_HS, recipients, buoys, "
+          "facing, time zone")
+    # 1. no buoy number outside the one defaults table (correction C10)
+    src = (HERE / "storm_watch.py").read_text().splitlines()
+    starts = [i for i, ln in enumerate(src) if ln.startswith("# >>> CACO-05 defaults")]
+    ends = [i for i, ln in enumerate(src) if ln.startswith("# <<< CACO-05 defaults")]
+    a, b = (starts[0], ends[0]) if len(starts) == 1 and len(ends) == 1 else (-1, -1)
+    lit = re.compile(r"440(08|13)")
+    outside = [i + 1 for i, ln in enumerate(src) if lit.search(ln) and not a < i < b]
+    inside = "\n".join(src[a:b]) if a >= 0 else ""
+    check(len(starts) == 1 and len(ends) == 1 and not outside and "44008" in inside and "44013" in inside,
+          f"storm_watch.py names 44008 / 44013 only inside its one CACO-05 defaults table (lines {a + 1}-{b + 1}; "
+          f"outside: {outside})")
+    cfg0 = sw.load_settings(None)[0]
+    check(sw.buoys(cfg0) == ("44008", "44013") and cfg0["STORM_GFSWAVE_STATION"] == "44008" and cfg0["STORM_MODE"] == "full"
+          and cfg0["STORM_STATION"] == "CACO-05" and cfg0["STORM_FACING"] is None and cfg0["STORM_MIN_CELL_LON"] == -69.93
+          and sw.USER_AGENT == "caco05-storm-watch (USGS coastal camera research)" and sw.SUBJECT == "[CACO-05 storm watch]"
+          and sw.SOURCE_FILES[-1] == "gfswave_44008.bull" and sw.SRC_LABELS[2:4] == ["44013 converted", "44008 x 0.83"],
+          "no station file: CACO-05's buoys, mode full, the User-Agent, subject, file names and labels of today")
+
+    # 2. the settings files: storm_watch_station.conf, then storm_watch_settings.conf (the last value wins)
+    with tempfile.TemporaryDirectory() as tmp:
+        base = station_base(tmp, "prec", extra="STORM_MODE=alerts\nSTORM_HS_M=4.0\nSTORM_CONFIRM_HS=2.2\n",
+                            settings='STORM_HS_M=4.5\nSTORM_SITE="Own Beach"\n')
+        cron, cfg = station_cfg(base)
+        check(cfg["STORM_HS_M"] == 4.5 and cfg["STORM_CONFIRM_HS"] == 2.2 and cfg["STORM_SITE"] == "Own Beach"
+              and cfg["STORM_BUOY"] == "46026" and cfg["STORM_MODE"] == "alerts" and cfg["STORM_FACING"] == 270.0
+              and cfg["STORM_MIN_CELL_LON"] is None and cfg["STORM_GFSWAVE_STATION"] == "46026",
+              "storm_watch_station.conf then storm_watch_settings.conf: the settings file's value wins (STORM_HS_M "
+              "4.5), the station file's others stand")
+        rc, out = check_settings_run(base)
+        check(rc == 0 and "site Own Beach" in out and "mode alerts" in out and "buoys 46026 and 46237" in out,
+              "main reads both files in that order (--check-settings shows the site from the settings file, the mode "
+              "and buoys from the station file)")
+        (base / "storm_watch_settings.conf").write_text("STORM_MODE=full\n")
+        with contextlib.redirect_stdout(io.StringIO()) as so:
+            sw.main(["--base", str(base), "--dry-run", "--no-fetch", "--now", "2026-11-16T12:50:00Z"])
+        (base / "storm_watch_settings.conf").write_text("")
+        with contextlib.redirect_stdout(io.StringIO()) as so2:
+            sw.main(["--base", str(base), "--dry-run", "--no-fetch", "--now", "2026-11-16T12:50:00Z"])
+        check("alerts mode" not in so.getvalue() and "alerts mode (no DEM)" in so2.getvalue(),
+              "a run takes STORM_MODE from the settings file over the station file's")
+
+    # 3. --check-settings: exit 1 on an unknown key, a value that does not parse, 'KEY = v', a missing station fact
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "chk", settings=None)
+        rc, out = check_settings_run(base)
+        check(rc == 0 and "settings OK" in out and "WARN" not in out and "owg.sh RECIPIENTS" in out,
+              "CACO-05 without any settings file: OK, no warning (recipients from owg.sh, only counted)")
+        check("@" not in out, "--check-settings never prints an address")
+        cases = [("STORM_FOO=1\n", "STORM_FOO is not a storm watch setting"),
+                 ("STORM_HS_M=abc\n", "does not parse"),
+                 ("STORM_HS_M = 4.0\n", "no spaces around '='"),
+                 ("STORM_HS_M= 4.0\n", "no spaces around '='"),
+                 ("STORM_MODE=partial\n", "STORM_MODE='partial' does not parse"),
+                 ("STORM_TZ=Mars/Olympus_Mons\n", "STORM_TZ='Mars/Olympus_Mons' does not parse"),
+                 ("STORM_BUOY=44 008\n", "text after the value"),
+                 ('STORM_SITE="Unclosed\n', "quote is not closed")]
+        got = []
+        for text, want in cases:
+            (base / "storm_watch_settings.conf").write_text("# a comment\n\n" + text)
+            rc, out = check_settings_run(base)
+            got.append((text.strip(), rc, want in out and "settings REFUSED" in out))
+        check(all(rc == 1 and ok for _, rc, ok in got), f"--check-settings exit 1: unknown key, unparsable values, "
+                                                          f"'KEY = v', 'KEY= v', text after a value, an open quote ({got})")
+        (base / "storm_watch_settings.conf").write_text("STORM_STATION=TEST-02\n")
+        rc, out = check_settings_run(base)
+        warned = [k for k in sw.MARCONI_FACTS if f"WARN: {k} is CACO-05's (Marconi Beach) value" in out]
+        check(rc == 0 and set(warned) == set(sw.MARCONI_FACTS) and "thresholds" in out and "--emit-settings" in out,
+              f"another station on Marconi's facts: exit 0, a WARN for each ({len(warned)} of "
+              f"{len(sw.MARCONI_FACTS)}) and for the thresholds")
+        (base / "storm_watch_settings.conf").unlink()
+        (base / "storm_watch_station.conf").write_text(STATION_TEXT.replace("STORM_FACING=270\n", ""))
+        rc, out = check_settings_run(base)
+        check(rc == 1 and "the station fact STORM_FACING is missing" in out,
+              "a storm_watch_station.conf without one of its station facts (STORM_FACING): exit 1")
+        (base / "storm_watch_station.conf").write_text(STATION_TEXT)
+        rc, out = check_settings_run(base)
+        check(rc == 0 and "CACO-05's (Marconi Beach) value" not in out,
+              "a complete station file with its own facts: exit 0, no Marconi-fact warning")
+        check("emails ON: 0 recipient(s)" in out and "no owg.sh fallback" in out and "WARN: emails are on" in out,
+              "... STORM_EMAIL=1 without STORM_EMAIL_TO on a setup station: 0 recipients (no owg.sh), a WARN")
+        (base / "storm_watch_station.conf").write_text(STATION_TEXT.replace("STORM_BUOY2=46237", "STORM_BUOY2=44013"))
+        rc, out = check_settings_run(base)
+        check(rc == 0 and "WARN: STORM_BUOY2 is CACO-05's (Marconi Beach) value '44013'" in out,
+              "a station file giving one of Marconi's facts (STORM_BUOY2 44013): a WARN, exit 0")
+        (base / "storm_watch_station.conf").write_text(STATION_TEXT)
+        (base / "storm_watch_settings.conf").write_text("STORM_HS_M=4.5\nSTORM_EMAIL=0\n")
+        cron, cfg = station_cfg(base)
+        rc, out = check_settings_run(base)
+        check(rc == 0 and cfg["STORM_HS_M"] == 4.5 and "emails off" in out, "station file and settings file together: OK")
+
+    # 4. waterline_station.conf's DEM_MAX_HS is applied after the cron's lines
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "overlay")
+        c0, _ = sw.cron_settings(base)
+        (base / "waterline_station.conf").write_text('WATERLINE_STAGE=""\nOWG_ENABLE="0"\nDEM_MAX_HS="1.0"\n'
+                                                     'DEM_CELL="9.0"\nSTATION_NAME="TEST-01"\nexport STATION_NAME\n')
+        cron, notes = sw.cron_settings(base)
+        cfg = sw.load_settings(None, cron)[0]
+        check(c0["DEM_MAX_HS"] == "1.5" and cron["DEM_MAX_HS"] == "1.0" and cron["DEM_CELL"] == "2.0" and not notes
+              and cfg["STORM_CALM_HS"] == 1.0 and sw.dem_args(cron, True)[:2] == ["--max-hs", "1.0"],
+              "waterline_station.conf's DEM_MAX_HS (1.0) wins over the cron's (1.5) for the storm DEMs and the calm "
+              "level; its other keys (a forbidden DEM_CELL) are not taken")
+        runner = fake_runner_factory()
+        ctx = ctx_for(base, NOW, runner=runner)
+        ctx.has_hs = True
+        E = sw.new_event(ctx, {"events": []}, "obs", "2026-11-14")
+        sw.build_dem(ctx, E, sw.evdir(ctx, E) / "pre" / "pre_x", "2026-11-07", "2026-11-13", no_plot=True)
+        argv = runner.calls[0] if runner.calls else []
+        check("--max-hs" in argv and argv[argv.index("--max-hs") + 1] == "1.0",
+              "... and the DEM build is called with --max-hs 1.0")
+        (base / "waterline_station.conf").write_text('DEM_MAX_HS="lots"\n')
+        cron, notes = sw.cron_settings(base)
+        check(cron["DEM_MAX_HS"] == "1.5" and any("not a number" in n for n in notes),
+              "a DEM_MAX_HS there that is not a number: the cron's, with a note")
+
+    # 5. recipients: owg.sh's only on CACO-05 in full mode
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "rcpt", settings=None)
+        cron, cfg = cfg_for(base)
+        to1, w1 = sw.recipients(base, cfg)
+        to2, w2 = sw.recipients(base, dict(cfg, STORM_MODE="alerts"))
+        (base / "storm_watch_station.conf").write_text(STATION_TEXT)
+        to3, w3 = sw.recipients(base, cfg)
+        to4, _ = sw.recipients(base, dict(cfg, STORM_EMAIL_TO="x@example.org"))
+        check(len(to1) == 3 and w1 == "owg.sh RECIPIENTS" and to2 == [] and "alerts mode" in w2 and to3 == []
+              and "storm_watch_station.conf exists" in w3 and to4 == ["x@example.org"],
+              "owg.sh's RECIPIENTS only without a station file in full mode; never with a storm_watch_station.conf or "
+              "in alerts mode; STORM_EMAIL_TO always")
+        start = datetime(2026, 10, 20, tzinfo=UTC)
+        storm = datetime(2026, 11, 14, 3, tzinfo=UTC)
+        write_buoy(base / "archive/waves_46026.csv",
+                   [(e, h / 0.83 * 1.35, 12.0, 270) for e, h in storm_hours(start, 45, storm_at=storm)])
+        sent = []
+        days = simple_ground(days_of("2026-10-20", "2026-11-30"))
+        run_day(base, "2026-11-12", days)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ev, _, line = run_day(base, "2026-11-15", days, mailer=lambda *a: sent.append(a) or 0, email=True)
+        E = ev.get("2026-11-14_obs") or {}
+        check(E and not sent and "WARNING: no email recipients" in line and "no owg.sh fallback" in line
+              and [m["status"] for m in E["emails"]] == ["failed"] and evdir_file(base, E, "missed_storm") is not None,
+              "a setup station with emails on and no STORM_EMAIL_TO: nothing sent, a WARNING, the body still written")
+
+    # 6. STORM_BUOY / STORM_BUOY2: the fetch, the file names, the GFS-Wave bulletin, the labels
+    with tempfile.TemporaryDirectory() as tmp:
+        base = station_base(tmp, "buoys", settings='STORM_EMAIL_TO="a@example.org"\n')
+        cron, cfg = station_cfg(base)
+        net = FakeNet(fixture_routes(), default=(404, b"{}"))
+        ctx = sw.Ctx(base, NOW, cfg, cron, mode="live", opener=net, runner=fake_runner_factory(), fetch=True,
+                     email=False, local_now=LOCAL, sleep=nosleep)
+        state = sw.fresh_state(NOW)
+        f = sw.fetch_forecast(ctx, state)
+        polar = [u for u, _ in net.seen if "polar.ncep" in u]
+        check(polar == ["https://polar.ncep.noaa.gov/waves/WEB/gfswave.latest_run/plots/gfswave.46026.bull"]
+              and "gfswave_46026.bull" in f.raw and not any("44008" in k for k in f.raw)
+              and sw.source_files(cfg)[-1] == "gfswave_46026.bull",
+              "the GFS-Wave bulletin of STORM_BUOY (46026) is fetched and named for it")
+        uas = {h.get("User-Agent") for u, h in net.seen if "api.weather.gov" not in u}
+        check(uas == {"test01-storm-watch (USGS coastal camera research)"},
+              f"the User-Agent names the station (STORM_STATION TEST-01): {uas}")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc, line = sw.run_once(ctx)
+        arch = sorted(pp.name for pp in (base / "archive/storm_watch/forecasts/2026-11-16").iterdir())
+        check(rc == 0 and "1250Z_gfswave_46026.bull.gz" in arch and not any("44008" in n for n in arch),
+              f"the archived forecast is named for the buoy ({[n for n in arch if 'gfswave' in n]})")
+        raw = {"gfswave_46026.bull": (200, (FIX / "gfswave_44008_SYNTHETIC.bull").read_bytes(), "")}
+        fc = sw.build_forecast(raw, NOW, cfg)
+        s46 = (fc["groups"].get("gfswave_46026") or [{}])[0]
+        check(fc["waves_group"] == "gfswave_46026" and fc["status"].get("gfswave_46026") == "ok"
+              and s46.get("name", "").startswith("gfswave 46026 (cycle") and s46.get("cell") == "46026 model point",
+              "the bulletin is read under the buoy's name: group, status, series name and cell")
+        om = json.loads((FIX / "om_marine_SYNTHETIC.json").read_text())
+        om[0]["latitude"], om[0]["longitude"] = 37.75, -122.71
+        om[1]["latitude"], om[1]["longitude"] = 37.76, -122.83
+        fc = sw.build_forecast({"om_marine.json": (200, json.dumps(om).encode(), "")}, NOW, cfg)
+        names = [x["name"] for x in fc["groups"].get("om_marine", [])]
+        check(len(names) == 2 and names[0].startswith("om_marine offshore Test (37.75N 122.71W)")
+              and names[1].startswith("om_marine 46026 point"), f"the Open-Meteo points labelled for the site and buoy "
+                                                               f"({names})")
+        cfg_n = sw.load_settings([base / "storm_watch_station.conf"], cron)[0]
+        cfg_n2 = dict(cfg_n, STORM_GFSWAVE_STATION=None)
+        net2 = FakeNet(fixture_routes(), default=(404, b"{}"))
+        ctx2 = sw.Ctx(base, NOW, cfg_n2, cron, mode="dry", opener=net2, fetch=True, email=False, local_now=LOCAL,
+                      sleep=nosleep)
+        sw.fetch_forecast(ctx2, sw.fresh_state(NOW))
+        (base / "storm_watch_settings.conf").write_text("STORM_GFSWAVE_STATION=none\n")
+        cron, cfg_none = station_cfg(base)
+        check(not [u for u, _ in net2.seen if "polar.ncep" in u] and cfg_none["STORM_GFSWAVE_STATION"] is None
+              and sw.gfs_file(cfg_none) is None and len(sw.source_files(cfg_none)) == 6,
+              "STORM_GFSWAVE_STATION=none: no bulletin is fetched")
+        (base / "storm_watch_settings.conf").write_text("STORM_GFSWAVE_STATION=46013\n")
+        cron, cfg_g = station_cfg(base)
+        check(sw.gfs_file(cfg_g) == "gfswave_46013.bull" and cfg_g["STORM_BUOY"] == "46026",
+              "STORM_GFSWAVE_STATION names another bulletin; the buoy stays STORM_BUOY")
+        (base / "storm_watch_settings.conf").write_text("")
+        cron, cfg = station_cfg(base)
+        # the observed side: archive/waves_46026.csv and waves_46237.csv, never 44008's or 44013's
+        t0 = datetime(2026, 11, 10, tzinfo=UTC)
+        e = [ep(t0 + timedelta(hours=k)) for k in range(10)]
+        write_buoy(base / "archive/waves_46026.csv", [(e[0], 4.0, 12, 270), (e[1], 4.4, 12, 270), (e[2], 4.3, 12, 270)])
+        write_buoy(base / "archive/waves_46237.csv", [(e[3], 2.0, 12, 270)])
+        write_buoy(base / "archive/waves_44008.csv", [(e[k], 9.0, 12, 270) for k in range(10)])
+        write_buoy(base / "archive/waves_44013.csv", [(e[k], 9.0, 12, 270) for k in range(10)])
+        o = sw.read_observed(base, t0 + timedelta(hours=9), cfg)
+        lab = sw.src_labels(cfg)
+        k0 = sw.hour_of(t0) - o.h0
+        check(abs(o.prim[k0] - 4.0 * 0.83) < 1e-9 and lab[int(o.psrc[k0])] == "46026 x 0.83"
+              and abs(o.prim[k0 + 3] - 2.0 * 0.83) < 1e-9 and lab[int(o.psrc[k0 + 3])] == "46237 converted"
+              and np.nanmax(o.raw_hs) == 4.4,
+              "the observed waves come from waves_46026.csv (x 0.83) and waves_46237.csv (no transfer file and not "
+              "CACO-05: x 0.83, not CACO-05's 44013 fit); 44008's and 44013's files are not read")
+        segs = sw.segments(o, cfg)
+        check(segs and segs[0]["buoy"] == "46026" and ", 46026 4.4 m" in sw.seg_text(segs[0])
+              and "46026 x 0.83" in segs[0]["srcs"], f"a segment names the buoy: {sw.seg_text(segs[0]) if segs else ''}")
+        E = {"observed": {"onset": "2026-11-10T00:00:00Z", "peak_hs": 3.65, "peak_time": "2026-11-10T01:00:00Z",
+                          "raw_max": 4.4, "end": None, "sources": []}, "storm_dates": None, "forecast": None, "notes": []}
+        sl = "\n".join(sw.storm_lines(E, cfg))
+        check("46026 up to 4.4 m" in sl and "(Test, nearshore-equivalent)" in sl and "PST" in sl and "44008" not in sl,
+              "the email's storm lines: the buoy, the site, local times in STORM_TZ (PST)")
+        runner = fake_runner_factory()
+        c3 = sw.Ctx(base, NOW, cfg, cron, mode="live", runner=runner, fetch=True, email=False, local_now=LOCAL,
+                    sleep=nosleep)
+        sw.observe(c3)
+        fetched = [(a[a.index("--station") + 1], Path(a[a.index("--output") + 1]).name) for a in runner.calls]
+        check(fetched == [("46026", "waves_46026.csv"), ("46237", "waves_46237.csv")],
+              f"stale archives: STORM_BUOY and (a setup station, no owg.sh to do it) STORM_BUOY2 fetched ({fetched})")
+        net3 = FakeNet([], default=(404, b""))
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc, _ = sw.climatology(cfg, None, None, "2025-2025", opener=net3)
+        check(net3.seen and "/46026h2025.txt.gz" in net3.seen[0][0]
+              and net3.seen[0][1]["User-Agent"].startswith("test01-storm-watch"),
+              "--climatology defaults to STORM_BUOY's history")
+    # --climatology --emit-settings: suggested thresholds as KEY=VALUE lines that --check-settings accepts
+    lines = ["#YY  MM DD hh mm WDIR WSPD GST  WVHT   DPD   APD MWD   PRES  ATMP  WTMP  DEWP  VIS  TIDE"]
+    t0 = datetime(2025, 1, 1, tzinfo=UTC)
+    for k in range(24 * 120):
+        tt = t0 + timedelta(hours=k)
+        hs = 1.0 + 1.5 * (k % 100) / 99.0 + (2.5 if k % 500 < 6 else 0.0)     # 1.0-2.5 m, a 6 h storm every ~21 days
+        lines.append(f"{tt:%Y %m %d %H} 00 MM MM MM {hs:5.2f} 10.00 7.00  60 1010.0 MM MM MM MM MM")
+    with tempfile.TemporaryDirectory() as tmp:
+        pin = Path(tmp) / "x.txt.gz"
+        pin.write_bytes(gzip.compress("\n".join(lines).encode()))
+        cfg_f = dict(sw.load_settings(None)[0], STORM_FACING=80.0)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc, res = sw.climatology(cfg_f, [str(pin)], emit=True)
+        sug = res.get("suggested") or {}
+        emitted = [ln for ln in out.getvalue().splitlines() if re.match(r"^STORM_[A-Z_]+=", ln)]
+        base = make_base(tmp, "emit", settings="\n".join(emitted) + "\n")
+        rc2, chk = check_settings_run(base)
+        check(rc == 0 and sug.get("STORM_DIR_SECTOR") == "0-160" and float(sug["STORM_HS_M"]) >= float(sug["STORM_HS_SUPPORT_M"])
+              and float(sug["STORM_CONFIRM_HS"]) < float(sug["STORM_HS_SUPPORT_M"]) and len(emitted) == len(sug) == 8
+              and rc2 == 0, f"--climatology --emit-settings prints {len(emitted)} KEY=VALUE lines (STORM_FACING 80 -> "
+                            f"STORM_DIR_SECTOR 0-160) that --check-settings accepts ({sug})")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc3 = sw.main(["--base", str(base), "--emit-settings"])
+        check(rc3 == 1, "--emit-settings without --climatology: refused")
+    # the CACO-05 base: a stale 44013 archive is left to owg.sh (no station file)
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "c5fetch")
+        runner = fake_runner_factory()
+        c4 = ctx_for(base, NOW, fetch=True, runner=runner)
+        sw.observe(c4)
+        check([a[a.index("--station") + 1] for a in runner.calls] == ["44008"],
+              "CACO-05 (no station file): only 44008 is fetched, as today (owg.sh fetches 44013)")
+
+    # 7. the Open-Meteo sea-cell tests: STORM_FACING's sector; an empty STORM_MIN_CELL_LON turns the old test off
+    om = json.loads((FIX / "om_marine_SYNTHETIC.json").read_text())
+    pts = [(41.90, -69.80), (40.50, -69.25)]
+    bay = json.loads(json.dumps(om))
+    bay[0]["longitude"] = -70.05
+    r_old = sw.parse_om_marine(bay, [(41.90, -69.90), pts[1]], NOW, 96, -69.93)
+    r_off = sw.parse_om_marine(bay, [(41.90, -69.90), pts[1]], NOW, 96, None)
+    r_fac = sw.parse_om_marine(bay, [(41.90, -69.90), pts[1]], NOW, 96, None, facing=80.0, beach=(41.89, -69.96))
+    r_ok = sw.parse_om_marine(om, pts, NOW, 96, None, facing=80.0, beach=(41.89, -69.96))
+    check(isinstance(r_old[0], str) and isinstance(r_off[0], dict) and isinstance(r_fac[0], str)
+          and "outside the sector it faces (80 +- 80 deg)" in r_fac[0] and isinstance(r_ok[0], dict)
+          and isinstance(r_fac[1], dict),
+          "a cell in Cape Cod Bay: refused by the longitude test; accepted with STORM_MIN_CELL_LON empty; refused by "
+          "STORM_FACING 80 (it lies at ~270 deg from the beach); the offshore cell (85 deg) accepted; the buoy point "
+          "is never tested")
+    west = json.loads(json.dumps(om))
+    west[0]["latitude"], west[0]["longitude"] = 37.75, -122.70
+    behind = json.loads(json.dumps(om))
+    behind[0]["latitude"], behind[0]["longitude"] = 37.75, -122.40
+    pw = [(37.75, -122.60), pts[1]]
+    rw = sw.parse_om_marine(west, pw, NOW, 96, None, facing=270.0, beach=(37.75, -122.51))
+    rb = sw.parse_om_marine(behind, pw, NOW, 96, None, facing=270.0, beach=(37.75, -122.51))
+    check(isinstance(rw[0], dict) and isinstance(rb[0], str) and "outside the sector" in rb[0],
+          "a west-facing beach (270): a cell to the west kept, one behind the beach (east) refused")
+
+    # 8. STORM_TZ: zoneinfo first, else pandas (Python 3.8, or a zoneinfo that cannot be imported)
+    t = datetime(2026, 11, 17, 14, tzinfo=UTC)
+    try:
+        import zoneinfo     # noqa: F401
+        have_zi = True
+    except ImportError:
+        have_zi = False
+    z = sw.to_zone(t, "America/Los_Angeles")
+    a_txt = sw.local_time(t, "America/Los_Angeles")
+    saved = sys.modules.get("zoneinfo")
+    had = "zoneinfo" in sys.modules
+    sys.modules["zoneinfo"] = None      # 'import zoneinfo' now raises ImportError, as on Python 3.8
+    try:
+        z2 = sw.to_zone(t, "America/Los_Angeles")
+        b_txt = sw.local_time(t, "America/Los_Angeles")
+        valid = (sw.valid_tz("America/Los_Angeles"), sw.valid_tz("Mars/Olympus_Mons"), sw.valid_tz("../etc"))
+        e_txt = sw.when(t, "Pacific/Honolulu")
+    finally:
+        if had:
+            sys.modules["zoneinfo"] = saved
+        else:
+            del sys.modules["zoneinfo"]
+    check((type(z.tzinfo).__name__ == "ZoneInfo") == have_zi and a_txt == "Tue 17 Nov 06:00 PST",
+          f"STORM_TZ through zoneinfo when Python has it ({'yes' if have_zi else 'no: pandas'}): {a_txt}")
+    check(type(z2).__name__ == "Timestamp" and b_txt == a_txt and valid == (True, False, False)
+          and e_txt == "17 Nov 14Z (Tue 17 Nov 04:00 HST)",
+          f"... and through pandas when zoneinfo cannot be imported: {b_txt}; {e_txt}; zone check {valid}")
+    check(sw.local_time(t) == "Tue 17 Nov 09:00 EST" and sw.when(t) == "17 Nov 14Z (Tue 17 Nov 09:00 EST)",
+          "no STORM_TZ: CACO-05's America/New_York, as today")
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "s.conf"
+        p.write_text("STORM_TZ=Mars/Olympus_Mons\nSTORM_BUOY=../x\nSTORM_MODE=sometimes\n")
+        c, notes = sw.load_settings(p)
+        check(c["STORM_TZ"] == "America/New_York" and c["STORM_BUOY"] == "44008" and c["STORM_MODE"] == "full"
+              and len(notes) == 3, "a bad zone, buoy id or mode in a running station's file: the default, with a note")
+
+
+# --------------------------------------------------------------------------------------------
+# T15 alerts mode (STORM_MODE=alerts): no DEM; a storm-over email; closed 72 h after the end; events.csv
+# --------------------------------------------------------------------------------------------
+
+def events_rows(base):
+    p = base / "archive/storm_watch/events.csv"
+    if not p.exists():
+        return []
+    with open(p, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def bodies(base, E):
+    return {m["kind"]: (base / "archive/storm_watch/events" / E["id"] / m["body_file"]).read_text()
+            for m in E["emails"] if m.get("body_file")}
+
+
+def t15():
+    print("T15 alerts mode: no DEM, storm over, closed 72 h after the end, events.csv")
+    start = datetime(2026, 10, 20, tzinfo=UTC)
+    gi = simple_ground(days_of("2026-10-20", "2026-11-30"))
+    dem_word = re.compile(r"\bDEMs?\b|NAVD88")
+    # 1. a storm the forecast missed, on CACO-05's defaults in alerts mode
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "alerts", settings='STORM_MODE=alerts\nSTORM_EMAIL_TO="a@example.org"\n')
+        storm = datetime(2026, 11, 14, 3, tzinfo=UTC)
+        write_marconi(base / "archive/waves_marconi.csv",
+                      [(e, h, "blend", 1, 60, 9) for e, h in storm_hours(start, 45, storm_at=storm)])
+        runner = fake_runner_factory()
+        sent = []
+        got = {}
+        for d in days_of("2026-11-12", "2026-11-20"):
+            ev, ctx, line = run_day(base, d, gi, runner=runner, mailer=lambda s, t, b, a: sent.append((s, t, b)) or 0,
+                                    email=True)
+            E = ev.get("2026-11-14_obs")
+            got[d] = (E["status"], E["closed_reason"], [m["kind"] for m in E["emails"]]) if E else None
+        E = ev["2026-11-14_obs"]
+        end = sw.parse_iso(E["observed"]["end"])
+        check(got["2026-11-15"] == ("storm", None, ["missed_storm"])
+              and got["2026-11-16"] == ("post", None, ["missed_storm", "storm_over"])
+              and got["2026-11-17"][0] == "post" and got["2026-11-18"][:2] == ("closed", "complete")
+              and end == datetime(2026, 11, 15, 6, tzinfo=UTC),
+              f"the storm ends 15 Nov 06Z: a storm-over email on the run that sees the end (16 Nov), still open on "
+              f"17 Nov, closed on the first run 72 h after the end (18 Nov) ({got})")
+        check(any("72 h after the storm's end" in h for h in E["history"]) and E["pre"]["status"] == "planned"
+              and E["post3"] is None and E["post7"] is None and not E["change"] and E.get("mode") == "alerts",
+              "... closed by the clock: no pre, post or change step ran")
+        check(not any(Path(a[1]).name in ("dem_from_contours.py", "dem_change.py", "dem_map.py", "asc_to_geotiff.py")
+                      for a in runner.calls)
+              and not (base / "archive/storm_watch/work").exists()
+              and json.loads((base / "archive/storm_watch/state.json").read_text()).get("ground_cache") is None,
+              "no DEM, map or change call; the ground file is never read (no working copy, no ground cache)")
+        rows = events_rows(base)
+        check(len(rows) == 1 and rows[0]["event"] == "2026-11-14_obs" and rows[0]["closed_reason"] == "complete"
+              and rows[0]["storm_end_utc"] == "2026-11-15T06:00:00Z" and rows[0]["mode"] == "alerts"
+              and rows[0]["closed_utc"].startswith("2026-11-18") and rows[0]["buoy"] == "44008"
+              and rows[0]["emails"] == "missed_storm:sent storm_over:sent" and "@" not in json.dumps(rows),
+              f"one events.csv row, written by the closing run, never again ({rows[:1]})")
+        texts = bodies(base, E)
+        check(set(texts) == {"missed_storm", "storm_over"} and not any(dem_word.search(t) for t in texts.values())
+              and all("alerts mode" in t.lower() for t in texts.values())
+              and [s[:42] for s, _, _ in sent] == ["[CACO-05 storm watch] A storm the forecast",
+                                                     "[CACO-05 storm watch] Storm over at Marcon"],
+              "the emails (missed storm, storm over) carry no DEM or NAVD88 wording; both sent")
+        check("is over: the waves at Marconi stayed below 1.5 m for 24 hours" in texts["storm_over"]
+              and "closes 72 h after the end" in texts["storm_over"], "the storm-over email says why and when it closes")
+    # 2. a trigger for the same storm while the post event is open (72 h) belongs to it: no second heads-up
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "tail", settings='STORM_MODE=alerts\nSTORM_EMAIL=0\n')
+        storm = datetime(2026, 11, 14, 3, tzinfo=UTC)
+        write_marconi(base / "archive/waves_marconi.csv",
+                      [(e, h, "blend", 1, 60, 9) for e, h in storm_hours(start, 45, storm_at=storm)])
+        for d in ("2026-11-12", "2026-11-15", "2026-11-16"):
+            run_day(base, d, gi)
+
+        def stale_fc(c):
+            # an old model run still carrying the storm: rough from 15 Nov 00Z (before its end) to 18 Nov
+            h0 = sw.hour_of(datetime(2026, 11, 15, 0, tzinfo=UTC))
+            hs = np.where(np.arange(120) < 66, 3.8, 1.0)
+            return fc_of([series(hs, h0=h0)])
+        ev, _, _ = run_day(base, "2026-11-17", gi, stale_fc)
+        check(list(ev) == ["2026-11-14_obs"] and any("forecast still triggering" in n for n in ev["2026-11-14_obs"]["notes"]),
+              "a forecast for the storm's tail within the 72 h: noted on the open event, no new event or heads-up")
+    # 3. a forecast storm that never comes: a false alarm without a pending pre DEM; a setup station's names and zone
+    with tempfile.TemporaryDirectory() as tmp:
+        base = station_base(tmp, "fa", extra="STORM_MODE=alerts\nSTORM_EMAIL=0\n", settings="")
+        write_buoy(base / "archive/waves_46026.csv",
+                   [(e, 1.2, 10.0, 270) for e, _ in storm_hours(start, 45)])
+        cron, cfg = station_cfg(base)
+
+        def west_storm(c):
+            fc = storm_fc(c, datetime(2026, 11, 13, 18, tzinfo=UTC))
+            fc["waves"][0]["dir"][:] = 270.0
+            return fc
+        runner = fake_runner_factory()
+        for d in days_of("2026-11-10", "2026-11-18"):
+            ev, ctx, line = run_day(base, d, gi, west_storm if d == "2026-11-10" else None, runner=runner)
+        E = list(ev.values())[0]
+        texts = bodies(base, E)
+        check(E["closed_reason"] == "false_alarm" and not E["pending"] and set(texts) == {"heads_up", "false_alarm"}
+              and not any(dem_word.search(t) for t in texts.values()),
+              f"alerts mode, a forecast storm that never comes: a false alarm, no pre DEM left pending, no DEM wording "
+              f"({E['closed_reason']}, {list(texts)})")
+        check("[TEST-01 storm watch] Storm forecast for Test Beach: onset ~" in (
+              base / "archive/storm_watch/events" / E["id"] / E["emails"][0]["body_file"]).read_text()
+              and "PST" in texts["heads_up"] and "alerts mode" in texts["heads_up"]
+              and "(46026, 46237)" in texts["heads_up"],
+              "the heads-up: the station's subject and site, local times in its zone, its buoys")
+        rows = events_rows(base)
+        check(len(rows) == 1 and rows[0]["closed_reason"] == "false_alarm" and rows[0]["buoy"] == "46026"
+              and rows[0]["station"] == "TEST-01" and rows[0]["forecast_rules"] == "a"
+              and not any(Path(a[1]).name == "dem_from_contours.py" for a in runner.calls),
+              "its events.csv row; no DEM built")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            sw.main(["--base", str(base), "--status"])
+        check("alerts mode" in out.getvalue() and "     pre " not in out.getvalue(),
+              "--status says alerts mode, no pre line")
+    # 4. full mode (the default) writes no events.csv and keeps its emails as today
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "full")
+        storm = datetime(2026, 11, 14, 3, tzinfo=UTC)
+        write_marconi(base / "archive/waves_marconi.csv",
+                      [(e, h, "blend", 1, 60, 9) for e, h in storm_hours(start, 45, storm_at=storm)])
+        for d in ("2026-11-12", "2026-11-15", "2026-11-16", "2026-11-19"):
+            ev, _, line = run_day(base, d, gi)
+        E = ev["2026-11-14_obs"]
+        check(not events_rows(base) and "storm_over" not in [m["kind"] for m in E["emails"]] and "mode" not in E
+              and "csv_row" not in E and "alerts mode" not in line and E["status"] == "post",
+              "full mode: no storm-over email, no events.csv, no new keys in the event, nothing closed by the clock")
+
+
+# --------------------------------------------------------------------------------------------
+# T16 storm_watch.sh on a setup-managed NUC; the station file's exports
+# --------------------------------------------------------------------------------------------
+
+def t16():
+    print("T16 storm_watch.sh: a setup-managed NUC's crontab; waterline_station.conf's exports")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp) / "station"
+        base.mkdir()
+        shutil.copy(str(HERE / "storm_watch.sh"), str(base))
+        b = Path(tmp) / "bin"
+        b.mkdir()
+        tab = Path(tmp) / "crontab.txt"
+        tab.write_text("30 12 * * * /mnt/I2Rgus_Data/waterline/waterline_timex_cron.sh\n")
+        (b / "crontab").write_text(f'#!/bin/bash\nif [ "$1" = "-l" ]; then cat "{tab}"; else cat > "{tab}"; fi\n')
+        (b / "crontab").chmod(0o755)
+        home = Path(tmp) / "home"
+        (home / "stationTools").mkdir(parents=True)
+        (home / "stationTools/crontab_new_station.txt").write_text("# the crontab setup installed\n")
+        env = dict(os.environ, PATH=f"{b}:{os.environ['PATH']}", HOME=str(home))
+        sh = str(base / "storm_watch.sh")
+        before = tab.read_text()
+        r1 = subprocess.run([sh, "--install-cron"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            universal_newlines=True)
+        r2 = subprocess.run([sh, "--remove-cron"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            universal_newlines=True)
+        check(r1.returncode == 1 and 'STORM_WATCH="yes"' in r1.stdout and "./setup.sh --only 10" in r1.stdout
+              and r2.returncode == 1 and 'STORM_WATCH="no"' in r2.stdout and tab.read_text() == before
+              and not (base / "logs/crontab.before_storm_watch_install").exists(),
+              "~/stationTools/crontab_new_station.txt exists: --install-cron and --remove-cron refuse, point to "
+              "STORM_WATCH in station.conf and ./setup.sh --only 10, and leave the crontab as it was")
+        env2 = dict(env, HOME=str(Path(tmp) / "elsewhere"))
+        r3 = subprocess.run([sh, "--install-cron"], env=env2, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            universal_newlines=True)
+        check(r3.returncode == 0 and "storm_watch.sh" in tab.read_text(), "... and without it, --install-cron works")
+        # the station file: checked (a fake waterline_station_check.py exit), then sourced; its exports reach python
+        envout = Path(tmp) / "env.txt"
+        (b / "python3").write_text('#!/bin/bash\ncase "$1" in\n  *waterline_station_check.py) echo "check $2"; '
+                                   'exit "${CHECK_RC:-0}" ;;\nesac\nenv > "$ENV_OUT"\nexit 0\n')
+        (b / "python3").chmod(0o755)
+        (base / "waterline_station.conf").write_text('STATION_NAME="TEST-01"\nGEOTIFF_EPSG="26910"\nCAMS="c1"\n'
+                                                     'export STATION_NAME GEOTIFF_EPSG\n')
+        env3 = dict(env2, ENV_OUT=str(envout))
+        env3.pop("STATION_NAME", None)
+        env3.pop("GEOTIFF_EPSG", None)
+        r4 = subprocess.run([sh], env=env3, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                            universal_newlines=True)
+        seen = envout.read_text().splitlines() if envout.exists() else []
+        check(r4.returncode == 0 and "STATION_NAME=TEST-01" in seen and "GEOTIFF_EPSG=26910" in seen
+              and not any(ln.startswith("CAMS=") for ln in seen)
+              and "check check-overlay" in (base / "logs/storm_watch_detail.log").read_text(),
+              "waterline_station.conf: check-overlay first, then sourced; its exported keys reach storm_watch.py "
+              "(STATION_NAME, GEOTIFF_EPSG), the others do not")
+        envout.unlink()
+        r5 = subprocess.run([sh], env=dict(env3, CHECK_RC="1"), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            stdin=subprocess.DEVNULL, universal_newlines=True)
+        runlog = (base / "logs/storm_watch.log").read_text()
+        check(r5.returncode == 1 and not envout.exists() and "ERROR: waterline_station.conf refused" in runlog,
+              "a station file check-overlay refuses: storm_watch.py is not run, an ERROR line, exit 1")
+        r6 = subprocess.run([sh, "--dry-run"], env=dict(env3, CHECK_RC="1"), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, universal_newlines=True)
+        check(r6.returncode == 0 and envout.exists() and "STATION_NAME=TEST-01" not in envout.read_text(),
+              "--dry-run (builds nothing) neither checks nor sources it")
+
+
+# --------------------------------------------------------------------------------------------
 # real captures (on the NUC)
 # --------------------------------------------------------------------------------------------
 
@@ -2318,7 +2891,7 @@ def main():
         real_captures(sys.argv[sys.argv.index("--real-captures") + 1])
     else:
         os.environ.setdefault("MPLCONFIGDIR", tempfile.mkdtemp(prefix="mpl_storm_watch_"))
-        for t in (t1, t2, t3, t4, t5, t6, t7, t8, t9, t9b, t10, t11, t12, t13):
+        for t in (t1, t2, t3, t4, t5, t6, t7, t8, t9, t9b, t10, t11, t12, t13, t14, t15, t16):
             t()
     if FAILED:
         print(f"{len(FAILED)} storm watch check(s) FAILED:")

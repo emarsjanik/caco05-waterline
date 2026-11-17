@@ -481,11 +481,25 @@ def dem_args(cron, has_hs):
     return a
 
 
-# The station settings: (default, kind, basis). Kinds: f float, i int, s text, sec sector "a-b",
-# codes comma list, pt "lat,lon", f0 float or "" (= the cron's value).
+# The station settings: (default, kind, basis). Kinds: f float, i int, s text, sec sector "a-b", codes comma list,
+# pt "lat,lon", f0 float or "" (= the cron's value), fx float or "" (= that test off), deg "" or 0-360, mode full|alerts,
+# tz an IANA time zone, name a non-empty name, id an NDBC station id, id0 an id or "" (none), gfs an id, "" (= STORM_BUOY)
+# or "none". The place facts default to CACO-05's (the CACO05 table above).
 SETTINGS = {
+    "STORM_MODE": ("full", "mode", "full: pre/post-storm DEMs and change maps; alerts: forecasts, alerts and an event "
+                                   "log only (no DEM; events close 72 h after the storm's end)"),
+    "STORM_STATION": (CACO05["STORM_STATION"], "name", "the station: email subject and User-Agent"),
+    "STORM_SITE": (CACO05["STORM_SITE"], "name", "the beach: titles and emails"),
+    "STORM_TZ": (CACO05["STORM_TZ"], "tz", "the beach's time zone: local times in the emails"),
+    "STORM_BUOY": (CACO05["STORM_BUOY"], "id", "the offshore NDBC wave buoy: observed waves (archive/waves_<id>.csv) "
+                                               "and its GFS-Wave bulletin"),
+    "STORM_BUOY2": (CACO05["STORM_BUOY2"], "id0", "a second buoy converted to the beach (calibration/buoy_transfer_<id>.json); "
+                                                  "empty = none"),
+    "STORM_GFSWAVE_STATION": ("", "gfs", "the GFS-Wave point bulletin; empty = STORM_BUOY, none = no bulletin"),
+    "STORM_FACING": (CACO05["STORM_FACING"], "deg", "the direction the beach faces, deg true: the Open-Meteo sea cell "
+                                                    "must lie in front of it; empty = no such test"),
     "STORM_LEAD_HOURS": ("96", "i", "lead time of the trigger (GEFS-Wave skill holds to ~day 4)"),
-    "STORM_HS_M": ("3.5", "f", "offshore Hs, rule (a): ~Marconi p99 / 0.83; 44008 read 3.8-3.9 m on 23 Sep 2026"),
+    "STORM_HS_M": ("3.5", "f", "offshore Hs, rule (a): ~Marconi p99 / 0.83; STORM_BUOY read 3.8-3.9 m on 23 Sep 2026"),
     "STORM_MIN_HOURS": ("3", "i", "hours at or above, rule (a)/(c)/(d): one 3-hourly step (6 h caught 1 of 5 ADCP storms)"),
     "STORM_HS_SUPPORT_M": ("3.0", "f", "offshore Hs with a support alert, rule (c)"),
     "STORM_SWELL_HS_M": ("3.0", "f", "offshore Hs of long-period swell, rule (d)"),
@@ -499,9 +513,9 @@ SETTINGS = {
     "STORM_WIND_MIN_HOURS": ("6", "i", "hours of rule (e)"),
     "STORM_ONSET_HS_M": ("1.8", "f", "offshore Hs that marks the forecast onset (~1.5 / 0.83)"),
     "STORM_CONFIRM_HS": ("2.5", "f", "Marconi Hs that confirms a forecast storm (ADCP winter p98)"),
-    "STORM_CONFIRM_BUOY_HS": ("3.0", "f", "raw 44008 Hs in the sector for 2 h that confirms"),
+    "STORM_CONFIRM_BUOY_HS": ("3.0", "f", "raw STORM_BUOY Hs in the sector for 2 h that confirms"),
     "STORM_OBS_OPEN_HS": ("3.0", "f", "Marconi peak that opens a storm the forecast missed (with 2 h >= confirm)"),
-    "STORM_OBS_OPEN_BUOY_HS": ("3.5", "f", "raw 44008 Hs in the sector for 2 h that opens one"),
+    "STORM_OBS_OPEN_BUOY_HS": ("3.5", "f", "raw STORM_BUOY Hs in the sector for 2 h that opens one"),
     "STORM_OBS_LOOKBACK_DAYS": ("14", "i", "how far back a missed storm is still opened"),
     "STORM_BREAK_HS": ("2.0", "f0", "Marconi peak of a wave event that cuts a post window (survey_products EVENT_HS_M)"),
     "STORM_BREAK_HOURS": ("24", "i0", "rough hours of a wave event that cuts a post window"),
@@ -518,29 +532,38 @@ SETTINGS = {
     "STORM_MIN_WAVE_HOURS": ("20", "i", "observed wave hours each date of a window needs before it is built"),
     "STORM_OFFSHORE_TO_MARCONI": ("0.83", "f", "offshore to Marconi, onshore directions (VALIDATION 4.5)"),
     "STORM_SHELTERED_FACTOR": ("0.5", "f", "offshore to Marconi outside the sector (buoy_transfer.py)"),
-    "STORM_ALERT_ZONES": ("ANZ254,MAZ022", "codes", "NWS zones: coastal waters off Marconi, Barnstable"),
+    "STORM_ALERT_ZONES": (CACO05["STORM_ALERT_ZONES"], "codes", "NWS zones: coastal waters off Marconi, Barnstable"),
     "STORM_ALERT_STRONG": ("SU.W,CF.W,SS.W,SR.W,HF.W,HU.W,TR.W", "codes", "alerts that trigger on their own"),
     "STORM_ALERT_SUPPORT": ("SU.Y,CF.Y,CF.A,GL.W,SR.A,HF.A,SE.W,HW.W,TR.A,HU.A,SS.A", "codes",
                             "alerts that trigger with Hs >= STORM_HS_SUPPORT_M"),
     "STORM_ALERT_WAVE_GATED": ("", "codes", "strong alerts that count only as support when a wave forecast exists "
                                             "(e.g. CF.W,SS.W: MAZ022 also covers the bay shore)"),
     "STORM_SOURCES": ("om_marine,gfswave,nws,om_wind", "codes", "forecast sources (drop om_* to stop using Open-Meteo)"),
-    "STORM_POINT": ("41.89,-69.96", "pt", "NWS /points and Open-Meteo wind"),
-    "STORM_MARINE_POINT": ("41.90,-69.80", "pt", "offshore Marconi, Open-Meteo marine"),
-    "STORM_BUOY_POINT": ("40.50,-69.25", "pt", "44008, Open-Meteo marine"),
-    "STORM_MIN_CELL_LON": ("-69.93", "f", "an Open-Meteo cell west of this is in Cape Cod Bay or behind the shore"),
+    "STORM_POINT": (CACO05["STORM_POINT"], "pt", "the beach: NWS /points and Open-Meteo wind"),
+    "STORM_MARINE_POINT": (CACO05["STORM_MARINE_POINT"], "pt", "offshore of the beach (Marconi), Open-Meteo marine"),
+    "STORM_BUOY_POINT": (CACO05["STORM_BUOY_POINT"], "pt", "STORM_BUOY's position, Open-Meteo marine"),
+    "STORM_MIN_CELL_LON": (CACO05["STORM_MIN_CELL_LON"], "fx", "an Open-Meteo cell west of this is in Cape Cod Bay or "
+                                                               "behind the shore (Marconi); empty = no such test"),
     "NWS_CONTACT": ("", "s", "added to the User-Agent of api.weather.gov requests only; empty by default"),
     "STORM_EMAIL": ("1", "i", "0: email bodies are written to the event folder, nothing is sent"),
-    "STORM_EMAIL_TO": ("", "s", "space-separated; empty = owg.sh's RECIPIENTS"),
+    "STORM_EMAIL_TO": ("", "s", "space-separated; empty = owg.sh's RECIPIENTS, but never with a storm_watch_station.conf "
+                                "or in alerts mode (then empty = no email, with a WARNING)"),
     "STORM_HTTP_TIMEOUT_S": ("45", "f", "per request"),
     "STORM_FETCH_DEADLINE_S": ("300", "f", "all requests of a run"),
     "STORM_LOCK_WAIT_S": ("1800", "f", "wait for the cron's lock"),
     "STORM_LOCK_HOLD_S": ("900", "f", "the cron's lock is not taken when a cron run starts within this"),
     "STORM_OWG_LOCK_WAIT_S": ("600", "f", "wait for owg.sh's lock"),
     "STORM_MAX_WAIT_DAYS": ("21", "i", "a date the ground file never covers: give up after this"),
-    "STORM_BUOY_STALE_H": ("6", "f", "fetch 44008 when its archive is older"),
+    "STORM_BUOY_STALE_H": ("6", "f", "fetch STORM_BUOY when its archive is older"),
     "STORM_FORECAST_KEEP_DAYS": ("730", "i", "days of archived forecasts kept"),
 }
+# The place facts a storm_watch_station.conf must give (--check-settings: a missing one is an error), and the ones
+# whose CACO-05 (Marconi) value at another station gives a WARNING
+STATION_FACTS = ("STORM_STATION", "STORM_SITE", "STORM_TZ", "STORM_POINT", "STORM_MARINE_POINT", "STORM_BUOY_POINT",
+                 "STORM_BUOY", "STORM_BUOY2", "STORM_ALERT_ZONES", "STORM_FACING", "STORM_MIN_CELL_LON")
+MARCONI_FACTS = ("STORM_SITE", "STORM_POINT", "STORM_MARINE_POINT", "STORM_BUOY_POINT", "STORM_BUOY", "STORM_BUOY2",
+                 "STORM_ALERT_ZONES", "STORM_MIN_CELL_LON")
+ID_RE = re.compile(r"^[A-Za-z0-9]{3,8}$")
 
 
 def parse_sector(text):
@@ -558,13 +581,20 @@ def in_sector(deg, sector):
         return ((d >= a) & (d <= b)) if a <= b else ((d >= a) | (d <= b))
 
 
+def settings_paths(path):
+    """A path, None, or a list of them (read in order) -> [Path] of the existing ones."""
+    paths = path if isinstance(path, (list, tuple)) else [path]
+    return [Path(p) for p in paths if p and Path(p).exists()]
+
+
 def load_settings(path, cron=None):
-    """Station settings (KEY=VALUE, '#' comments) over the defaults. -> (cfg, notes). Unknown keys and bad
-    values give a note and the default. cfg holds parsed values; "" keys resolved from the cron."""
+    """Station settings (KEY=VALUE, '#' comments) over the defaults. `path` is one file or a list of files read in order
+    (main: storm_watch_station.conf, then storm_watch_settings.conf): the last value wins. -> (cfg, notes). Unknown keys
+    and bad values give a note and the default (--check-settings refuses them). cfg holds parsed values; "" keys
+    resolved from the cron; STORM_GFSWAVE_STATION resolved to an id or None."""
     cron = cron or CRON_DEFAULTS
     raw, notes = {}, []
-    p = Path(path) if path else None
-    if p is not None and p.exists():
+    for p in settings_paths(path):
         for k, vals in var_lines(p.read_text(errors="replace")).items():
             if k not in SETTINGS:
                 notes.append(f"setting {k} in {p.name} is not known: ignored")
@@ -587,6 +617,8 @@ def load_settings(path, cron=None):
             cfg[k] = win
     cfg["STORM_PRE_MAX_DAYS"] = max(cfg["STORM_PRE_MAX_DAYS"], cfg["STORM_PRE_DAYS"])
     cfg["STORM_POST_MAX_DAYS"] = max(cfg["STORM_POST_MAX_DAYS"], cfg["STORM_POST_DAYS"])
+    g = cfg["STORM_GFSWAVE_STATION"]
+    cfg["STORM_GFSWAVE_STATION"] = None if g == "none" else (g or cfg["STORM_BUOY"])
     return cfg, notes
 
 
@@ -600,6 +632,15 @@ def parse_setting(v, kind):
         return None if v == "" else float(v)
     if kind == "i0":
         return None if v == "" else int(v)
+    if kind == "fx":
+        return None if v == "" else float(v)
+    if kind == "deg":
+        if v == "":
+            return None
+        d = float(v)
+        if not 0 <= d <= 360:
+            raise ValueError(v)
+        return d % 360
     if kind == "sec":
         return parse_sector(v)
     if kind == "codes":
@@ -610,6 +651,24 @@ def parse_setting(v, kind):
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             raise ValueError(v)
         return (lat, lon)
+    if kind == "mode":
+        if v not in ("full", "alerts"):
+            raise ValueError(f"{v!r}: full or alerts")
+        return v
+    if kind == "tz":
+        if not valid_tz(v):
+            raise ValueError(f"{v!r}: not a time zone")
+        return v
+    if kind == "name":
+        if not v or len(v) > 60 or any(ord(c) < 32 for c in v) or any(c in v for c in '"$`\\'):
+            raise ValueError(f"{v!r}: a name of 1-60 plain characters")
+        return v
+    if kind in ("id", "id0", "gfs"):
+        if (v == "" and kind != "id") or (v == "none" and kind == "gfs"):
+            return v
+        if not ID_RE.match(v):
+            raise ValueError(f"{v!r}: an NDBC station id (3-8 letters or digits)")
+        return v
     return v
 
 
@@ -626,10 +685,136 @@ def owg_recipients(base):
 
 
 def recipients(base, cfg):
-    """-> (list, where from). Never print the addresses anywhere but --dry-run's terminal."""
+    """-> (list, where from). Never print the addresses anywhere but --dry-run's terminal. owg.sh's RECIPIENTS (CACO-05's
+    list) are the fallback only on CACO-05: never when a storm_watch_station.conf exists (a setup-managed station) or in
+    alerts mode, where an empty STORM_EMAIL_TO means no email (send_emails then logs a WARNING)."""
     if cfg.get("STORM_EMAIL_TO"):
         return cfg["STORM_EMAIL_TO"].split(), "STORM_EMAIL_TO"
+    if (Path(base) / STATION_FILE).exists() or cfg.get("STORM_MODE") == "alerts":
+        why = STATION_FILE + " exists" if (Path(base) / STATION_FILE).exists() else "alerts mode"
+        return [], f"STORM_EMAIL_TO empty; {why}: no owg.sh fallback"
     return owg_recipients(base), "owg.sh RECIPIENTS"
+
+
+# --------------------------------------------------------------------------------------------
+# --check-settings: the settings files read strictly (setup's gate before it installs the cron line)
+# --------------------------------------------------------------------------------------------
+
+LINE_SPACED_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s+=|^\s*([A-Za-z_][A-Za-z0-9_]*)=\s")
+
+
+def strict_lines(path):
+    """-> ({KEY: (value, line number)}, [errors]) of one settings file: only blank lines, '#' comments and
+    column-0 KEY=VALUE lines (a value with spaces double-quoted; after it only a '#' comment)."""
+    vals, errs = {}, []
+    name = Path(path).name
+    try:
+        text = Path(path).read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        return vals, [f"{name}: not readable ({exc})"]
+    for n, line in enumerate(text.splitlines(), 1):
+        t = line.strip()
+        if not t or t.startswith("#"):
+            continue
+        m = VAR_RE.match(line)
+        if not m:
+            sp = LINE_SPACED_RE.match(line)
+            if sp and (sp.group(1) or sp.group(2)):
+                k = sp.group(1) or sp.group(2)
+                errs.append(f"{name}:{n}: '{t[:60]}': no spaces around '=' (write {k}=value; this line is not read)")
+            elif line[:1].isspace() and VAR_RE.match(t):
+                errs.append(f"{name}:{n}: '{t[:60]}': indented (write it at column 0; this line is not read)")
+            else:
+                errs.append(f"{name}:{n}: '{t[:60]}': not KEY=VALUE (this line is not read)")
+            continue
+        k, rest = m.group(1), m.group(2)
+        if k not in SETTINGS:
+            errs.append(f"{name}:{n}: {k} is not a storm watch setting")
+            continue
+        if rest[:1].isspace() and rest.strip() and not rest.strip().startswith("#"):
+            errs.append(f"{name}:{n}: '{t[:60]}': no spaces around '=' (write {k}=value; the value is not read)")
+            continue
+        if rest[:1] in ("'", '"'):
+            end = rest.find(rest[0], 1)
+            if end < 0:
+                errs.append(f"{name}:{n}: {k}: the quote is not closed")
+                continue
+            after = rest[end + 1:].strip()
+        else:
+            v = var_value(rest)
+            after = rest[len(v):].strip()
+        if after and not after.startswith("#"):
+            errs.append(f"{name}:{n}: {k}: text after the value ({after[:30]!r}): quote a value with spaces")
+            continue
+        v = var_value(rest)
+        try:
+            parse_setting(v, SETTINGS[k][1])
+        except (ValueError, TypeError) as exc:
+            errs.append(f"{name}:{n}: {k}={v!r} does not parse ({SETTINGS[k][1]}: {exc})")
+            continue
+        vals[k] = (v, n)
+    return vals, errs
+
+
+def check_settings(base, settings_path=None):
+    """--check-settings. -> (exit code, report lines). Errors (exit 1): a line that is not KEY=VALUE (e.g. 'KEY = v'),
+    an unknown key, a value that does not parse, a storm_watch_station.conf missing a station fact (STATION_FACTS).
+    Warnings (exit 0): another station using CACO-05's (Marconi's) facts or thresholds, emails on without recipients."""
+    base = Path(base)
+    station = base / STATION_FILE
+    spath = Path(settings_path) if settings_path else base / SETTINGS_FILE
+    errs, warns, out, given = [], [], [], {}
+    for p in (station, spath):
+        if not p.exists():
+            out.append(f"  {p.name}: none")
+            continue
+        vals, e = strict_lines(p)
+        errs += e
+        given.update(vals)
+        out.append(f"  {p.name}: {len(vals)} setting(s) read" + (f", {len(e)} error(s)" if e else ""))
+    if station.exists():
+        missing = [k for k in STATION_FACTS if k not in given]
+        for k in missing:
+            errs.append(f"{STATION_FILE}: the station fact {k} is missing (its default is CACO-05's: "
+                        f"{SETTINGS[k][0]!r})")
+    cron, cron_notes = cron_settings(base)
+    cfg, _ = load_settings([station, spath], cron)
+    if not is_caco05(cfg):
+        for k in MARCONI_FACTS:
+            default, kind, _ = SETTINGS[k]
+            if parse_setting(given.get(k, (default,))[0], kind) == parse_setting(default, kind):
+                warns.append(f"{k} is CACO-05's (Marconi Beach) value {default!r}, but the station is "
+                             f"{station_of(cfg)}: check it")
+        if cfg["STORM_FACING"] is None and cfg["STORM_MIN_CELL_LON"] is None:
+            warns.append("STORM_FACING and STORM_MIN_CELL_LON are both empty: the Open-Meteo sea cell is not checked "
+                         "(set STORM_FACING, the direction the beach faces)")
+        thr = [k for k in ("STORM_HS_M", "STORM_CONFIRM_HS", "STORM_OBS_OPEN_HS", "STORM_DIR_SECTOR") if k not in given]
+        if thr:
+            warns.append(f"thresholds {', '.join(thr)} are Marconi's defaults: review them with "
+                         f"storm_watch.py --climatology --station {cfg['STORM_BUOY']} --emit-settings")
+    to, where = recipients(base, cfg)
+    out.append(f"  station {station_of(cfg)}, site {site_of(cfg)}, time zone {cfg['STORM_TZ']}, mode {cfg['STORM_MODE']}")
+    b1, b2 = buoys(cfg)
+    out.append(f"  buoys {b1}" + (f" and {b2}" if b2 else " (no second buoy)") + "; GFS-Wave bulletin "
+               + (cfg["STORM_GFSWAVE_STATION"] or "none") + f"; alert zones {','.join(cfg['STORM_ALERT_ZONES'])}")
+    if cfg["STORM_MODE"] == "full":
+        out.append(f"  storm DEMs with the cron's options: {' '.join(dem_args(cron, True))}"
+                   + (f" (DEM_MAX_HS from {OVERLAY_FILE})" if (base / OVERLAY_FILE).exists() else ""))
+        for n in cron_notes:
+            warns.append(n)
+    if cfg["STORM_EMAIL"] == 1:
+        out.append(f"  emails ON: {len(to)} recipient(s) ({where})")
+        if not to:
+            warns.append(f"emails are on (STORM_EMAIL=1) but there are no recipients ({where}): nothing will be sent")
+    else:
+        out.append(f"  emails off (STORM_EMAIL={cfg['STORM_EMAIL']}): bodies written to the event folders, nothing "
+                   f"sent ({len(to)} recipient(s) would get them: {where})")
+    lines = ["storm watch settings (" + str(base) + "):"] + out
+    lines += [f"ERROR: {e}" for e in errs] + [f"WARN: {w}" for w in warns]
+    lines.append("settings OK" + (f" ({len(warns)} warning(s))" if warns else "") if not errs else
+                 f"settings REFUSED: {len(errs)} error(s)")
+    return (1 if errs else 0), lines
+
 
 # --------------------------------------------------------------------------------------------
 # HTTP (stdlib urllib only, like the rest of the repository)
@@ -637,14 +822,14 @@ def recipients(base, cfg):
 
 
 def headers_for(url, cfg):
-    """The request headers: the generic User-Agent everywhere; for api.weather.gov the station's NWS_CONTACT
-    (when set) and Accept geo+json. Nothing else identifies anyone."""
-    ua = USER_AGENT
+    """The request headers: the generic User-Agent (the station's name only) everywhere; for api.weather.gov the
+    station's NWS_CONTACT (when set) and Accept geo+json. Nothing else identifies anyone."""
+    ua = user_agent(cfg)
     h = {"User-Agent": ua}
     if "://api.weather.gov/" in url:
         contact = (cfg or {}).get("NWS_CONTACT") or ""
         if contact:
-            h["User-Agent"] = f"caco05-storm-watch (USGS coastal camera research; {contact})"
+            h["User-Agent"] = ua[:-1] + f"; {contact})"
         h["Accept"] = "application/geo+json"
     return h
 
@@ -906,9 +1091,30 @@ def om_fresh(hours, now):
     return ""
 
 
-def parse_om_marine(js, points, now, lead_h, min_cell_lon):
-    """Open-Meteo marine (one object per point, in the order asked) -> [series or why] per point. The Marconi
-    point (first) is refused when its grid cell lies west of min_cell_lon (Cape Cod Bay / behind the shore)."""
+def ll_text(lat, lon):
+    """'41.90N 69.79W'."""
+    return f"{abs(lat):.2f}{'N' if lat >= 0 else 'S'} {abs(lon):.2f}{'W' if lon < 0 else 'E'}"
+
+
+def bearing_deg(a, b):
+    """Initial great-circle bearing (deg true) from point a to point b, each (lat, lon) in degrees."""
+    p1, p2 = np.radians(a[0]), np.radians(b[0])
+    dl = np.radians(b[1] - a[1])
+    y = np.sin(dl) * np.cos(p2)
+    x = np.cos(p1) * np.sin(p2) - np.sin(p1) * np.cos(p2) * np.cos(dl)
+    return float(np.degrees(np.arctan2(y, x)) % 360)
+
+
+def angle_off(a, b):
+    """The angle between two directions, 0-180 deg."""
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def parse_om_marine(js, points, now, lead_h, min_cell_lon, facing=None, beach=None):
+    """Open-Meteo marine (one object per point, in the order asked) -> [series or why] per point. The beach's offshore
+    point (first) is refused when its grid cell lies west of min_cell_lon (CACO-05: Cape Cod Bay / behind the shore;
+    None: no such test), or, with the beach's facing (deg true) and position, when the cell does not lie in front of
+    the beach (its bearing from the beach more than FACING_HALF_DEG off the facing: a bay behind it, or inland)."""
     objs = om_objects(js)
     out = []
     for i, (lat, lon) in enumerate(points):
@@ -924,10 +1130,16 @@ def parse_om_marine(js, points, now, lead_h, min_cell_lon):
         if abs(clat - lat) > 0.3 or abs(clon - lon) > 0.3:
             out.append(f"grid cell {clat:.2f},{clon:.2f} is not near {lat:.2f},{lon:.2f}")
             continue
-        if i == 0 and clon < min_cell_lon:
+        if i == 0 and min_cell_lon is not None and clon < min_cell_lon:
             out.append(f"grid cell {clat:.2f}N {-clon:.2f}W lies west of {-min_cell_lon:.2f}W (Cape Cod Bay "
                        "or behind the shore)")
             continue
+        if i == 0 and facing is not None and beach is not None:
+            br = bearing_deg(beach, (clat, clon))
+            if angle_off(br, facing) > FACING_HALF_DEG:
+                out.append(f"grid cell {ll_text(clat, clon)} lies at {br:.0f} deg from the beach, outside the sector "
+                           f"it faces ({facing:.0f} +- {FACING_HALF_DEG:.0f} deg): a bay behind the beach, or land?")
+                continue
         units = o.get("hourly_units") or {}
         if units.get("wave_height") != "m":
             out.append(f"wave_height unit {units.get('wave_height')!r}, not m")
@@ -951,7 +1163,7 @@ def parse_om_marine(js, points, now, lead_h, min_cell_lon):
         if why:
             out.append(why)
             continue
-        s.update(tstat="Tm", cell=f"{clat:.2f}N {-clon:.2f}W")
+        s.update(tstat="Tm", cell=ll_text(clat, clon))
         out.append(s)
     return out
 
@@ -980,8 +1192,9 @@ BULL_CYCLE = re.compile(r"Cycle\s*:\s*(\d{8})\s+(\d{1,2})\s*UTC")
 BULL_ROW = re.compile(r"^\|\s*(\d{1,2})\s+(\d{1,2})\s*\|\s*([\d.]+)")
 
 
-def parse_gfs_bull(text, now, lead_h):
-    """NOAA GFS-Wave point bulletin (gfswave.<station>.bull) -> (series, cycle datetime). Rows '| dd hh | Hst n x |
+def parse_gfs_bull(text, now, lead_h, station=None):
+    """NOAA GFS-Wave point bulletin (gfswave.<station>.bull; station default STORM_BUOY's CACO-05 value) ->
+    (series, cycle datetime). Rows '| dd hh | Hst n x |
     [*] Hs Tp dir | ...': Hst the total height; Tp and direction from the largest partition. Month and year from
     the Cycle line; a day smaller than the row before rolls to the next month. Stale over 36 h (ValueError)."""
     m = BULL_CYCLE.search(text or "")
@@ -1034,17 +1247,47 @@ def parse_gfs_bull(text, now, lead_h):
     why = check_series(s, ["hs", "tp", "dir"], now, lead_h)
     if why:
         raise ValueError(why)
-    s.update(tstat="Tp", cell="44008 model point")
+    s.update(tstat="Tp", cell=f"{station or CACO05['STORM_BUOY']} model point")
     return s, cyc
 
 # --------------------------------------------------------------------------------------------
 # fetching the forecast (one call per source; every failure is "unavailable this run")
 # --------------------------------------------------------------------------------------------
 
-SOURCE_FILES = ("nws_points.json", "nws_grid.json", "nws_forecast.json", "nws_alerts.json", "om_marine.json",
-                "om_wind.json", "gfswave_44008.bull")
 MARINE_PREFIX = ("AN", "AM", "GM", "PZ", "PK", "PH", "PS", "LE", "LH", "LM", "LO", "LS", "SL", "LC")
-GFS_URL = "https://polar.ncep.noaa.gov/waves/WEB/gfswave.latest_run/plots/gfswave.44008.bull"
+GFS_URL_FMT = "https://polar.ncep.noaa.gov/waves/WEB/gfswave.latest_run/plots/gfswave.{station}.bull"
+
+
+def gfs_station(cfg):
+    """The GFS-Wave bulletin's station (STORM_GFSWAVE_STATION, resolved: default STORM_BUOY), or None (none)."""
+    if cfg is None:
+        return CACO05["STORM_BUOY"]
+    if "STORM_GFSWAVE_STATION" not in cfg:
+        return buoys(cfg)[0]
+    g = cfg["STORM_GFSWAVE_STATION"]
+    if g is None or g == "none":
+        return None
+    return g or buoys(cfg)[0]
+
+
+def gfs_file(cfg):
+    """'gfswave_<station>.bull' (the raw response's name), or None."""
+    g = gfs_station(cfg)
+    return f"gfswave_{g}.bull" if g else None
+
+
+def gfs_key(cfg):
+    g = gfs_station(cfg)
+    return f"gfswave_{g}" if g else None
+
+
+def source_files(cfg):
+    return (("nws_points.json", "nws_grid.json", "nws_forecast.json", "nws_alerts.json", "om_marine.json",
+             "om_wind.json") + ((gfs_file(cfg),) if gfs_file(cfg) else ()))
+
+
+SOURCE_FILES = source_files(None)                           # CACO-05's
+GFS_URL = GFS_URL_FMT.format(station=gfs_station(None))     # CACO-05's
 
 
 def coord(x):
@@ -1135,7 +1378,7 @@ def fetch_forecast(ctx, state):
     if ctx.forecast_dir:
         # saved responses (--forecast-dir, or a replay of the archived ones): every file there, no /points logic
         keep = {"nws": ("nws_grid.json", "nws_forecast.json", "nws_alerts.json"), "om_marine": ("om_marine.json",),
-                "om_wind": ("om_wind.json",), "gfswave": ("gfswave_44008.bull",)}
+                "om_wind": ("om_wind.json",), "gfswave": (gfs_file(cfg),) if gfs_file(cfg) else ()}
         for src, names in keep.items():
             if src in srcs:
                 for name in names:
@@ -1192,8 +1435,8 @@ def fetch_forecast(ctx, state):
                 f.get("om_marine.json", om_marine_url(cfg, 7, False))
     if "om_wind" in srcs:
         f.get("om_wind.json", om_wind_url(cfg))
-    if "gfswave" in srcs:
-        f.get("gfswave_44008.bull", GFS_URL)
+    if "gfswave" in srcs and gfs_file(cfg):
+        f.get(gfs_file(cfg), GFS_URL_FMT.format(station=gfs_station(cfg)))
     return f
 
 
@@ -1206,9 +1449,10 @@ def loads(res):
 
 def build_forecast(raw, now, cfg):
     """Raw bodies by name -> the forecast: the wave series the rules read (the first fresh group of: both
-    Open-Meteo points, the GFS-Wave 44008 bulletin, the NWS grid waves), the others (a NOTE only), the wind
+    Open-Meteo points, the buoy's GFS-Wave bulletin, the NWS grid waves), the others (a NOTE only), the wind
     (NWS grid, else Open-Meteo), the NWS alerts, and each source's status."""
     lead = cfg["STORM_LEAD_HOURS"]
+    gname, gkey, gst = gfs_file(cfg), gfs_key(cfg), gfs_station(cfg)
     fc = {"now": iso_z(now), "status": {}, "groups": {}, "wind_all": [], "alerts": None, "text": [], "notes": [],
           "om_used": False}
     st = fc["status"]
@@ -1250,9 +1494,10 @@ def build_forecast(raw, now, cfg):
     if "om_marine.json" in raw:
         try:
             pts = [cfg["STORM_MARINE_POINT"], cfg["STORM_BUOY_POINT"]]
-            res = parse_om_marine(loads(raw["om_marine.json"]), pts, now, lead, cfg["STORM_MIN_CELL_LON"])
+            res = parse_om_marine(loads(raw["om_marine.json"]), pts, now, lead, cfg["STORM_MIN_CELL_LON"],
+                                  facing=cfg.get("STORM_FACING"), beach=cfg.get("STORM_POINT"))
             ok = []
-            for (lat, lon), r, label in zip(pts, res, ("offshore Marconi", "44008 point")):
+            for (lat, lon), r, label in zip(pts, res, (f"offshore {site_short(cfg)}", f"{buoys(cfg)[0]} point")):
                 if isinstance(r, dict):
                     r.update(name=f"om_marine {label} ({r['cell']})")
                     ok.append(r)
@@ -1273,23 +1518,23 @@ def build_forecast(raw, now, cfg):
             st["om_wind"] = "ok"
         except (ValueError, KeyError, TypeError, IndexError) as exc:
             st["om_wind"] = f"unavailable ({str(exc)[:80]})"
-    if "gfswave_44008.bull" in raw:
+    if gname and gname in raw:
         try:
-            r = raw["gfswave_44008.bull"]
+            r = raw[gname]
             if r[0] != 200:
                 raise ValueError(r[2] or f"HTTP {r[0]}")
-            s, cyc = parse_gfs_bull(r[1].decode("utf-8", "replace"), now, lead)
-            s.update(name=f"gfswave 44008 (cycle {cyc:%d %b %H}Z)")
-            fc["groups"]["gfswave_44008"] = [s]
-            st["gfswave_44008"] = "ok"
+            s, cyc = parse_gfs_bull(r[1].decode("utf-8", "replace"), now, lead, station=gst)
+            s.update(name=f"gfswave {gst} (cycle {cyc:%d %b %H}Z)")
+            fc["groups"][gkey] = [s]
+            st[gkey] = "ok"
         except (ValueError, TypeError) as exc:
-            st["gfswave_44008"] = f"unavailable ({str(exc)[:80]})"
+            st[gkey] = f"unavailable ({str(exc)[:80]})"
     for name in raw:
         key = name.split(".")[0]
         if key.startswith(("nws_points", "nws_zone", "nws_forecast")) or key in st:
             continue
         st[key] = f"unavailable ({unavailable(name)[:80]})"
-    order = [g for g in ("om_marine", "gfswave_44008", "nws_grid") if g in fc["groups"]]
+    order = [g for g in ("om_marine", gkey, "nws_grid") if g and g in fc["groups"]]
     fc["waves_group"] = order[0] if order else None
     fc["waves"] = fc["groups"][order[0]] if order else []
     fc["waves_other"] = [s for g in order[1:] for s in fc["groups"][g]]
@@ -1300,8 +1545,8 @@ def build_forecast(raw, now, cfg):
 
 
 def perfect_forecast(obs, now, cfg):
-    """Replay: the observed offshore waves over (now, now + lead] as the forecast (raw 44008, else the
-    Marconi-equivalent / 0.83), labelled 'hindcast: observed waves'."""
+    """Replay: the observed offshore waves over (now, now + lead] as the forecast (the raw buoy, STORM_BUOY, else
+    the beach's (Marconi-equivalent) height / STORM_OFFSHORE_TO_MARCONI), labelled 'hindcast: observed waves'."""
     lead = cfg["STORM_LEAD_HOURS"]
     h0 = hour_of(now)
     fc = {"now": iso_z(now), "status": {}, "groups": {}, "wind_all": [], "alerts": None, "text": [], "notes": [],
@@ -1313,7 +1558,8 @@ def perfect_forecast(obs, now, cfg):
         hs = np.where(np.isfinite(obs.raw_hs), obs.raw_hs, obs.prim / cfg["STORM_OFFSHORE_TO_MARCONI"])[sel]
         if np.isfinite(hs).sum() >= MIN_SOURCE_HOURS:
             s = {"h": hrs[sel], "hs": hs, "tp": obs.tp[sel], "dir": obs.dir[sel], "tstat": "Tp",
-                 "cell": "observed", "name": "hindcast: observed waves (44008, else Marconi / 0.83)"}
+                 "cell": "observed", "name": f"hindcast: observed waves ({buoys(cfg)[0]}, else {site_short(cfg)} / "
+                                            f"{cfg['STORM_OFFSHORE_TO_MARCONI']:g})"}
             fc["groups"]["observed"] = [s]
     fc["waves_group"] = "observed" if fc["groups"] else None
     fc["waves"] = fc["groups"].get("observed", [])
@@ -1501,11 +1747,21 @@ def evaluate_trigger(fc, now, cfg):
     return T
 
 # --------------------------------------------------------------------------------------------
-# observed waves, in the Marconi currency (ADCP-equivalent at 21 m: hs_best, DEM_MAX_HS)
+# observed waves, in the beach's currency (CACO-05: ADCP-equivalent at 21 m: hs_best, DEM_MAX_HS)
 # --------------------------------------------------------------------------------------------
 
 OBS_DAYS = 60
-SRC_LABELS = ["", "waves_marconi", "44013 converted", "44008 x 0.83", "camera only"]
+
+
+def src_labels(cfg=None):
+    """The observed layers' labels (index = Obs.psrc): 1 waves_marconi, 2 STORM_BUOY2 converted, 3 STORM_BUOY x the
+    offshore factor, 4 camera only."""
+    b1, b2 = buoys(cfg)
+    f = (cfg or {}).get("STORM_OFFSHORE_TO_MARCONI", 0.83)
+    return ["", "waves_marconi", f"{b2 or 'buoy 2'} converted", f"{b1} x {f:g}", "camera only"]
+
+
+SRC_LABELS = src_labels(None)       # CACO-05's
 
 
 def read_rows(path, cols, h_min, h_max):
@@ -1569,9 +1825,10 @@ def hourly_buoy(rows):
 
 
 class Obs:
-    """Hourly observed waves on [h0, h0 + n): prim (Marconi-equivalent from the buoy layers: waves_marconi
-    blend/buoy rows, else 44013 converted, else 44008 x 0.83), cam (waves_marconi camera-only rows), val (the
-    calm test: the larger of prim and cam), raw 44008 height and direction, period and direction."""
+    """Hourly observed waves on [h0, h0 + n): prim (the beach's (Marconi-equivalent) height from the buoy layers:
+    waves_marconi blend/buoy rows, else STORM_BUOY2 converted, else STORM_BUOY x 0.83), cam (waves_marconi
+    camera-only rows), val (the calm test: the larger of prim and cam), the raw STORM_BUOY height and direction,
+    period and direction."""
 
     def __init__(self, h0, n):
         self.h0, self.n = h0, n
@@ -1598,15 +1855,17 @@ def offshore_to_marconi(hs, d, cfg):
 
 
 def read_observed(base, now, cfg, h_end=None):
-    """Reads archive/waves_marconi.csv, waves_44013.csv and waves_44008.csv over the last 60 days up to `now`
-    -> Obs. Reads only; the caller holds owg.sh's lock."""
+    """Reads archive/waves_marconi.csv, waves_<STORM_BUOY2>.csv and waves_<STORM_BUOY>.csv over the last 60 days up
+    to `now` -> Obs. Reads only; the caller holds owg.sh's lock."""
     base = Path(base)
     h1 = hour_of(now) if h_end is None else h_end
     h0 = h1 - OBS_DAYS * 24
     o = Obs(h0, h1 - h0 + 1)
+    bp, bs = buoys(cfg)
     m = read_rows(base / "archive/waves_marconi.csv", ["hs_best", "best_from", "qc_flag", "dir_deg", "tp_s"], h0, h1)
-    b13 = hourly_buoy(read_rows(base / "archive/waves_44013.csv", ["wvht_m", "dpd_s", "mwd_deg"], h0, h1))
-    b08 = hourly_buoy(read_rows(base / "archive/waves_44008.csv", ["wvht_m", "dpd_s", "mwd_deg"], h0, h1))
+    b13 = hourly_buoy(read_rows(base / f"archive/waves_{bs}.csv", ["wvht_m", "dpd_s", "mwd_deg"], h0, h1)) \
+        if bs else {}
+    b08 = hourly_buoy(read_rows(base / f"archive/waves_{bp}.csv", ["wvht_m", "dpd_s", "mwd_deg"], h0, h1))
     L1, cam, raw_m = {}, {}, {}
     for r in m:
         q = fnum_or_nan(r.get("qc_flag"))
@@ -1628,16 +1887,20 @@ def read_observed(base, now, cfg, h_end=None):
         tp13 = np.array([v[1] for v in b13.values()])
         d13 = np.array([v[2] for v in b13.values()])
         conv = np.full(len(hs13), np.nan)
-        trp = base / "calibration/buoy_transfer_44013.json"
+        trp = base / f"calibration/buoy_transfer_{bs}.json"
         if trp.exists():
             try:
                 sys.path.insert(0, str(HERE))
                 import buoy_transfer
                 conv = np.asarray(buoy_transfer.apply(buoy_transfer.load(trp), hs13, tp13, d13), float)
             except Exception as exc:
-                o.notes.append(f"buoy_transfer_44013.json not applied ({exc})")
+                o.notes.append(f"{trp.name} not applied ({exc})")
         sec = in_sector(d13, cfg["STORM_DIR_SECTOR"]) | ~np.isfinite(d13)
-        fallback = np.where(sec, 0.827 * hs13 + 0.151, cfg["STORM_SHELTERED_FACTOR"] * hs13)
+        # without its transfer file: CACO-05's fit for its second buoy at Marconi; at any other station or buoy the
+        # offshore factor (STORM_OFFSHORE_TO_MARCONI), as for STORM_BUOY
+        fa, fb = CACO05["STORM_BUOY2_FIT"] if (is_caco05(cfg) and bs == CACO05["STORM_BUOY2"]) \
+            else (cfg["STORM_OFFSHORE_TO_MARCONI"], 0.0)
+        fallback = np.where(sec, fa * hs13 + fb, cfg["STORM_SHELTERED_FACTOR"] * hs13)
         conv = np.where(np.isfinite(conv), conv, fallback)
         for (h, v), c in zip(b13.items(), conv):
             L2[h] = (float(c), v[1], v[2])
@@ -1689,6 +1952,7 @@ def segments(o, cfg):
         calm_h = np.isfinite(v) & (v <= calm)
     segs, i, n = [], 0, o.n
     sec_raw = in_sector(o.raw_dir, cfg["STORM_DIR_SECTOR"])
+    labels = src_labels(cfg)
     while i < n:
         if not rough[i]:
             i += 1
@@ -1708,7 +1972,7 @@ def segments(o, cfg):
         seg = {"start": o.h0 + start, "last": o.h0 + last, "end": None if end is None else o.h0 + end,
                "rough_hours": int(rough[span].sum()), "camera_only": not has.any(),
                "peak": None, "peak_h": None, "n_confirm": 0,
-               "srcs": sorted({SRC_LABELS[int(x)] for x in o.psrc[span] if x})}
+               "srcs": sorted({labels[int(x)] for x in o.psrc[span] if x}), "buoy": buoys(cfg)[0]}
         if has.any():
             k = int(np.nanargmax(np.where(has, prim, np.nan)))
             seg.update(peak=round(float(prim[k]), 2), peak_h=o.h0 + start + k,
@@ -1747,7 +2011,7 @@ def seg_span(s, now_h):
 def seg_text(s):
     return (f"{hour_iso(s['start'])[:13]}Z-" + (f"{hour_iso(s['end'])[:13]}Z" if s["end"] is not None else "open")
             + (f", peak {s['peak']:.2f} m" if s["peak"] is not None else ", camera-only")
-            + (f", 44008 {s['raw_max']:.1f} m" if s["raw_max"] else ""))
+            + (f", {s.get('buoy') or CACO05['STORM_BUOY']} {s['raw_max']:.1f} m" if s["raw_max"] else ""))
 
 
 # --------------------------------------------------------------------------------------------
@@ -2042,6 +2306,7 @@ class Ctx:
         self.forecast_dir = forecast_dir
         self.save_raw = save_raw
         self.email = email and cfg["STORM_EMAIL"] == 1 and mode == "live"
+        self.alerts = cfg.get("STORM_MODE") == "alerts"     # no DEM: see alerts_steps
         self.fetch = fetch
         self.coverage_cap = coverage_cap
         self.msmtp = msmtp
@@ -2119,8 +2384,8 @@ def build_dem(ctx, E, stem, start, end, no_plot=False, extra=(), title=None, kin
         if rc == 3:
             rec["note"] = "grids written, its page not drawn (exit 3)"
         if not no_plot:
-            draw_products(ctx, E, stem, title or f"Marconi Beach {kind} DEM, {start} to {end}",
-                          f"CACO-05 storm watch {E['id']} {kind} {start}..{end}; intertidal beach only")
+            draw_products(ctx, E, stem, title or f"{site_of(ctx.cfg)} {kind} DEM, {start} to {end}",
+                          f"{station_of(ctx.cfg)} storm watch {E['id']} {kind} {start}..{end}; intertidal beach only")
     else:
         rec.update(adequate=False, cells=0,
                    why={4: "no waterline points in the window, or the day test rejected every camera-day (exit 4)"}
@@ -2299,7 +2564,7 @@ def do_change(ctx, E, part, segs):
         json.dump(res, f, indent=1)
     if res["status"] == "map":
         ctx.run([sys.executable, str(HERE / "asc_to_geotiff.py"), str(cdir), "--note",
-                 f"CACO-05 storm watch {E['id']} change pre {a}..{b} to {part} "
+                 f"{station_of(ctx.cfg)} storm watch {E['id']} change pre {a}..{b} to {part} "
                  f"{post['window'][0]}..{post['window'][1]}; intertidal beach only"], ed / "log.txt")
     del dc
     return res
@@ -2333,8 +2598,8 @@ def segs_in(segs, a, b):
 # --------------------------------------------------------------------------------------------
 
 
-def fresh_state(now):
-    return {"version": STATE_VERSION, "station": STATION, "created_utc": iso_z(now), "last_run": {},
+def fresh_state(now, station=STATION):
+    return {"version": STATE_VERSION, "station": station, "created_utc": iso_z(now), "last_run": {},
             "nws_points": None, "ground_cache": None, "events": [], "seen_segments": [], "install_utc": iso_z(now)}
 
 
@@ -2354,7 +2619,7 @@ def load_state(ctx):
                 raise ValueError("not an object")
             ctx.warn("WARNING: restored the previous state (state.json.prev)")
         except (OSError, ValueError):
-            st = fresh_state(ctx.now)
+            st = fresh_state(ctx.now, station_of(ctx.cfg))
             for ej in sorted(ctx.events_dir.glob("*/event.json")):
                 try:
                     st["events"].append(json.loads(ej.read_text()))
@@ -2370,7 +2635,7 @@ def load_state(ctx):
         if prev.exists() or any(ctx.events_dir.glob("*/event.json")):
             ctx.warn("WARNING: state file missing, but earlier runs left state.json.prev or event folders")
             return recover(), False
-        return fresh_state(ctx.now), True
+        return fresh_state(ctx.now, station_of(ctx.cfg)), True
     try:
         st = json.loads(p.read_text())
         if not isinstance(st, dict):
@@ -2433,6 +2698,8 @@ def new_event(ctx, state, kind, onset_d):
          "pre": {"status": "planned", "planned": None, "window": None}, "pre_provisional": None,
          "post3": None, "post7": None, "change": {}, "pending": [], "emails": [], "notices": {},
          "prev_event": None, "merged_from": [], "notes": [], "history": [], "waiting": {}}
+    if ctx.alerts:
+        E["mode"] = "alerts"
     state["events"].append(E)
     if ctx.writes:
         evdir(ctx, E).mkdir(parents=True, exist_ok=True)
@@ -2627,14 +2894,14 @@ def waves_ready(ctx, E, key, obs, a, b):
     return False, f"waiting for the wave record on {', '.join(gaps)}"
 
 
-def part_title(E, kind, a, b):
+def part_title(E, kind, a, b, site=None):
     sd = E.get("storm_dates")
     if kind.startswith("pre"):
-        return (f"Marconi Beach PRE-storm DEM, {a} to {b} (UTC dates)"
+        return (f"{site or CACO05['STORM_SITE']} PRE-storm DEM, {a} to {b} (UTC dates)"
                 + (f", before the {sd[0]}..{sd[1]} storm" if sd else
                    f", before the storm forecast for {onset_date(E)}"))
     which = "first 3 usable days" if kind == "post3" else "7 days"
-    return f"Marconi Beach POST-storm DEM ({which}), {a} to {b}"
+    return f"{site or CACO05['STORM_SITE']} POST-storm DEM ({which}), {a} to {b}"
 
 
 def try_pre(ctx, state, E, segs, gi, obs, provisional=False, window=None):
@@ -2677,7 +2944,7 @@ def try_pre(ctx, state, E, segs, gi, obs, provisional=False, window=None):
                                     + (f" (after {after[-1]})" if after else "")}
             return True
         rec = build_dem(ctx, E, ed / "pre_provisional" / f"pre_{start}_{end}", start, end,
-                        title=part_title(E, "pre", start, end) + " (PROVISIONAL)", kind="pre (provisional)")
+                        title=part_title(E, "pre", start, end, site_of(cfg)) + " (PROVISIONAL)", kind="pre (provisional)")
         rec["usable"] = usable_dates(gi, start, end, cfg)
         rec["status"] = "built" if rec["adequate"] else "inadequate"
         E["pre_provisional"] = rec
@@ -2737,7 +3004,7 @@ def try_pre(ctx, state, E, segs, gi, obs, provisional=False, window=None):
         lo = fl
     for attempt in range(4):
         rec = build_dem(ctx, E, ed / "pre" / f"pre_{start}_{end}", start, end,
-                        title=part_title(E, "pre", start, end), kind="pre")
+                        title=part_title(E, "pre", start, end, site_of(cfg)), kind="pre")
         if rec["adequate"] or attempt == 3 or start <= lo:
             break
         hist(ctx, E, f"pre {start}..{end} not adequate ({rec['why']}): one more day back")
@@ -2781,7 +3048,7 @@ def try_post3(ctx, state, E, gi, obs, segs):
         hist(ctx, E, "post3: DEM stage disabled")
         return True
     rec = build_dem(ctx, E, evdir(ctx, E) / "post3" / f"post3_{fp}_{d3}", fp, d3,
-                    title=part_title(E, "post3", fp, d3), kind="post3")
+                    title=part_title(E, "post3", fp, d3, site_of(cfg)), kind="post3")
     rec.update(usable=u[:need], status="built" if rec["adequate"] else "inadequate", flags=[why] if why else [])
     E["post3"] = rec
     hist(ctx, E, f"post3 {fp}..{d3}: {rec.get('cells')} cells" + ("" if rec["adequate"] else f" ({rec['why']})"))
@@ -2830,7 +3097,7 @@ def try_post7(ctx, state, E, gi, obs):
         E["post7"] = {"status": "disabled", "window": [fp, cap], "usable": u}
         return True
     rec = build_dem(ctx, E, evdir(ctx, E) / "post7" / f"post7_{fp}_{cap}", fp, cap,
-                    title=part_title(E, "post7", fp, cap), kind="post7")
+                    title=part_title(E, "post7", fp, cap, site_of(cfg)), kind="post7")
     flags = [f for f in (wwhy, reason, ("cut short by the next storm (from %s)" % dadd(ob["cut_date"], 1)) if cut
                          else "") if f]
     rec.update(usable=u, status="built" if rec["adequate"] else "inadequate", flags=flags)
@@ -2983,7 +3250,8 @@ def update_watch(ctx, state, E, segs, T, t_hit, obs):
         close_false_alarm(ctx, E, segs, obs, "the observed waves never reached the confirm level")
     elif ctx.now_h > en + 7 * 24 and cov < 0.5:
         E["status"], E["closed_reason"] = "closed", "unverified"
-        E["pending"].append({"what": "pre_final", "window": E["pre"]["planned"], "since": ctx.today})
+        if not ctx.alerts:
+            E["pending"].append({"what": "pre_final", "window": E["pre"]["planned"], "since": ctx.today})
         hist(ctx, E, f"closed UNVERIFIED: observed waves cover {100 * cov:.0f} % of the storm's window")
         queue_email(ctx, E, "unverified", coverage=round(cov, 2))
     elif receding:
@@ -2991,7 +3259,7 @@ def update_watch(ctx, state, E, segs, T, t_hit, obs):
 
 
 def merged_owner(ctx, state, E, segs, obs, h0, h1):
-    """A segment that confirms with its waves inside [h0, h1] (Marconi >= STORM_CONFIRM_HS, or 44008 >=
+    """A segment that confirms with its waves inside [h0, h1] (Marconi >= STORM_CONFIRM_HS, or STORM_BUOY >=
     STORM_CONFIRM_BUOY_HS in the sector for 2 h, on the hours of the segment inside the window) and that another
     event owns -> (that event, the segment, the Marconi peak inside the window), else (None, None, None). The
     owner is the oldest one not itself merged away (merge_or_cut gives the event it merges into the segment too)."""
@@ -3041,8 +3309,9 @@ def close_false_alarm(ctx, E, segs, obs, why):
             peak = round(float(np.nanmax(obs.prim[a:b + 1])), 2)
     E["status"], E["closed_reason"] = "closed", "false_alarm"
     E["observed"]["peak_hs"] = peak
-    E["pending"].append({"what": "pre_final", "window": E["pre"]["planned"], "since": ctx.today})
-    hist(ctx, E, f"closed FALSE ALARM: {why} (observed Marconi peak {fnum(peak)} m)")
+    if not ctx.alerts:
+        E["pending"].append({"what": "pre_final", "window": E["pre"]["planned"], "since": ctx.today})
+    hist(ctx, E, f"closed FALSE ALARM: {why} (observed {site_short(ctx.cfg)} peak {fnum(peak)} m)")
     queue_email(ctx, E, "false_alarm", why=why, peak=peak)
 
 
@@ -3055,6 +3324,10 @@ def update_storm(ctx, state, E, segs):
         set_first_post(ctx, E, state.get("ground_cache"))
         hist(ctx, E, f"storm over: end {ob['end'][:13]}Z, storm dates {E['storm_dates'][0]}..{E['storm_dates'][1]}, "
                      f"first post date {E['first_post']}")
+        if ctx.alerts and not any(m["kind"] == "missed_storm" and m["status"] == "pending" for m in E["emails"]):
+            # alerts mode: the storm-over email (a storm the forecast missed that is already over when it is found
+            # has its end in the missed-storm email going out in this run)
+            queue_email(ctx, E, "storm_over")
         return
     if ob["end"] is None and ob.get("peak_time"):
         ph = iso_hour(ob["peak_time"])
@@ -3071,8 +3344,8 @@ def update_storm(ctx, state, E, segs):
 def update_post(ctx, state, E, segs):
     follow_segments(ctx, E, segs)
     ob = E["observed"]
-    if ob.get("cut_segment"):
-        return
+    if ob.get("cut_segment") or ctx.alerts:
+        return              # alerts mode: no post window to cut
     end_h = iso_hour(ob["end"])
     cap = dadd(E["first_post"], ctx.cfg["STORM_POST_DAYS"] - 1)
     for s in sorted(segs, key=lambda x: x["start"]):
@@ -3286,6 +3559,67 @@ def pending_steps(ctx, state, E, gi, obs, segs):
     E["pending"] = keep
 
 
+# ---- alerts mode (STORM_MODE=alerts): no DEM; events close on the clock; one events.csv row each ----------------
+
+
+def alerts_steps(ctx, state, E):
+    """Alerts mode: an event whose storm has ended closes ALERTS_CLOSE_H (72 h) after the end. trigger_match keeps a
+    post event for 72 h after its end, so a forecast for the same storm's tail in that time updates it (no second
+    heads-up); nothing waits for a DEM or the ground file."""
+    ob = E["observed"]
+    if E["status"] == "post" and ob.get("end") and ctx.now_h >= iso_hour(ob["end"]) + ALERTS_CLOSE_H:
+        E["status"], E["closed_reason"] = "closed", "complete"
+        hist(ctx, E, f"closed: {ALERTS_CLOSE_H} h after the storm's end (alerts mode: no beach maps)")
+
+
+EVENTS_CSV_FIELDS = ("event", "kind", "mode", "station", "opened_utc", "closed_utc", "closed_reason",
+                     "forecast_onset_utc", "forecast_end_utc", "forecast_peak_hs_m", "forecast_peak_utc", "forecast_rules",
+                     "observed_onset_utc", "observed_peak_hs_m", "observed_peak_utc", "buoy", "buoy_max_hs_m",
+                     "storm_end_utc", "storm_dates", "emails")
+
+
+def event_row(ctx, E):
+    f, ob = E.get("forecast") or {}, E["observed"]
+    pk = f.get("peak") or {}
+    sd = E.get("storm_dates")
+    blank = lambda x: "" if x is None else x     # noqa: E731
+    return [E["id"], E["kind"], E.get("mode", ""), station_of(ctx.cfg), E["opened_utc"], iso_z(ctx.now),
+            E["closed_reason"] or "", blank(f.get("onset_fc")), blank(f.get("end_fc")), blank(pk.get("hs")),
+            blank(pk.get("time")), ",".join(f.get("rules") or []), blank(ob.get("onset")), blank(ob.get("peak_hs")),
+            blank(ob.get("peak_time")), buoys(ctx.cfg)[0], blank(ob.get("raw_max")), blank(ob.get("end")),
+            f"{sd[0]}..{sd[1]}" if sd else "", " ".join(f"{m['kind']}:{m['status']}" for m in E["emails"])]
+
+
+def write_events_csv(ctx, state):
+    """Alerts mode: one row per closed event in archive/storm_watch/events.csv, appended by the run that closed it
+    (after its emails, so their outcome is in the row; never an address). -> rows written."""
+    if not (ctx.writes and ctx.alerts):
+        return 0
+    todo = [E for E in state["events"] if not is_open(E) and not E.get("csv_row")]
+    if not todo:
+        return 0
+    path = ctx.out_root / "events.csv"
+    have = set()
+    if path.exists():
+        try:
+            with open(path, newline="") as f:
+                have = {r.get("event") for r in csv.DictReader(f)}
+        except (OSError, csv.Error):
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    with open(path, "a", newline="") as f:
+        w = csv.writer(f)
+        if f.tell() == 0:
+            w.writerow(EVENTS_CSV_FIELDS)
+        for E in todo:
+            if E["id"] not in have:
+                w.writerow(event_row(ctx, E))
+                n += 1
+            E["csv_row"] = iso_z(ctx.now)
+    return n
+
+
 def needed_from(ctx, state):
     """The earliest date any open event or pending build needs in the working ground rows."""
     cfg = ctx.cfg
@@ -3379,7 +3713,7 @@ def forecast_lines(ctx, E):
     out = []
     pk = f.get("peak")
     if pk:
-        out.append(f"  peak Hs {pk['hs']:.1f} m (offshore) at {when(parse_iso(pk['time']))}, from "
+        out.append(f"  peak Hs {pk['hs']:.1f} m (offshore) at {when(parse_iso(pk['time']), cfg['STORM_TZ'])}, from "
                    f"{compass(pk['dir'] if pk['dir'] is not None else float('nan'))}"
                    + (f", {pk.get('tstat', 'Tp')} {pk['tp']:.0f} s" if pk.get("tp") is not None else "")
                    + f" ({pk['source']})")
@@ -3394,7 +3728,8 @@ def forecast_lines(ctx, E):
             out.append(f"    {a['headline']}")
     w = f.get("wind_peak")
     if w:
-        out.append(f"  wind peak {w['ws']:.0f} m/s ({w['ws'] / 0.514444:.0f} kt) at {when(parse_iso(w['time']))}, "
+        out.append(f"  wind peak {w['ws']:.0f} m/s ({w['ws'] / 0.514444:.0f} kt) at "
+                   f"{when(parse_iso(w['time']), cfg['STORM_TZ'])}, "
                    f"from {compass(w['dir'] if w['dir'] is not None else float('nan'))}"
                    + (f", gusts {w['gust']:.0f} m/s ({w['gust'] / 0.514444:.0f} kt)" if w.get("gust") else "")
                    + f" ({w['source']})")
@@ -3414,11 +3749,23 @@ def plan_lines(ctx, E, observed=False):
     od = onset_date(E)
     pre = E["pre"]
     win = pre.get("window") or pre.get("planned") or [dadd(od, -cfg["STORM_PRE_DAYS"]), dadd(od, -1)]
+    tz = cfg["STORM_TZ"]
+    if ctx.alerts:
+        out = ["WHAT THE STATION WILL DO (alerts mode: forecasts and alerts only, no beach maps):"]
+        if observed:
+            out.append(f"  observed onset {when(parse_iso(E['observed']['onset']), tz)}")
+        else:
+            out.append(f"  provisional onset ~{when(parse_iso(E['forecast']['onset_fc']), tz)}")
+        out.append(f"  it follows the storm on the observed waves ({', '.join(x for x in buoys(cfg) if x)}) and emails "
+                   f"when it is over (24 calm hours); the event closes {ALERTS_CLOSE_H} h after that")
+        if not observed:
+            out.append("  a storm that does not arrive is closed as a false alarm")
+        return out
     out = ["WHAT THE STATION WILL DO (UTC dates):"]
     if observed:
-        out.append(f"  observed onset {when(parse_iso(E['observed']['onset']))}")
+        out.append(f"  observed onset {when(parse_iso(E['observed']['onset']), tz)}")
     else:
-        out.append(f"  provisional onset ~{when(parse_iso(E['forecast']['onset_fc']))}")
+        out.append(f"  provisional onset ~{when(parse_iso(E['forecast']['onset_fc']), tz)}")
     out.append("  the storm dates (from the onset date to the end) are left out of every DEM: wave setup and "
                "surge push the waterline up")
     if ctx.cron.get("DEM_ENABLE") != "1":
@@ -3447,16 +3794,19 @@ def plan_lines(ctx, E, observed=False):
     return out
 
 
-def storm_lines(E):
+def storm_lines(E, cfg=None, alerts=False):
     ob = E["observed"]
-    out = [f"  onset {when(parse_iso(ob['onset']))}" if ob.get("onset") else "  onset: not observed"]
+    tz = (cfg or {}).get("STORM_TZ")
+    out = [f"  onset {when(parse_iso(ob['onset']), tz)}" if ob.get("onset") else "  onset: not observed"]
     if ob.get("peak_hs") is not None:
-        out.append(f"  peak {ob['peak_hs']:.2f} m (Marconi, ADCP-equivalent) at {when(parse_iso(ob['peak_time']))}"
-                   + (f"; 44008 up to {ob['raw_max']:.1f} m" if ob.get("raw_max") else ""))
+        out.append(f"  peak {ob['peak_hs']:.2f} m ({site_short(cfg)}, {currency(cfg)}) at "
+                   f"{when(parse_iso(ob['peak_time']), tz)}"
+                   + (f"; {buoys(cfg)[0]} up to {ob['raw_max']:.1f} m" if ob.get("raw_max") else ""))
     if ob.get("end"):
-        out.append(f"  end {when(parse_iso(ob['end']))} (24 calm hours began)")
+        out.append(f"  end {when(parse_iso(ob['end']), tz)} (24 calm hours began)")
     if E.get("storm_dates"):
-        out.append(f"  storm dates left out of every DEM: {E['storm_dates'][0]} to {E['storm_dates'][1]}")
+        out.append(f"  storm dates: {E['storm_dates'][0]} to {E['storm_dates'][1]}" if alerts else
+                   f"  storm dates left out of every DEM: {E['storm_dates'][0]} to {E['storm_dates'][1]}")
     if ob.get("sources"):
         out.append(f"  wave record: {', '.join(ob['sources'])}")
     f = E.get("forecast")
@@ -3550,32 +3900,43 @@ def pointing_lines(c):
 def compose(ctx, state, E, m):
     """-> (subject, body, attachments) of a queued email."""
     cfg, kind, data = ctx.cfg, m["kind"], m.get("data") or {}
-    pre = SUBJECT + (" [HINDCAST]" if E.get("hindcast") else "")
+    pre = subject_of(cfg) + (" [HINDCAST]" if E.get("hindcast") else "")
     od = onset_date(E)
     att, lines = [], []
     sd = E.get("storm_dates")
     sdt = f"{sd[0]}..{sd[1]}" if sd else od
+    site, short, tz, alerts = site_of(cfg), site_short(cfg), cfg["STORM_TZ"], ctx.alerts
+    b1, b2 = buoys(cfg)
     if kind == "heads_up":
         on = parse_iso(E["forecast"]["onset_fc"])
-        subj = f"Storm forecast for Marconi Beach: onset ~{eastern(on)[:10]} (heads-up)"
-        lines = [f"A storm is forecast for Marconi Beach within the next {cfg['STORM_LEAD_HOURS'] / 24:g} days. This "
+        subj = f"Storm forecast for {site}: onset ~{local_time(on, tz)[:10]} (heads-up)"
+        lines = [f"A storm is forecast for {site} within the next {cfg['STORM_LEAD_HOURS'] / 24:g} days. This "
                  "heads-up is for planning a GPS or drone survey before and after it.", "",
                  f"FORECAST (run {iso_z(ctx.now)[:16]}Z; wave heights offshore, deep water):"] + forecast_lines(ctx, E)
         if E.get("prev_event"):
             X = next((x for x in state["events"] if x["id"] == E["prev_event"]), None)
             lines.append(f"  this storm follows {E['prev_event']}, " + (
                 "whose storm is still going on" if X is not None and X["status"] == "storm" else
+                "which closes 72 h after its storm's end" if alerts else
                 "whose post-storm DEMs are still being built"))
         lines += [""] + plan_lines(ctx, E)
         p = map_png(ctx, E, "pre_provisional")
         att += [p] if p else []
     elif kind == "missed_storm":
-        subj = f"A storm the forecast missed: {eastern(parse_iso(E['observed']['onset']))[:10]}"
-        lines = ["The observed waves show a storm that no forecast trigger announced. Its pre-storm DEM is built "
-                 "after the fact from the saved waterline points.", "", "STORM (observed):"] + storm_lines(E)
+        subj = f"A storm the forecast missed: {local_time(parse_iso(E['observed']['onset']), tz)[:10]}"
+        lines = ["The observed waves show a storm that no forecast trigger announced. " + (
+                 "Alerts mode: no beach maps are made." if alerts else
+                 "Its pre-storm DEM is built after the fact from the saved waterline points."), "",
+                 "STORM (observed):"] + storm_lines(E, cfg, alerts)
         lines += [""] + plan_lines(ctx, E, observed=True)
+    elif kind == "storm_over":
+        subj = f"Storm over at {site}: {sdt}"
+        lines = [f"The storm of event {E['id']} is over: the waves at {short} stayed below {cfg['STORM_CALM_HS']:g} m "
+                 f"for {cfg['STORM_END_CALM_HOURS']} hours. The event closes {ALERTS_CLOSE_H} h after the end (a "
+                 "forecast for the same storm in those hours updates it: no new heads-up).", "",
+                 "STORM (observed):"] + storm_lines(E, cfg, alerts)
     elif kind == "update":
-        subj = f"Storm forecast update for Marconi Beach: {'; '.join(data.get('why') or [])[:80]}"
+        subj = f"Storm forecast update for {site}: {'; '.join(data.get('why') or [])[:80]}"
         lines = ["The forecast for the storm in event " + E["id"] + " has escalated: " + "; ".join(data.get("why") or []),
                  "", "FORECAST:"] + forecast_lines(ctx, E)
     elif kind == "false_alarm":
@@ -3584,30 +3945,38 @@ def compose(ctx, state, E, m):
         subj = f"False alarm: the storm forecast for {od} did not arrive"
         pw = E["pre"].get("planned") or ["?", "?"]
         lines = [f"Event {E['id']} is closed as a FALSE ALARM: {data.get('why')}. The forecast peak was "
-                 f"{fnum(pk.get('hs'), '%.1f')} m offshore at {pk.get('time', '?')[:13]}Z; the observed Marconi "
+                 f"{fnum(pk.get('hs'), '%.1f')} m offshore at {pk.get('time', '?')[:13]}Z; the observed {short} "
                  f"peak between the forecast onset minus 24 h and its end plus 48 h was {fnum(data.get('peak'))} m "
-                 f"(a storm is confirmed at {cfg['STORM_CONFIRM_HS']:g} m). The pre-storm DEM of {pw[0]} to "
-                 f"{pw[1]} is kept as a calm-days DEM in {evdir(ctx, E)}/pre/ (built once the ground file covers it)."]
+                 f"(a storm is confirmed at {cfg['STORM_CONFIRM_HS']:g} m)." + ("" if alerts else
+                 f" The pre-storm DEM of {pw[0]} to "
+                 f"{pw[1]} is kept as a calm-days DEM in {evdir(ctx, E)}/pre/ (built once the ground file covers it).")]
     elif kind == "merged":
         into = data.get("into")
         what = (f"the storm forecast for {od} came, but its waves are" if E.get("forecast") and not E["observed"]["onset"]
                 else f"the storm of {od} is")
         subj = f"Storm of {od}: part of event {into} (one compound event)"
-        lines = [f"Event {E['id']} is closed: {what} part of the storm that event {into} follows (one compound "
-                 "event: fewer than 3 usable calm dates between the two storms)"
-                 + (f"; observed Marconi peak {fnum(data.get('peak'))} m" if data.get("peak") is not None else "")
-                 + f". Its pre-storm and post-storm DEMs and change maps come with the emails of {into}; this event "
-                 "builds none of its own."]
+        if alerts:
+            lines = [f"Event {E['id']} is closed: {what} part of the storm that event {into} follows (one compound "
+                     "event)" + (f"; observed {short} peak {fnum(data.get('peak'))} m" if data.get("peak") is not None
+                                 else "") + f". Its storm-over email comes with {into}."]
+        else:
+            lines = [f"Event {E['id']} is closed: {what} part of the storm that event {into} follows (one compound "
+                     "event: fewer than 3 usable calm dates between the two storms)"
+                     + (f"; observed {short} peak {fnum(data.get('peak'))} m" if data.get("peak") is not None else "")
+                     + f". Its pre-storm and post-storm DEMs and change maps come with the emails of {into}; this event "
+                     "builds none of its own."]
     elif kind == "unverified":
         subj = f"Storm forecast for {od}: closed without verification"
         lines = [f"Event {E['id']} is closed UNVERIFIED: the observed wave record covers only "
                  f"{100 * data.get('coverage', 0):.0f} % of the storm's window, so whether the storm came is not "
-                 "known. Check the buoys (archive/waves_44008.csv, waves_44013.csv) and the camera wave gauge."]
+                 f"known. Check the buoys (archive/waves_{b1}.csv" + (f", waves_{b2}.csv" if b2 else "")
+                 + ") and the camera wave gauge."]
     elif kind == "not_over":
         subj = f"Storm of {od} not over after 7 days"
-        lines = [f"The waves at Marconi have not stayed below {cfg['STORM_CALM_HS']:g} m for "
+        lines = [f"The waves at {short} have not stayed below {cfg['STORM_CALM_HS']:g} m for "
                  f"{cfg['STORM_END_CALM_HOURS']} hours since the peak of {E['observed'].get('peak_time', '?')[:13]}Z. "
-                 "The post-storm DEMs wait for the end. The event is given up 14 days after the peak."] + storm_lines(E)
+                 + ("" if alerts else "The post-storm DEMs wait for the end. ")
+                 + "The event is given up 14 days after the peak."] + storm_lines(E, cfg, alerts)
     elif kind == "waiting_ground":
         subj = f"Storm of {od}: waiting for the ground file"
         lines = [f"The {data.get('part')} DEM needs the waterline points of {data.get('date')}, but the ground file's "
@@ -3616,16 +3985,19 @@ def compose(ctx, state, E, m):
                  f"{data.get('date')}."]
     elif kind == "gave_up":
         subj = f"Storm of {od}: given up"
-        lines = [f"Event {E['id']} is closed: " + (data.get("why") or "gave up") + ".",
-                 "", "What was built:", dem_line("pre", E["pre"]), dem_line("post3", E["post3"]),
-                 dem_line("post7", E["post7"])]
-        att += [p for p in (map_png(ctx, E, "pre"), map_png(ctx, E, "post3")) if p]
+        lines = [f"Event {E['id']} is closed: " + (data.get("why") or "gave up") + "."]
+        if alerts:
+            lines += [""] + storm_lines(E, cfg, alerts)
+        else:
+            lines += ["", "What was built:", dem_line("pre", E["pre"]), dem_line("post3", E["post3"]),
+                      dem_line("post7", E["post7"])]
+            att += [p for p in (map_png(ctx, E, "pre"), map_png(ctx, E, "post3")) if p]
     elif kind in ("report_post3", "report_post7"):
         part = kind.split("_")[1]
         c = E["change"].get(part) or {}
         subj = (f"Beach change after the {sdt} storm: "
                 + ("first look (3 usable days)" if part == "post3" else "7-day map"))
-        lines = ["STORM:"] + storm_lines(E) + ["", f"DEMS (dem_from_contours.py, the cron's 7-day DEM options: "
+        lines = ["STORM:"] + storm_lines(E, cfg) + ["", f"DEMS (dem_from_contours.py, the cron's 7-day DEM options: "
                                                     f"{opts_text(ctx)}):", dem_line("pre", E["pre"]),
                                                dem_line(part, E[part])]
         if c.get("status") == "map":
@@ -3645,7 +4017,7 @@ def compose(ctx, state, E, m):
         att += [p for p in (map_png(ctx, E, "pre"), map_png(ctx, E, part)) if p]
         tifs = tif_paths(ctx, E, "pre") + tif_paths(ctx, E, part)
         if tifs:
-            lines += ["", "GeoTIFFs (EPSG:6348, NAVD88): " + ", ".join(tifs)]
+            lines += ["", f"GeoTIFFs (EPSG:{os.environ.get('GEOTIFF_EPSG') or '6348'}, NAVD88): " + ", ".join(tifs)]
     else:
         subj, lines = f"{kind} ({E['id']})", [f"event {E['id']}: {kind}"]
     keep, size, skipped = [], 0, []
@@ -3660,7 +4032,11 @@ def compose(ctx, state, E, m):
         size += n
     if skipped:
         lines += ["", "Not attached (over 10 MB in all): " + ", ".join(skipped)]
-    lines += ["", INTERTIDAL_NOTE]
+    if not alerts:
+        lines += ["", INTERTIDAL_NOTE]
+    else:
+        lines += ["", "Alerts mode (STORM_MODE=alerts): forecasts, alerts and the observed storm only; no beach maps "
+                      "until the station's waterline maps are set up."]
     if (E.get("forecast") or {}).get("om_used"):
         lines.append(OM_ATTRIBUTION)
     lines += [f"Event folder: {evdir(ctx, E)}",
@@ -3698,12 +4074,12 @@ def send_emails(ctx, state):
                 if m.get("stub_sent"):
                     continue
                 stub = True
-                subj = f"{SUBJECT} {m['kind']} ({E['id']}): could not be composed"
+                subj = f"{subject_of(ctx.cfg)} {m['kind']} ({E['id']}): could not be composed"
                 body = (f"The {m['kind']} email of event {E['id']} could not be composed ({exc!r}). "
                         + ("It is not tried again" if last else
                            f"It is composed again on the next runs (up to {COMPOSE_TRIES} in all) and sent then")
                         + f"; see the event folder {evdir(ctx, E)} and logs/storm_watch_detail.log."
-                        f"\n\n{INTERTIDAL_NOTE}\n")
+                        + ("\n" if ctx.alerts else f"\n\n{INTERTIDAL_NOTE}\n"))
                 att = []
             kind = m["kind"] + ("_stub" if stub else "")
             if not stub:
@@ -3773,22 +4149,26 @@ def newest_epoch(path):
 
 def observe(ctx):
     """Reads the observed waves under owg.sh's lock (released before the ground pass: the cron takes its own lock
-    first and owg.sh's second, so holding owg's while waiting for the cron's would deadlock). Fetches 44008 itself
-    into archive/waves_44008.csv when that archive is stale (live runs only, and only while it holds owg.sh's
-    lock: owg.sh writes the same file)."""
+    first and owg.sh's second, so holding owg's while waiting for the cron's would deadlock). Fetches STORM_BUOY itself
+    into archive/waves_<STORM_BUOY>.csv when that archive is stale (live runs only, and only while it holds owg.sh's
+    lock: owg.sh writes the same file); on a setup-managed station (a storm_watch_station.conf; no owg.sh there)
+    STORM_BUOY2 as well."""
+    b1, b2 = buoys(ctx.cfg)
+    fetch = [b1] + ([b2] if b2 and (ctx.base / STATION_FILE).exists() else [])
     lockf = None
     if ctx.mode == "live":
         lockf = take_lock(ctx.base / "logs/owg.lock", ctx.cfg["STORM_OWG_LOCK_WAIT_S"], sleep=ctx.sleep)
         if lockf is None:
-            ctx.note("owg.sh holds logs/owg.lock: waves read without it (44008 not fetched)")
+            ctx.note(f"owg.sh holds logs/owg.lock: waves read without it ({', '.join(fetch)} not fetched)")
     try:
         if ctx.mode == "live" and ctx.fetch and lockf is not None:
-            p = ctx.base / "archive/waves_44008.csv"
-            nh = newest_epoch(p)
-            if nh is None or ctx.now_h - nh > ctx.cfg["STORM_BUOY_STALE_H"]:
-                rc, out = ctx.run([sys.executable, str(HERE / "fetch_buoy_waves.py"), "--station", "44008",
-                                   "--output", str(p)], ctx.base / "logs/storm_watch_detail_fetch.log")
-                ctx.note("44008 fetched" if rc == 0 else f"44008 fetch failed (exit {rc})")
+            for b in fetch:
+                p = ctx.base / f"archive/waves_{b}.csv"
+                nh = newest_epoch(p)
+                if nh is None or ctx.now_h - nh > ctx.cfg["STORM_BUOY_STALE_H"]:
+                    rc, out = ctx.run([sys.executable, str(HERE / "fetch_buoy_waves.py"), "--station", b,
+                                       "--output", str(p)], ctx.base / "logs/storm_watch_detail_fetch.log")
+                    ctx.note(f"{b} fetched" if rc == 0 else f"{b} fetch failed (exit {rc})")
         h_end = ctx.now_h if ctx.mode == "replay" else None
         return read_observed(ctx.base, ctx.now, ctx.cfg, h_end=h_end)
     finally:
@@ -3895,9 +4275,16 @@ def run_once(ctx, ground_override=None, fc_override=None):
     handle_trigger(ctx, state, fc, T, trigger_match(ctx, state, T), segs)
     save_state(ctx, state)
     # the ground file and the builds
-    need = needed_from(ctx, state)
+    need = None if ctx.alerts else needed_from(ctx, state)
     gi = None
-    if need is None:
+    if ctx.alerts:
+        # alerts mode (no DEM): the ground file and the cron's lock are never touched; events close on the clock
+        ctx.ground_why = "alerts mode: no DEM"
+        for E in sorted([e for e in state["events"] if is_open(e)], key=lambda e: e["opened_utc"]):
+            alerts_steps(ctx, state, E)
+        if ctx.mode == "live" and ctx.work.exists():
+            shutil.rmtree(str(ctx.work), ignore_errors=True)
+    elif need is None:
         if ctx.mode == "live" and ctx.work.exists():
             shutil.rmtree(str(ctx.work), ignore_errors=True)
     elif ctx.mode == "dry":
@@ -3924,6 +4311,7 @@ def run_once(ctx, ground_override=None, fc_override=None):
                 ctx.warn(f"ERROR: event {E['id']}: {type(exc).__name__}: {str(exc)[:160]}")
                 ctx.errors.append(E["id"])
     sent = send_emails(ctx, state)
+    write_events_csv(ctx, state)
     # the run line
     T_text = ""
     if T["triggered"]:
@@ -3937,7 +4325,8 @@ def run_once(ctx, ground_override=None, fc_override=None):
     nh = obs.newest
     if nh is not None:
         k = nh - obs.h0
-        otext = (f"observed Marconi {obs.val[k]:.1f} m {hour_dt(nh):%d %b %H}Z ({SRC_LABELS[int(obs.psrc[k])] or '?'})"
+        otext = (f"observed {site_short(cfg)} {obs.val[k]:.1f} m {hour_dt(nh):%d %b %H}Z "
+                 f"({src_labels(cfg)[int(obs.psrc[k])] or '?'})"
                  + (" STALE" if ctx.now_h - nh > 12 else ""))
         if ctx.now_h - nh > 12:
             ctx.note(f"observed waves stale (newest {hour_iso(nh)[:13]}Z)")
@@ -3957,6 +4346,8 @@ def run_once(ctx, ground_override=None, fc_override=None):
     if T_text:
         parts.append(T_text)
     parts += [otext, f"events: {evtext or 'no change'} ({open_n} open)"]
+    if ctx.alerts:
+        parts.append("alerts mode (no DEM)")
     if sent:
         parts.append("email " + ", ".join(sent))
     parts += ctx.notes + [n for n in T["notes"] if n.startswith("NOTE")]
@@ -4168,9 +4559,12 @@ def clim_events(df, thr, cfg):
     return [(idx[a], idx[b], float(np.nanmax(hs[a:b + 1]))) for a, b in ev]
 
 
-def climatology(cfg, inputs=None, station="44008", years=None, opener=None):
-    """Counts rule-(a) events per year and month at 3.0 / 3.5 / 4.0 m and STORM_HS_M. -> (exit code, result)."""
+def climatology(cfg, inputs=None, station=None, years=None, opener=None, emit=False):
+    """Counts rule-(a) events per year and month at 3.0 / 3.5 / 4.0 m and STORM_HS_M (NDBC history of `station`,
+    default STORM_BUOY). emit: also prints suggested thresholds as KEY=VALUE lines (suggest_settings).
+    -> (exit code, result)."""
     import pandas as pd
+    station = station or buoys(cfg)[0]
     parts = []
     for p in inputs or []:
         parts.append(climatology_series(p))
@@ -4180,7 +4574,7 @@ def climatology(cfg, inputs=None, station="44008", years=None, opener=None):
         import buoy_transfer
         for yr in range(y0, y1 + 1):
             url = buoy_transfer.HIST.format(st=station, yr=yr)
-            st, body, why = http_get(url, {"User-Agent": USER_AGENT}, 120, opener=opener)
+            st, body, why = http_get(url, {"User-Agent": user_agent(cfg)}, 120, opener=opener)
             if st != 200:
                 print(f"{url}: {why} (download it by hand and pass --input FILE)")
                 continue
@@ -4227,7 +4621,53 @@ def climatology(cfg, inputs=None, station="44008", years=None, opener=None):
               + ", ".join(f"{m}:{n}" for m, n in sorted(by_month.items()))
               + (f"; catches {len(r['catches'])} of the {len(obs_segs)} storms that open an event"
                  if obs_segs is not None else ""))
+    if emit:
+        sug = suggest_settings(df, cfg, kind, years_span)
+        res["suggested"] = {k: v for k, v, _ in sug}
+        print(f"\n# Suggested storm watch settings for {station_of(cfg)} from this record ({kind}, {res['first'][:10]} "
+              f"to {res['last'][:10]}, {years_span:.1f} years), by CACO-05's rules (docs/VALIDATION.md 4.9).")
+        print("# For review by hand: copy the lines you keep into storm_watch_settings.conf, then run "
+              "storm_watch.py --check-settings.")
+        if not sug:
+            print("# none: the record is shorter than 90 days of wave heights")
+        for k, v, why in sug:
+            print(f"# {why}")
+            print(f"{k}={v}")
     return 0, res
+
+
+SUGGEST_MIN_HOURS = 90 * 24
+
+
+def suggest_settings(df, cfg, kind, years_span):
+    """Thresholds from an offshore wave record, by the rules CACO-05's were set with (VALIDATION 4.9): rule (a) and
+    the raw buoy's open height at the offshore p99; the support, swell and raw buoy's confirm heights at p98; the
+    beach's confirm and open heights at p98 and p99 x STORM_OFFSHORE_TO_MARCONI; with STORM_FACING, the wave sector
+    facing +- 80 deg (CACO-05: 80 -> 0-160). -> [(key, value text, why)]."""
+    hs = df["hs"].to_numpy(dtype=float)
+    hs = hs[np.isfinite(hs)]
+    if len(hs) < SUGGEST_MIN_HOURS:
+        return []
+    p98, p99 = (float(x) for x in np.percentile(hs, [98, 99]))
+    f = cfg["STORM_OFFSHORE_TO_MARCONI"]
+    r1 = lambda x: f"{np.round(x, 1):.1f}"      # noqa: E731
+    out = []
+    c2 = dict(cfg)
+    if cfg.get("STORM_FACING") is not None:
+        a, b = (cfg["STORM_FACING"] - FACING_HALF_DEG) % 360, (cfg["STORM_FACING"] + FACING_HALF_DEG) % 360
+        out.append(("STORM_DIR_SECTOR", f"{a:.0f}-{b:.0f}",
+                    f"waves FROM the facing ({cfg['STORM_FACING']:.0f} deg) +- {FACING_HALF_DEG:.0f} deg"))
+        c2["STORM_DIR_SECTOR"] = (float(f"{a:.0f}"), float(f"{b:.0f}"))
+    n = len(clim_events(df, float(r1(p99)), c2))
+    out += [("STORM_HS_M", r1(p99), f"rule (a): the offshore p99 ({p99:.2f} m; {kind}): {n} event(s) in "
+                                    f"{years_span:.1f} years, {n / years_span:.1f} a year"),
+            ("STORM_HS_SUPPORT_M", r1(p98), f"rule (c): the offshore p98 ({p98:.2f} m)"),
+            ("STORM_SWELL_HS_M", r1(p98), f"rule (d): the offshore p98 ({p98:.2f} m)"),
+            ("STORM_CONFIRM_BUOY_HS", r1(p98), f"the raw buoy that confirms: the offshore p98 ({p98:.2f} m)"),
+            ("STORM_OBS_OPEN_BUOY_HS", r1(p99), f"the raw buoy that opens a missed storm: the offshore p99 ({p99:.2f} m)"),
+            ("STORM_CONFIRM_HS", r1(p98 * f), f"the beach's height that confirms: offshore p98 x {f:g}"),
+            ("STORM_OBS_OPEN_HS", r1(p99 * f), f"the beach's peak that opens a missed storm: offshore p99 x {f:g}")]
+    return out
 
 
 def print_status(ctx):
@@ -4241,15 +4681,17 @@ def print_status(ctx):
     for w in ctx.warnings:
         print(w)
     lr = state.get("last_run") or {}
-    print(f"storm watch state: {ctx.state_path}  (last run {lr.get('utc', 'never')}: {lr.get('result', '')})")
+    print(f"storm watch state: {ctx.state_path}  (last run {lr.get('utc', 'never')}: {lr.get('result', '')})"
+          + ("; alerts mode: no DEM" if ctx.alerts else ""))
     if not state["events"]:
         print("  no events")
     for E in state["events"]:
         pre = E["pre"] or {}
         print(f"  {E['id']}: {E['status'].upper()}" + (f" ({E['closed_reason']})" if E["closed_reason"] else "")
               + (f", storm dates {E['storm_dates'][0]}..{E['storm_dates'][1]}" if E.get("storm_dates") else ""))
-        print(f"     pre {pre.get('window') or pre.get('planned')} {pre.get('status')}"
-              + (f" ({pre.get('why')})" if pre.get("why") else ""))
+        if not (ctx.alerts or E.get("mode") == "alerts"):
+            print(f"     pre {pre.get('window') or pre.get('planned')} {pre.get('status')}"
+                  + (f" ({pre.get('why')})" if pre.get("why") else ""))
         for part in ("post3", "post7"):
             r = E.get(part)
             if r:
@@ -4260,6 +4702,7 @@ def print_status(ctx):
         if is_open(E):
             w = ("the storm's end" if E["status"] == "storm" else
                  "the forecast storm (or its false-alarm window)" if E["status"] == "watch" else
+                 f"{ALERTS_CLOSE_H} h after the storm's end (alerts mode)" if ctx.alerts else
                  "the ground file to cover the post dates")
             print(f"     waiting for: {w}")
         if E["history"]:
@@ -4290,13 +4733,18 @@ def main(argv=None):
     ap.add_argument("--save-raw", help="also write each response, plain, into this folder (for fixtures)")
     ap.add_argument("--no-email", action="store_true", help="write the email bodies, send nothing")
     ap.add_argument("--status", action="store_true", help="print the events and what each waits for")
-    ap.add_argument("--settings", help="station settings file (default <base>/storm_watch_settings.conf)")
+    ap.add_argument("--settings", help="station settings file (default <base>/storm_watch_settings.conf; read after "
+                                       "<base>/storm_watch_station.conf when that exists)")
+    ap.add_argument("--check-settings", action="store_true",
+                    help="check the settings files strictly; exit 1 on an error (setup's gate)")
     ap.add_argument("--replay", nargs=2, metavar=("START", "END"), help="a past range of UTC dates, day by day")
     ap.add_argument("--out-dir", help="with --replay: a folder of its own")
     ap.add_argument("--replay-lag-days", type=int, default=2, help="with --replay: the ground file lag (default 2)")
     ap.add_argument("--climatology", action="store_true", help="count rule-(a) events per year from a wave record")
-    ap.add_argument("--station", default="44008")
+    ap.add_argument("--station", default=None, help="with --climatology: an NDBC station (default STORM_BUOY)")
     ap.add_argument("--years", default="2010-2025")
+    ap.add_argument("--emit-settings", action="store_true",
+                    help="with --climatology: print suggested thresholds as KEY=VALUE lines, for review by hand")
     ap.add_argument("--input", action="append", help="with --climatology: NDBC stdmet (.txt/.gz), a "
                                                        "fetch_buoy_waves CSV, the ADCP CSV or waves_marconi.csv")
     args = ap.parse_args(argv)
@@ -4306,11 +4754,18 @@ def main(argv=None):
     if args.settings and not spath.exists():
         print(f"--settings {spath}: no such file")
         return 1
-    cfg, set_notes = load_settings(spath, cron)
+    if args.check_settings:
+        rc, lines = check_settings(base, spath)
+        print("\n".join(lines))
+        return rc
+    if args.emit_settings and not args.climatology:
+        print("--emit-settings goes with --climatology")
+        return 1
+    cfg, set_notes = load_settings([base / STATION_FILE, spath], cron)
     if args.no_email:
         cfg["STORM_EMAIL"] = 0
     if args.climatology:
-        rc, _ = climatology(cfg, args.input, args.station, args.years)
+        rc, _ = climatology(cfg, args.input, args.station, args.years, emit=args.emit_settings)
         return rc
     if args.replay:
         if not args.out_dir:

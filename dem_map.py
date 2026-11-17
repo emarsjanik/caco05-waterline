@@ -14,6 +14,10 @@ diagnostic page (dem_figure.py), which Dr Sherwood found easier to read
 
 reads <stem>_dem.asc and <stem>_spread.asc (dem_from_contours.py) and
 writes <stem>_map.png.
+
+Another station (station_env.py; a new station's waterline_station.conf
+exports these): the title names STATION_NAME, and the axis label the frame
+of GEOTIFF_EPSG.
 """
 
 import argparse
@@ -21,6 +25,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+import station_env                          # a new station's settings (waterline_station.conf); CACO-05's by default
 
 
 def read_asc(path):
@@ -65,7 +71,8 @@ def draw(stem, title=None, output=None):
             info = json.loads(Path(f"{stem}_info.json").read_text())
             a, b = info.get("first_date") or info.get("window_start"), info.get("last_date") or info.get("window_end")
             if a and b:
-                title = f"Marconi Beach: {a} to {b}" + (f" (last {info['last_days']} days)" if info.get("last_days") else "")
+                title = (f"{station_env.station_name('Marconi Beach')}: {a} to {b}"
+                         + (f" (last {info['last_days']} days)" if info.get("last_days") else ""))
         except (OSError, ValueError):
             pass
     fig, axes = plt.subplots(1, 2 if s is not None else 1, figsize=(12, 8.5), squeeze=False)
@@ -87,9 +94,10 @@ def draw(stem, title=None, output=None):
         fig.colorbar(im2, ax=ax2, shrink=0.7, label="spread (m)")
         ax2.set_title("Repeatability (precision, not accuracy)\n16-84 percentile range of the frames in each cell",
                       fontsize=10)
+    frame = station_env.frame_label()          # CACO-05: NAD83(2011) / UTM 19N, EPSG:6348 (GEOTIFF_EPSG)
     for a in axes[0]:
         a.set_aspect("equal")
-        a.set_xlabel("easting (m, NAD83(2011) / UTM 19N, EPSG:6348)")
+        a.set_xlabel(f"easting (m, {frame})")
         a.set_ylabel("northing (m)")
         a.ticklabel_format(useOffset=False, style="plain")
         a.tick_params(labelsize=8)

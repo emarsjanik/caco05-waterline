@@ -75,6 +75,12 @@ The measured setup stands on a DEM of earlier days only, and what that
 means for the DEM (it inherits that DEM's level, and reads beach change
 since as setup) is in measured_setup.py; whether the station switches is
 docs/VALIDATION.md 4.12.
+
+ANOTHER STATION. The antenna height, local time zone and wave currency
+are CACO-05's unless the environment says otherwise:
+GNSSR_ANTENNA_NAVD88_M, STATION_TZ and STATION_WAVE_CURRENCY, which a new
+station's waterline_station.conf exports (station_env.py). A value that
+does not parse stops the script with an ERROR.
 """
 
 import argparse
@@ -88,6 +94,7 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
+import station_env                  # a new station's settings (waterline_station.conf); CACO-05's by default
 import timex_timing
 from setup_model import (SETUP_MODELS, STOCKDON_SETUP_K, EvolvingSlope, deshoal_depth, model_tag,
                          setup_c, stockdon_frame)
@@ -274,7 +281,12 @@ def looks_like_gnssr_spline(path):
 #               own wh_4061 / peak period, which an earlier version of this
 #               rule called the raw buoy and warned about): a NOTE, no
 #               WARNING
-WAVE_CURRENCY_FITTED = "marconi:hs_best/tp_s"
+# The raw-buoy line is a WARNING only when the frames get a setup
+# (--setup-coef above 0); without one the buoy heights only feed a
+# --max-hs filter downstream, so it is a NOTE (as dem_from_contours.py's).
+# A new station fitted C in its own wave record: STATION_WAVE_CURRENCY
+# (waterline_station.conf; station_env.py) names it, in this tag form.
+WAVE_CURRENCY_FITTED = station_env.wave_currency()       # CACO-05: "marconi:hs_best/tp_s"
 
 
 def wave_columns(columns):
@@ -299,8 +311,9 @@ def wave_currency_note(tag):
     """One line on a wave_source tag against the currency C was fitted in:
     (is_fitted_currency, text)."""
     if tag == WAVE_CURRENCY_FITTED:
-        return True, (f"{tag} -- the currency the setup coefficient was fitted in "
-                      f"(hs_best: ADCP wh_4061 Hs; tp_s: NDBC 44008 peak period)")
+        return True, (f"{tag} -- the currency the setup coefficient was fitted in"
+                      + (" (hs_best: ADCP wh_4061 Hs; tp_s: NDBC 44008 peak period)"
+                         if tag == station_env.CACO05_WAVE_CURRENCY else ""))
     if tag.startswith("adcp_equiv:"):
         return False, (f"{tag} -- ADCP-equivalent Hs (the setup coefficient's Hs currency) but "
                        f"ADCP-equivalent Tp, not the NDBC 44008 peak period C was fitted with "
@@ -311,6 +324,11 @@ def wave_currency_note(tag):
                        f"e.g. process_chelsea.py's adcp_waves.csv (the ADCP's own Hs and peak period): "
                        f"not known to be the currency the setup coefficient was fitted in "
                        f"({WAVE_CURRENCY_FITTED})")
+    if not tag.startswith("buoy:"):
+        # only where STATION_WAVE_CURRENCY names another currency (e.g. a station's C fitted on its raw buoy,
+        # and a marconi file): CACO-05's tags all end above or below
+        return False, (f"{tag} -- NOT the currency the setup coefficient was fitted in "
+                       f"({WAVE_CURRENCY_FITTED}), so the setup (and the --max-hs filter) differ")
     return False, (f"{tag} -- NOT the currency the setup coefficient was fitted in "
                    f"({WAVE_CURRENCY_FITTED}): raw offshore buoy Hs/Tp overstate sheltered "
                    f"south-west seas, so the setup (and the --max-hs filter) differ")
@@ -403,7 +421,13 @@ def nearest_within(epochs, values, epoch, max_gap_s):
 # written in the spline file's header, so if the gnssrefl station file is
 # later corrected to 19.014 m, the correction falls to zero by itself
 # rather than being applied twice.
-GNSSR_ANTENNA_NAVD88_M = 19.014
+#
+# A new station: GNSSR_ANTENNA_NAVD88_M in the environment (its OPUS
+# height; waterline_station.conf exports it, station_env.py). A value that
+# is not a number stops the script with an ERROR rather than fall back to
+# CACO-05's. compare_gnssr_to_tidemodel.py and gnssir_reflection_audit.py
+# import this constant, so they follow.
+GNSSR_ANTENNA_NAVD88_M = station_env.antenna_navd88_m()   # CACO-05: 19.014
 
 
 def load_gnssr_spline(path, qc_reference=None):
@@ -552,8 +576,9 @@ MIN_COMMON_COLUMNS = 50
 
 # The station's local time zone. "Day" filters are judged on local days:
 # UTC dates split each evening's captures (20:00 EDT = 00:00 UTC) into
-# the next day.
-LOCAL_TZ = "America/New_York"
+# the next day. A new station: STATION_TZ (waterline_station.conf;
+# station_env.py checks the name: zoneinfo, else pytz or dateutil).
+LOCAL_TZ = station_env.station_tz()                      # CACO-05: "America/New_York"
 
 
 def local_date(epoch):
@@ -909,7 +934,8 @@ def main():
                              "frames (whose waterline sits above still water by the wave "
                              "setup) can be left out of the DEM, and wave_source: which "
                              "columns of which kind of file tagged them (a WARNING when it "
-                             "is the raw buoy, a NOTE for another currency than the one the "
+                             "is the raw buoy and --setup-coef applies a setup, a NOTE without "
+                             "one and for another currency than the one the "
                              "setup coefficient was fitted in; see WAVE_CURRENCY_FITTED).")
     parser.add_argument("--wave-max-gap-minutes", type=float, default=90.0,
                         help="Largest gap to the nearest wave record before a frame's wave "
@@ -1271,18 +1297,28 @@ def main():
         fitted, note = wave_currency_note(wave_tag)
         print(f"Wave file                : {args.waves} (columns {hcol}, {tcol})")
         print(f"Wave currency            : {note}")
-        if not fitted and wave_tag.startswith("buoy:"):
+        if not fitted and wave_tag.startswith("buoy:") and args.setup_coef:
             print(f"WARNING: the frames are tagged with the raw buoy waves ({wave_tag}), not the "
                   f"currency the setup coefficient was fitted in ({WAVE_CURRENCY_FITTED})"
-                  + (f": the setup with C = {args.setup_coef} is NOT the station's calibrated setup"
-                     if args.setup_coef else "")
-                  + ". Was archive/waves_marconi.csv (owg.sh / marconi_waves.py) missing?")
+                  f": the setup with C = {args.setup_coef} is NOT the station's calibrated setup"
+                  ". Was archive/waves_marconi.csv (owg.sh / marconi_waves.py) missing?")
+        elif not fitted and wave_tag.startswith("buoy:"):
+            # no setup (no --setup-coef, or C = 0): the buoy heights only reach a --max-hs filter
+            # downstream, as dem_from_contours.py's NOTE says
+            print(f"NOTE: the frames are tagged with the raw buoy waves ({wave_tag}), not the "
+                  f"currency the setup coefficient was fitted in ({WAVE_CURRENCY_FITTED}); no setup "
+                  f"is applied here (no --setup-coef, or C = 0), so only a --max-hs filter, if used, judges "
+                  f"their buoy Hs")
         elif not fitted and wave_tag.startswith("unknown:"):
             print(f"NOTE: the wave file's kind is not known from its columns, so not known to be the "
                   f"currency C was fitted in ({WAVE_CURRENCY_FITTED}); see the line above.")
-        elif not fitted:
+        elif not fitted and wave_tag.startswith("adcp_equiv:"):
             print(f"NOTE: wave period currency differs from the one C was fitted in "
                   f"({WAVE_CURRENCY_FITTED}); see the line above.")
+        elif not fitted:
+            # another station's currency (STATION_WAVE_CURRENCY) and a file of another kind
+            print(f"NOTE: the wave file is not the currency C was fitted in ({WAVE_CURRENCY_FITTED}); "
+                  f"see the line above.")
         gap_s = args.wave_max_gap_minutes * 60.0
         per_frame = {}
         for r in output_rows:
