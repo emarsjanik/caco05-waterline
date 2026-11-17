@@ -22,12 +22,16 @@ failed, 2 usage). These checks run the script as setup does:
     (PROVISIONAL, with a STATION_PROVISIONAL text check-overlay accepts); the
     pinned envelope_from_survey's sys.exit ("the band hardly appears")
     caught; a DEM that does not cover the camera; --merge; usage errors;
+    geometry_grid's 40-600 m ring itself;
   * trial (6.6): a stub detector (it records its options) with the real
     extract_elevation_contours.py and georectify.py, five frames, one of each
     outcome; the scratch-folder rules (never input/, processed_timex/,
-    archive/ ...; the pictures only read); then the real detector on one
-    synthetic frame (needs OpenCV);
-  * pointing (correction 7): planted turns of a synthetic scene give PASS,
+    archive/ ...; the pictures only read); a relative --work-dir; the antenna
+    height from --antenna-navd88 or the environment, never CACO-05's 19.014
+    without a word; then the real detector on one synthetic frame (needs
+    OpenCV);
+  * pointing (correction 7): the PASS/WARN/FAIL limits (pointing_grade, with
+    or without OpenCV); planted turns of a synthetic scene give PASS,
     WARN and FAIL; unrelated pictures give UNMATCHED (nothing checked), a
     picture of another size an ERROR, all as JSON with exit 1 (needs OpenCV:
     a SKIP line without it).
@@ -86,10 +90,10 @@ def strict_json(text):
     return json.loads(text, parse_constant=no)
 
 
-def cli(*args, cwd=None):
+def cli(*args, cwd=None, env=None):
     """-> (exit status, JSON dict or None, stdout, stderr)."""
     p = subprocess.run([sys.executable, str(CHECK)] + [str(a) for a in args], stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE, universal_newlines=True, cwd=str(cwd or HERE))
+                       stderr=subprocess.PIPE, universal_newlines=True, cwd=str(cwd or HERE), env=env)
     try:
         js = strict_json(p.stdout) if p.stdout.strip().startswith("{") else None
     except ValueError:
@@ -105,16 +109,17 @@ def frame_name(epoch, cam, station="TEST07"):
 T0 = 1789000200                       # 2026-09-10 00:30 UTC
 
 
-def write_spline(path, t0=T0, hours=6):
-    """gnssrefl subdaily spline_out.txt layout, Hortho 19.014 (no datum shift)."""
+def write_spline(path, t0=T0, hours=6, hortho=19.014):
+    """gnssrefl subdaily spline_out.txt layout, Hortho 19.014 by default (no datum shift at CACO-05's
+    antenna height)."""
     ts = np.arange(t0 - hours * 3600, t0 + hours * 3600 + 1, 1800)
     with open(path, "w") as f:
-        f.write("% station test gnssrefl\n% orthometric height minus RH, where Hortho (m) is    19.014 \n"
+        f.write(f"% station test gnssrefl\n% orthometric height minus RH, where Hortho (m) is {hortho:9.3f} \n"
                 "% MJD RH(m) YYYY MM DD HH MM SS quasi-sea-level(m)\n")
         for t in ts:
             z = 0.3 + 1.0 * math.sin(2 * math.pi * (t - ts[0]) / (12.42 * 3600))
             u = datetime.fromtimestamp(int(t), tz=timezone.utc)
-            f.write(f"{t / 86400 + 40587:15.7f} {19.014 - z:10.3f} {u.year:4d} {u.month:3d} {u.day:3d} "
+            f.write(f"{t / 86400 + 40587:15.7f} {hortho - z:10.3f} {u.year:4d} {u.month:3d} {u.day:3d} "
                     f"{u.hour:3d} {u.minute:3d} {u.second:3d} {z:10.3f}\n")
 
 
@@ -359,6 +364,20 @@ def test_profile(d):
           "the reason", rc == 0 and ok and js["status"] == "PROVISIONAL" and js["source"] == "geometry"
           and "camera geometry" in js["provisional_reason"] and "+0.12 m" in js["provisional_reason"]
           and js["ring_m"] == [40.0, 600.0] and "PROVISIONAL" in err, (rc, out[:600], err))
+    # the ring itself (C8): the plane only 40-600 m from the camera, NaN nearer and farther. The envelope
+    # above changes when the ring goes (up to 0.1 of the picture's height), but nothing else pins it.
+    cx, cy, zp = 412345.6, 4645678.9, 0.12
+    g, xl, yt, cell = wsc.geometry_grid(cx, cy, zp)
+    XX, YY = np.meshgrid(xl + (np.arange(g.shape[1]) + 0.5) * cell, yt - (np.arange(g.shape[0]) + 0.5) * cell)
+    rr = np.hypot(XX - cx, YY - cy)
+    lo, hi = wsc.GEOMETRY_RING_M
+    inside = (rr >= lo) & (rr <= hi)
+    check(f"geometry_grid: a level plane at z only {lo:g}-{hi:g} m from the camera, NaN nearer and farther, "
+          f"over a north-up box round the camera",
+          (lo, hi) == (40.0, 600.0) and inside.any() and (rr < lo).any() and (rr > hi).any()
+          and bool(np.isnan(g[~inside]).all()) and bool((g[inside] == zp).all())
+          and abs(xl + g.shape[1] * cell / 2.0 - cx) < cell and abs(yt - g.shape[0] * cell / 2.0 - cy) < cell
+          and g.shape[0] * cell >= 2 * hi, (g.shape, xl, yt, cell))
     sp = js["station_provisional"] if js else ""
     res = wsc.check_overlay(f'STATION_PROVISIONAL="{sp}"\nWATERLINE_STAGE="archive"\n')
     check(f"its STATION_PROVISIONAL text passes check-overlay: \"{sp[:70]}...\"",
@@ -547,7 +566,8 @@ def test_trial(d):
     prof_c2 = d / "profile_c2_only.json"
     prof_c2.write_text(json.dumps({"c2": strict_json(geo.read_text())["c1"]}))
     rc, js, out, err = cli("trial", "--camera", "c1", "--io", IO["c1"], "--eo", EO["c1"], "--profile-json", prof_c2,
-                           "--spline", spline, "--frames", src / names[0], "--work-dir", work, "--scripts-dir", stubs)
+                           "--spline", spline, "--antenna-navd88", "19.014", "--frames", src / names[0],
+                           "--work-dir", work, "--scripts-dir", stubs)
     check("a profile without this camera: refused, exit 1 (CACO05's own band would be used)",
           rc == 1 and "no entry for c1" in js["reason"], (rc, out[:300]))
     other = d / "someone_elses"
@@ -559,6 +579,49 @@ def test_trial(d):
     rc, js, out, err = cli(*args, "--frames", src / names[0])
     check("run again in the same scratch folder: its own trial_c1 replaced, exit 0", rc == 0 and js["passed"] == 1,
           (rc, out[:300]))
+
+    # a relative --work-dir (docs/NEW_STATION.md: --work-dir work/trial): every step runs inside the scratch
+    # folder, so the folder must be made absolute first (else the detector reads trial_c1/<relative>/src)
+    rel_args = [a if a != work else "relwork/trial" for a in args]
+    rc, js, out, err = cli(*rel_args, "--frames", src / names[0], cwd=d)
+    t_rel = d / "relwork" / "trial" / "trial_c1"
+    check("a relative --work-dir: resolved against the current folder; the detector, contours and georectify "
+          "all find their files, exit 0, the absolute folder in the JSON, no nested copy",
+          rc == 0 and js["passed"] == 1 and js["steps"] == {"detector": 0, "contours": 0, "georectify": 0}
+          and js["work_dir"] == str(t_rel) and Path(js["log"]).is_file() and not (t_rel / "relwork").exists(),
+          (rc, out[:600], err[-400:]))
+
+    # the antenna height: never CACO-05's 19.014 m without a word
+    spline12 = d / "spline_hortho12.txt"
+    write_spline(spline12, hortho=12.3)
+    no_ant = [a for a in args if a not in ("--antenna-navd88", "19.014")]
+    env_clean = {k: v for k, v in os.environ.items() if k != "GNSSR_ANTENNA_NAVD88_M"}
+    i = no_ant.index("--spline") + 1
+    no_ant[i] = spline12
+    rc, js, out, err = cli(*no_ant, "--frames", src / names[0], env=env_clean)
+    check("no --antenna-navd88 and no GNSSR_ANTENNA_NAVD88_M: usage, exit 2, said (CACO-05's 19.014 would be used)",
+          rc == 2 and js and js["ok"] is False and "--antenna-navd88" in js["error"] and "19.014" in err, (rc, out[:300], err))
+    levels = {}
+    for what, extra, env in (("--antenna-navd88 12.3", ["--antenna-navd88", "12.3"], env_clean),
+                             ("GNSSR_ANTENNA_NAVD88_M=12.3 in the environment", [],
+                              dict(env_clean, GNSSR_ANTENNA_NAVD88_M="12.3")),
+                             ("--antenna-navd88 19.014 (another height)", ["--antenna-navd88", "19.014"], env_clean)):
+        rc, js, out, err = cli(*no_ant, *extra, "--frames", src / names[0], env=env)
+        lev = js and js["frames"][0]["water_level_navd88"]
+        levels[what] = lev
+        check(f"{what}: the trial runs, the height used and where it came from in the JSON (water level {lev} m)",
+              rc == 0 and js["antenna_navd88_m"] == (19.014 if "19.014" in what else 12.3) and lev is not None
+              and js["antenna_from"] == ("--antenna-navd88" if extra else "GNSSR_ANTENNA_NAVD88_M in the environment")
+              and "m NAVD88 from" in err, (rc, out[:400], err[-300:]))
+    l12, lenv, l19 = levels.values()
+    check(f"... the height reaches extract_elevation_contours.py: the same level from the option and the "
+          f"environment ({l12}, {lenv}), 19.014 - 12.3 = 6.714 m higher with 19.014 ({l19})",
+          None not in (l12, lenv, l19) and l12 == lenv and abs(l19 - l12 - 6.714) < 0.01, levels)
+    rc, js, out, err = cli(*no_ant, "--frames", src / names[0], env=dict(env_clean, GNSSR_ANTENNA_NAVD88_M="12.3m"))
+    check("GNSSR_ANTENNA_NAVD88_M not a number (and no option): usage, exit 2",
+          rc == 2 and "not an antenna height" in err, (rc, err))
+    rc, js, out, err = cli(*no_ant, "--antenna-navd88", "nan", "--frames", src / names[0], env=env_clean)
+    check("--antenna-navd88 nan: usage, exit 2", rc == 2 and "not an antenna height" in err, (rc, err))
 
     if not HAVE_CV2:
         print("  SKIP  the real detector on a synthetic frame (OpenCV does not import here)")
@@ -585,14 +648,22 @@ def test_trial(d):
 # pointing
 # ---------------------------------------------------------------------
 
+POINTING_RULE = {"pass_below_deg": 0.3, "fail_above_deg": 1.0, "min_inliers": 40}
+
+
 def test_pointing(d):
     print("pointing: a calibration-day picture against recent timex")
+    # the limits themselves (pure Python: checked with or without OpenCV): PASS < 0.3, WARN 0.3-1.0, FAIL > 1.0
+    for x, want in ((0.0, "PASS"), (0.29, "PASS"), (0.2999, "PASS"), (0.30, "WARN"), (0.6, "WARN"),
+                    (1.00, "WARN"), (1.0001, "FAIL"), (1.01, "FAIL"), (5.0, "FAIL")):
+        check(f"pointing_grade({x}) is {want} (PASS under 0.3 deg, WARN 0.3-1.0, FAIL over 1.0)",
+              wsc.pointing_grade(x) == want, wsc.pointing_grade(x))
     if not HAVE_CV2:
         print("  SKIP  pointing (OpenCV does not import here; the command then says UNAVAILABLE)")
         rc, js, out, err = cli("pointing", "--io", IO["c2"], "--eo", EO["c2"], "--calibration-picture", __file__,
                                "--timex", __file__)
-        check("without OpenCV: UNAVAILABLE, exit 1, JSON", rc == 1 and js and js["verdict"] == "UNAVAILABLE",
-              (rc, out[:300]))
+        check("without OpenCV: UNAVAILABLE, exit 1, JSON, the rule it would grade by",
+              rc == 1 and js and js["verdict"] == "UNAVAILABLE" and js["rule"] == POINTING_RULE, (rc, out[:300]))
         return
     import pointing_daily as pdl                                     # synthetic scene and exact turns (OpenCV only)
     # c2's lens at half size (the same angles; faster matching)
@@ -619,7 +690,7 @@ def test_pointing(d):
         check(f"a camera turned {turn} deg: measured {rot} deg, {want}, exit {0 if want != 'FAIL' else 1}",
               js and js["verdict"] == want and abs(rot - turn) < 0.05 and rc == (1 if want == "FAIL" else 0)
               and js["frames"][0]["status"] == "matched" and js["ok"] is (want != "FAIL")
-              and f"pointing: {want}" in err, (rc, out[:600], err))
+              and js["rule"] == POINTING_RULE and f"pointing: {want}" in err, (rc, out[:600], err))
     check("nothing written next to the calibration-day picture (its pointing goes to a scratch folder)",
           not cal.with_suffix(".json").exists())
 

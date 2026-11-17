@@ -575,6 +575,30 @@ def t2():
         grids = [u for u, _ in net2.seen if u.endswith("/gridpoints/BOX/9,9")]
         check(len(grids) == 2 and len([u for u, _ in net2.seen if "/points/" in u]) == 1 and "nws_points" not in state,
               "a grid 404: not retried as such; /points refetched once, and the cache dropped when the grid still 404s")
+        # the cache is the answer for one point: STORM_POINT moved (setup rewrote storm_watch_station.conf, or a fix
+        # in the settings file) -> asked again, whatever its age; the same point within 7 days -> kept
+        new_body = json.dumps({"properties": {"forecastGridData": "https://api.weather.gov/gridpoints/GYX/5,7",
+                                              "forecast": "https://api.weather.gov/gridpoints/GYX/5,7/forecast",
+                                              "forecastZone": "https://api.weather.gov/zones/forecast/MEZ023"}}).encode()
+        net4 = FakeNet([("/points/43.5,-70.2", [(200, new_body)]), ("/points/", [(200, pts_body)])],
+                       default=(200, b"{}"))
+        st4 = sw.fresh_state(NOW)
+        st4["nws_points"] = dict(sw.parse_nws_points(json.loads(pts_body.decode())),
+                                 utc=sw.iso_z(NOW - timedelta(days=2)), point="41.89,-69.96")
+        settings_before = (base / "storm_watch_settings.conf").read_text()
+        ctx4 = ctx_for(base, NOW, opener=net4, fetch=True, extra="STORM_POINT=43.5,-70.2\n")
+        sw.fetch_forecast(ctx4, st4)
+        seen4 = [u for u, _ in net4.seen]
+        check([u for u in seen4 if "/points/" in u] == ["https://api.weather.gov/points/43.5,-70.2"]
+              and any(u.endswith("/gridpoints/GYX/5,7") for u in seen4) and not any("/BOX/9,9" in u for u in seen4)
+              and st4["nws_points"]["point"] == "43.5,-70.2",
+              "a cached /points answer (2 days old) for another point: asked again for STORM_POINT, the new grid used")
+        net5 = FakeNet([("/points/", [(200, new_body)])], default=(200, b"{}"))
+        ctx5 = ctx_for(base, NOW + timedelta(days=1), opener=net5, fetch=True)
+        sw.fetch_forecast(ctx5, st4)
+        check(not any("/points/" in u for u, _ in net5.seen) and any(u.endswith("/gridpoints/GYX/5,7") for u, _ in net5.seen),
+              "... the same point a day later: the cache kept (no /points request)")
+        (base / "storm_watch_settings.conf").write_text(settings_before)
         arch = Path(tmp) / "forecasts/2026-11-16"
         arch.mkdir(parents=True)
         for name, src in (("nws_grid.json", "nws_grid_SYNTHETIC.json"), ("om_marine.json", "om_marine_SYNTHETIC.json")):
@@ -2369,6 +2393,35 @@ def t14():
             sw.main(["--base", str(base), "--dry-run", "--no-fetch", "--now", "2026-11-16T12:50:00Z"])
         check("alerts mode" not in so.getvalue() and "alerts mode (no DEM)" in so2.getvalue(),
               "a run takes STORM_MODE from the settings file over the station file's")
+        # a value in storm_watch_settings.conf that does not parse keeps the value before it (the station file's
+        # own), never CACO-05's (Marconi's) default; a place fact or the mode gives a WARNING on the run line
+        (base / "storm_watch_settings.conf").write_text("STORM_POINT=37.76,-122.52,5\nSTORM_TZ=America/LosAngeles\n"
+                                                        "STORM_MODE=Alerts\nSTORM_HS_M=4.2\nSTORM_HS_M=4,5\n")
+        cron, cfg = station_cfg(base)
+        _, notes = sw.load_settings([base / "storm_watch_station.conf", base / "storm_watch_settings.conf"], cron)
+        check(cfg["STORM_POINT"] == (37.75, -122.51) and cfg["STORM_TZ"] == "America/Los_Angeles"
+              and cfg["STORM_MODE"] == "alerts" and cfg["STORM_HS_M"] == 4.2 and cfg["STORM_STATION"] == "TEST-01",
+              "a typo in storm_watch_settings.conf (STORM_POINT, STORM_TZ, STORM_MODE): the station file's own value "
+              "stands, not CACO-05's; a bad later line keeps the good line before it (STORM_HS_M 4.2)")
+        warned = [n for n in notes if n.startswith("WARNING: ")]
+        check(len(warned) == 3 and all("storm_watch_station.conf's" in n for n in warned)
+              and {k for k in ("STORM_POINT", "STORM_TZ", "STORM_MODE") if any(f"setting {k}=" in n for n in warned)}
+              == {"STORM_POINT", "STORM_TZ", "STORM_MODE"}
+              and any("STORM_HS_M='4,5'" in n and "storm_watch_settings.conf's '4.2' is used" in n
+                      and not n.startswith("WARNING") for n in notes),
+              f"... each said: a WARNING for the place facts and the mode, a note for a threshold ({notes})")
+        with contextlib.redirect_stdout(io.StringIO()) as so3:
+            sw.main(["--base", str(base), "--dry-run", "--no-fetch", "--now", "2026-11-16T12:50:00Z"])
+        check("WARNING: setting STORM_POINT='37.76,-122.52,5' in storm_watch_settings.conf is not valid" in so3.getvalue()
+              and "alerts mode (no DEM)" in so3.getvalue(),
+              "... the run line carries the WARNING and runs in the station file's alerts mode")
+        (base / "storm_watch_settings.conf").write_text("")
+        (base / "storm_watch_station.conf").write_text(STATION_TEXT + "STORM_TZ=Pacific/Nowhere\n")
+        _, cfg = station_cfg(base)
+        check(cfg["STORM_TZ"] == "America/Los_Angeles",
+              "a bad second line in the station file itself keeps its good first line")
+        (base / "storm_watch_station.conf").write_text(STATION_TEXT + "STORM_MODE=alerts\nSTORM_HS_M=4.0\n"
+                                                       "STORM_CONFIRM_HS=2.2\n")
 
     # 3. --check-settings: exit 1 on an unknown key, a value that does not parse, 'KEY = v', a missing station fact
     with tempfile.TemporaryDirectory() as tmp:
@@ -2579,12 +2632,27 @@ def t14():
         base = make_base(tmp, "emit", settings="\n".join(emitted) + "\n")
         rc2, chk = check_settings_run(base)
         check(rc == 0 and sug.get("STORM_DIR_SECTOR") == "0-160" and float(sug["STORM_HS_M"]) >= float(sug["STORM_HS_SUPPORT_M"])
-              and float(sug["STORM_CONFIRM_HS"]) < float(sug["STORM_HS_SUPPORT_M"]) and len(emitted) == len(sug) == 8
+              and float(sug["STORM_CONFIRM_HS"]) < float(sug["STORM_HS_SUPPORT_M"]) and len(emitted) == len(sug) == 9
               and rc2 == 0, f"--climatology --emit-settings prints {len(emitted)} KEY=VALUE lines (STORM_FACING 80 -> "
                             f"STORM_DIR_SECTOR 0-160) that --check-settings accepts ({sug})")
+        check(rc == 0 and 2.0 <= float(sug.get("STORM_ONSET_HS_M", 0)) <= 2.2
+              and float(sug["STORM_ONSET_HS_M"]) < float(sug["STORM_HS_SUPPORT_M"]) and "STORM_ONSET_HS_M" not in chk,
+              f"... with the forecast onset at the record's p75 ({sug.get('STORM_ONSET_HS_M')} m: the record runs "
+              f"1.0-2.5 m), not Marconi's 1.8, and --check-settings has no onset warning")
         with contextlib.redirect_stdout(io.StringIO()):
             rc3 = sw.main(["--base", str(base), "--emit-settings"])
         check(rc3 == 1, "--emit-settings without --climatology: refused")
+        # a high-energy station: the trigger raised, the onset left at Marconi's 1.8 m -> named in the warnings
+        hi = station_base(tmp, "onset", settings="STORM_HS_M=5.3\nSTORM_CONFIRM_HS=4.0\nSTORM_OBS_OPEN_HS=4.4\n")
+        rc4, chk4 = check_settings_run(hi)
+        (hi / "storm_watch_settings.conf").write_text("STORM_HS_M=5.3\nSTORM_CONFIRM_HS=4.0\nSTORM_OBS_OPEN_HS=4.4\n"
+                                                      "STORM_ONSET_HS_M=2.6\n")
+        rc5, chk5 = check_settings_run(hi)
+        check(rc4 == 0 and "STORM_ONSET_HS_M are Marconi's defaults" in chk4
+              and "STORM_ONSET_HS_M 1.8 m is 0.34 x STORM_HS_M 5.3 m" in chk4
+              and rc5 == 0 and "STORM_ONSET_HS_M" not in chk5,
+              "--check-settings at another station: STORM_ONSET_HS_M left at Marconi's 1.8 m under a 5.3 m trigger is "
+              "named (a default, and far below the trigger); set to 2.6 m, no such warning")
     # the CACO-05 base: a stale 44013 archive is left to owg.sh (no station file)
     with tempfile.TemporaryDirectory() as tmp:
         base = make_base(tmp, "c5fetch")
@@ -2722,6 +2790,56 @@ def t15():
               "the emails (missed storm, storm over) carry no DEM or NAVD88 wording; both sent")
         check("is over: the waves at Marconi stayed below 1.5 m for 24 hours" in texts["storm_over"]
               and "closes 72 h after the end" in texts["storm_over"], "the storm-over email says why and when it closes")
+        # the storm's dates in alerts mode: its own UTC span (14 Nov 03Z to 15 Nov 06Z), not the DEM rule's dates
+        # with a made-up 12:00 UTC first frame (which ended them on 14 Nov)
+        check(E["storm_dates"] == ["2026-11-14", "2026-11-15"]
+              and sent[1][0].endswith("Storm over at Marconi Beach: 2026-11-14..2026-11-15")
+              and "storm dates (UTC): 2026-11-14 to 2026-11-15" in texts["storm_over"]
+              and rows[0]["storm_dates"] == "2026-11-14..2026-11-15",
+              f"alerts mode: the storm dates are the storm's own, 14..15 Nov, in the subject, the body and events.csv "
+              f"({E['storm_dates']}, {sent[1][0][-40:]})")
+        st_now = json.loads((base / "archive/storm_watch/state.json").read_text())
+        e00 = {"observed": {"onset": "2026-11-14T03:00:00Z", "end": "2026-11-16T00:00:00Z"}, "forecast": None}
+        sw.set_first_post(ctx, e00, None)
+        check(e00["storm_dates"] == ["2026-11-14", "2026-11-15"],
+              f"... a storm ending at 00Z: its last date is the day before (no storm hour on the end's date) "
+              f"({e00['storm_dates']})")
+        # the merged email (alerts): what it says about the storm-over email depends on the owner's state
+        import copy
+        owner = next(x for x in st_now["events"] if x["id"] == E["id"])
+        W = copy.deepcopy(owner)
+        W.update(id="2026-11-13_fc", emails=[], notes=[])
+        m = {"kind": "merged", "data": {"into": owner["id"], "peak": 2.6}}
+        merged = {}
+        for case, emails, end in (("over, its email sent", owner["emails"], owner["observed"]["end"]),
+                                  ("over, no storm-over email", [x for x in owner["emails"] if x["kind"] != "storm_over"],
+                                   owner["observed"]["end"]),
+                                  ("still going on", [], None)):
+            X = dict(owner, emails=emails, observed=dict(owner["observed"], end=end))
+            merged[case] = sw.compose(ctx, {"events": [X, W]}, W, m)[1]
+        check("the storm-over email of 2026-11-14_obs covers it" in merged["over, its email sent"]
+              and "no separate storm-over email" in merged["over, no storm-over email"]
+              and "Its storm-over email comes with 2026-11-14_obs" in merged["still going on"]
+              and not any("comes with" in merged[k] for k in ("over, its email sent", "over, no storm-over email")),
+              "alerts mode, the merged email: it promises the owner's storm-over email only while that storm goes on")
+    # 1b. a storm the runs first see after it ended (no run 13-16 Nov): the missed-storm email says it is over and
+    #     promises no storm-over email; the event closes 72 h after the end with that one email
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "late", settings='STORM_MODE=alerts\nSTORM_EMAIL=0\n')
+        storm = datetime(2026, 11, 14, 3, tzinfo=UTC)
+        write_marconi(base / "archive/waves_marconi.csv",
+                      [(e, h, "blend", 1, 60, 9) for e, h in storm_hours(start, 45, storm_at=storm)])
+        late = {}
+        for d in ("2026-11-12", "2026-11-17", "2026-11-18"):
+            ev, ctx, _ = run_day(base, d, gi)
+            E = ev.get("2026-11-14_obs")
+            late[d] = (E["status"], [m["kind"] for m in E["emails"]]) if E else None
+        body = bodies(base, E).get("missed_storm", "")
+        check(late["2026-11-17"] == ("post", ["missed_storm"]) and late["2026-11-18"] == ("closed", ["missed_storm"])
+              and "the storm is already over (end 15 Nov 06Z" in body and "no separate storm-over email" in body
+              and "emails when it is over" not in body and "the event closes 72 h after the end, ~18 Nov 06Z" in body,
+              f"a storm found after its end: the missed-storm email says it is over, promises no storm-over email; "
+              f"closed with that one email ({late})")
     # 2. a trigger for the same storm while the post event is open (72 h) belongs to it: no second heads-up
     with tempfile.TemporaryDirectory() as tmp:
         base = make_base(tmp, "tail", settings='STORM_MODE=alerts\nSTORM_EMAIL=0\n')
@@ -2739,6 +2857,53 @@ def t15():
         ev, _, _ = run_day(base, "2026-11-17", gi, stale_fc)
         check(list(ev) == ["2026-11-14_obs"] and any("forecast still triggering" in n for n in ev["2026-11-14_obs"]["notes"]),
               "a forecast for the storm's tail within the 72 h: noted on the open event, no new event or heads-up")
+    # ... and as a live Open-Meteo series gives it on 17 Nov: from today 00Z (after the end, 15 Nov 06Z)
+    for what, first_calm, want_new in (("rough from the series' first hour (the storm's tail as the model still "
+                                         "carries it): noted on the open event, no new event or heads-up", 0, False),
+                                        ("calm for its first 30 h, then rough (a new storm): its own event and "
+                                         "heads-up, prev_event the open one", 30, True)):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = make_base(tmp, "tail2", settings='STORM_MODE=alerts\nSTORM_EMAIL=0\n')
+            storm = datetime(2026, 11, 14, 3, tzinfo=UTC)
+            write_marconi(base / "archive/waves_marconi.csv",
+                          [(e, h, "blend", 1, 60, 9) for e, h in storm_hours(start, 45, storm_at=storm)])
+            for d in ("2026-11-12", "2026-11-15", "2026-11-16"):
+                run_day(base, d, gi)
+
+            def live_fc(c, first_calm=first_calm):
+                h0 = sw.hour_of(datetime(2026, 11, 17, 0, tzinfo=UTC))
+                k = np.arange(168)
+                hs = np.where((k >= first_calm) & (k < first_calm + 30), 3.8, 1.0)
+                return fc_of([series(hs, h0=h0)])
+            ev, ctx, _ = run_day(base, "2026-11-17", gi, live_fc)
+            E = ev["2026-11-14_obs"]
+            new = [x for x in ev.values() if x["id"] != E["id"]]
+            if want_new:
+                ok = (len(new) == 1 and [m["kind"] for m in new[0]["emails"]] == ["heads_up"]
+                      and new[0].get("prev_event") == E["id"] and new[0]["forecast"]["onset_fc"] == "2026-11-17T18:00:00Z"
+                      and not any("forecast still triggering" in n for n in E["notes"]))
+            else:
+                ok = (not new and E["status"] == "post" and [m["kind"] for m in E["emails"]] == ["missed_storm", "storm_over"]
+                      and any("forecast still triggering" in n and "rough from its first hour, 2026-11-17T00Z" in n
+                              for n in E["notes"]))
+            check(ok, f"alerts mode, a forecast series from 17 Nov 00Z (after the end): {what} "
+                      f"({[(x['id'], [m['kind'] for m in x['emails']]) for x in ev.values()]})")
+    with tempfile.TemporaryDirectory() as tmp:
+        # full mode (CACO-05) keeps today's rule: only an onset at or before the end is the same storm
+        base = make_base(tmp, "tail_full", settings='STORM_EMAIL=0\n')
+        storm = datetime(2026, 11, 14, 3, tzinfo=UTC)
+        write_marconi(base / "archive/waves_marconi.csv",
+                      [(e, h, "blend", 1, 60, 9) for e, h in storm_hours(start, 45, storm_at=storm)])
+        for d in ("2026-11-12", "2026-11-15", "2026-11-16"):
+            run_day(base, d, gi)
+
+        def live_fc_full(c):
+            h0 = sw.hour_of(datetime(2026, 11, 17, 0, tzinfo=UTC))
+            return fc_of([series(np.where(np.arange(168) < 30, 3.8, 1.0), h0=h0)])
+        ev, _, _ = run_day(base, "2026-11-17", gi, live_fc_full)
+        check(len(ev) == 2 and any(x["id"] != "2026-11-14_obs" and [m["kind"] for m in x["emails"]] == ["heads_up"]
+                                   for x in ev.values()),
+              "full mode: the same forecast opens its own event with a heads-up, as before the alerts mode")
     # 3. a forecast storm that never comes: a false alarm without a pending pre DEM; a setup station's names and zone
     with tempfile.TemporaryDirectory() as tmp:
         base = station_base(tmp, "fa", extra="STORM_MODE=alerts\nSTORM_EMAIL=0\n", settings="")

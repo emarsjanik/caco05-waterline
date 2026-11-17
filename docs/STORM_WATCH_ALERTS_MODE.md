@@ -23,9 +23,13 @@ watch then does, and what to check or change by hand.
 | `archive/storm_watch/events.csv` | not written | **one row per event**, when it closes |
 | Email wording | DEM and intertidal-beach notes | no DEM or NAVD88 wording |
 
-Why 72 h: a forecast that still shows the same storm (an older model run, the storm's tail) belongs to an
-open event for 72 h after its end, so it updates that event instead of opening a new one with a second
-heads-up. After 72 h the event closes and its row goes to `events.csv`.
+Why 72 h: the event stays open for 72 h after the storm's end, so a forecast that still carries the same
+storm is noted on that event instead of opening a new one with a second heads-up. That is a forecast whose
+rough period begins at or before the observed end (an older model run), or one that is rough from the first
+hour of its series (a live Open-Meteo series starts at 00Z today, so the model is still carrying the storm's
+tail after the waves calmed: there is no calm gap between the two). A forecast whose rough period begins
+after calm hours inside its series is a new storm: it opens its own event, with its own heads-up, which
+names the open event as the storm before it. After 72 h the event closes and its row goes to `events.csv`.
 
 The other closing rules are the same in both modes: a forecast storm that never comes is closed as a
 **false alarm**, one whose waves the buoys could not see as **unverified**, one that came as part of another
@@ -45,7 +49,8 @@ from full to alerts closes open events 72 h after their storm's end, without the
 forecast_peak_hs_m, forecast_peak_utc, forecast_rules, observed_onset_utc, observed_peak_hs_m,
 observed_peak_utc, buoy, buoy_max_hs_m, storm_end_utc, storm_dates, emails`
 
-`kind` is `fc` (opened on the forecast) or `obs` (a storm the forecast missed); `closed_reason` is
+`kind` is `fc` (opened on the forecast) or `obs` (a storm the forecast missed); `storm_dates` is the
+storm's own span in UTC dates, from its onset date to the date of its last rough hour; `closed_reason` is
 `complete`, `false_alarm`, `unverified`, `merged` or `gave_up`; `emails` lists each email's kind and
 outcome (`heads_up:sent storm_over:sent`, or `:dry` when emails are off).
 
@@ -130,8 +135,10 @@ zones or longitude test; check them: the nearest buoy is not always the right on
 still at Marconi's values, no sea-cell test at all, emails on without recipients.
 
 coastcam-station-setup runs it after it writes `storm_watch_station.conf`, and installs no crontab line
-unless it passes. A daily run never stops on these: an unknown key or a bad value is noted in
-`logs/storm_watch.log` and its default is used.
+unless it passes. A daily run never stops on these: an unknown key is noted in `logs/storm_watch.log` and
+ignored; a value that does not parse is noted and the value before it is kept (the station file's, for a
+typo in `storm_watch_settings.conf`; else the default), never CACO-05's in place of the station's own. With
+a `storm_watch_station.conf`, a bad place fact or `STORM_MODE` is a `WARNING` on the run line.
 
 ---
 
@@ -147,7 +154,11 @@ python3 storm_watch.py --climatology --years 2010-2025 --emit-settings
 It counts the storms each threshold would have opened per year, then prints `KEY=VALUE` lines, each
 with its reason as a comment: `STORM_HS_M` and `STORM_OBS_OPEN_BUOY_HS` at the buoy's 99th percentile;
 `STORM_HS_SUPPORT_M`, `STORM_SWELL_HS_M` and `STORM_CONFIRM_BUOY_HS` at its 98th; `STORM_CONFIRM_HS` and
-`STORM_OBS_OPEN_HS` at those times 0.83; with `STORM_FACING`, `STORM_DIR_SECTOR` as the facing +- 80 deg.
+`STORM_OBS_OPEN_HS` at those times 0.83; `STORM_ONSET_HS_M` (the height a forecast's rough run is
+followed back over to its onset) at its 75th, above the ordinary swell (Marconi's 1.8 m at a high-energy
+beach would put the onset at the start of every forecast series); with `STORM_FACING`, `STORM_DIR_SECTOR`
+as the facing +- 80 deg. `--check-settings` warns when `STORM_ONSET_HS_M` is outside 0.4-0.8 times
+`STORM_HS_M` (CACO-05: 1.8 / 3.5 = 0.51).
 These are for review by hand: copy the lines you keep into `storm_watch_settings.conf`, then run
 `./storm_watch.sh --check-settings`.
 

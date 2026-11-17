@@ -137,6 +137,7 @@ def make_base(root, name, cron_text, caco05_cal=True, station_cal=()):
     (b / "owg.sh").write_text(OWG_STUB)
     (b / "owg.sh").chmod(0o755)
     shutil.copy(str(CHECK), str(b / CHECK.name))
+    shutil.copy(str(HERE / "station_env.py"), str(b / "station_env.py"))   # the check's time zone rule
     (b / "waterline_timex_cron.sh").write_text(localise(cron_text, b))
     return b
 
@@ -459,6 +460,7 @@ def test_check_overlay(d):
                                                             'ARCHIVE_PRODUCTS=""\n', ""),
         "the stage-1 file with WATERLINE_STAGE first and more settings":
             station_conf(b, stage="archive", CAMS="c1", CAL_IO_C2="", CAL_EO_C2=""),
+        "CAMS with extra plain spaces (bash splits it into c1 and c2 all the same)": station_conf(b, CAMS=" c1  c2"),
     }
     for what, text in good.items():
         res = wsc.check_overlay(text)
@@ -501,6 +503,10 @@ def test_check_overlay(d):
         ("an unknown time zone", full.replace("America/New_York", "America/Nowhere_Town"), "STATION_TZ"),
         ("a bad stage", full + 'WATERLINE_STAGE="stage1"\n', "WATERLINE_STAGE"),
         ("cameras c2 alone", full.replace('CAMS="c1 c2"', 'CAMS="c2"'), "CAMS"),
+        ("CAMS with a no-break space (bash keeps 'c1\u00a0c2' one word)",
+         full.replace('CAMS="c1 c2"', 'CAMS="c1\u00a0c2"'), "not plain ASCII"),
+        ("CAMS with an em space", full.replace('CAMS="c1 c2"', 'CAMS="c1\u2003c2"'), "CAMS"),
+        ("CAMS with an ideographic space", full.replace('CAMS="c1 c2"', 'CAMS="c1\u3000c2"'), "CAMS"),
         ("a relative path", full.replace(f'GAUGE_CSV="{b}/', 'GAUGE_CSV="archive/'), "absolute path"),
         ("a path with a space", full.replace(f'WAVES_CSV="{b}/archive/', f'WAVES_CSV="{b}/my archive/'),
          "absolute path"),
@@ -536,6 +542,65 @@ def test_check_overlay(d):
         msgs = " | ".join(e["message"] for e in res["errors"])
         check(f"refused: {what}", not res["ok"] and why in msgs, msgs or "accepted")
 
+    # CAMS is split as the cron's unquoted $CAMS is after it sources the file (bash, default IFS): a value
+    # check-overlay takes for c1 and c2 is c1 and c2 in the map loop, never one word with a Unicode space
+    for v in ("c1 c2", "c1", " c1  c2", "c1\u00a0c2", "c1\u2003c2", "c1\u3000c2"):
+        conf = Path(d) / "e_cams.conf"
+        conf.write_bytes(f'CAMS="{v}"\n'.encode("utf-8"))
+        r = subprocess.run(["bash", "-c", '. "$1"; for cam in $CAMS; do printf "[%s]" "$cam"; done', "x", str(conf)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        words = re.findall(r"\[(.*?)\]", r.stdout.decode("utf-8"))
+        accepted = wsc.check_value("CAMS", v) is None
+        check(f"CAMS={v!r}: split as bash splits it ({words}); accepted only when that is c1 or c1 c2",
+              r.returncode == 0 and wsc._shell_words(v) == words and accepted == (words in (["c1"], ["c1", "c2"])),
+              (words, wsc._shell_words(v), accepted))
+
+    # STATION_TZ: check-overlay asks station_env's own lookup, so a zone it accepts never stops the contour
+    # and DEM steps at import (station_env.station_tz(), run by the cron's same python3)
+    import station_env
+    zones = ("America/New_York", "Europe/Lisbon", "America/Los_Angeles", "EST5", "CST6", "UTC+3", "GMT-5",
+             "localtime", "posixrules", "Factory", "America/Nowhere_Town")
+    saved = os.environ.get("STATION_TZ")
+    try:
+        for v in zones:
+            os.environ["STATION_TZ"] = v
+            try:
+                station_env.station_tz()
+                steps_take_it = True
+            except SystemExit:
+                steps_take_it = False
+            gate = wsc.check_value("STATION_TZ", v) is None
+            check(f"STATION_TZ={v}: check-overlay {'accepts' if gate else 'refuses'} it, as the Python steps "
+                  f"{'do' if steps_take_it else 'refuse it'} (the same lookup: {wsc._known_zone(v)})",
+                  gate == steps_take_it and wsc._known_zone(v) == station_env._zone_known(v),
+                  (gate, steps_take_it, wsc._known_zone(v), station_env._zone_known(v)))
+    finally:
+        if saved is None:
+            os.environ.pop("STATION_TZ", None)
+        else:
+            os.environ["STATION_TZ"] = saved
+    # ... and where zoneinfo is missing (Python 3.8), with pytz there: pytz decides for both (dateutil alone
+    # would take EST5 or localtime, which the steps then refuse on every run)
+    probe = ("import sys, json\nsys.modules['zoneinfo'] = None\nsys.path.insert(0, %r)\n"
+             "import waterline_station_check as w, station_env as s\n"
+             "try:\n    import pytz\n    have = True\nexcept ImportError:\n    have = False\n"
+             "print(json.dumps([have, {v: [w.check_value('STATION_TZ', v) is None, s._zone_known(v)] for v in %r}]))"
+             % (str(HERE), list(zones)))
+    r = subprocess.run([sys.executable, "-c", probe], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       universal_newlines=True)
+    try:
+        have_pytz, got = json.loads(r.stdout)
+    except ValueError:
+        have_pytz, got = None, {}
+    check("without zoneinfo: check-overlay and station_env give the same answer for every zone",
+          r.returncode == 0 and got and all(a == (k is not False) for a, k in got.values()), (r.stdout, r.stderr[-400:]))
+    if have_pytz:
+        check("without zoneinfo, with pytz: EST5, UTC+3 and localtime refused by check-overlay (pytz does not know "
+              "them; the steps would stop at import)", got and not any(got[v][0] for v in ("EST5", "UTC+3", "localtime"))
+              and got["America/New_York"][0] and got["Europe/Lisbon"][0], got)
+    else:
+        print("  SKIP without zoneinfo, with pytz: pytz does not import here (the Python 3.8 run checks it)")
+
     # the command line: JSON on stdout, the summary on stderr, exit 0 / 1 / 2
     f = Path(d) / "e_cli.conf"
 
@@ -569,10 +634,31 @@ def test_check_overlay(d):
     check("a file that is not UTF-8: exit 1", rc == 1 and "not UTF-8" in err, (rc, err))
     rc, out, err = cli("check-overlay")
     check("no --conf: usage, exit 2", rc == 2, (rc, err))
+    # pair, profile, trial and pointing are real commands (test_waterline_station_check.py tests what they
+    # do): here only that each has its own parser (a usage error naming its required options, exit 2,
+    # nothing on stdout) and that an input file that is not there is a usage error too, said in the JSON
+    nx = str(Path(d) / "no_such_file")
+    not_there = {
+        "pair": ("--xyz", nx, "--uv", nx, "--io", nx, "--eo", nx),
+        "profile": ("--camera", "c1", "--io", nx, "--eo", nx, "--image-size", "2448x2048", "--geometry",
+                    "--output", nx + ".json"),
+        "trial": ("--camera", "c1", "--io", nx, "--eo", nx, "--profile-json", nx, "--spline", nx, "--frames", nx),
+        "pointing": ("--io", nx, "--eo", nx, "--calibration-picture", nx, "--timex", nx),
+    }
     for sub in ("pair", "profile", "trial", "pointing"):
         rc, out, err = cli(sub, "--anything", "x")
-        check(f"{sub}: a stub for now, 'not implemented yet', exit 2", rc == 2 and "not implemented yet" in err,
-              (rc, err))
+        check(f"{sub} with an unknown option and none of its own: its usage, the required options named, exit 2, "
+              f"nothing on stdout", rc == 2 and out == "" and f"usage: waterline_station_check.py {sub}" in err
+              and f"waterline_station_check.py {sub}: error: the following arguments are required" in err,
+              (rc, out[:200], err))
+        rc, out, err = cli(sub, *not_there[sub])
+        try:
+            js = json.loads(out)
+        except ValueError:
+            js = {}
+        check(f"{sub} with input files that are not there: usage, exit 2, 'not found' in the JSON and on stderr",
+              rc == 2 and js.get("command") == sub and js.get("ok") is False and "not found" in js.get("error", "")
+              and f"{sub}: not found" in err and not Path(nx + ".json").exists(), (rc, out[:300], err))
     rc, out, err = cli()
     check("no subcommand: usage, exit 2", rc == 2)
 

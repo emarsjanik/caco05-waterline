@@ -9,7 +9,7 @@ Checks For A New Station's Waterline Settings (coastcam-station-setup)
                                        (--survey-csv S.csv | --dem D.tif | --geometry [--plane-z MSL])
                                        [--mllw M --mhhw M] [--merge]
     python3 waterline_station_check.py trial --camera c1 --io IO --eo EO --profile-json P.json
-                                       --spline SPLINE --frames T1 [.. T5] [--work-dir DIR] [--antenna-navd88 M]
+                                       --spline SPLINE --frames T1 [.. T5] --antenna-navd88 M [--work-dir DIR]
     python3 waterline_station_check.py pointing --io IO --eo EO --calibration-picture IMG --timex T1 [T2 ..]
 
 WHAT. coastcam-station-setup (./setup.sh --waterline) sets this repository up
@@ -72,7 +72,10 @@ never needs it: it has no waterline_station.conf.
                    scratch one (never input/, processed_timex/ or archive/; the
                    pictures are copied). A frame passes with a line in >= 50% of
                    the columns, >= 80% of its points placed, all 30-1000 m from the
-                   camera. Exit 0 when one frame passes.
+                   camera. Exit 0 when one frame passes. The antenna height comes
+                   from --antenna-navd88 (or GNSSR_ANTENNA_NAVD88_M already in the
+                   environment), never CACO-05's 19.014 m: without either, usage
+                   (exit 2). The JSON says which height was used.
   pointing         (correction 7) a picture taken on the calibration day against
                    recent timex of the same camera, by pointing_check's matcher:
                    the rotation in degrees, PASS under 0.3, WARN 0.3-1.0, FAIL over
@@ -83,9 +86,11 @@ and a summary for people on stderr. Exit status: 0 ok, 1 refused or failed,
 2 usage.
 
 Python 3.8 (CACO-05 and the NUCs: Ubuntu 20.04/22.04). capabilities and
-check-overlay use the standard library only; pair, profile, trial and pointing
-load numpy and this repository's modules when they run (profile also
-matplotlib, pointing OpenCV), and never change them.
+check-overlay use the standard library only (check-overlay also asks this
+checkout's station_env.py, itself standard library, for its time-zone rule,
+so it accepts exactly the zones the Python steps accept); pair, profile, trial
+and pointing load numpy and this repository's modules when they run (profile
+also matplotlib, pointing OpenCV), and never change them.
 """
 
 import argparse
@@ -193,22 +198,21 @@ def _is_abs_path(v):
 
 
 def _known_zone(name):
-    """True/False when the zone can be looked up here (zoneinfo, else dateutil), None when it cannot."""
-    try:
-        import zoneinfo                                  # Python 3.9+
-    except ImportError:
-        zoneinfo = None
-    if zoneinfo is not None:
-        try:
-            zoneinfo.ZoneInfo(name)
-            return True
-        except Exception:                                # ZoneInfoNotFoundError, ValueError on odd names
-            return False
-    try:
-        from dateutil import tz                          # Python 3.8: pandas brings dateutil
-    except ImportError:
-        return None
-    return tz.gettz(name) is not None
+    """True/False when the zone is known to the Python steps here, None when nothing can look it up.
+    station_env's own rule (zoneinfo, else pytz, else dateutil), so this check and the contour and
+    DEM steps the cron runs with the same python3 cannot disagree: on Python 3.8 dateutil alone
+    would accept POSIX strings (EST5, UTC+3) and files such as 'localtime' that pytz, which
+    station_env asks first there, does not know. station_env imports only the standard library."""
+    _repo_modules()
+    import station_env
+    return station_env._zone_known(name)
+
+
+def _shell_words(v):
+    """The words the cron's unquoted $VAR gives: bash splits on its default IFS (space, tab, newline)
+    only, never on Unicode spaces (a pasted no-break space keeps 'c1\u00a0c2' one word). Tab and
+    newline cannot occur in an accepted value (BAD_IN_QUOTES), so splitting on ' ' is the same."""
+    return [w for w in v.split(" ") if w]
 
 
 def check_value(key, v):
@@ -216,9 +220,11 @@ def check_value(key, v):
     if key == "WATERLINE_STAGE":
         return None if v in ("", "archive") else 'must be "archive" (stage 1) or ""'
     if key == "CAMS":
-        cams = v.split()
+        cams = _shell_words(v)
         if cams not in (["c1"], ["c1", "c2"]):
-            return 'must be "c1" or "c1 c2" (the cron maps c1 and, on a two-camera station, c2)'
+            return ('must be "c1" or "c1 c2" (the cron maps c1 and, on a two-camera station, c2)'
+                    + ("; it holds a character that is not plain ASCII (a pasted no-break space? the cron "
+                       "splits on plain spaces only)" if re.search(r"[^\x00-\x7f]", v) else ""))
         return None
     if key in ("CAL", "GNSSR_SPLINE", "GAUGE_CSV", "WAVES_CSV"):
         return None if _is_abs_path(v) else "must be an absolute path without spaces, wildcards or '..'"
@@ -351,7 +357,7 @@ def check_overlay(text):
         if problem:
             err(n, key, f'{key}="{value}" {problem}')
         if key == "STATION_TZ" and not problem and _known_zone(value) is None:
-            notes.append(f"STATION_TZ={value}: not looked up (no zoneinfo or dateutil here)")
+            notes.append(f"STATION_TZ={value}: not looked up (no zoneinfo, pytz or dateutil here)")
 
     if len(export_lines) > 1:
         err(export_lines[1], None, f"more than one export line (lines {', '.join(map(str, export_lines))})")
@@ -360,7 +366,7 @@ def check_overlay(text):
 
     # the cameras and their calibration names
     if "CAMS" in keys and check_value("CAMS", keys["CAMS"]) is None:
-        two = "c2" in keys["CAMS"].split()
+        two = "c2" in _shell_words(keys["CAMS"])
         for k in ("CAL_IO_C2", "CAL_EO_C2"):
             if two and keys.get(k) == "":
                 err(key_line[k], k, f'{k}="" but CAMS="{keys["CAMS"]}" maps c2: name its file')
@@ -1183,9 +1189,23 @@ def cmd_trial(args):
         problem = trial_dir_problem(args.work_dir)
         if problem:
             return _usage("trial", problem)
+    # the antenna height: extract_elevation_contours.py would otherwise use CACO-05's 19.014 m and every
+    # water level would be off by the difference while the trial still passes (its range check cannot see it)
+    if args.antenna_navd88 is not None:
+        antenna, antenna_from, raw = args.antenna_navd88, "--antenna-navd88", repr(args.antenna_navd88)
+    else:
+        raw = os.environ.get("GNSSR_ANTENNA_NAVD88_M", "").strip()
+        if not raw:
+            return _usage("trial", "--antenna-navd88 M is needed (the station's antenna height in m NAVD88, the "
+                                   "OPUS height): without it extract_elevation_contours.py would use CACO-05's "
+                                   "19.014 m and put every water level off by the difference")
+        antenna, antenna_from = _float(raw), "GNSSR_ANTENNA_NAVD88_M in the environment"
+    if antenna is None or not math.isfinite(antenna) or not -100 < antenna < 5000:
+        return _usage("trial", f"{antenna_from} {raw}: not an antenna height in m NAVD88")
     scripts = Path(args.scripts_dir).resolve()
     out = {"command": "trial", "camera": cam, "ok": False, "frames": [], "passed": 0, "tried": len(frames),
            "best": None, "steps": {}, "work_dir": None, "log": None,
+           "antenna_navd88_m": antenna, "antenna_from": antenna_from,
            "rule": {"min_columns_fraction": TRIAL_MIN_COLUMNS, "min_placed_fraction": TRIAL_MIN_PLACED,
                     "range_m": list(TRIAL_RANGE_M)}}
 
@@ -1212,7 +1232,8 @@ def cmd_trial(args):
 
     import shutil
     import tempfile
-    work = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="waterline_trial_"))
+    # absolute: every step runs with cwd=t and is given paths inside t (a relative one would mean t/t/...)
+    work = Path(os.path.abspath(args.work_dir)) if args.work_dir else Path(tempfile.mkdtemp(prefix="waterline_trial_"))
     t = work / f"trial_{cam}"
     if t.exists() and not (t / TRIAL_MARKER).is_file():
         return refuse(f"{t} exists and was not made by this command: not touching it")
@@ -1249,8 +1270,7 @@ def cmd_trial(args):
         contours, ground = t / "contour_points.csv", t / "contour_points_ground.csv"
         if any((t / "detections").glob("*.csv")):
             env = dict(os.environ)
-            if args.antenna_navd88 is not None:
-                env["GNSSR_ANTENNA_NAVD88_M"] = repr(args.antenna_navd88)
+            env["GNSSR_ANTENNA_NAVD88_M"] = repr(float(antenna))
             extra = (["--waves", Path(args.waves).resolve()] if args.waves else []) + \
                     (["--gnssr-qc-reference", Path(args.gauge_csv).resolve()] if args.gauge_csv else [])
             rc = _run_logged([sys.executable, scripts / "extract_elevation_contours.py", Path(args.spline).resolve(),
@@ -1285,7 +1305,8 @@ def cmd_trial(args):
     else:
         out["reason"] = f"no frame passed ({len(frames)} tried): the maps may stay empty until the detector is tuned"
     _emit(out)
-    say(f"trial {cam}: {len(passed)} of {len(frames)} frame(s) pass (work folder {t})")
+    say(f"trial {cam}: {len(passed)} of {len(frames)} frame(s) pass (work folder {t}; antenna "
+        f"{antenna:.3f} m NAVD88 from {antenna_from})")
     for r in out["frames"]:
         if r["pass"]:
             say(f"  ok    {r['time_utc']}: {r['points']} points, {100 * r['placed_fraction']:.0f}% placed, "
@@ -1460,7 +1481,8 @@ def add_station_setup_parsers(sub):
     p.add_argument("--work-dir", default=None,
                    help="scratch folder (default: a new temporary one); trial_<camera>/ in it is replaced")
     p.add_argument("--antenna-navd88", type=float, default=None, metavar="M",
-                   help="GNSSR_ANTENNA_NAVD88_M for extract_elevation_contours.py (the OPUS height)")
+                   help="GNSSR_ANTENNA_NAVD88_M for extract_elevation_contours.py (the OPUS height); needed "
+                        "unless GNSSR_ANTENNA_NAVD88_M is set in the environment (never CACO-05's 19.014)")
     p.add_argument("--waves", default=None, help="wave archive for extract_elevation_contours.py --waves")
     p.add_argument("--gauge-csv", default=None, help="tide-gauge archive for --gnssr-qc-reference")
     p.add_argument("--timing-mode", default="legacy", choices=("legacy", "mid"))

@@ -31,8 +31,9 @@ its own, with its own heads-up.
 MODES (STORM_MODE). full (the default; CACO-05): all of the above.
 alerts (a new station before its beach maps exist): the forecast, the
 heads-up, the observed storm and its end, with no DEM at all: a "storm over"
-email at the storm's end, the event closed 72 h later (a trigger for the same
-storm in those hours updates it: no second heads-up), and one row per event
+email at the storm's end, the event closed 72 h later (a forecast that still
+carries the same storm in those hours is noted on it: no second heads-up; a
+new rough period after calm hours is a storm of its own), and one row per event
 in archive/storm_watch/events.csv. The ground file and the cron's lock are
 never touched.
 
@@ -50,8 +51,9 @@ offshore NDBC buoy: its observations and its GFS-Wave bulletin), STORM_BUOY2
 (a second buoy converted to the beach; empty = none), STORM_GFSWAVE_STATION
 (default the buoy; "none" = no bulletin), STORM_FACING and STORM_MIN_CELL_LON
 (the Open-Meteo sea-cell tests). Settings files, read in this order (the last
-value wins): storm_watch_station.conf (coastcam-station-setup writes it from
-its station.conf; CACO-05 has none), then storm_watch_settings.conf (your own
+valid value wins; one that does not parse keeps the value before it):
+storm_watch_station.conf (coastcam-station-setup writes it from its
+station.conf; CACO-05 has none), then storm_watch_settings.conf (your own
 edits). --check-settings checks both.
 
 FORECAST SOURCES (each fetched every run; a failed source counts as
@@ -564,6 +566,7 @@ STATION_FACTS = ("STORM_STATION", "STORM_SITE", "STORM_TZ", "STORM_POINT", "STOR
 MARCONI_FACTS = ("STORM_SITE", "STORM_POINT", "STORM_MARINE_POINT", "STORM_BUOY_POINT", "STORM_BUOY", "STORM_BUOY2",
                  "STORM_ALERT_ZONES", "STORM_MIN_CELL_LON")
 ID_RE = re.compile(r"^[A-Za-z0-9]{3,8}$")
+ONSET_RATIO = (0.4, 0.8)        # --check-settings: STORM_ONSET_HS_M within these times STORM_HS_M (CACO-05: 0.51)
 
 
 def parse_sector(text):
@@ -589,25 +592,35 @@ def settings_paths(path):
 
 def load_settings(path, cron=None):
     """Station settings (KEY=VALUE, '#' comments) over the defaults. `path` is one file or a list of files read in order
-    (main: storm_watch_station.conf, then storm_watch_settings.conf): the last value wins. -> (cfg, notes). Unknown keys
-    and bad values give a note and the default (--check-settings refuses them). cfg holds parsed values; "" keys
-    resolved from the cron; STORM_GFSWAVE_STATION resolved to an id or None."""
+    (main: storm_watch_station.conf, then storm_watch_settings.conf): the last valid value wins. -> (cfg, notes).
+    Unknown keys give a note. A value that does not parse gives a note and keeps the value before it (an earlier line's
+    or file's, else the default), so a typo in storm_watch_settings.conf never swaps the station file's own fact for
+    CACO-05's; with a storm_watch_station.conf, a bad place fact or STORM_MODE is a 'WARNING: ' note (main shows it as
+    a warning). --check-settings refuses them all. cfg holds parsed values; "" keys resolved from the cron;
+    STORM_GFSWAVE_STATION resolved to an id or None."""
     cron = cron or CRON_DEFAULTS
-    raw, notes = {}, []
-    for p in settings_paths(path):
+    raw, src, notes = {}, {}, []
+    paths = settings_paths(path)
+    station_file = any(p.name == STATION_FILE for p in paths)
+    for p in paths:
         for k, vals in var_lines(p.read_text(errors="replace")).items():
             if k not in SETTINGS:
                 notes.append(f"setting {k} in {p.name} is not known: ignored")
                 continue
-            raw[k] = vals[-1]
+            kind = SETTINGS[k][1]
+            for v in vals:                               # in order: a bad line keeps the valid value before it
+                try:
+                    parse_setting(v, kind)
+                except (ValueError, TypeError):
+                    kept = f"{src[k]}'s {raw[k]!r}" if k in raw else f"the default {SETTINGS[k][0]!r}"
+                    warn = station_file and (k in STATION_FACTS or k == "STORM_MODE")
+                    notes.append(("WARNING: " if warn else "") + f"setting {k}={v!r} in {p.name} is not valid "
+                                 f"({kind}): {kept} is used")
+                    continue
+                raw[k], src[k] = v, p.name
     cfg = {}
     for k, (default, kind, _) in SETTINGS.items():
-        v = raw.get(k, default)
-        try:
-            cfg[k] = parse_setting(v, kind)
-        except (ValueError, TypeError):
-            notes.append(f"setting {k}={v!r} is not valid ({kind}): the default {default!r} is used")
-            cfg[k] = parse_setting(default, kind)
+        cfg[k] = parse_setting(raw.get(k, default), kind)
     calm_from_cron = cron.get("DEM_MAX_HS") or "1.5"
     if cfg["STORM_CALM_HS"] is None:
         cfg["STORM_CALM_HS"] = float(calm_from_cron)
@@ -788,10 +801,17 @@ def check_settings(base, settings_path=None):
         if cfg["STORM_FACING"] is None and cfg["STORM_MIN_CELL_LON"] is None:
             warns.append("STORM_FACING and STORM_MIN_CELL_LON are both empty: the Open-Meteo sea cell is not checked "
                          "(set STORM_FACING, the direction the beach faces)")
-        thr = [k for k in ("STORM_HS_M", "STORM_CONFIRM_HS", "STORM_OBS_OPEN_HS", "STORM_DIR_SECTOR") if k not in given]
+        thr = [k for k in ("STORM_HS_M", "STORM_CONFIRM_HS", "STORM_OBS_OPEN_HS", "STORM_DIR_SECTOR", "STORM_ONSET_HS_M")
+               if k not in given]
         if thr:
             warns.append(f"thresholds {', '.join(thr)} are Marconi's defaults: review them with "
                          f"storm_watch.py --climatology --station {cfg['STORM_BUOY']} --emit-settings")
+        on, hs_m = cfg["STORM_ONSET_HS_M"], cfg["STORM_HS_M"]
+        if not ONSET_RATIO[0] * hs_m <= on <= ONSET_RATIO[1] * hs_m:
+            why = ("so low that a forecast onset runs back over the ordinary swell" if on < ONSET_RATIO[0] * hs_m
+                   else "too close to the trigger height to mark an onset")
+            warns.append(f"STORM_ONSET_HS_M {on:g} m is {on / hs_m:.2f} x STORM_HS_M {hs_m:g} m (CACO-05: 1.8 / 3.5 = "
+                         f"0.51): {why} (--emit-settings suggests one)")
     to, where = recipients(base, cfg)
     out.append(f"  station {station_of(cfg)}, site {site_of(cfg)}, time zone {cfg['STORM_TZ']}, mode {cfg['STORM_MODE']}")
     b1, b2 = buoys(cfg)
@@ -1372,7 +1392,8 @@ def read_saved(folder, name):
 
 def fetch_forecast(ctx, state):
     """Fetches every source in STORM_SOURCES. -> Fetcher (raw bodies by name). Refreshes the cached NWS
-    /points answer weekly or after a 404 from the grid; never hardcodes the grid numbers."""
+    /points answer weekly, after a 404 from the grid, or when STORM_POINT is no longer the point it was asked for
+    (the answer keeps its point); never hardcodes the grid numbers."""
     cfg, f = ctx.cfg, Fetcher(ctx)
     srcs = cfg["STORM_SOURCES"]
     if ctx.forecast_dir:
@@ -1387,16 +1408,19 @@ def fetch_forecast(ctx, state):
         return f
     if "nws" in srcs:
         pts = state.get("nws_points") or {}
-        fresh = pts.get("utc") and (utc(ctx.now) - parse_iso(pts["utc"])).total_seconds() < 7 * 86400
+        here = "%s,%s" % tuple(coord(x) for x in cfg["STORM_POINT"])
+        # an answer for another point (STORM_POINT changed; an older state has no point) is stale whatever its age
+        fresh = (pts.get("utc") and pts.get("point") == here
+                 and (utc(ctx.now) - parse_iso(pts["utc"])).total_seconds() < 7 * 86400)
         refreshed = False
 
         def refresh():
-            lat, lon = cfg["STORM_POINT"]
-            st, body, why = f.get("nws_points.json", f"https://api.weather.gov/points/{coord(lat)},{coord(lon)}")
+            st, body, why = f.get("nws_points.json", f"https://api.weather.gov/points/{here}")
             if st == 200:
                 try:
                     p = parse_nws_points(json.loads(body.decode("utf-8", "replace")))
                     p["utc"] = iso_z(ctx.now)
+                    p["point"] = here
                     state["nws_points"] = p
                     return p
                 except ValueError as exc:
@@ -1616,13 +1640,16 @@ RULE_WORDS = {"a": "waves at or above the storm height", "b": "a strong NWS aler
 
 
 def evaluate_trigger(fc, now, cfg):
-    """-> {triggered, rules, onset_fc, end_fc, peak, first_trigger_hour, hours_over, outlook, notes, by}."""
+    """-> {triggered, rules, onset_fc, end_fc, peak, first_trigger_hour, hours_over, outlook, notes, by, onset_open}.
+    onset_open: the first hour of the series (ISO) when the rough run that sets onset_fc is rough from that first
+    sample, so its true onset is unknown (at or before the series start: e.g. an older model run still carrying a
+    storm that has passed); else None."""
     lead = cfg["STORM_LEAD_HOURS"]
     h0 = hour_of(now)
     h1 = h0 + lead
     sector, onset_hs = cfg["STORM_DIR_SECTOR"], cfg["STORM_ONSET_HS_M"]
     T = {"triggered": False, "rules": [], "by": [], "onset_fc": None, "end_fc": None, "peak": None,
-         "first_trigger_hour": None, "hours_over": 0, "outlook": [], "notes": [], "alerts": []}
+         "first_trigger_hour": None, "hours_over": 0, "outlook": [], "notes": [], "alerts": [], "onset_open": None}
     alerts = [a for a in (fc.get("alerts") or []) if alert_hours(a)[0] <= h1 and alert_hours(a)[1] >= h0]
     have_waves = bool(fc.get("waves"))
     gated = set(cfg["STORM_ALERT_WAVE_GATED"])
@@ -1631,7 +1658,7 @@ def evaluate_trigger(fc, now, cfg):
     strong = [a for a in alerts if a["code"] in strong_codes]
     support = [a for a in alerts if a["code"] in support_codes]
     T["alerts"] = [dict(a, role="strong" if a in strong else "support" if a in support else "other") for a in alerts]
-    onsets, ends, firsts = [], [], []
+    onsets, ends, firsts, open_from = [], [], [], []
 
     def masks(s):
         w = (s["h"] >= h0) & (s["h"] <= h1)
@@ -1676,6 +1703,7 @@ def evaluate_trigger(fc, now, cfg):
                 while j1 + 1 < len(hs) and hs[j1 + 1] > onset_hs and sec[j1 + 1]:
                     j1 += 1
                 onsets.append(int(s["h"][j0]) - 12)
+                open_from.append(int(s["h"][0]) if j0 == 0 else None)
                 ends.append(int(s["h"][j1]))
                 firsts.append(int(s["h"][a]))
         return found
@@ -1702,10 +1730,11 @@ def evaluate_trigger(fc, now, cfg):
                 rough = (np.nan_to_num(s["hs"], nan=-1.0) > onset_hs) & sec
                 for i0, i1 in true_runs(rough):
                     if s["h"][i0] <= ah1 and s["h"][i1] >= ah0 - 24:
-                        cand = (int(s["h"][i0]), int(s["h"][i1]))
+                        cand = (int(s["h"][i0]), int(s["h"][i1]), int(s["h"][0]) if i0 == 0 else None)
                         run = cand if run is None or cand[0] < run[0] else run
                         break
             onsets.append((run[0] if run else ah0) - 12)
+            open_from.append(run[2] if run else None)
             ends.append(max(ah1, run[1]) if run else ah1)
             firsts.append(max(ah0, h0))
     if not have_waves and fc.get("wind") is not None:
@@ -1722,6 +1751,7 @@ def evaluate_trigger(fc, now, cfg):
             while j1 + 1 < len(cond) and cond[j1 + 1]:
                 j1 += 1
             onsets.append(int(s["h"][r[0]]) - 12)
+            open_from.append(None)
             ends.append(int(s["h"][j1]))
             firsts.append(int(s["h"][r[0]]))
     if T["rules"]:
@@ -1729,6 +1759,7 @@ def evaluate_trigger(fc, now, cfg):
         T["rules"] = sorted(set(T["rules"]))
         on = min(onsets)
         T["onset_fc"] = hour_iso(on)
+        T["onset_open"] = next((hour_iso(o) for x, o in zip(onsets, open_from) if x == on and o is not None), None)
         T["end_fc"] = hour_iso(max(max(ends), on + 12) if ends else on + 48)
         T["first_trigger_hour"] = hour_iso(min(firsts))
     elif fc.get("waves_other"):
@@ -2785,7 +2816,9 @@ def typical_first_frame(gi):
 def set_first_post(ctx, E, gi):
     """The first post-storm date: the end's date when no ground frame of that date is earlier than the end,
     else the next date (provisional, from the usual first-frame time, until the ground file covers the date);
-    never the onset date. The storm dates run from the onset date to the date before."""
+    never the onset date. The storm dates run from the onset date to the date before. In alerts mode (no DEM, no
+    camera frames) the storm dates are the storm's own UTC span instead: the onset date to the date of its last
+    rough hour (the hour before the end); first_post stays as above (a switch to full mode recomputes it all)."""
     end_h = iso_hour(E["observed"]["end"])
     d = hour_date(end_h)
     if gi and covered(gi, d) and d in (gi.get("earliest") or {}):
@@ -2797,6 +2830,8 @@ def set_first_post(ctx, E, gi):
     first = max(first, dadd(od, 1))
     E["first_post"], E["first_post_exact"] = first, exact
     E["storm_dates"] = [od, dadd(first, -1)]
+    if getattr(ctx, "alerts", False):
+        E["storm_dates"] = [od, max(od, hour_date(end_h - 1))]
 
 
 def floor_date(state, E, od):
@@ -3427,6 +3462,20 @@ def record_run(E, ctx, T):
                                                  "peak_time": (T["peak"] or {}).get("time"), "rules": T["rules"]}]
 
 
+def same_storm_as_post(ctx, T, E):
+    """A trigger matched to post event E is still E's storm (noted on E: no new event, no heads-up) when its onset
+    is at or before the observed end (an older model run). In alerts mode also when the forecast's rough period runs
+    from the first hour of its series (T['onset_open']: its true onset unknown, at or before the series start, so no
+    calm gap separates it from the storm) and that hour is within ALERTS_CLOSE_H of the end: the storm's tail as a
+    model still carries it after the waves calmed. A rough period that begins after calm hours inside the series is
+    a new storm, with its own event and heads-up (prev_event names E). Full mode is unchanged (CACO-05)."""
+    end = iso_hour(E["observed"]["end"])
+    if iso_hour(T["onset_fc"]) <= end:
+        return True
+    oo = T.get("onset_open")
+    return bool(ctx.alerts and oo and iso_hour(oo) <= end + ALERTS_CLOSE_H)
+
+
 def handle_trigger(ctx, state, fc, T, matches, segs):
     if not T["triggered"]:
         for E in state["events"]:
@@ -3452,9 +3501,11 @@ def handle_trigger(ctx, state, fc, T, matches, segs):
                 hist(ctx, E, "forecast escalated: " + "; ".join(why))
         return E
     posts = [E for E in matches if E["status"] == "post"]
-    if posts and all(iso_hour(T["onset_fc"]) <= iso_hour(E["observed"]["end"]) for E in posts):
+    if posts and all(same_storm_as_post(ctx, T, E) for E in posts):
         for E in posts:
-            E["notes"].append(f"{ctx.today}: forecast still triggering (onset ~{T['onset_fc'][:13]}Z) after the storm")
+            E["notes"].append(f"{ctx.today}: forecast still triggering (onset ~{T['onset_fc'][:13]}Z"
+                              + (f"; rough from its first hour, {T['onset_open'][:13]}Z" if T.get("onset_open") else "")
+                              + ") after the storm")
         return None
     in_post = [X for X in state["events"] if X["status"] in ("post", "storm")]
     E = new_event(ctx, state, "fc", T["onset_fc"][:10])
@@ -3563,9 +3614,10 @@ def pending_steps(ctx, state, E, gi, obs, segs):
 
 
 def alerts_steps(ctx, state, E):
-    """Alerts mode: an event whose storm has ended closes ALERTS_CLOSE_H (72 h) after the end. trigger_match keeps a
-    post event for 72 h after its end, so a forecast for the same storm's tail in that time updates it (no second
-    heads-up); nothing waits for a DEM or the ground file."""
+    """Alerts mode: an event whose storm has ended closes ALERTS_CLOSE_H (72 h) after the end. While it is open, a
+    forecast that still carries the same storm (its rough period beginning at or before the end, or running from the
+    first hour of the forecast series: same_storm_as_post) is noted on it, with no second heads-up; a new rough period
+    after calm hours opens its own event. Nothing waits for a DEM or the ground file."""
     ob = E["observed"]
     if E["status"] == "post" and ob.get("end") and ctx.now_h >= iso_hour(ob["end"]) + ALERTS_CLOSE_H:
         E["status"], E["closed_reason"] = "closed", "complete"
@@ -3756,8 +3808,17 @@ def plan_lines(ctx, E, observed=False):
             out.append(f"  observed onset {when(parse_iso(E['observed']['onset']), tz)}")
         else:
             out.append(f"  provisional onset ~{when(parse_iso(E['forecast']['onset_fc']), tz)}")
-        out.append(f"  it follows the storm on the observed waves ({', '.join(x for x in buoys(cfg) if x)}) and emails "
-                   f"when it is over (24 calm hours); the event closes {ALERTS_CLOSE_H} h after that")
+        end = E["observed"].get("end")
+        if end:
+            # a storm found after it ended (a missed storm seen late): its end is in this email, no storm-over email
+            close = parse_iso(hour_iso(iso_hour(end) + ALERTS_CLOSE_H))
+            out.append(f"  the storm is already over (end {when(parse_iso(end), tz)})"
+                       + ("" if any(m["kind"] == "storm_over" for m in E["emails"]) else
+                          ": no separate storm-over email")
+                       + f"; the event closes {ALERTS_CLOSE_H} h after the end, ~{when(close, tz)}")
+        else:
+            out.append(f"  it follows the storm on the observed waves ({', '.join(x for x in buoys(cfg) if x)}) and "
+                       f"emails when it is over (24 calm hours); the event closes {ALERTS_CLOSE_H} h after that")
         if not observed:
             out.append("  a storm that does not arrive is closed as a false alarm")
         return out
@@ -3805,7 +3866,7 @@ def storm_lines(E, cfg=None, alerts=False):
     if ob.get("end"):
         out.append(f"  end {when(parse_iso(ob['end']), tz)} (24 calm hours began)")
     if E.get("storm_dates"):
-        out.append(f"  storm dates: {E['storm_dates'][0]} to {E['storm_dates'][1]}" if alerts else
+        out.append(f"  storm dates (UTC): {E['storm_dates'][0]} to {E['storm_dates'][1]}" if alerts else
                    f"  storm dates left out of every DEM: {E['storm_dates'][0]} to {E['storm_dates'][1]}")
     if ob.get("sources"):
         out.append(f"  wave record: {', '.join(ob['sources'])}")
@@ -3933,7 +3994,8 @@ def compose(ctx, state, E, m):
         subj = f"Storm over at {site}: {sdt}"
         lines = [f"The storm of event {E['id']} is over: the waves at {short} stayed below {cfg['STORM_CALM_HS']:g} m "
                  f"for {cfg['STORM_END_CALM_HOURS']} hours. The event closes {ALERTS_CLOSE_H} h after the end (a "
-                 "forecast for the same storm in those hours updates it: no new heads-up).", "",
+                 "forecast that still carries this storm in those hours is noted on it: no new heads-up; a new rough "
+                 "period after the calm is a storm of its own, with its own heads-up).", "",
                  "STORM (observed):"] + storm_lines(E, cfg, alerts)
     elif kind == "update":
         subj = f"Storm forecast update for {site}: {'; '.join(data.get('why') or [])[:80]}"
@@ -3956,9 +4018,17 @@ def compose(ctx, state, E, m):
                 else f"the storm of {od} is")
         subj = f"Storm of {od}: part of event {into} (one compound event)"
         if alerts:
+            X = next((x for x in state["events"] if x["id"] == into), None)
+            xend = (X or {}).get("observed", {}).get("end")
+            if not xend:
+                tail = f" Its storm-over email comes with {into}."
+            elif any(m["kind"] == "storm_over" for m in X["emails"]):
+                tail = f" That storm is over (end {when(parse_iso(xend), tz)}): the storm-over email of {into} covers it."
+            else:
+                tail = f" That storm is over (end {when(parse_iso(xend), tz)}): no separate storm-over email."
             lines = [f"Event {E['id']} is closed: {what} part of the storm that event {into} follows (one compound "
                      "event)" + (f"; observed {short} peak {fnum(data.get('peak'))} m" if data.get("peak") is not None
-                                 else "") + f". Its storm-over email comes with {into}."]
+                                 else "") + "." + tail]
         else:
             lines = [f"Event {E['id']} is closed: {what} part of the storm that event {into} follows (one compound "
                      "event: fewer than 3 usable calm dates between the two storms)"
@@ -4642,13 +4712,15 @@ SUGGEST_MIN_HOURS = 90 * 24
 def suggest_settings(df, cfg, kind, years_span):
     """Thresholds from an offshore wave record, by the rules CACO-05's were set with (VALIDATION 4.9): rule (a) and
     the raw buoy's open height at the offshore p99; the support, swell and raw buoy's confirm heights at p98; the
-    beach's confirm and open heights at p98 and p99 x STORM_OFFSHORE_TO_MARCONI; with STORM_FACING, the wave sector
-    facing +- 80 deg (CACO-05: 80 -> 0-160). -> [(key, value text, why)]."""
+    beach's confirm and open heights at p98 and p99 x STORM_OFFSHORE_TO_MARCONI; the forecast onset at the offshore
+    p75 (above the ordinary swell: CACO-05's 1.8 m default would put a high-energy beach's onset at the start of every
+    forecast series); with STORM_FACING, the wave sector facing +- 80 deg (CACO-05: 80 -> 0-160).
+    -> [(key, value text, why)]."""
     hs = df["hs"].to_numpy(dtype=float)
     hs = hs[np.isfinite(hs)]
     if len(hs) < SUGGEST_MIN_HOURS:
         return []
-    p98, p99 = (float(x) for x in np.percentile(hs, [98, 99]))
+    p75, p98, p99 = (float(x) for x in np.percentile(hs, [75, 98, 99]))
     f = cfg["STORM_OFFSHORE_TO_MARCONI"]
     r1 = lambda x: f"{np.round(x, 1):.1f}"      # noqa: E731
     out = []
@@ -4666,7 +4738,10 @@ def suggest_settings(df, cfg, kind, years_span):
             ("STORM_CONFIRM_BUOY_HS", r1(p98), f"the raw buoy that confirms: the offshore p98 ({p98:.2f} m)"),
             ("STORM_OBS_OPEN_BUOY_HS", r1(p99), f"the raw buoy that opens a missed storm: the offshore p99 ({p99:.2f} m)"),
             ("STORM_CONFIRM_HS", r1(p98 * f), f"the beach's height that confirms: offshore p98 x {f:g}"),
-            ("STORM_OBS_OPEN_HS", r1(p99 * f), f"the beach's peak that opens a missed storm: offshore p99 x {f:g}")]
+            ("STORM_OBS_OPEN_HS", r1(p99 * f), f"the beach's peak that opens a missed storm: offshore p99 x {f:g}"),
+            ("STORM_ONSET_HS_M", r1(p75), f"the forecast onset (a rough run is followed back while above it): the "
+                                          f"offshore p75 ({p75:.2f} m; {100 * np.mean(hs > float(r1(p75))):.0f}% of the "
+                                          f"hours lie above it)")]
     return out
 
 
@@ -4792,7 +4867,7 @@ def main(argv=None):
     ctx = Ctx(base, now, cfg, cron, mode=mode, forecast_dir=args.forecast_dir, save_raw=args.save_raw,
               email=not args.no_email, fetch=not args.no_fetch)
     for n in cron_notes + set_notes:
-        ctx.note(n)
+        (ctx.warn if n.startswith("WARNING: ") else ctx.note)(n)
     lockf = None
     if mode == "live":
         lockf = take_lock(base / "logs/storm_watch.lock", 0)
