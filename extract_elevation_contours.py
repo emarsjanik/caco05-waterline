@@ -281,9 +281,12 @@ def looks_like_gnssr_spline(path):
 #               own wh_4061 / peak period, which an earlier version of this
 #               rule called the raw buoy and warned about): a NOTE, no
 #               WARNING
-# The raw-buoy line is a WARNING only when the frames get a setup
-# (--setup-coef above 0); without one the buoy heights only feed a
-# --max-hs filter downstream, so it is a NOTE (as dem_from_contours.py's).
+# The raw-buoy line is a WARNING when the frames get a setup (--setup-coef
+# above 0). Without one it stays a WARNING on CACO-05 (the alarm that
+# waves_marconi.csv is missing), and is a NOTE on another station
+# (station_env.is_caco05() False), where there is no Marconi file to miss
+# and the buoy heights only feed a --max-hs filter downstream (as
+# dem_from_contours.py's NOTE).
 # A new station fitted C in its own wave record: STATION_WAVE_CURRENCY
 # (waterline_station.conf; station_env.py) names it, in this tag form.
 WAVE_CURRENCY_FITTED = station_env.wave_currency()       # CACO-05: "marconi:hs_best/tp_s"
@@ -326,7 +329,8 @@ def wave_currency_note(tag):
                        f"({WAVE_CURRENCY_FITTED})")
     if not tag.startswith("buoy:"):
         # only where STATION_WAVE_CURRENCY names another currency (e.g. a station's C fitted on its raw buoy,
-        # and a marconi file): CACO-05's tags all end above or below
+        # and a marconi file). CACO-05's tags never get here: marconi is its fitted currency, adcp_equiv and
+        # unknown are answered above, buoy below
         return False, (f"{tag} -- NOT the currency the setup coefficient was fitted in "
                        f"({WAVE_CURRENCY_FITTED}), so the setup (and the --max-hs filter) differ")
     return False, (f"{tag} -- NOT the currency the setup coefficient was fitted in "
@@ -934,8 +938,8 @@ def main():
                              "frames (whose waterline sits above still water by the wave "
                              "setup) can be left out of the DEM, and wave_source: which "
                              "columns of which kind of file tagged them (a WARNING when it "
-                             "is the raw buoy and --setup-coef applies a setup, a NOTE without "
-                             "one and for another currency than the one the "
+                             "is the raw buoy, on another station a NOTE without --setup-coef; "
+                             "a NOTE for another currency than the one the "
                              "setup coefficient was fitted in; see WAVE_CURRENCY_FITTED).")
     parser.add_argument("--wave-max-gap-minutes", type=float, default=90.0,
                         help="Largest gap to the nearest wave record before a frame's wave "
@@ -1297,14 +1301,20 @@ def main():
         fitted, note = wave_currency_note(wave_tag)
         print(f"Wave file                : {args.waves} (columns {hcol}, {tcol})")
         print(f"Wave currency            : {note}")
-        if not fitted and wave_tag.startswith("buoy:") and args.setup_coef:
+        caco05 = station_env.is_caco05()
+        if not fitted and wave_tag.startswith("buoy:") and (args.setup_coef or caco05):
+            # with a setup: the setup is not the calibrated one. Without one, on CACO-05, still the
+            # alarm that waves_marconi.csv is missing (the cron says nothing else)
             print(f"WARNING: the frames are tagged with the raw buoy waves ({wave_tag}), not the "
                   f"currency the setup coefficient was fitted in ({WAVE_CURRENCY_FITTED})"
-                  f": the setup with C = {args.setup_coef} is NOT the station's calibrated setup"
-                  ". Was archive/waves_marconi.csv (owg.sh / marconi_waves.py) missing?")
+                  + (f": the setup with C = {args.setup_coef} is NOT the station's calibrated setup"
+                     if args.setup_coef else "")
+                  + (". Was archive/waves_marconi.csv (owg.sh / marconi_waves.py) missing?" if caco05 else
+                     ". Is STATION_WAVE_CURRENCY (waterline_station.conf) the record C was fitted in?"))
         elif not fitted and wave_tag.startswith("buoy:"):
-            # no setup (no --setup-coef, or C = 0): the buoy heights only reach a --max-hs filter
-            # downstream, as dem_from_contours.py's NOTE says
+            # another station (its waterline_station.conf sets station_env's variables), no setup (no
+            # --setup-coef, or C = 0): there is no waves_marconi.csv to miss, and the buoy heights only
+            # reach a --max-hs filter downstream, as dem_from_contours.py's NOTE says
             print(f"NOTE: the frames are tagged with the raw buoy waves ({wave_tag}), not the "
                   f"currency the setup coefficient was fitted in ({WAVE_CURRENCY_FITTED}); no setup "
                   f"is applied here (no --setup-coef, or C = 0), so only a --max-hs filter, if used, judges "

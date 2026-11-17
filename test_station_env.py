@@ -21,8 +21,10 @@ GNSSR_QC_GROSS_M and WAVE_BUOY to the cron's Python steps. This checks:
      variable (exit 1, no traceback), never CACO-05's value in its place;
      above all a bad or empty antenna height;
   d. the raw-buoy line of extract_elevation_contours.py: a WARNING with
-     --setup-coef, a NOTE without one; none when the station's C was
-     fitted on its raw buoy (STATION_WAVE_CURRENCY);
+     --setup-coef; without one a NOTE on another station, still CACO-05's
+     WARNING (waves_marconi.csv missing) when no station variable is set;
+     none when the station's C was fitted on its raw buoy
+     (STATION_WAVE_CURRENCY);
   e. a one-camera chain on a synthetic c1 fixture (rows from a planar beach
      through the CACO05 c1 2025-11-13 calibration, named explicitly):
      extract -> georectify (c1 only) -> DEM with its page -> map, GeoTIFF,
@@ -42,7 +44,8 @@ scripts would make it fail.
 
 Python 3.8 compatible; no network; no pytest. Calibration files are named
 one by one (calibration/CACO05_c1_20240801_IO.yaml and
-calibration/CACO05_c1_20251113_EO-CV.yaml); the folder is never listed.
+calibration/CACO05_c1_20251113_EO-CV.yaml; --before also links the c2 pair
+that dem_figure.py reads, by name); the folder is never listed.
 """
 
 import argparse
@@ -311,7 +314,8 @@ def test_frames_and_names():
 # ---------------------------------------------------------------------
 
 def test_warning_note(d):
-    print("d. extract_elevation_contours.py: the raw-buoy line is a WARNING with --setup-coef, a NOTE without")
+    print("d. extract_elevation_contours.py: the raw-buoy line: a WARNING with --setup-coef; without, a NOTE on "
+          "another station")
     if not (CAL_IO_C1.is_file() and CAL_EO_C1.is_file()):
         skip(f"WARNING vs NOTE: {CAL_IO_C1.name} / {CAL_EO_C1.name} not in calibration/ (the fixture uses them)")
         return
@@ -331,13 +335,26 @@ def test_warning_note(d):
     check(rc == 0 and len(lines) == 1 and lines[0].startswith("WARNING: the frames are tagged with the raw buoy")
           and "C = 0.037 is NOT the station's calibrated setup" in lines[0],
           "--setup-coef 0.037: WARNING (the setup is not the calibrated one), as before", log[-800:])
-    rc, lines, log = extract("no_c", [])
-    check(rc == 0 and len(lines) == 1 and lines[0].startswith("NOTE: the frames are tagged with the raw buoy")
-          and "no setup is applied here" in lines[0] and "WARNING" not in "".join(lines),
-          "no --setup-coef: a NOTE (no setup applied; only a --max-hs filter judges the buoy Hs)", log[-800:])
-    rc, lines, log = extract("c0", ["--setup-coef", "0"])
-    check(rc == 0 and len(lines) == 1 and lines[0].startswith("NOTE:"), "--setup-coef 0 (no setup): a NOTE",
+    rc, lines, log = extract("no_c_caco05", [])
+    check(rc == 0 and len(lines) == 1 and lines[0].startswith("WARNING: the frames are tagged with the raw buoy")
+          and "C = " not in lines[0] and "waves_marconi.csv" in lines[0],
+          "CACO-05 (no station variable), no --setup-coef: still the WARNING that waves_marconi.csv is missing "
+          "(as before; test_dem_diagnostics.py)", log[-800:])
+    station = {"STATION_NAME": "CACO07"}
+    rc, lines, log = extract("with_c_station", ["--setup-coef", "0.037"], station)
+    check(rc == 0 and len(lines) == 1 and lines[0].startswith("WARNING: the frames are tagged with the raw buoy")
+          and "C = 0.037 is NOT" in lines[0] and "waves_marconi.csv" not in lines[0]
+          and "STATION_WAVE_CURRENCY" in lines[0],
+          "another station, --setup-coef 0.037: a WARNING, pointing at STATION_WAVE_CURRENCY (no Marconi file)",
           log[-800:])
+    rc, lines, log = extract("no_c_station", [], station)
+    check(rc == 0 and len(lines) == 1 and lines[0].startswith("NOTE: the frames are tagged with the raw buoy")
+          and "no setup is applied here" in lines[0] and not any("WARNING" in ln for ln in log.splitlines()),
+          "another station, no --setup-coef: a NOTE (no setup applied; only a --max-hs filter judges the buoy "
+          "Hs), no WARNING at all", log[-800:])
+    rc, lines, log = extract("c0_station", ["--setup-coef", "0"], station)
+    check(rc == 0 and len(lines) == 1 and lines[0].startswith("NOTE:"),
+          "another station, --setup-coef 0 (no setup): a NOTE", log[-800:])
     rc, lines, log = extract("station_c", ["--setup-coef", "0.02"], {"STATION_WAVE_CURRENCY": "buoy:wvht_m/dpd_s"})
     check(rc == 0 and not lines and "Wave currency            : buoy:wvht_m/dpd_s -- the currency the setup "
                                     "coefficient was fitted in\n" in log,

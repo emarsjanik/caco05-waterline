@@ -39,7 +39,6 @@ Everything else is made in a temporary folder.
 """
 
 import os
-import re
 import sys
 import json
 import math

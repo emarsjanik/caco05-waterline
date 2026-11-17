@@ -57,6 +57,9 @@ python3 test_calibrate_eo.py                     # ends "all calibrate_eo tests 
 python3 test_timestack_wave_height.py            # ends "all timestack wave height tests passed" (section 4.11, opt-in)
 python3 test_measured_setup.py                   # ends "all measured setup tests passed" (section 4.12, opt-in)
 python3 test_storm_watch.py                      # ends "all storm watch tests passed" (section 2.10, opt-in)
+python3 test_station_overlay.py                  # ends "all station overlay tests passed" (section 2.11)
+python3 test_station_env.py                      # ends "all station_env checks passed" (section 2.11)
+python3 test_waterline_station_check.py          # ends "ALL CHECKS PASSED" (section 2.11)
 bash -n storm_watch.sh && echo "storm watch syntax OK"
 cat archive/gnssr_record_start.txt               # note "YYYY-MM-DD N"; see section 2.5
 ```
@@ -947,6 +950,62 @@ archived forecasts of each day, else the observed waves as a perfect forecast); 
 entry in `survey_products.py`'s station job list (that file is not edited; it already keeps clear of
 07:50). The job fetches 44008 itself (`fetch_buoy_waves.py`, under owg.sh's lock) only when its archive is
 over 6 h old.
+
+### 2.11 Another station: the station file, its settings and setup's checks (`waterline_station.conf`, `station_env.py`, `waterline_station_check.py`; nothing changes on CACO-05)
+
+**Claim.** CACO-05 has no `waterline_station.conf`, so without the file nothing changes:
+
+- the cron runs the same commands, writes the same log and files, and exits as before;
+- every Python step writes byte-identical outputs;
+- the storm watch behaves as before.
+
+On a new station, coastcam-station-setup writes the file (docs/NEW_STATION.md). There:
+
+- `waterline_station_check.py check-overlay` accepts setup's files and refuses anything else.
+- The cron takes the station's cameras, calibration, detector options, sources and switches. A
+  stage-1 file keeps only the timex pictures.
+- The exported settings (antenna height, time zone, EPSG, name, PROVISIONAL text, wave currency, QC
+  range, buoy) take effect where they are read, and a bad value stops the script, never falling back
+  to CACO-05's value.
+- `pair`, `profile`, `trial` and `pointing` give setup the answers it reads.
+
+Every test below runs on fixtures and temporary folders of its own, with no network. Each names
+CACO-05's calibration files one by one: the 2025-11-13 set and `gcp_uv_c?.csv`, never a glob of
+`calibration/`.
+
+```
+python3 test_station_overlay.py                  # ends "all station overlay tests passed"
+python3 test_station_env.py                      # ends "all station_env checks passed"
+python3 test_station_env.py --before 0b5e98e     # the same, plus byte-identical against the scripts before the edit
+python3 test_waterline_station_check.py          # ends "ALL CHECKS PASSED" (about 35 s here)
+python3 test_storm_watch.py                      # ends "all storm watch tests passed" (T14-T16 here, section 2.10)
+```
+
+**Notes on running them.**
+
+- **`test_station_overlay.py` needs git.** It compares with the cron at `0b5e98e`, origin/main before
+  the overlay, read with `git show`. Without git, or without that revision, parts a and d print SKIP
+  lines. `--baseline REV|FILE` gives another revision or a copy of the old cron.
+- **`--before` stays opt-in.** `test_station_env.py --before` requires the seven edited scripts to
+  match REF byte for byte, so a later, unrelated edit to one of them would fail it.
+- **Some checks need OpenCV.** Without it, `test_waterline_station_check.py` prints SKIP lines for
+  the real-detector run and the pointing checks.
+- **A new station's NUC cannot run two of them.** `test_waterline_station_check.py` and
+  `test_station_env.py` read CACO-05's calibration files, which a new station's sparse clone leaves
+  out. Run them on CACO-05 or in a development checkout.
+
+| what | data | number | reproduce here | check on the NUC |
+|---|---|---|---|---|
+| No station file: the cron as before | [SYNTH] the cron run by bash in a temporary `$BASE`, with a stand-in python3 (it records each call and runs the real checker) and a stand-in owg.sh. The real owg.sh and calibration folder are never read. Compared with the cron at `0b5e98e`. | The same commands in the same order (station_status.py gains `--buoy-csv`/`--gauge-csv`, the same files as its defaults), the same log line for line, the same files and contents, and the same exit status. The overlay's names set in the job's environment change nothing. | `python3 test_station_overlay.py` (a) | same |
+| The five readers of the cron's `VAR=` lines | [SYNTH] the cron's text, now and at `0b5e98e` | Every column-0 `NAME=` line unchanged. The new defaults are `: "${NAME=default}"` lines. survey_products.py, recalibrate_timing.py, storm_watch.py, station_status.py and dem_from_contours.py read identical, non-empty CACO-05 values. | same (d) | same |
+| A station file, one and two cameras | [SYNTH] | No owg.sh, runup or pointing log. The station's `DETECTOR_ARGS`, `CAL` and calibration names, GNSS-R file, gauge, buoy and `DEM_MAX_HS`, and no setup coefficient. The exports reach the Python steps. No timestacks or other products kept. With the pointing log on, a one-camera station passes only `--eo-c1`. A missing station calibration file gives an ERROR. | same (b) | - |
+| Stage 1 (`WATERLINE_STAGE="archive"`) | [SYNTH] | The only Python call is the check, the timex pictures are kept and nothing else is written. A second run adds new pictures and never overwrites one. | same (c) | on a new NUC: `grep "stage 1" logs/timex_cron.log` |
+| `check-overlay`, and the cron on a refused file | [SYNTH] 7 good and 56 bad station files | Setup's files accepted. Refused: an unquoted value, `$`, a backtick, a backslash, a quote, a control character, an unknown or forbidden key, a bad number, a bad export line, a missing station fact, and others. The cron then exits 1 with a FATAL line and the reason in its log, and runs nothing else. A `$(touch ...)` value is never executed. A fresh folder without `logs/` works. | same (e, f) | - |
+| The exported settings: defaults and effect | [SYNTH] a one-camera chain on a planar-beach c1 fixture through the CACO05 c1 2025-11-13 calibration: extract, georectify (c1 only), DEM and page, map, GeoTIFF, change | **Unset, and CACO-05's values set explicitly:** every file byte-identical (21 + 2 + 3 files). **A new station's values (antenna +1 m):** every contour level +1.000 m and the DEM median +1.00 m, the PROVISIONAL line in `_info.json` and on the page, the station's name, the EPSG 6339 tag and the "UTM 10N" labels. **Bad values:** an empty, blank, non-numeric, NaN or infinite antenna height, or an unknown zone, gives an ERROR with exit 1 and no traceback, never CACO-05's value. | `python3 test_station_env.py` | same |
+| The raw-buoy line of `extract_elevation_contours.py` | [SYNTH] | With `--setup-coef`: a WARNING at every station. Without one: CACO-05 keeps its WARNING (`waves_marconi.csv` missing), and another station gets a NOTE. No warning when `STATION_WAVE_CURRENCY` is the buoy's. | same | - |
+| `pair` (which lens, position and picks belong together) | [REAL] CACO05's 2025-11-13 calibration, targets and picks, each named | **c1:** 0.33 m mean (14 targets); the next position is 122 times worse. **c2:** 0.33 m (13 targets), 166 times. **The swapped position fails** (best 40.2 m, exit 1). A copied lens is an `io_tie` (exit 0), a copied position an `eo_tie`; a wrong `--image`, 3 shared targets, or a picks file without its header is refused. | `python3 test_waterline_station_check.py` | same |
+| `profile`, `trial`, `pointing` | [SYNTH] a survey (points with and without a header, and as a DEM `.asc`); five timex frames with one of each outcome; planted turns of a synthetic scene | **profile:** the band lies inside the envelope, written as detect_original_view writes it. Geometry only is PROVISIONAL. The pinned `envelope_from_survey`'s exit is caught. **trial:** the detector's options as expected, every folder in scratch, the input pictures unchanged; a work folder in the station's own folders is refused. **pointing:** turns of 0.1, 0.6 and 1.6 deg give PASS, WARN and FAIL; unrelated pictures give UNMATCHED, exit 1. | same | - |
+| The storm watch at another station, alerts mode | [SYNTH] (section 2.10's harness) | **T14:** no 44008/44013 outside the defaults table, the settings-file order, `--check-settings`, `waterline_station.conf`'s `DEM_MAX_HS`, no owg.sh recipients, `STORM_BUOY`/`STORM_BUOY2`, the facing test and `STORM_TZ`. **T15:** storm-over email, closed 72 h after the end, one `events.csv` row, no DEM. **T16:** `--install-cron` refused on a setup-managed NUC; the station file checked and sourced. | `python3 test_storm_watch.py` | same |
 
 ## 3. Survey-date products (`survey_products.py`)
 

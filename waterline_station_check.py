@@ -803,7 +803,7 @@ def cmd_pair(args):
         ch = out["chosen"]
         say(f"  chosen: {Path(ch['io']).name} + {Path(ch['eo']).name}, mean {ch['mean_m']:.2f} m"
             + (f"; next best position {Path(nxt['eo']).name} {ratio:.1f} times worse" if nxt else
-               "; the only position given"))
+               "; no other position to compare with"))
         if out["io_tie"]:
             say("  io_tie: " + ", ".join(f"{Path(e['io']).name} ({e['mean_m']:.2f} m)" for e in out["io_tie"]["ios"])
                 + ": decide by a name hint or ask")
@@ -1113,11 +1113,17 @@ def _read_csv(path):
         return []
 
 
+def _frame_result(reasons=None):
+    """A frame's entry in the trial's JSON, before it is judged (every frame has the same keys)."""
+    return {"detected": False, "signal_columns_fraction": None, "points": 0, "placed": 0,
+            "placed_fraction": None, "range_m": None, "water_level_navd88": None, "pass": False,
+            "reasons": list(reasons or [])}
+
+
 def judge_frame(stem, det_csv, ground_rows, nu, cam_xy):
     """The trial's verdict on one frame (design 6.6): a line in >= TRIAL_MIN_COLUMNS of the picture's
     columns, >= TRIAL_MIN_PLACED of its points placed, all of them TRIAL_RANGE_M from the camera."""
-    res = {"detected": False, "signal_columns_fraction": None, "points": 0, "placed": 0,
-           "placed_fraction": None, "range_m": None, "water_level_navd88": None, "pass": False, "reasons": []}
+    res = _frame_result()
     det = _read_csv(det_csv) if det_csv.is_file() else []
     if not det:
         res["reasons"].append("the detector kept no line (no usable signal, too dark or low confidence: "
@@ -1224,11 +1230,11 @@ def cmd_trial(args):
         stem = name[:-len(".jpg")]
         size = _image_size(f)
         if size is None:
-            results[name] = {"frame": name, "pass": False, "reasons": ["cannot read the picture"]}
+            results[name] = dict(frame=name, **_frame_result(["cannot read the picture"]))
             continue
         if size != (nu, nv):
-            results[name] = {"frame": name, "pass": False,
-                             "reasons": [f"the picture is {size[0]} x {size[1]}, the lens file {nu} x {nv}"]}
+            results[name] = dict(frame=name, **_frame_result(
+                [f"the picture is {size[0]} x {size[1]}, the lens file {nu} x {nv}"]))
             continue
         shutil.copy2(f, str(t / "src" / name))            # a copy: nothing in the station's folders is touched
         usable.append((name, stem))

@@ -33,6 +33,9 @@ code 1) naming the variable. waterline_station_check.py check-overlay
 refuses such a file before the cron sources it, so on a station these
 errors are a last line of defence.
 
+is_caco05() is True when none is set: only a message that is CACO-05's own
+(the waves_marconi.csv alarm of extract_elevation_contours.py) asks it.
+
 Python 3.8: no zoneinfo there; the time zone is checked with pytz or
 dateutil instead (pandas brings one of them).
 """
@@ -62,6 +65,17 @@ def _refuse(name, value, what):
 def _text(name):
     """The variable's value without surrounding blanks; '' when unset."""
     return os.environ.get(name, "").strip()
+
+
+# every variable above: a new station's waterline_station.conf exports them (its STATION_NAME in both stages)
+STATION_VARS = ("GNSSR_ANTENNA_NAVD88_M", "STATION_TZ", "STATION_WAVE_CURRENCY", "STATION_NAME",
+                "STATION_PROVISIONAL", "GEOTIFF_EPSG", "GNSSR_QC_GROSS_M", "WAVE_BUOY")
+
+
+def is_caco05():
+    """True when none of the station variables is set (or all are ""): CACO-05, which has no
+    waterline_station.conf. Only for wording that is CACO-05's own (its waves_marconi.csv), never for a value."""
+    return not any(_text(k) for k in STATION_VARS)
 
 
 def _number(v):

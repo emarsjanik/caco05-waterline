@@ -41,8 +41,9 @@ limit PLUS the largest shoreline setup the waves could produce
 (Stockdon et al. 2006: 0.35 * beta * sqrt(Hs * L0), L0 = g Tp^2 / 2 pi,
 beta = SETUP_BETA), with Hs/Tp from the buoy archive written by
 fetch_buoy_waves.py (archive/waves_44008.csv, found next to the gauge
-archive; another station's buoy: WAVE_BUOY, archive/waves_<WAVE_BUOY>.csv). Inside that allowance it is kept as SUSPECT "possible_setup":
-in a storm the GNSS-R may be measuring real water the gauge cannot see.
+archive; another station's buoy: WAVE_BUOY, archive/waves_<WAVE_BUOY>.csv).
+Inside that allowance it is kept as SUSPECT "possible_setup": in a storm
+the GNSS-R may be measuring real water the gauge cannot see.
 Readings below the gauge are unaffected. No wave archive -> plain limit.
 
 WAVE RUNUP. Above the setup allowance but within the Stockdon 2% runup
