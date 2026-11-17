@@ -17,6 +17,12 @@ sharpness (archive/owg_c2_H.csv) and grades the camera window:
   * night frames ("dark") and unreadable ones never count, and a day with
     fewer than 4 daylight frames is not judged;
   * no file, or no recent day with enough frames: no line at all.
+And its "storm watch" line, from storm_watch.py's stamp (logs/storm_watch_last_run):
+  * no stamp (the storm watch not installed): no line;
+  * a fresh "ok" stamp is OK; 40 h old is a WARN; 5 days old an ALERT (its crontab line gone?);
+  * "blind since <date>" (no forecast source answered) is OK for 2 days, a WARN from 3 days on, so a
+    station that cannot reach the forecast hosts does not sit at WARN hiding real ones;
+  * an "error" stamp is a WARN; the line never holds the words the cron log counts (WARNING, ERROR).
 Exit status 0 when every check passes.
 """
 
@@ -28,7 +34,7 @@ from datetime import datetime, timezone, timedelta
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from station_status import lens_check   # noqa: E402
+from station_status import lens_check, storm_watch_check   # noqa: E402
 
 NOW = datetime(2026, 10, 25, 22, 0, tzinfo=timezone.utc)
 FIELDS = ["filename", "epoch", "time_utc", "brightness", "sharpness", "saturation", "status"]
@@ -96,8 +102,33 @@ def main():
 
         check("no file: no line", lens_check(Path(tmp) / "missing.csv", now=NOW.timestamp()) is None)
 
+        print("storm watch line:")
+        import os
+        stamp = Path(tmp) / "storm_watch_last_run"
+        check("no stamp: no line (not installed)", storm_watch_check(stamp, now=NOW.timestamp()) is None)
+
+        def sw(text, age_h):
+            stamp.write_text(text + "\n")
+            t = NOW.timestamp() - age_h * 3600
+            os.utime(stamp, (t, t))
+            return storm_watch_check(stamp, now=NOW.timestamp())
+        r = sw("ok (2026-10-25 12:50Z): 0 open event(s)", 9)
+        check("a fresh ok stamp is OK", r and r[0] == "OK" and "0 open event" in r[1], r)
+        r = sw("ok (2026-10-24 02:50Z): 1 open event(s)", 40)
+        check("40 h old is a WARN", r and r[0] == "WARN", r)
+        r = sw("ok (2026-10-20 12:50Z): 1 open event(s)", 5 * 24)
+        check("5 days old is an ALERT naming --install-cron", r and r[0] == "ALERT" and "--install-cron" in r[1], r)
+        r = sw("blind since 2026-10-25: no forecast source (om_marine unavailable)", 9)
+        check("blind since today is OK (not yet 3 days)", r and r[0] == "OK" and "blind" in r[1], r)
+        r = sw("blind since 2026-10-21: no forecast source (om_marine unavailable)", 9)
+        check("blind for 4 days is a WARN", r and r[0] == "WARN" and "4 days" in r[1], r)
+        r = sw("error in: run (2026-10-25 12:50Z): ERROR KeyError WARNING", 9)
+        check("an error stamp is a WARN", r and r[0] == "WARN", r)
+        check("the line holds no WARNING / ERROR (the cron log counts them)",
+              r and "WARNING" not in r[1] and "ERROR" not in r[1], r)
+
     if failures:
-        print(f"{len(failures)} lens check(s) FAILED")
+        print(f"{len(failures)} station status check(s) FAILED")
         raise SystemExit(1)
     print("all station status tests passed")
 

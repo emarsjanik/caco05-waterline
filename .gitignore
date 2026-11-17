@@ -9,6 +9,9 @@ logs/
 work/
 reports/
 
+# Station settings the user edits on the NUC (a tracked file with local edits stops git pull)
+storm_watch_settings.conf
+
 # Generated products
 *.png
 *.jpg

@@ -1,0 +1,24 @@
+{
+  "_fixture_note": "SYNTHETIC, written from documentation; not a real response. gridX/gridY are placeholders.",
+  "id": "https://api.weather.gov/points/41.89,-69.96",
+  "type": "Feature",
+  "geometry": {"type": "Point", "coordinates": [-69.96, 41.89]},
+  "properties": {
+    "@id": "https://api.weather.gov/points/41.89,-69.96",
+    "@type": "wx:Point",
+    "cwa": "BOX",
+    "forecastOffice": "https://api.weather.gov/offices/BOX",
+    "gridId": "BOX",
+    "gridX": 101,
+    "gridY": 101,
+    "forecast": "https://api.weather.gov/gridpoints/BOX/101,101/forecast",
+    "forecastHourly": "https://api.weather.gov/gridpoints/BOX/101,101/forecast/hourly",
+    "forecastGridData": "https://api.weather.gov/gridpoints/BOX/101,101",
+    "observationStations": "https://api.weather.gov/gridpoints/BOX/101,101/stations",
+    "forecastZone": "https://api.weather.gov/zones/forecast/MAZ022",
+    "county": "https://api.weather.gov/zones/county/MAC001",
+    "fireWeatherZone": "https://api.weather.gov/zones/fire/MAZ022",
+    "timeZone": "America/New_York",
+    "radarStation": "KBOX"
+  }
+}
