@@ -356,6 +356,36 @@ mkdir -p "$SCRATCH" "$SCRATCH_INPUT" "$ARCHIVE_CSV" "$ARCHIVE_IMG" "$ARCHIVE_RAS
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" >> "$LOG"; }
 
+# ANOTHER STATION. coastcam-station-setup (./setup.sh --waterline) writes
+# waterline_station.conf beside this script on a station other than CACO-05:
+# its cameras, calibration files, detector options, GNSS-R file, gauge, buoy,
+# setup and DEM choices, and the switches below. It is read here, after every
+# CACO-05 setting above, so its values win; waterline_station_check.py first
+# checks it (KEY="value" lines of known names only, nothing a shell would run)
+# and a refused file stops the run with a FATAL line. CACO-05 has no such
+# file: every name below then keeps the CACO-05 value written next to it, and
+# this script runs exactly as before. Not tracked by git (.gitignore).
+#   WATERLINE_STAGE  "archive": stage 1, the timex pictures are kept and
+#                    nothing else runs (no detection, maps or DEM); "" runs all
+#   CAMS             the cameras mapped; CAL_IO_C2="" / CAL_EO_C2="" for one
+#   OWG_ENABLE       1 runs owg.sh (CACO-05's optical wave gauge) in step 5c
+#   DETECTOR_ARGS    added to the detector's options (e.g. a profile JSON)
+#   CAL_IO_C1 ...    calibration file names, in $CAL
+# (The station file can only set names; these come from it, never from the
+# environment the job was started with.)
+unset WATERLINE_STAGE CAMS OWG_ENABLE DETECTOR_ARGS CAL_IO_C1 CAL_EO_C1 CAL_IO_C2 CAL_EO_C2
+if [ -f "$BASE/waterline_station.conf" ]; then
+    if ! python3 "$BASE/waterline_station_check.py" check-overlay --conf "$BASE/waterline_station.conf" \
+            2>> "$LOG" > /dev/null; then
+        log "FATAL: $BASE/waterline_station.conf refused (see above): nothing run. It is coastcam-station-setup's file: run ./setup.sh --waterline again"
+        exit 1
+    fi
+    . "$BASE/waterline_station.conf"
+fi
+: "${WATERLINE_STAGE=}" "${CAMS=c1 c2}" "${OWG_ENABLE=1}" "${DETECTOR_ARGS=}"
+: "${CAL_IO_C1=CACO05_c1_20240801_IO.yaml}" "${CAL_EO_C1=CACO05_c1_20251113_EO-CV.yaml}"
+: "${CAL_IO_C2=CACO05_c2_20240801_IO.yaml}" "${CAL_EO_C2=CACO05_c2_20251113_EO-CV.yaml}"
+
 # The detector's debug images (see DEBUG_KEEP_DAYS): removes the frame
 # folders directly in folder $1 last changed $2 or more days ago, by their
 # modification time, and logs how many went -- and, with a WARNING, how many
@@ -478,10 +508,10 @@ build_model_series() {
         fi
     fi
     if ! python3 "$BASE/georectify.py" "$use" "$mg" \
-            --io-c1 "$CAL/CACO05_c1_20240801_IO.yaml" \
-            --eo-c1 "$CAL/CACO05_c1_20251113_EO-CV.yaml" \
-            --io-c2 "$CAL/CACO05_c2_20240801_IO.yaml" \
-            --eo-c2 "$CAL/CACO05_c2_20251113_EO-CV.yaml" >> "$LOG" 2>&1; then
+            --io-c1 "$CAL/$CAL_IO_C1" \
+            --eo-c1 "$CAL/$CAL_EO_C1" \
+            ${CAL_IO_C2:+--io-c2 "$CAL/$CAL_IO_C2"} \
+            ${CAL_EO_C2:+--eo-c2 "$CAL/$CAL_EO_C2"} >> "$LOG" 2>&1; then
         log "WARNING: model-only DEM series: georectification failed (see above); $DEM_SERIES_MODEL not updated"
         return 0
     fi
@@ -534,16 +564,28 @@ if [ "$TIMING_MODE" != "legacy" ]; then
     fi
 fi
 
+# Stage 1 of a new station (WATERLINE_STAGE="archive" in waterline_station.conf;
+# never on CACO-05): only the timex pictures are kept, as step 3 keeps them,
+# until setup's continue step (./setup.sh --waterline) installs the full file.
+if [ "$WATERLINE_STAGE" = "archive" ]; then
+    cp -pn /mnt/I2Rgus_Data/ImageProducts/*.timex.jpg "$ARCHIVE_IMG"/ 2>/dev/null
+    log "stage 1 (WATERLINE_STAGE=archive): timex kept: $(find "$ARCHIVE_IMG" -name '*.jpg' 2>/dev/null | wc -l); no detection, maps or DEM until setup's continue step"
+    log "=== run end ==="
+    exit 0
+fi
+
 # 1. Detect. Bias correction is ON: timex-specific corrections were
 #    derived in v6.8 and the detector selects them by image suffix, so
 #    a timex run no longer picks up the snap-tuned values. --timing-mode
 #    chooses the blend and the timex bias file (TIMING_MODE above).
+#    DETECTOR_ARGS: a new station's own options (waterline_station.conf;
+#    "" on CACO-05), word-split on purpose.
 python3 waterline_detector_v5.py \
     --image-suffix timex.jpg \
     --timing-mode "$TIMING_MODE" \
     --input-dir "$SCRATCH_INPUT" \
     --output-dir "$SCRATCH" \
-    --debug-dir "$DEBUG_DIR" >> "$LOG" 2>&1
+    --debug-dir "$DEBUG_DIR" $DETECTOR_ARGS >> "$LOG" 2>&1
 status=$?
 if [ $status -ne 0 ]; then
     log "WARNING: detector exited $status (continuing to archive whatever it produced)"
@@ -575,7 +617,8 @@ for prod in $ARCHIVE_PRODUCTS; do
     log "$prod images in archive: $(find "$BASE/archive/images_$prod" -name '*.jpg' 2>/dev/null | wc -l)"
 done
 
-cp -pn "$RAS_SOURCE"/*.c2.ras.tiff "$ARCHIVE_RAS"/ 2>/dev/null
+# RAS_SOURCE="" (a new station's waterline_station.conf): no timestacks kept
+[ -n "$RAS_SOURCE" ] && cp -pn "$RAS_SOURCE"/*.c2.ras.tiff "$ARCHIVE_RAS"/ 2>/dev/null
 ras_count=$(find "$ARCHIVE_RAS" -name '*.ras.tiff' 2>/dev/null | wc -l)
 log "C2 timestacks in archive: $ras_count"
 
@@ -623,8 +666,11 @@ qc_arg=""
 #     emails the daily report; see owg.sh). After 5b, which has just
 #     downloaded the buoy and gauge, so no second download here; its
 #     lock keeps this from colliding with the hourly run.
-"$BASE/owg.sh" --no-fetch --no-report >> "$LOG" 2>&1 \
-    || log "WARNING: optical wave gauge (owg.sh) reported a problem; see logs/owg.log"
+#     OWG_ENABLE=0 (a new station's waterline_station.conf): not run.
+if [ "$OWG_ENABLE" = "1" ]; then
+    "$BASE/owg.sh" --no-fetch --no-report >> "$LOG" 2>&1 \
+        || log "WARNING: optical wave gauge (owg.sh) reported a problem; see logs/owg.log"
+fi
 
 # 5. Match detections to measured water level, then draw the maps.
 #    Both read from the ARCHIVE, not the working folders, so they see
@@ -761,7 +807,7 @@ else
             log "waterline consistency filter disabled (CONSISTENCY_ENABLE=$CONSISTENCY_ENABLE)"
         fi
 
-        for cam in c1 c2; do
+        for cam in $CAMS; do
             # Rolling week -- the diagnostic view.
             python3 "$BASE/daily_elevation_map.py" "$MAP_CONTOURS" "$ARCHIVE_IMG" "$cam" \
                 "$BASE/elevation_map_${cam}_${MAP_WEEK_DAYS}day.png" \
@@ -792,15 +838,15 @@ else
         #    absence of a DEM would otherwise look like success.
         if [ "$DEM_ENABLE" != "1" ]; then
             log "DEM stage disabled (DEM_ENABLE=$DEM_ENABLE)"
-        elif [ ! -f "$CAL/CACO05_c1_20240801_IO.yaml" ] \
-          || [ ! -f "$CAL/CACO05_c2_20240801_IO.yaml" ]; then
+        elif [ ! -f "$CAL/$CAL_IO_C1" ] \
+          || { [ -n "$CAL_IO_C2" ] && [ ! -f "$CAL/$CAL_IO_C2" ]; }; then
             log "ERROR: calibration not found in $CAL -- skipping georectification and DEM."
         else
             python3 "$BASE/georectify.py" "$MAP_CONTOURS" "$GROUND" \
-                --io-c1 "$CAL/CACO05_c1_20240801_IO.yaml" \
-                --eo-c1 "$CAL/CACO05_c1_20251113_EO-CV.yaml" \
-                --io-c2 "$CAL/CACO05_c2_20240801_IO.yaml" \
-                --eo-c2 "$CAL/CACO05_c2_20251113_EO-CV.yaml" >> "$LOG" 2>&1
+                --io-c1 "$CAL/$CAL_IO_C1" \
+                --eo-c1 "$CAL/$CAL_EO_C1" \
+                ${CAL_IO_C2:+--io-c2 "$CAL/$CAL_IO_C2"} \
+                ${CAL_EO_C2:+--eo-c2 "$CAL/$CAL_EO_C2"} >> "$LOG" 2>&1
             if [ $? -ne 0 ]; then
                 log "ERROR: georectification failed -- DEM not rebuilt."
             else
@@ -923,14 +969,16 @@ fi
 #     (the products are unaffected).
 if [ "$POINTING_LOG_ENABLE" = "1" ]; then
     python3 "$BASE/pointing_daily.py" --image-dir "$ARCHIVE_IMG" --log-dir "$BASE/archive" \
-        --eo-c1 "$CAL/CACO05_c1_20251113_EO-CV.yaml" \
-        --eo-c2 "$CAL/CACO05_c2_20251113_EO-CV.yaml" >> "$LOG" 2>&1 \
+        --eo-c1 "$CAL/$CAL_EO_C1" \
+        ${CAL_EO_C2:+--eo-c2 "$CAL/$CAL_EO_C2"} >> "$LOG" 2>&1 \
         || log "WARNING: camera pointing log failed (see above); the products are unaffected"
 fi
 
 # 8. Station health summary (station_status.py): also written to
-#    station_status.txt; exit status 1 = warnings, 2 = alerts.
-python3 "$BASE/station_status.py" --base "$BASE" --gnssr "$GNSSR_SPLINE" > "$BASE/station_status.txt" 2>&1
+#    station_status.txt; exit status 1 = warnings, 2 = alerts. The buoy and
+#    gauge files are this script's (on CACO-05 the same as its defaults).
+python3 "$BASE/station_status.py" --base "$BASE" --gnssr "$GNSSR_SPLINE" \
+    --buoy-csv "$WAVES_CSV" --gauge-csv "$GAUGE_CSV" > "$BASE/station_status.txt" 2>&1
 status_rc=$?
 log "station status: $(head -1 "$BASE/station_status.txt")"
 [ "$status_rc" -ge 1 ] && grep -E "^ +(WARN|ALERT)" "$BASE/station_status.txt" | while read -r l; do log "  $l"; done

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Storm Watch: Pre- And Post-Storm Beach Maps For CACO-05 (Marconi Beach)
-=========================================================================
+Storm Watch: Storm Alerts And Pre- And Post-Storm Beach Maps (CACO-05, And New Stations)
+=========================================================================================
 A daily job (its own crontab line, opt-in: storm_watch.sh --install-cron)
-that reads the forecast for Marconi Beach, and when strong weather is
-forecast within the lead time (default 4 days) starts an EVENT:
+that reads the forecast for the beach (STORM_SITE: Marconi Beach on
+CACO-05), and when strong weather is forecast within the lead time
+(default 4 days) starts an EVENT:
 
   1. it fixes a PRE-storm DEM from the calm days before the storm, with
      exactly the cron's 7-day window-DEM method and options
@@ -27,46 +28,71 @@ from the saved waterline points. A trigger while a storm is still going on
 belongs to it only when its onset is within a day; a later one is a storm of
 its own, with its own heads-up.
 
+MODES (STORM_MODE). full (the default; CACO-05): all of the above.
+alerts (a new station before its beach maps exist): the forecast, the
+heads-up, the observed storm and its end, with no DEM at all: a "storm over"
+email at the storm's end, the event closed 72 h later (a trigger for the same
+storm in those hours updates it: no second heads-up), and one row per event
+in archive/storm_watch/events.csv. The ground file and the cron's lock are
+never touched.
+
 WHAT THE CAMERA DEM COVERS: ONLY THE INTERTIDAL BEACH, between the low and
-high waterlines the cameras see (about -0.8 to +1.0 m NAVD88 on a 7-day DEM).
-The dune, the bluff and the beach above the high-water line are NOT mapped;
-erosion there (the bluff loss of Sep 2024, the dune loss of Jan 2025) is not
-measured by this job (a GPS or drone survey is).
+high waterlines the cameras see (about -0.8 to +1.0 m NAVD88 on a 7-day DEM
+at CACO-05). The dune, the bluff and the beach above the high-water line are
+NOT mapped; erosion there (the bluff loss of Sep 2024, the dune loss of Jan
+2025 at Marconi) is not measured by this job (a GPS or drone survey is).
+
+THE STATION. Every place fact is a setting (defaults: CACO-05's, from the one
+table CACO05 below): STORM_STATION (the email subject, the User-Agent),
+STORM_SITE (titles), STORM_TZ (local times in the emails), STORM_POINT,
+STORM_MARINE_POINT, STORM_BUOY_POINT, STORM_ALERT_ZONES, STORM_BUOY (the
+offshore NDBC buoy: its observations and its GFS-Wave bulletin), STORM_BUOY2
+(a second buoy converted to the beach; empty = none), STORM_GFSWAVE_STATION
+(default the buoy; "none" = no bulletin), STORM_FACING and STORM_MIN_CELL_LON
+(the Open-Meteo sea-cell tests). Settings files, read in this order (the last
+value wins): storm_watch_station.conf (coastcam-station-setup writes it from
+its station.conf; CACO-05 has none), then storm_watch_settings.conf (your own
+edits). --check-settings checks both.
 
 FORECAST SOURCES (each fetched every run; a failed source counts as
 unavailable for that run: it never triggers and never crashes the job):
-  * NWS api.weather.gov: active alerts for STORM_ALERT_ZONES (ANZ254, the
-    coastal waters off Marconi, and MAZ022, Barnstable), the gridpoint raw
-    data (wind, and waves when the beach cell has them) and the text forecast.
-  * Open-Meteo marine (offshore Marconi 41.90N 69.80W and the 44008 position)
-    and wind. Free for non-commercial use; data CC BY 4.0, so every email that
-    used it says "Weather data by Open-Meteo.com". STORM_SOURCES can drop it.
-  * NOAA GFS-Wave point bulletin for 44008 (polar.ncep.noaa.gov), a fallback.
+  * NWS api.weather.gov: active alerts for STORM_ALERT_ZONES (on CACO-05
+    ANZ254, the coastal waters off Marconi, and MAZ022, Barnstable), the
+    gridpoint raw data (wind, and waves when the beach cell has them) and the
+    text forecast.
+  * Open-Meteo marine (offshore, STORM_MARINE_POINT, and the buoy's position,
+    STORM_BUOY_POINT) and wind. Free for non-commercial use; data CC BY 4.0,
+    so every email that used it says "Weather data by Open-Meteo.com".
+    STORM_SOURCES can drop it.
+  * NOAA GFS-Wave point bulletin for the buoy (polar.ncep.noaa.gov), a fallback.
   The parsers were written from the providers' documentation: no real
   response could be fetched where they were written. Capture one of each on
   the NUC (--dry-run --save-raw DIR) and check them (test_storm_watch.py
   --real-captures DIR) before trusting them.
-  Every request sends the User-Agent "caco05-storm-watch (USGS coastal camera
-  research)"; api.weather.gov requests add NWS_CONTACT when that station
-  setting is filled in (empty by default).
+  Every request sends the User-Agent "<station>-storm-watch (USGS coastal
+  camera research)" ("caco05-storm-watch ..." on CACO-05); api.weather.gov
+  requests add NWS_CONTACT when that station setting is filled in (empty by
+  default).
 
 TRIGGER (within STORM_LEAD_HOURS, default 96 h; heights OFFSHORE, deep water):
   (a) forecast Hs >= STORM_HS_M (3.5 m) from STORM_DIR_SECTOR (0-160 deg) for
       >= STORM_MIN_HOURS (3 h), on either offshore point (Open-Meteo), else
-      the GFS-Wave 44008 bulletin, else the NWS grid waves;
+      the buoy's GFS-Wave bulletin, else the NWS grid waves;
   (b) a strong NWS alert (High Surf, Coastal Flood, Storm Surge, Storm,
       Hurricane Force Wind, Hurricane or Tropical Storm WARNING);
   (c) Hs >= STORM_HS_SUPPORT_M (3.0 m) in the sector AND a support alert
       (Gale Warning, High Surf or Coastal Flood Advisory, ...);
   (d) long-period swell: Hs >= 3.0 m with peak period >= 12 s (mean period
       >= 10 s where only a mean period is forecast);
-  (e) only when no wave forecast could be read: NE-E wind of gale force.
-OBSERVED WAVES (Marconi currency: hs_best of archive/waves_marconi.csv, else
-44013 converted, else 44008 x 0.83): a storm is the run of hours above 1.5 m
-(the cron's DEM_MAX_HS) ending at the first of 24 calm hours. A forecast
-event is confirmed at >= 2.5 m; a storm the forecast missed opens an event at
->= 3.0 m (2 h >= 2.5 m), or 44008 >= 3.5 m for 2 h. Thresholds and their
-basis: docs/VALIDATION.md 2.10 and 4.9, storm_watch_settings.conf.example.
+  (e) only when no wave forecast could be read: onshore wind of gale force.
+OBSERVED WAVES (the beach's currency; on CACO-05 hs_best of
+archive/waves_marconi.csv, else STORM_BUOY2 converted, else STORM_BUOY x
+0.83): a storm is the run of hours above 1.5 m (the cron's DEM_MAX_HS) ending
+at the first of 24 calm hours. A forecast event is confirmed at >= 2.5 m; a
+storm the forecast missed opens an event at >= 3.0 m (2 h >= 2.5 m), or the
+raw buoy >= 3.5 m for 2 h. Thresholds and their basis: docs/VALIDATION.md 2.10
+and 4.9, storm_watch_settings.conf.example; a new station's suggestions:
+--climatology --emit-settings.
 
 WINDOWS (UTC dates, as dem_from_contours.py filters them):
   pre    the 7 dates before the onset date (onset date left out), extended
@@ -85,11 +111,14 @@ FILES (on the station, BASE = /mnt/I2Rgus_Data/waterline):
   archive/storm_watch/state.json       the events (survives reboots and missed days)
   archive/storm_watch/events/<id>/     one folder per event: pre/, post3/, post7/,
                                        change_post3/, change_post7/, emails/, event.json, log.txt
+  archive/storm_watch/events.csv       alerts mode: one row per closed event
   archive/storm_watch/forecasts/<date>/  each run's raw responses, gzipped (an audit trail)
   archive/storm_watch/work/            the working copy of the ground rows (removed when idle)
   logs/storm_watch.log                 one line per run
   logs/storm_watch_last_run            the last run's stamp (station_status.py reads it)
+  storm_watch_station.conf             a new station's facts (setup writes it; untracked)
   storm_watch_settings.conf            station settings (untracked; see the .example)
+  waterline_station.conf               read only for its DEM_MAX_HS (applied after the cron's)
 It never writes contour_points_*.csv, dem_intertidal_*, archive/dems/,
 archive/dems_model/ or logs/timex_cron.log, and changes nothing in the cron.
 
@@ -98,11 +127,14 @@ Usage (on the station; storm_watch.sh runs it from cron at 07:50 local):
     python3 storm_watch.py --dry-run           fetch, evaluate, print; write and send nothing
     python3 storm_watch.py --dry-run --save-raw /tmp/sw_raw   ... and keep the raw responses
     python3 storm_watch.py --status            the events and what each waits for
+    python3 storm_watch.py --check-settings    check the settings files (exit 1 on an error)
     python3 storm_watch.py --no-email          build, but only write the email bodies
     python3 storm_watch.py --replay 2026-09-15 2026-10-20 --out-dir /tmp/sw_replay
                                                a past range, day by day (a hindcast; never emails)
-    python3 storm_watch.py --climatology --station 44008 --years 2010-2025
-                                               events per year under the wave rule (NDBC history)
+    python3 storm_watch.py --climatology --years 2010-2025 [--station ID] [--emit-settings]
+                                               events per year under the wave rule (NDBC history
+                                               of STORM_BUOY); --emit-settings prints suggested
+                                               thresholds as KEY=VALUE lines, for review by hand
 Exit status: 0 ran (whatever it decided), 1 bad arguments or settings,
 2 unexpected error (the traceback is printed; the run line says ERROR).
 """
@@ -126,11 +158,79 @@ from datetime import datetime, date, timedelta, timezone
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-STATION = "CACO-05"
-USER_AGENT = "caco05-storm-watch (USGS coastal camera research)"
+
+# >>> CACO-05 defaults (the ONE table that names CACO-05's buoys: test_storm_watch.py checks that no other line of
+# this file holds their numbers). The defaults of the station settings (SETTINGS below); a new station gives its own
+# in storm_watch_station.conf, which coastcam-station-setup writes from its station.conf (STORM_BUOYS -> STORM_BUOY,
+# STORM_BUOY2; waterline_station.conf's WAVE_BUOY is the same buoy as STORM_BUOY).
+CACO05 = {
+    "STORM_STATION": "CACO-05",
+    "STORM_SITE": "Marconi Beach",
+    "STORM_TZ": "America/New_York",
+    "STORM_BUOY": "44008",              # NDBC 44008, Nantucket Shoals: open Atlantic, like Marconi; its GFS-Wave bulletin
+    "STORM_BUOY2": "44013",             # NDBC 44013, off Boston: owg.sh fetches it; converted to Marconi
+    "STORM_BUOY2_FIT": (0.827, 0.151),  # 44013 -> Marconi (Hs) in the sector when buoy_transfer_44013.json is missing
+    "STORM_POINT": "41.89,-69.96",
+    "STORM_MARINE_POINT": "41.90,-69.80",
+    "STORM_BUOY_POINT": "40.50,-69.25",
+    "STORM_ALERT_ZONES": "ANZ254,MAZ022",
+    "STORM_MIN_CELL_LON": "-69.93",
+    "STORM_FACING": "",                 # Marconi faces ~80 deg; CACO-05 keeps the longitude test only
+}
+# <<< CACO-05 defaults
+
+STATION = CACO05["STORM_STATION"]
 STATE_VERSION = 1
-SUBJECT = "[CACO-05 storm watch]"
-INTERTIDAL_NOTE = ("WHAT THE CAMERA DEM COVERS: only the intertidal beach, between the low and high "
+STATION_FILE = "storm_watch_station.conf"       # a new station's facts (setup writes it; CACO-05 has none)
+SETTINGS_FILE = "storm_watch_settings.conf"     # your own edits, read after it (the last value wins)
+OVERLAY_FILE = "waterline_station.conf"         # the cron's station file: its DEM_MAX_HS is applied after the cron's
+ALERTS_CLOSE_H = 72                             # alerts mode: an event closes this long after its storm's end
+FACING_HALF_DEG = 80.0                          # the Open-Meteo sea cell must lie within this of STORM_FACING
+
+
+def station_of(cfg):
+    return (cfg or {}).get("STORM_STATION") or CACO05["STORM_STATION"]
+
+
+def site_of(cfg):
+    return (cfg or {}).get("STORM_SITE") or CACO05["STORM_SITE"]
+
+
+def site_short(cfg):
+    """The site without a trailing ' Beach' ('Marconi Beach' -> 'Marconi'), for 'observed Marconi 1.2 m'."""
+    s = site_of(cfg)
+    return s[:-len(" Beach")] if s.endswith(" Beach") and len(s) > len(" Beach") else s
+
+
+def is_caco05(cfg):
+    return station_of(cfg) == CACO05["STORM_STATION"]
+
+
+def currency(cfg):
+    """What the observed (nearshore) heights are: CACO-05's are ADCP-equivalent (hs_best, VALIDATION 4.5)."""
+    return "ADCP-equivalent" if is_caco05(cfg) else "nearshore-equivalent"
+
+
+def user_agent(cfg):
+    """'<station>-storm-watch (USGS coastal camera research)': the station's name only ('caco05-' on CACO-05)."""
+    slug = re.sub(r"[^a-z0-9]", "", station_of(cfg).lower()) or "station"
+    return f"{slug}-storm-watch (USGS coastal camera research)"
+
+
+def subject_of(cfg):
+    return f"[{station_of(cfg)} storm watch]"
+
+
+def buoys(cfg):
+    """(STORM_BUOY, STORM_BUOY2 or '')."""
+    cfg = cfg or {}
+    return (cfg.get("STORM_BUOY") or CACO05["STORM_BUOY"],
+            cfg.get("STORM_BUOY2", CACO05["STORM_BUOY2"]) or "")
+
+
+USER_AGENT = user_agent(None)
+SUBJECT = subject_of(None)
+INTERTIDAL_NOTE =("WHAT THE CAMERA DEM COVERS: only the intertidal beach, between the low and high "
                    "waterlines the cameras see (about -0.8 to +1.0 m NAVD88 on a 7-day DEM). The dune, the "
                    "bluff and the beach above the high-water line are not mapped; erosion there is not "
                    "measured (a GPS or drone survey is).")
@@ -208,22 +308,56 @@ def date_hour0(d):
     return hour_of(datetime.fromisoformat(d + "T00:00:00+00:00"))
 
 
-def eastern(dt):
-    """'Tue 17 Nov 09:00 EST' for a UTC datetime (pandas tz_convert: no zoneinfo on Python 3.8)."""
+def to_zone(dt, tz):
+    """A UTC datetime in the IANA zone `tz`: zoneinfo first (Python 3.9+), else pandas (Python 3.8 on the NUCs),
+    else dateutil. -> aware datetime / Timestamp, or None when none of them reads the zone."""
+    try:
+        from zoneinfo import ZoneInfo
+        return utc(dt).astimezone(ZoneInfo(tz))
+    except Exception:       # ImportError on 3.8; ZoneInfoNotFoundError (no tzdata) or ValueError (a bad name)
+        pass
     try:
         import pandas as pd
-        t = pd.Timestamp(utc(dt)).tz_convert("America/New_York")
-        return t.strftime("%a %d %b %H:%M ") + (t.tzname() or "ET")
+        return pd.Timestamp(utc(dt)).tz_convert(tz)
     except Exception:
+        pass
+    try:
+        from dateutil import tz as dtz
+        z = dtz.gettz(tz)
+        return utc(dt).astimezone(z) if z is not None else None
+    except Exception:
+        return None
+
+
+def valid_tz(tz):
+    """True when `tz` names a time zone (zoneinfo, pandas or dateutil reads it; without any of them a plausible
+    'Area/City' name)."""
+    if not re.match(r"^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$", tz or ""):
+        return False
+    probe = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    if to_zone(probe, tz) is not None:
+        return True
+    if to_zone(probe, "America/New_York") is not None:
+        return False                # the libraries read zones, but not this one
+    return "/" in tz                # no library reads any zone here: a plausible name is taken
+
+
+def local_time(dt, tz=None):
+    """'Tue 17 Nov 09:00 EST' for a UTC datetime in the station's zone (STORM_TZ; CACO-05: America/New_York);
+    '' when no library reads the zone."""
+    tz = tz or CACO05["STORM_TZ"]
+    t = to_zone(dt, tz)
+    if t is None:
         return ""
+    return t.strftime("%a %d %b %H:%M ") + (t.tzname() or tz)
 
 
-def when(dt):
-    """'17 Nov 14Z (Tue 17 Nov 09:00 EST)'."""
+def when(dt, tz=None):
+    """'17 Nov 14Z (Tue 17 Nov 09:00 EST)' (local time in STORM_TZ)."""
     if dt is None:
         return "?"
     dt = utc(dt)
-    e = eastern(dt)
+    e = local_time(dt, tz)
     return dt.strftime("%d %b %HZ") + (f" ({e})" if e else "")
 
 
@@ -253,7 +387,8 @@ CRON_DEFAULTS = {"DEM_ENABLE": "1", "DEM_CELL": "2.0", "DEM_MIN_POINTS": "3", "D
 CRON_NUMERIC = {"DEM_CELL": float, "DEM_MIN_POINTS": int, "DEM_MAX_SPREAD": float, "DEM_MAX_HS": float,
                 "DEM_MAX_DAY_OFFSET": float, "DEM_WINDOW_DAYS": int}
 CRON_MAY_BE_EMPTY = ("DEM_MAX_HS", "DEM_MAX_DAY_OFFSET", "DEM_DAY_BLOCK_LOD")
-VAR_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
+OVERLAY_CRON_KEYS = ("DEM_MAX_HS",)     # the CRON_KEYS waterline_station.conf may set (check-overlay forbids the rest)
+VAR_RE =re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 
 
 def var_value(raw):
@@ -279,7 +414,8 @@ def var_lines(text):
 
 def cron_settings(base, cron_path=None):
     """The cron's DEM settings, read from its column-0 VAR= lines (first occurrence; each must appear once),
-    "$BASE" replaced by `base`. -> (dict, notes). Missing file or key: the coded defaults, with a note."""
+    "$BASE" replaced by `base`, then waterline_station.conf's DEM_MAX_HS when that file exists (the cron sources it
+    after those lines). -> (dict, notes). Missing file or key: the coded defaults, with a note."""
     base = str(base)
     path = Path(cron_path) if cron_path else Path(base) / "waterline_timex_cron.sh"
     notes, out = [], {}
@@ -309,6 +445,25 @@ def cron_settings(base, cron_path=None):
     if missing:
         notes.append(f"cron settings not read ({', '.join(missing)} missing): coded defaults for those "
                      "(2.0/3/0.5/1.5/0.15/7)")
+    # a new station's waterline_station.conf (coastcam-station-setup writes it; CACO-05 has none): the cron sources
+    # it after its VAR= lines, so its DEM_MAX_HS is the one the cron's DEMs use, and so the storm DEMs'
+    ov = Path(base) / OVERLAY_FILE
+    if ov.exists():
+        try:
+            found = var_lines(ov.read_text(errors="replace"))
+        except OSError as exc:
+            found = {}
+            notes.append(f"{OVERLAY_FILE} not read ({exc.strerror or exc}): the cron's DEM_MAX_HS is used")
+        for k in OVERLAY_CRON_KEYS:
+            if k not in found:
+                continue
+            v = found[k][-1]
+            try:
+                if not (v == "" and k in CRON_MAY_BE_EMPTY):
+                    CRON_NUMERIC[k](v)
+                out[k] = v
+            except ValueError:
+                notes.append(f"{OVERLAY_FILE} {k}={v!r} is not a number: the cron's {out[k]!r} is used")
     return out, notes
 
 
