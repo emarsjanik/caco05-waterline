@@ -1,19 +1,55 @@
 # storm_watch_settings.conf.example -- the storm watch's station settings (storm_watch.py)
 #
 # Copy to storm_watch_settings.conf (untracked: .gitignore lists it, so 'git pull' is never blocked by
-# a local edit) and uncomment what you change. KEY=VALUE, one per line; '#' starts a comment. An unknown
-# key or a bad value is ignored with a note in logs/storm_watch.log (the default is used).
+# a local edit) and uncomment what you change. KEY=VALUE, one per line, at column 0, no spaces around
+# '='; quote a value with spaces ("..."); '#' starts a comment. An unknown key or a bad value is ignored
+# with a note in logs/storm_watch.log (the default is used); ./storm_watch.sh --check-settings refuses
+# them (exit 1).
 #
-# Wave heights: OFFSHORE = deep water (44008, the forecasts); MARCONI = hs_best of
-# archive/waves_marconi.csv, the ADCP-equivalent at 21 m that the cron's DEM_MAX_HS uses
-# (offshore x 0.83 for onshore directions, docs/VALIDATION.md 4.5). The DEM options are NOT here:
-# every storm DEM is built with the cron's own (waterline_timex_cron.sh DEM_* lines, read at run time).
-# Thresholds and their basis: docs/VALIDATION.md 2.10 and 4.9.
+# TWO FILES, read in this order (the last value wins):
+#   storm_watch_station.conf   a new station's facts, written by coastcam-station-setup from its
+#                              station.conf (never on CACO-05); do not edit it
+#   storm_watch_settings.conf  your own edits (this file's copy): they win
+# The defaults below are CACO-05's (Marconi Beach). With a storm_watch_station.conf (or STORM_MODE=alerts)
+# an empty STORM_EMAIL_TO never falls back to owg.sh's RECIPIENTS: no email, with a WARNING.
+#
+# Wave heights: OFFSHORE = deep water (the buoy STORM_BUOY, the forecasts); MARCONI = the beach's height
+# (on CACO-05 hs_best of archive/waves_marconi.csv, the ADCP-equivalent at 21 m that the cron's DEM_MAX_HS
+# uses; offshore x 0.83 for onshore directions, docs/VALIDATION.md 4.5). The DEM options are NOT here:
+# every storm DEM is built with the cron's own (waterline_timex_cron.sh DEM_* lines, then
+# waterline_station.conf's DEM_MAX_HS when that file exists; read at run time).
+# Thresholds and their basis: docs/VALIDATION.md 2.10 and 4.9; a new station's suggestions:
+#   python3 storm_watch.py --climatology --emit-settings
+# Alerts mode: docs/STORM_WATCH_ALERTS_MODE.md.
+
+# full: pre/post-storm DEMs and change maps; alerts: forecasts, alerts and an event log only (no DEM; events close 72 h after the storm's end)
+#STORM_MODE=full
+
+# the station: email subject and User-Agent
+#STORM_STATION=CACO-05
+
+# the beach: titles and emails
+#STORM_SITE="Marconi Beach"
+
+# the beach's time zone: local times in the emails
+#STORM_TZ=America/New_York
+
+# the offshore NDBC wave buoy: observed waves (archive/waves_<id>.csv) and its GFS-Wave bulletin
+#STORM_BUOY=44008
+
+# a second buoy converted to the beach (calibration/buoy_transfer_<id>.json); empty = none
+#STORM_BUOY2=44013
+
+# the GFS-Wave point bulletin; empty = STORM_BUOY, none = no bulletin
+#STORM_GFSWAVE_STATION=""
+
+# the direction the beach faces, deg true: the Open-Meteo sea cell must lie in front of it; empty = no such test
+#STORM_FACING=""
 
 # lead time of the trigger (GEFS-Wave skill holds to ~day 4)
 #STORM_LEAD_HOURS=96
 
-# offshore Hs, rule (a): ~Marconi p99 / 0.83; 44008 read 3.8-3.9 m on 23 Sep 2026
+# offshore Hs, rule (a): ~Marconi p99 / 0.83; STORM_BUOY read 3.8-3.9 m on 23 Sep 2026
 #STORM_HS_M=3.5
 
 # hours at or above, rule (a)/(c)/(d): one 3-hourly step (6 h caught 1 of 5 ADCP storms)
@@ -55,13 +91,13 @@
 # Marconi Hs that confirms a forecast storm (ADCP winter p98)
 #STORM_CONFIRM_HS=2.5
 
-# raw 44008 Hs in the sector for 2 h that confirms
+# raw STORM_BUOY Hs in the sector for 2 h that confirms
 #STORM_CONFIRM_BUOY_HS=3.0
 
 # Marconi peak that opens a storm the forecast missed (with 2 h >= confirm)
 #STORM_OBS_OPEN_HS=3.0
 
-# raw 44008 Hs in the sector for 2 h that opens one
+# raw STORM_BUOY Hs in the sector for 2 h that opens one
 #STORM_OBS_OPEN_BUOY_HS=3.5
 
 # how far back a missed storm is still opened
@@ -127,16 +163,16 @@
 # forecast sources (drop om_* to stop using Open-Meteo)
 #STORM_SOURCES=om_marine,gfswave,nws,om_wind
 
-# NWS /points and Open-Meteo wind
+# the beach: NWS /points and Open-Meteo wind
 #STORM_POINT=41.89,-69.96
 
-# offshore Marconi, Open-Meteo marine
+# offshore of the beach (Marconi), Open-Meteo marine
 #STORM_MARINE_POINT=41.90,-69.80
 
-# 44008, Open-Meteo marine
+# STORM_BUOY's position, Open-Meteo marine
 #STORM_BUOY_POINT=40.50,-69.25
 
-# an Open-Meteo cell west of this is in Cape Cod Bay or behind the shore
+# an Open-Meteo cell west of this is in Cape Cod Bay or behind the shore (Marconi); empty = no such test
 #STORM_MIN_CELL_LON=-69.93
 
 # added to the User-Agent of api.weather.gov requests only; empty by default
@@ -145,7 +181,7 @@
 # 0: email bodies are written to the event folder, nothing is sent
 #STORM_EMAIL=1
 
-# space-separated; empty = owg.sh's RECIPIENTS
+# space-separated; empty = owg.sh's RECIPIENTS, but never with a storm_watch_station.conf or in alerts mode (then empty = no email, with a WARNING)
 #STORM_EMAIL_TO=""
 
 # per request
@@ -166,7 +202,7 @@
 # a date the ground file never covers: give up after this
 #STORM_MAX_WAIT_DAYS=21
 
-# fetch 44008 when its archive is older
+# fetch STORM_BUOY when its archive is older
 #STORM_BUOY_STALE_H=6
 
 # days of archived forecasts kept

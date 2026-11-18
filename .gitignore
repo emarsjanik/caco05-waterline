@@ -12,6 +12,12 @@ reports/
 # Station settings the user edits on the NUC (a tracked file with local edits stops git pull)
 storm_watch_settings.conf
 
+# A new station's own files, written by coastcam-station-setup (CACO-05 has none)
+waterline_station.conf
+storm_watch_station.conf
+station_calibration/
+.coastcam-station-setup
+
 # Generated products
 *.png
 *.jpg

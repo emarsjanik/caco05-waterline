@@ -16,7 +16,8 @@ TESTS (flags follow IOOS QARTOD: 1 good, 2 not evaluated, 3 suspect,
 4 fail). A reading's flag is the worst of its tests.
 
   gross range   Outside GROSS_MIN..GROSS_MAX m NAVD88 -- beyond anything
-                tide plus surge produces here.                  -> FAIL
+                tide plus surge produces here (-2.5..3.5; another
+                station: GNSSR_QC_GROSS_M="lo,hi").            -> FAIL
   spike         More than SPIKE_LIMIT from a quadratic through the
                 readings within +/-SPIKE_WINDOW_S (at least 2 on each
                 side; readings already failed are left out). A curve
@@ -40,8 +41,9 @@ limit PLUS the largest shoreline setup the waves could produce
 (Stockdon et al. 2006: 0.35 * beta * sqrt(Hs * L0), L0 = g Tp^2 / 2 pi,
 beta = SETUP_BETA), with Hs/Tp from the buoy archive written by
 fetch_buoy_waves.py (archive/waves_44008.csv, found next to the gauge
-archive). Inside that allowance it is kept as SUSPECT "possible_setup":
-in a storm the GNSS-R may be measuring real water the gauge cannot see.
+archive; another station's buoy: WAVE_BUOY, archive/waves_<WAVE_BUOY>.csv).
+Inside that allowance it is kept as SUSPECT "possible_setup": in a storm
+the GNSS-R may be measuring real water the gauge cannot see.
 Readings below the gauge are unaffected. No wave archive -> plain limit.
 
 WAVE RUNUP. Above the setup allowance but within the Stockdon 2% runup
@@ -71,11 +73,14 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+import station_env                          # a new station's settings (waterline_station.conf); CACO-05's by default
 from setup_model import hs_l0               # Hs*L0: the setup formula, once
 
 GOOD, NOT_EVALUATED, SUSPECT, FAIL = 1, 2, 3, 4
 
-GROSS_MIN, GROSS_MAX = -2.5, 3.5       # m NAVD88
+# m NAVD88. A new station whose tide range does not fit CACO-05's: GNSSR_QC_GROSS_M="lo,hi"
+# (waterline_station.conf exports it when the gauge's MLLW or MHHW falls outside these; station_env.py)
+GROSS_MIN, GROSS_MAX = station_env.qc_gross_m()          # CACO-05: -2.5, 3.5
 SPIKE_LIMIT = 0.5                      # m
 SPIKE_WINDOW_S = 2 * 3600
 REF_LIMIT = 0.5                        # m
@@ -128,7 +133,9 @@ def default_waves_path(reference_path):
     local = Path(reference_path).parent / "waves_marconi.csv"
     if os.environ.get("CACO_LOCAL_WAVES") == "1" and local.exists():
         return local
-    p = Path(reference_path).parent / "waves_44008.csv"
+    # the cron's buoy archive, waves_<WAVE_BUOY>.csv (a new station's waterline_station.conf exports
+    # WAVE_BUOY; CACO-05's cron does not, so 44008)
+    p = Path(reference_path).parent / f"waves_{station_env.wave_buoy()}.csv"
     return p if p.exists() else None
 
 
@@ -283,8 +290,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("gnssr", help="gnssrefl spline file")
     ap.add_argument("--reference", help="Gauge archive from fetch_tide_gauge.py")
-    ap.add_argument("--waves", help="Buoy archive from fetch_buoy_waves.py (default: waves_44008.csv "
-                                    "next to --reference, if present)")
+    ap.add_argument("--waves", help="Buoy archive from fetch_buoy_waves.py (default: waves_44008.csv, "
+                                    "waves_<WAVE_BUOY>.csv on another station, next to --reference, if present)")
     ap.add_argument("--output", help="Write every reading with its flag and reasons (CSV).")
     ap.add_argument("--plot", help="Figure of the last --plot-days with failed readings marked.")
     ap.add_argument("--plot-days", type=int, default=7)

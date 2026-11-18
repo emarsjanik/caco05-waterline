@@ -26,13 +26,17 @@ are in the frame of the calibration's GCPs, which is that of the surveys (the
 2025 lidar DSMs and the 2026 RTK are NAD83(2011) / UTM 19N), as
 survey_products.py GEOTIFF_EPSG. Until Oct 2026 the default was 32619 (WGS 84
 / UTM zone 19N), a NOMINAL tag taken from an old .prj file, which a GIS places
-~1-1.5 m off the surveys; --epsg 32619 still writes it.
+~1-1.5 m off the surveys; --epsg 32619 still writes it. Another station's
+frame: GEOTIFF_EPSG in the environment (a new station's waterline_station.conf
+exports it; station_env.py's rule) replaces the default; --epsg still wins.
 
 Usage:
     python3 asc_to_geotiff.py /mnt/I2Rgus_Data/Chelsea_calibration/dem
     (every *.asc in the folder -> .tif next to it; or give files)
 """
 
+import os
+import re
 import sys
 import struct
 import argparse
@@ -152,12 +156,31 @@ DESCRIPTIONS = {
 }
 
 
+def env_epsg(default=6348):
+    """GEOTIFF_EPSG (a new station's frame; its waterline_station.conf exports it), else `default` (CACO-05's
+    6348). A value that is not an EPSG code stops with an ERROR, never CACO-05's frame. Read here rather than
+    through station_env.py, whose rule it follows, so this converter still runs as a lone copy (the cron's
+    dem_geotiff test runs it so)."""
+    v = os.environ.get("GEOTIFF_EPSG", "").strip()
+    if not v:
+        return default
+    if not re.match(r"^\d{4,6}$", v):
+        sys.exit(f"ERROR: GEOTIFF_EPSG={v!r} is not an EPSG code (digits, e.g. 6348). It comes from the environment "
+                 f"(waterline_station.conf's export line, coastcam-station-setup); fix it there, or unset "
+                 f"GEOTIFF_EPSG for CACO-05's value.")
+    return int(v)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("paths", nargs="+", help="folders (every *.asc in them) or .asc files")
     ap.add_argument("--epsg", type=int, default=6348,
                     help="projected CRS (default 6348 = NAD83(2011) / UTM 19N, the frame of the surveys and the "
-                         "grids; 32619 = WGS 84 / UTM 19N, the default until Oct 2026, a nominal tag)")
+                         "grids; 32619 = WGS 84 / UTM 19N, the default until Oct 2026, a nominal tag; "
+                         "GEOTIFF_EPSG in the environment, a new station's frame, replaces the default)")
+    # a new station's frame (GEOTIFF_EPSG, which its waterline_station.conf exports) replaces the 6348
+    # above; unset (CACO-05), the default stays 6348. A code that is not digits stops with an ERROR.
+    ap.set_defaults(epsg=env_epsg())
     ap.add_argument("--note", default="",
                     help="text added to every GeoTIFF's description (ImageDescription tag), e.g. which calibration "
                          "built the grid, so a file separated from its folder still says (survey_products.py)")
