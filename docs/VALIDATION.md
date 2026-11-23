@@ -57,6 +57,7 @@ python3 test_calibrate_eo.py                     # ends "all calibrate_eo tests 
 python3 test_timestack_wave_height.py            # ends "all timestack wave height tests passed" (section 4.11, opt-in)
 python3 test_measured_setup.py                   # ends "all measured setup tests passed" (section 4.12, opt-in)
 python3 test_storm_watch.py                      # ends "all storm watch tests passed" (section 2.10, opt-in)
+python3 test_weekly_frames.py                    # ends "all weekly frames tests passed" (docs/WEEKLY_FRAMES.md)
 python3 test_station_overlay.py                  # ends "all station overlay tests passed" (section 2.11)
 python3 test_station_env.py                      # ends "all station_env checks passed" (section 2.11)
 python3 test_waterline_station_check.py          # ends "ALL CHECKS PASSED" (section 2.11)

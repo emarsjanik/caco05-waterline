@@ -31,7 +31,11 @@ CACO-05 has no such file, so there the cron must run exactly as before:
      station fact ...); the cron then exits 1 with a FATAL line in its log and
      runs nothing else;
   f. a fresh folder without logs/ works (the check runs after the cron makes
-     logs/ and defines log(), design critique C1).
+     logs/ and defines log(), design critique C1);
+  g. the weekly frames step (7c, weekly_frames.py daily --base BASE --have-lock,
+     docs/WEEKLY_FRAMES.md): called once, after the pointing log and before
+     station_status.py, only while DEM_ENABLE=1; a failure is the cron's
+     "WARNING: weekly frames failed (see above)" and the run goes on.
 
 HOW. The cron is copied into a temporary folder ($BASE, with ImageProducts
 and the GNSS-R file there too) and run by bash with a stand-in python3 that
@@ -39,6 +43,9 @@ records each call (and runs waterline_station_check.py for real) and a
 stand-in owg.sh. REV (default BASELINE below: the commit before the overlay)
 gives the cron "as before"; update it when the cron changes on purpose. Without
 git or REV, part (a)'s comparison and part (d) are skipped with a SKIP line.
+The cron changed on purpose after REV in one way only: step 7c, the weekly
+frames call (WEEKLY_CALL below). Part (a) expects exactly that one call more,
+just before station_status.py, and otherwise the same commands, log and files.
 
 STATION FILES. None are read. The calibration names are created as empty
 files in the temporary folder; no folder of the station is listed.
@@ -88,6 +95,11 @@ case "$1" in
     */waterline_station_check.py) exec "$REAL_PY" "$@" ;;
 esac
 echo "ENV ${1##*/} ANT=${GNSSR_ANTENNA_NAVD88_M-unset} TZ=${STATION_TZ-unset} EPSG=${GEOTIFF_EPSG-unset} NAME=${STATION_NAME-unset} BUOY=${WAVE_BUOY-unset} PROV=${STATION_PROVISIONAL-unset}" >> "$ENVS"
+case "$1" in
+    */weekly_frames.py)
+        [ -n "$WEEKLY_SAY" ] && echo "$WEEKLY_SAY"
+        exit "${WEEKLY_RC:-0}" ;;
+esac
 prev=""
 for a in "$@"; do
     [ "$prev" = "--output" ] && echo "h" > "$a"
@@ -97,6 +109,19 @@ case "$1" in */georectify.py) printf 'h\nr\n' > "$3" ;; esac
 exit 0
 '''
 OWG_STUB = '#!/bin/bash\necho "OWG $*" >> "$CALLS"\nexit 0\n'
+# the one call the cron makes after REV on purpose (step 7c), just before station_status.py
+WEEKLY_CALL = "PY /B/weekly_frames.py daily --base /B --have-lock"
+
+
+def with_weekly(calls):
+    """REV's calls with the weekly frames call put in just before station_status.py (exactly one more call)."""
+    out, put = [], False
+    for c in calls:
+        if c.startswith("PY /B/station_status.py ") and not put:
+            out.append(WEEKLY_CALL)
+            put = True
+        out.append(c)
+    return out
 
 
 def localise(text, b):
@@ -250,12 +275,18 @@ def test_no_station_file(d, old):
         print("  SKIP the comparison with the cron before the overlay (no git, or the revision is not here)")
         return
     gold = run_cron(make_base(d, "a_old", old))
-    want = [c + " --buoy-csv /B/archive/waves_44008.csv --gauge-csv /B/archive/gauge_8447435.csv"
-            if c.startswith("PY /B/station_status.py ") else c for c in gold.calls]
+    want = with_weekly([c + " --buoy-csv /B/archive/waves_44008.csv --gauge-csv /B/archive/gauge_8447435.csv"
+                        if c.startswith("PY /B/station_status.py ") else c for c in gold.calls])
     check("the golden run (the cron before the overlay) ran its chain",
           gold.rc == 0 and len(gold.calls) > 15 and "OWG --no-fetch --no-report" in gold.calls, gold.calls)
-    check("the same commands in the same order (station_status.py: + --buoy-csv/--gauge-csv)",
-          new.calls == want, "\n".join(x for x in set(new.calls) ^ set(want)))
+    check("the golden run has no weekly frames call; the new one exactly one, just before station_status.py",
+          not [c for c in gold.calls if "weekly_frames.py" in c] and len(want) == len(gold.calls) + 1
+          and [c for c in new.calls if "weekly_frames.py" in c] == [WEEKLY_CALL]
+          and new.calls.index(WEEKLY_CALL) + 1 == next(i for i, c in enumerate(new.calls)
+                                                       if c.startswith("PY /B/station_status.py ")),
+          [c for c in new.calls if "weekly_frames.py" in c or "station_status.py" in c])
+    check("the same commands in the same order (station_status.py: + --buoy-csv/--gauge-csv; + the weekly frames "
+          "call before it)", new.calls == want, "\n".join(x for x in set(new.calls) ^ set(want)))
     check("the same log, line for line (timestamps aside)", new.log == gold.log,
           "\n".join(set(new.log.splitlines()) ^ set(gold.log.splitlines())))
     check("the same files, with the same contents", new.files() == gold.files(),
@@ -711,6 +742,49 @@ def test_fresh_base(d):
 
 
 # ---------------------------------------------------------------------
+# g. the weekly frames step (7c)
+# ---------------------------------------------------------------------
+
+def test_weekly_step(d):
+    print("g. the weekly frames step: once, after the pointing log, before station_status.py, only with DEM_ENABLE=1")
+    text = CRON.read_text()
+    call = 'python3 "$BASE/weekly_frames.py" daily --base "$BASE" --have-lock >> "$LOG" 2>&1'
+    i7b, i7c, i8 = (text.find("# 7b. Camera pointing log"), text.find(call), text.find("# 8. Station health summary"))
+    guard = text.rfind('if [ "$DEM_ENABLE" = "1" ]; then', 0, i7c)
+    check("the cron calls weekly_frames.py once, with --have-lock, between step 7b and step 8, inside "
+          "'if [ \"$DEM_ENABLE\" = \"1\" ]' at column 0, with its WARNING line",
+          text.count('"$BASE/weekly_frames.py"') == 1 and text.count(call) == 1 and 0 < i7b < guard < i7c < i8
+          and text[guard - 1] == "\n" and "fi" not in text[guard:i7c].split()
+          and text[i7c:i8].count('|| log "WARNING: weekly frames failed (see above)"') == 1, (i7b, guard, i7c, i8))
+    b = make_base(d, "g_ok", text)
+    r = run_cron(b, {"WEEKLY_SAY": "weekly frames: done today already (2026-11-23 UTC)"})
+    wk = r.py("weekly_frames.py")
+    pos = [i for i, c in enumerate(r.calls) if "pointing_daily.py" in c or "weekly_frames.py" in c
+           or "station_status.py" in c]
+    check("DEM_ENABLE=1: one call, 'daily --base BASE --have-lock', after pointing_daily.py and before "
+          "station_status.py; its own line in the log, no WARNING for it",
+          wk == [WEEKLY_CALL] and [r.calls[i].split()[1].split("/")[-1] for i in pos]
+          == ["pointing_daily.py", "weekly_frames.py", "station_status.py"]
+          and "weekly frames: done today already (2026-11-23 UTC)" in r.log
+          and "weekly frames failed" not in r.log and r.rc == 0, (wk, r.log[-400:]))
+    b = make_base(d, "g_fail", text)
+    r = run_cron(b, {"WEEKLY_SAY": "WARNING: weekly frames: week 2026-11-09..2026-11-15: dem_from_contours.py failed",
+                     "WEEKLY_RC": "1"})
+    lines = r.log.splitlines()
+    k = next((i for i, ln in enumerate(lines) if ln.startswith("WARNING: weekly frames: week")), -1)
+    check("weekly_frames.py exit 1: its line, then the cron's 'WARNING: weekly frames failed (see above)'; "
+          "station_status.py still runs and the run ends cleanly",
+          k >= 0 and lines[k + 1] == "WARNING: weekly frames failed (see above)" and r.rc == 0
+          and len(r.py("station_status.py")) == 1 and "=== run end ===" in r.log, r.log[-500:])
+    off = re.sub(r"^DEM_ENABLE=1$", "DEM_ENABLE=0", text, count=1, flags=re.M)
+    b = make_base(d, "g_off", off)
+    r = run_cron(b)
+    check("DEM_ENABLE=0: no weekly frames call (and the DEM stage logged as disabled)",
+          off != text and not r.py("weekly_frames.py") and "DEM stage disabled (DEM_ENABLE=0)" in r.log
+          and len(r.py("station_status.py")) == 1, r.calls[-4:])
+
+
+# ---------------------------------------------------------------------
 # Python 3.8
 # ---------------------------------------------------------------------
 
@@ -743,6 +817,7 @@ def main():
         test_readers(d, old)
         test_check_overlay(d)
         test_fresh_base(d)
+        test_weekly_step(d)
         test_py38()
     finally:
         if not args.keep:
