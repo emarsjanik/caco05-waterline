@@ -39,8 +39,11 @@ EST in winter. The same split already applies to every 7-day DEM.
 
 A final week is never rebuilt. `respec` (section 6) only redraws it.
 
-A provisional week is rebuilt only when its ground rows change. A failed DEM build (an exit code other than
-0, 3 or 4) is a `WARNING`. That week is never finalised; the next run builds it again.
+A provisional week is rebuilt only when its ground rows change: their number, or their content (a digest of
+the rows, so a ground file the cron re-processed with the same rows but other elevations rebuilds it too). A
+failed DEM build (an exit code other than 0, 3 or 4) is a `WARNING`. That week is never finalised; the next
+UTC day's daily run builds it again (the work is done once per UTC date), or at once
+`python3 weekly_frames.py daily --base BASE --force`.
 
 On the first daily run of a Monday, last week becomes provisional and the current-week frames start again
 from nothing. With the GNSS-R lag, the new week's frames say `EMPTY: no waterline points in this week` until
@@ -79,8 +82,12 @@ The waterline cron runs, near its end and only while `DEM_ENABLE=1`:
   return at once. `--force` redoes the work.
 - One step makes the frozen spec if there is none, builds the current week, moves ended weeks to provisional,
   finalises covered ones and rebuilds a video whose frames changed.
+- Missed weeks (the cron was off, or a backfill stopped with `--to`) are built at most 4 per daily run, the
+  oldest first, because the step runs inside the cron's lock. The rest wait for the next days' runs, and a
+  NOTE says how many are left; `backfill` builds them all at once.
 - Each action prints one line starting `weekly frames:`. A `NOTE:` line is information. A `WARNING:` line is a
-  real fault (a failed DEM build, a failed ffmpeg); the station status counts those.
+  real fault (a failed DEM build); the station status counts those. The videos never make a WARNING
+  (section 5).
 - Exit code: 0 when done, 1 after a WARNING. On exit 1 the cron adds its own line,
   `WARNING: weekly frames failed (see above)`, and goes on to the station status (step 8).
 - `WEEKLY_ENABLE=0` turns the step off.
@@ -92,6 +99,8 @@ Install ffmpeg once on the NUC:
     sudo apt-get install -y ffmpeg
 
 Without ffmpeg the frames are still made. The log gets one `NOTE` a day (never a WARNING) and the videos wait.
+An ffmpeg that fails (for example one built without libx264, or a full disk) is a `NOTE` too, with its last
+error line: the run's exit code stays 0, the earlier MP4 is kept, and the next daily run tries again.
 
 A video is rebuilt when the set of its frames, or one of them, changed since its last build (their list of
 names, times and sizes). This happens at most once per run. Each frame is shown for `1/WEEKLY_FPS` seconds
@@ -142,7 +151,9 @@ This re-freezes the spec from the current settings and the ground file. The old 
 and the videos are rebuilt.
 
 Storm frames are drawn by `storm_watch.py` and keep the look they were drawn with. The videos scale and pad
-them to the frame size, and `respec` says how many there are. The storm watch draws a product's frames in
+them to the frame size, and `respec` says how many there are. (Each frame's time in the video comes from the
+concat list, never from ffmpeg's frame count, which restarts where the frame size changes; so a video of
+mixed sizes keeps every frame.) The storm watch draws a product's frames in
 the run that makes it final, and only once `frame_spec.json` exists: before that it logs a NOTE and tries
 again on its next run while the event is open (the storm watch never writes `frame_spec.json` itself).
 Their banners use the storm watch's own settings: `BEFORE (pre-storm, <start> to <end>)`, `AFTER (first
@@ -187,6 +198,14 @@ The DEM options are not settings here. They are the cron's own: `DEM_MAX_HS`, `D
 through `storm_watch.cron_settings` and `storm_watch.dem_args`, so they cannot drift. A new station's
 `waterline_station.conf` `DEM_MAX_HS` applies, as it does for the cron.
 
+**A new station's own values in a run by hand.** The cron sources `waterline_station.conf` and exports the
+station's names (`STATION_NAME`, `GEOTIFF_EPSG`, `STATION_TZ`, `STATION_WAVE_CURRENCY` and the others on its
+`export` line). Every `weekly_frames.py` command does the same by itself: it checks the file as the cron does
+(`waterline_station_check.py check-overlay`) and puts the exported values into its environment. So a
+`backfill` or `respec` run from a shell freezes the station's own name and frame and builds its DEMs with
+the station's time zone and waves, exactly like the cron's run. A file the check refuses stops the command
+with an `ERROR` (exit 1) and nothing is written. CACO-05 has no such file.
+
 ## 9. What a frame shows
 
 - **DEM frame.** The week's DEM on the frozen extent and colour scale, with:
@@ -207,7 +226,8 @@ The cameras' positions are not drawn. They would need the calibration files, whi
 
 ## 10. Blind date
 
-The script reads only the ground file, its own outputs and the storm watch's `frames.json` and frames. It
+The script reads only the ground file, its own outputs, the storm watch's `frames.json` and frames, and the
+cron's settings files (`waterline_timex_cron.sh`, a new station's `waterline_station.conf`). It
 never opens, globs or stats anything under `calibration/`, `surveys/` or `ground_truth/`, nor anything named
 for a blind date (`survey_products.BLIND_DATES`, 2024-10-23, in any of its name forms).
 
@@ -219,7 +239,7 @@ date are never copied or drawn. `test_weekly_frames.py` checks all of this with 
     python3 weekly_frames.py status --base /mnt/I2Rgus_Data/waterline   # read only
     python3 test_weekly_frames.py                                       # ends "all weekly frames tests passed"
 
-The test takes about 35 s. It:
+The test takes about 45 s. It:
 
 - runs the real `dem_from_contours.py` for two weeks and checks the exact cron options;
 - follows a week through current, provisional and final (by coverage and by the maximum wait), plus an empty
@@ -228,5 +248,9 @@ The test takes about 35 s. It:
   and hash;
 - checks a resumable backfill that skips the blind week;
 - checks the order of the concat lists, ffmpeg's arguments (a fake ffmpeg), and ffmpeg missing;
-- makes one real tiny MP4 and counts its frames with ffprobe (when ffmpeg is installed);
+- makes one real tiny MP4 and counts its frames with ffprobe (when ffmpeg is installed), and one of mixed
+  frame sizes (a storm frame from before a `respec`) that must keep every frame;
+- checks that a failing ffmpeg is a NOTE (exit 0), that odd sizes such as 854x480 come out exact on
+  matplotlib 3.3, that a run by hand applies `waterline_station.conf`, that missed weeks are capped at 4 a
+  daily run, that re-processed rows rebuild an open week, and when a failed build is retried;
 - checks the locks, and that every write lands under `archive/weekly/` or `logs/`.

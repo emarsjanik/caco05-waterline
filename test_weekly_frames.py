@@ -21,6 +21,10 @@ only; nothing named for that date is created or opened (an audit hook watches ev
   T6  the videos: concat order (weeks and storm frames by date, change after DEM), ffmpeg's arguments,
       rebuilt only on change, ffmpeg missing (a NOTE, frames still made, rc 0), a real tiny MP4
   T7  locks: the cron's lock held, a cron run due, another weekly run busy; the CLI end to end
+  T8  review fixes: a video of mixed frame sizes keeps every frame (real ffmpeg), a failing ffmpeg is a NOTE
+      (rc 0), the frame size exact on matplotlib 3.3 (854x480), waterline_station.conf applied in a run by
+      hand, missed weeks capped per daily run, re-processed rows rebuild an open week, the failed-build retry
+      wording
 Every command's writes are checked to land under archive/weekly/ or logs/.
 """
 
@@ -645,9 +649,10 @@ def t6():
                   and a[a.index("-i") + 1] == str(base / "archive/weekly/video/dem_frames.txt")
                   and a[a.index("-r") + 1] == "2" and a[a.index("-c:v") + 1] == "libx264"
                   and a[a.index("-pix_fmt") + 1] == "yuv420p" and "scale=1920:1080" in a[a.index("-vf") + 1]
-                  and "setpts=N/(2*TB)" in a[a.index("-vf") + 1] and a[-1].endswith(".dem_weekly.mp4.tmp"),
-                  "ffmpeg: concat demuxer, -safe 0, one frame each 1/fps (setpts, -r 2), H.264 yuv420p, the frame "
-                  "size, a temp file")
+                  and "setpts=round(T*2)/(2*TB)" in a[a.index("-vf") + 1] and "N/" not in a[a.index("-vf") + 1]
+                  and a[-1].endswith(".dem_weekly.mp4.tmp"),
+                  "ffmpeg: concat demuxer, -safe 0, one frame each 1/fps (setpts on the list's times, not N; -r 2), "
+                  "H.264 yuv420p, the frame size, a temp file")
             mp4 = base / "archive/weekly/video/dem_weekly.mp4"
             check(mp4.read_bytes() == b"fake mp4" and not list((base / "archive/weekly/video").glob(".*.tmp")),
                   "the temp file replaced the video")
@@ -765,12 +770,218 @@ def t7():
         check(p.returncode == 2 and "not a date" in p.stdout, "a bad --from: refused (argparse)")
 
 
+# --------------------------------------------------------------------------------------------
+# T8 review fixes
+# --------------------------------------------------------------------------------------------
+
+STATION_CONF = """# waterline_station.conf -- a test station (modelled on docs/NEW_STATION.md's full file)
+CAMS="c1 c2"
+CAL="/nonexistent/station_calibration"
+CAL_IO_C1="T07_c1_IO.yaml"
+CAL_EO_C1="T07_c1_EO.yaml"
+CAL_IO_C2="T07_c2_IO.yaml"
+CAL_EO_C2="T07_c2_EO.yaml"
+GNSSR_SPLINE="/nonexistent/spline.txt"
+TIDE_GAUGE="8447435"
+GAUGE_CSV="/nonexistent/gauge.csv"
+WAVE_BUOY="44013"
+WAVES_CSV="/nonexistent/waves.csv"
+DEM_MAX_HS="1.0"
+SETUP_COEF=""
+DETECTOR_ARGS=""
+OWG_ENABLE="0"
+RUNUP_ENABLE="0"
+POINTING_LOG_ENABLE="0"
+GNSSR_ANTENNA_NAVD88_M="12.345"
+STATION_TZ="America/Chicago"
+GEOTIFF_EPSG="6347"
+STATION_NAME="CACO-07 Test Beach"
+STATION_WAVE_CURRENCY="buoy:wvht_m/dpd_s"
+export GNSSR_ANTENNA_NAVD88_M STATION_TZ GEOTIFF_EPSG STATION_NAME STATION_WAVE_CURRENCY WAVE_BUOY
+"""
+
+
+def t8():
+    print("T8 review fixes: mixed sizes in a video, ffmpeg failing, frame size on mpl 3.3, the station file, "
+          "missed weeks capped, re-processed rows, the retry wording")
+    import station_env
+    # (1) the frame size: 854x480 and 402x240 (matplotlib 3.3 truncated them to 853 and 401 px)
+    with tempfile.TemporaryDirectory() as tmp:
+        got = []
+        for w, h in ((854, 480), (402, 240), (1366, 768), (320, 240)):
+            spec = {"extent": [0.0, 100.0, 0.0, 60.0], "z_limits": [-1.0, 2.0], "size": [w, h], "dpi": 100,
+                    "frame_label": "x", "change_limit": 0.5, "hash": "t"}
+            pd, pw = Path(tmp) / f"d{w}.png", Path(tmp) / f"w{w}.png"
+            wf.draw_dem_frame(None, pd, spec, "t")
+            wf.draw_waterline_frame([], pw, spec, "t")
+            got.append(((w, h), wf.png_size(pd), wf.png_size(pw)))
+        check(all(a == b == c for a, b, c in got),
+              f"every frame exactly WEEKLY_SIZE, odd widths never (matplotlib {__import__('matplotlib').__version__}): "
+              f"{got}")
+    # (2) waterline_station.conf in a run by hand (no station variables in the environment)
+    saved_env = {k: os.environ.get(k) for k in station_env.STATION_VARS}
+    try:
+        for k in station_env.STATION_VARS:
+            os.environ.pop(k, None)
+        with tempfile.TemporaryDirectory() as tmp:
+            base = make_base(tmp, settings="WEEKLY_SIZE=320x240\n")
+            (base / "waterline_station.conf").write_text(STATION_CONF)
+            write_ground(base, dates("2026-11-02", "2026-11-10"))
+            seen = []
+            inner = fake_runner([])
+
+            def runner(argv, log_path=None):
+                if Path(argv[1]).name == "dem_from_contours.py":
+                    seen.append({k: os.environ.get(k) for k in ("STATION_TZ", "STATION_WAVE_CURRENCY",
+                                                                "STATION_NAME", "GEOTIFF_EPSG")})
+                return inner(argv, log_path)
+            for k in station_env.STATION_VARS:
+                os.environ.pop(k, None)
+            rc, out = run(base, ["backfill"], "2026-11-11T03:00:00Z", runner)
+            spec = wf.load_spec(base)
+            check(rc == 0 and spec["station_name"] == "CACO-07 Test Beach" and spec["epsg"] == 6347
+                  and "CACO-07 Test Beach: week of" in wf.week_title("2026-11-02", spec["station_name"]),
+                  f"backfill by hand: the station's name and EPSG frozen ({spec.get('station_name')}, "
+                  f"{spec.get('epsg')})")
+            check(seen and all(e == {"STATION_TZ": "America/Chicago", "STATION_WAVE_CURRENCY": "buoy:wvht_m/dpd_s",
+                                     "STATION_NAME": "CACO-07 Test Beach", "GEOTIFF_EPSG": "6347"} for e in seen),
+                  f"the DEM builds see the station's time zone and waves, as in the cron ({seen[:1]})")
+            for k in station_env.STATION_VARS:          # the cron's run: the variables exported, as the cron does
+                os.environ.pop(k, None)
+            os.environ.update(STATION_NAME="CACO-07 Test Beach", GEOTIFF_EPSG="6347", STATION_TZ="America/Chicago")
+            rc, out = run(base, ["daily", "--have-lock"], "2026-11-11T17:00:00Z", runner)
+            check(rc == 0 and "differs" not in out, "the cron's next daily run: no 'differs' NOTE")
+            for k in station_env.STATION_VARS:
+                os.environ.pop(k, None)
+            rc, out = run(base, ["respec"], "2026-11-11T18:00:00Z", runner)
+            check(rc == 0 and wf.load_spec(base)["station_name"] == "CACO-07 Test Beach",
+                  "respec by hand keeps the station's name (it no longer re-freezes CACO-05's)")
+            (base / "waterline_station.conf").write_text(STATION_CONF.replace('GEOTIFF_EPSG="6347"',
+                                                                              'GEOTIFF_EPSG="63x7"'))
+            before = tree(base)
+            rc, out = run(base, ["backfill"], "2026-11-11T19:00:00Z", runner)
+            check(rc == 1 and "ERROR: waterline_station.conf refused" in out and tree(base) == before,
+                  "a station file check-overlay refuses: an ERROR, rc 1, nothing written (the cron stops too)")
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    # (3) missed weeks: CATCHUP_WEEKS a daily run (inside the cron's lock), the rest on the next days
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, settings="WEEKLY_SIZE=320x240\n")
+        write_ground(base, dates("2026-09-28", "2026-11-24"), frames=4)
+        calls = []
+        run(base, ["backfill", "--to", "2026-10-04"], "2026-11-25T03:00:00Z", fake_runner(calls))
+        n0 = len(calls)
+        rc, out = run(base, ["daily", "--have-lock"], "2026-11-25T17:00:00Z", fake_runner(calls))
+        first = sorted(c[c.index("--start-date") + 1] for c in calls[n0:])
+        check(rc == 0 and first == ["2026-10-05", "2026-10-12", "2026-10-19", "2026-10-26", "2026-11-23"]
+              and "7 missed week(s): 4 built now, 3 left" in out and "backfill --base BASE" in out,
+              f"7 missed weeks: the daily run builds the 4 oldest and the current week, a NOTE names backfill "
+              f"({first})")
+        n1 = len(calls)
+        rc, out = run(base, ["daily", "--have-lock"], "2026-11-26T17:00:00Z", fake_runner(calls))
+        second = sorted(c[c.index("--start-date") + 1] for c in calls[n1:])
+        st = wf.read_json(base / "archive/weekly/state.json")
+        check(rc == 0 and second == ["2026-11-02", "2026-11-09", "2026-11-16"] and "missed week" not in out
+              and sorted(st["weeks"]) == [wf.d_iso(datetime(2026, 9, 28) + timedelta(days=7 * k))[:10]
+                                          for k in range(9)],
+              f"the next day: the 3 left (no NOTE); every week known ({second})")
+    # (4) re-processed rows (same counts, other elevations) rebuild an open week
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, settings="WEEKLY_SIZE=320x240\n")
+        write_ground(base, dates("2026-11-02", "2026-11-10"))
+        calls = []
+        run(base, ["daily", "--have-lock"], "2026-11-11T17:00:00Z", fake_runner(calls))
+        write_ground(base, dates("2026-11-02", "2026-11-14"))
+        run(base, ["daily", "--have-lock"], "2026-11-16T17:00:00Z", fake_runner(calls))
+        n = len(calls)
+        write_ground(base, dates("2026-11-02", "2026-11-14"), shift=0.10)
+        rc, out = run(base, ["daily", "--have-lock"], "2026-11-17T17:00:00Z", fake_runner(calls))
+        built = [c[c.index("--start-date") + 1] for c in calls[n:]]
+        line = [l for l in out.splitlines() if "week 2026-11-09" in l]
+        check(rc == 0 and "2026-11-09" in built and line and "redrawn only" not in line[0]
+              and wk(base, "2026-11-09")["status"] == "provisional",
+              f"the ground file re-processed (+0.10 m, same rows): the provisional week rebuilt ({built})")
+        n = len(calls)
+        rc, out = run(base, ["daily", "--have-lock"], "2026-11-18T17:00:00Z", fake_runner(calls))
+        check("2026-11-09" not in [c[c.index("--start-date") + 1] for c in calls[n:]] and "redrawn only" in out,
+              "rows unchanged the next day: not rebuilt (redrawn only)")
+    # (5) a failed build: retried by the next UTC day's run, as the WARNING says
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, settings="WEEKLY_SIZE=320x240\n")
+        write_ground(base, dates("2026-11-02", "2026-11-10"))
+        rc, out = run(base, ["daily", "--have-lock"], "2026-11-11T00:55:00Z",
+                      fake_runner([], rc_for={"2026-11-09": 1}))
+        warn = [l for l in out.splitlines() if l.startswith("WARNING:")]
+        rc2, out2 = run(base, ["daily", "--have-lock"], "2026-11-11T16:30:00Z", fake_runner([]))
+        calls = []
+        rc3, out3 = run(base, ["daily", "--have-lock"], "2026-11-12T00:55:00Z", fake_runner(calls))
+        doc = " ".join((HERE / "docs/WEEKLY_FRAMES.md").read_text().split())
+        check(rc == 1 and len(warn) == 1 and "next UTC day's daily run" in warn[0] and "--force" in warn[0]
+              and "next run" not in warn[0] and "done today already" in out2
+              and [c[c.index("--start-date") + 1] for c in calls] == ["2026-11-09"] and rc3 == 0
+              and "the next run builds it again" not in doc and "next UTC day" in doc,
+              f"a failed build: the WARNING says the next UTC day's run (or --force), which is when it is built "
+              f"again; the docs say the same ({warn[:1]})")
+    # (6) a failing ffmpeg: a NOTE, rc 0, the earlier video kept; (7) mixed frame sizes with the real ffmpeg
+    old_path = os.environ.get("PATH", "")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, settings="WEEKLY_SIZE=320x240\n")
+        write_ground(base, dates("2026-11-02", "2026-11-17"))
+        fakebin = Path(tmp) / "fakebin"
+        fakebin.mkdir()
+        (fakebin / "ffmpeg").write_text("#!/bin/sh\necho 'Unknown encoder libx264' >&2\nexit 1\n")
+        (fakebin / "ffmpeg").chmod(0o755)
+        os.environ["PATH"] = f"{fakebin}{os.pathsep}{old_path}"
+        try:
+            vdir = base / "archive/weekly/video"
+            vdir.mkdir(parents=True)
+            (vdir / "dem_weekly.mp4").write_bytes(b"earlier video")
+            rc, out = run(base, ["backfill"], "2026-11-18T03:00:00Z", fake_runner([]))
+            rc2, out2 = run(base, ["daily", "--have-lock"], "2026-11-18T17:00:00Z", fake_runner([]))
+            st = wf.read_json(base / "archive/weekly/state.json")
+            check(rc == 0 and rc2 == 0 and "WARNING" not in out + out2
+                  and "NOTE: weekly frames: video dem_weekly.mp4 not rebuilt (ffmpeg exit 1: Unknown encoder" in out
+                  and (vdir / "dem_weekly.mp4").read_bytes() == b"earlier video"
+                  and st["videos"]["dem"].get("failed_rc") == 1 and not list(vdir.glob(".*.tmp")),
+                  "a failing ffmpeg: a NOTE (no WARNING), rc 0, the earlier video kept, the failure in state.json")
+        finally:
+            os.environ["PATH"] = old_path
+    if not (REAL_FFMPEG and REAL_FFPROBE):
+        print("  (no ffmpeg/ffprobe here: the mixed-size MP4 check is skipped)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, settings="WEEKLY_SIZE=640x360\n")
+        write_ground(base, dates("2026-11-02", "2026-11-24"))
+        run(base, ["backfill"], "2026-11-25T03:00:00Z", fake_runner([]))
+        storm_event(base, wf.load_spec(base), entries=[{"part": "pre", "series": "dem", "date": "2026-11-14",
+                                                        "window": ["2026-11-08", "2026-11-14"],
+                                                        "png": "dem_pre.png"}])
+        (base / "weekly_frames_settings.conf").write_text("WEEKLY_SIZE=320x240\n")
+        rc, out = run(base, ["respec"], "2026-11-25T04:00:00Z", fake_runner([]))
+        lst = (base / "archive/weekly/video/dem_frames.txt").read_text()
+        n_list = sum(1 for l in lst.splitlines() if l.startswith("file "))
+        sizes = sorted({wf.png_size(l[6:-1]) for l in lst.splitlines() if l.startswith("file ")})
+        p = subprocess.run([REAL_FFPROBE, "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries",
+                            "stream=nb_read_frames,width,height", "-of", "json",
+                            str(base / "archive/weekly/video/dem_weekly.mp4")],
+                           stdout=subprocess.PIPE, universal_newlines=True)
+        s = (json.loads(p.stdout or "{}").get("streams") or [{}])[0]
+        check(rc == 0 and n_list == 4 and sizes == [(320, 240), (640, 360)]
+              and int(s.get("nb_read_frames") or 0) == n_list and s.get("width") == 320,
+              f"respec to 320x240 with a 640x360 storm frame: the MP4 keeps all {n_list} frames, scaled to 320x240 "
+              f"({s})")
+
+
 def main():
     os.environ["MPLCONFIGDIR"] = tempfile.mkdtemp(prefix="mpl_wf_")
     os.environ.setdefault("MPLBACKEND", "Agg")
     wf.local_now = lambda: datetime(2026, 1, 1, 3, 0)       # far from every station job
     t_all = time.time()
-    for t in (t1, t2, t3, t4, t5, t6, t7):
+    for t in (t1, t2, t3, t4, t5, t6, t7, t8):
         t()
     shutil.rmtree(os.environ["MPLCONFIGDIR"], ignore_errors=True)
     print(f"\n{str(len(FAILED)) + ' check(s) FAILED' if FAILED else 'all weekly frames tests passed'} "

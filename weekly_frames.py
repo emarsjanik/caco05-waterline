@@ -64,14 +64,17 @@ Usage:
     python3 weekly_frames.py status --base BASE
         read only: the look, the weeks by status, the videos
 Settings: BASE/weekly_frames_settings.conf (see weekly_frames_settings.conf.example).
+A new station's BASE/waterline_station.conf is checked and its exported names
+applied by every command, as the cron does, so a run by hand matches the cron's.
 The video needs ffmpeg (sudo apt-get install -y ffmpeg); without it the
 frames are still made. docs/WEEKLY_FRAMES.md has the details.
 
 Exit status: 0 done (notes included), 1 a fault (a WARNING line), bad
 arguments or settings. Python 3.8; numpy and matplotlib only.
 
-BLIND: this script reads only the ground file, its own outputs and the
-storm watch's frames.json/frames; it never opens, globs or stats anything
+BLIND: this script reads only the ground file, its own outputs, the
+storm watch's frames.json/frames and the cron's settings files
+(waterline_timex_cron.sh, a new station's waterline_station.conf); it never opens, globs or stats anything
 under calibration/, surveys/ or ground_truth/, nor anything named for a
 BLIND date (survey_products.BLIND_DATES, kept equal to BLIND_DATES here),
 and skips every week that contains one.
@@ -113,6 +116,7 @@ Z_ROUND_M = 0.25
 CONTOUR_STEP_M = 0.5
 LOCK_WAIT_S = 600.0            # waiting for the cron's lock (not when run by the cron: --have-lock)
 CRON_HOLD_S = 900              # no ground read when a waterline cron run starts within 15 min
+CATCHUP_WEEKS = 4              # missed weeks one daily run builds (it runs inside the cron's lock); backfill: all
 DEM_TIMEOUT_S = 3600
 FFMPEG_TIMEOUT_S = 1800
 DEFAULT_STATION = "CACO-05 Marconi Beach"
@@ -380,11 +384,13 @@ def frame_passes(hs_text, max_hs):
 def scan_ground(path, d_min, d_max, out_csv=None, max_hs=None, stats=False):
     """One pass of the ground file. Copies the rows dated [d_min, d_max] (UTC dates; never a blind date's) to
     out_csv (tmp + replace); per date in that range: georectified rows, frames and frames passing --max-hs (only
-    when the file has offshore_hs_m); the first and latest georectified dates of the WHOLE file; with stats: the
+    when the file has offshore_hs_m), and a digest of the date's rows (a re-processed file with the same counts
+    but other values still differs); the first and latest georectified dates of the WHOLE file; with stats: the
     extent and the elevations of every usable point (georectified, passing --max-hs, not a blind date) for the
     frozen look."""
     info = {"rows": 0, "first": None, "latest": None, "has_hs": False, "dates": {}, "copied": 0,
-            "range": [d_min, d_max], "stats": None}
+            "range": [d_min, d_max], "stats": None, "digest": {}}
+    digests = {}
     st = {"e": [float("inf"), float("-inf")], "n": [float("inf"), float("-inf")], "z": array.array("d"),
           "first": None, "last": None} if stats else None
     frames = {}
@@ -430,6 +436,10 @@ def scan_ground(path, d_min, d_max, out_csv=None, max_hs=None, stats=False):
                     if w:
                         w.writerow(row)
                     info["copied"] += 1
+                    h = digests.get(d)
+                    if h is None:
+                        h = digests[d] = hashlib.sha1()
+                    h.update(("\x1f".join(row) + "\n").encode("utf-8", "replace"))
                     if ground:
                         fr = row[ks] if ks is not None and ks < len(row) else f"{row[kt]}|{row[kc] if kc is not None else ''}"
                         rec = info["dates"].setdefault(d, [0, 0, 0])
@@ -457,6 +467,7 @@ def scan_ground(path, d_min, d_max, out_csv=None, max_hs=None, stats=False):
                     if st["last"] is None or d > st["last"]:
                         st["last"] = d
             info["first"], info["latest"] = first or None, latest or None
+            info["digest"] = {d: h.hexdigest()[:16] for d, h in digests.items()}
     finally:
         if g:
             g.close()
@@ -533,6 +544,35 @@ def load_spec(base):
     if not isinstance(s, dict) or not s.get("extent") or not s.get("z_limits") or not s.get("size"):
         return None
     return s
+
+
+STATION_FILE = "waterline_station.conf"
+
+
+def apply_station_file(base):
+    """As the cron does before its Python steps: a new station's BASE/waterline_station.conf (coastcam-station-
+    setup's; CACO-05 has none), checked by waterline_station_check.check_overlay, and the names its export line
+    exports put into the environment (the file's values win, as when the cron sources it). So a run by hand
+    (backfill, respec, status, daily without the cron) freezes the station's own name and frame and builds its
+    DEMs with the station's time zone and waves, like the cron's run. -> (names set, error text or '')."""
+    p = Path(base) / STATION_FILE
+    if not p.is_file():
+        return [], ""
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import waterline_station_check
+    try:
+        res = waterline_station_check.check_overlay(p.read_text(errors="replace"))
+    except OSError as exc:
+        return [], f"{STATION_FILE} not read ({exc.strerror or exc})"
+    if not res["ok"]:
+        e = res["errors"][0]
+        return [], (f"{STATION_FILE} refused by waterline_station_check.py check-overlay (as the cron refuses it): "
+                    + (f"line {e['line']}: " if e.get("line") else "") + str(e.get("message")))
+    names = [k for k in res["exported"] if k in res["keys"]]
+    for k in names:
+        os.environ[k] = res["keys"][k]
+    return names, ""
 
 
 def station_label():
@@ -686,7 +726,9 @@ def _figure(spec, title, subtitle, banner):
     plt = _mpl()
     L = _layout(spec)
     dpi = float(spec.get("dpi") or DPI)
-    fig = plt.figure(figsize=(L["w"] / dpi, L["h"] / dpi), dpi=dpi)
+    # + 0.25 px: matplotlib 3.3 (the NUC's) truncates width/dpi*dpi, so 854 px would come out 853 (8.54 * 100 =
+    # 853.99...); later versions round, and 854.25 rounds to 854 too
+    fig = plt.figure(figsize=((L["w"] + 0.25) / dpi, (L["h"] + 0.25) / dpi), dpi=dpi)
     fig.patch.set_facecolor("white")
     s = L["s"]
     if banner:
@@ -1067,13 +1109,18 @@ def decide_status(monday, today, latest, max_wait):
 
 
 def week_fingerprint(ctx, info, monday):
+    """The week's rows (counts, last date, and a digest of their content: the cron may re-process the ground file,
+    e.g. a timing-mode switch, with the same rows but other elevations) and the DEM options."""
     sun = sunday_of(monday)
     days = {d: v for d, v in info["dates"].items() if monday <= d <= sun}
     rows = sum(v[0] for v in days.values())
     frames = sum(v[1] for v in days.values())
     last = max(days) if days else ""
     args = " ".join(sw().dem_args(ctx.cron, ctx.has_hs))
-    return f"{rows}|{frames}|{last}|{args}"
+    dig = info.get("digest") or {}
+    content = hashlib.sha1("|".join(f"{d}:{dig[d]}" for d in sorted(dig) if monday <= d <= sun).encode()) \
+        .hexdigest()[:16]
+    return f"{rows}|{frames}|{last}|{args}|{content}"
 
 
 def dem_argv(ctx, ground, monday):
@@ -1202,11 +1249,12 @@ def build_week(ctx, info, monday):
         rebuilt = True
         if rc not in (0, 3, 4):
             ctx.warn(f"week {monday}: dem_from_contours.py failed (exit {rc}; see {wd.relative_to(ctx.base)}/"
-                     "dem_log.txt): the week stays open and is built again next run")
+                     "dem_log.txt): the week stays open and is built again by the next UTC day's daily run "
+                     "(or now: `weekly_frames.py daily --base BASE --force`)")
     W.update(data_through=thru, latest_in_week=latest_in)
     if status == "final":
         if W.get("dem_rc") not in (0, 3, 4):
-            status = "provisional"              # a failed build is never final: retried next run
+            status = "provisional"              # a failed build is never final: retried by the next day's run
         else:
             status = "final" if W.get("cells") else "empty"
             W["final_reason"] = reason
@@ -1302,9 +1350,12 @@ def concat_text(frames, fps, series):
 
 
 def ffmpeg_argv(ffmpeg, list_path, out_tmp, spec):
+    """Each frame at its slot k/fps: setpts snaps the concat list's times (k x 1/fps) to whole frames. Not N
+    (the frame count): ffmpeg rebuilds its filters when the frame size changes (a storm frame drawn before a
+    respec), N restarts at 0 there, and the frames after it would get earlier frames' times and be dropped."""
     w, h = spec["size"]
     fps = fmt_num(spec.get("fps") or 2)
-    vf = (f"setpts=N/({fps}*TB),scale={w}:{h}:force_original_aspect_ratio=decrease,"
+    vf = (f"setpts=round(T*{fps})/({fps}*TB),scale={w}:{h}:force_original_aspect_ratio=decrease,"
           f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=white,format=yuv420p")
     return [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
             "-vf", vf, "-r", fps, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4",
@@ -1313,7 +1364,8 @@ def ffmpeg_argv(ffmpeg, list_path, out_tmp, spec):
 
 def build_videos(ctx, force=False):
     """Each series' MP4 from its frames, when their set or content changed since the last build (or force).
-    Never a failure of the run: a missing ffmpeg is a NOTE (once per day), a failed ffmpeg a WARNING."""
+    Never a failure of the run (no WARNING, no exit 1): a missing ffmpeg is a NOTE (once per day), a failed ffmpeg
+    a NOTE (the daily step tries once per day)."""
     vstate = ctx.state.setdefault("videos", {})
     ffmpeg = shutil.which("ffmpeg")
     noted = set()
@@ -1356,7 +1408,9 @@ def build_videos(ctx, force=False):
         rc, text = ctx.runner(ffmpeg_argv(ffmpeg, lst, tmp, ctx.spec), None)
         if rc != 0 or not tmp.exists() or tmp.stat().st_size == 0:
             last = (text.strip().splitlines() or [""])[-1][:160]
-            ctx.warn(f"video {VIDEO_NAMES[series]} not rebuilt (ffmpeg exit {rc}: {last}); the frames are fine")
+            ctx.note(f"video {VIDEO_NAMES[series]} not rebuilt (ffmpeg exit {rc}: {last}); the frames are fine, "
+                     "the earlier video is kept, and the next daily run tries again")
+            vstate[series] = dict(prev, failed_sig=sig, failed_utc=iso_z(ctx.now), failed_rc=rc, failed_text=last)
             if tmp.exists():
                 tmp.unlink()
             continue
@@ -1421,11 +1475,23 @@ def cmd_daily(ctx, force=False):
         open_weeks = sorted(m for m, s in st["weeks"].items() if s not in ("final", "empty"))
         todo = set(open_weeks) | {cur}
         known = sorted(st["weeks"])
+        # missed weeks (the cron was off, a backfill stopped with --to): CATCHUP_WEEKS a run, oldest first, as
+        # this runs inside the cron's lock; the rest wait in state.json's "catchup" for the next days' runs
+        missed = set(st.get("catchup") or [])
         if known:
             m = monday_of(d_of(known[-1])) + timedelta(days=7)
             while d_iso(m) < cur:
-                todo.add(d_iso(m))
+                (todo if blind_in_week(m) else missed).add(d_iso(m))     # a blind week: only said skipped
                 m += timedelta(days=7)
+        missed = sorted(m for m in missed if DATE_RE.match(m) and m < cur and m not in st["weeks"]
+                        and not blind_in_week(m))
+        todo |= set(missed[:CATCHUP_WEEKS])
+        st["catchup"] = missed                  # built ones drop out next run (they are in "weeks" then)
+        rest = missed[CATCHUP_WEEKS:]
+        if rest:
+            ctx.note(f"{len(missed)} missed week(s): {CATCHUP_WEEKS} built now, {len(rest)} left for the next "
+                     f"days' runs ({rest[0]} to {rest[-1]}); `weekly_frames.py backfill --base BASE` builds them "
+                     "all at once")
         weeks = []
         for m in sorted(todo):
             b = blind_in_week(m)
@@ -1648,6 +1714,10 @@ def main(argv=None, runner=None, now=None):
     base = Path(a.base)
     if not base.is_dir():
         print(f"ERROR: --base {a.base}: not a folder")
+        return 1
+    _, bad = apply_station_file(base)
+    if bad:
+        print(f"ERROR: {bad}: nothing done")
         return 1
     if now is None and a.now:
         now = datetime.fromisoformat(a.now.replace("Z", "+00:00"))
