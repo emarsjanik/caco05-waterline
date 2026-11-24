@@ -118,6 +118,11 @@
 # hours of the calm run that must have a value
 #STORM_END_MIN_PRESENT=20
 
+# THE STORM DEM WINDOWS. STORM_PRE_DAYS and STORM_POST_DAYS: whole days 1 to 30 (--check-settings refuses
+# others; a run keeps the value before). --check-settings warns when one is above its _MAX_DAYS (raised to
+# it), when STORM_POST1_USABLE is above STORM_POST_DAYS, or STORM_MIN_USABLE_DAYS above either. The emails,
+# titles and the storm frames for the weekly videos (events/<id>/frames/, docs/WEEKLY_FRAMES.md) say
+# these numbers: "first 3 usable days", "7 days" at the defaults.
 # pre window dates; empty = the cron's DEM_WINDOW_DAYS (7)
 #STORM_PRE_DAYS=""
 

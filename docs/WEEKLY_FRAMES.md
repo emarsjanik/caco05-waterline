@@ -81,7 +81,8 @@ The waterline cron runs, near its end and only while `DEM_ENABLE=1`:
   finalises covered ones and rebuilds a video whose frames changed.
 - Each action prints one line starting `weekly frames:`. A `NOTE:` line is information. A `WARNING:` line is a
   real fault (a failed DEM build, a failed ffmpeg); the station status counts those.
-- Exit code: 0 when done, 1 after a WARNING.
+- Exit code: 0 when done, 1 after a WARNING. On exit 1 the cron adds its own line,
+  `WARNING: weekly frames failed (see above)`, and goes on to the station status (step 8).
 - `WEEKLY_ENABLE=0` turns the step off.
 
 ## 5. The videos (ffmpeg)
@@ -141,7 +142,12 @@ This re-freezes the spec from the current settings and the ground file. The old 
 and the videos are rebuilt.
 
 Storm frames are drawn by `storm_watch.py` and keep the look they were drawn with. The videos scale and pad
-them to the frame size, and `respec` says how many there are.
+them to the frame size, and `respec` says how many there are. The storm watch draws a product's frames in
+the run that makes it final, and only once `frame_spec.json` exists: before that it logs a NOTE and tries
+again on its next run while the event is open (the storm watch never writes `frame_spec.json` itself).
+Their banners use the storm watch's own settings: `BEFORE (pre-storm, <start> to <end>)`, `AFTER (first
+<STORM_POST1_USABLE> usable days, ...)`, `AFTER (<STORM_POST_DAYS> days, ...)`. In alerts mode there are
+none.
 
 ## 7. Backfill (once, over the archive)
 
@@ -193,7 +199,9 @@ through `storm_watch.cron_settings` and `storm_watch.dem_args`, so they cannot d
   - the subtitle gives the counts of waterlines and points.
 - **Change frame** (storm watch only). `dem_change.py`'s difference grid, `RdBu` with the frozen limit:
   - cells within the level of detection are light grey, and cells not compared are the panel's grey;
-  - the title and subtitle give both windows and the volumes.
+  - the banner gives both windows (`STORM <event>: CHANGE before -> after (pre <a> to <b> -> post <c> to <d>)`),
+    the title which post-storm DEM it is (`first 3 usable days` or `7 days` at the storm watch's defaults),
+    and the subtitle the volumes and the level of detection.
 
 The cameras' positions are not drawn. They would need the calibration files, which this script never reads.
 

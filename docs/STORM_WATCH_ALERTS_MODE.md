@@ -18,6 +18,7 @@ watch then does, and what to check or change by hand.
 | Forecast check, heads-up email | yes | yes |
 | Follows the storm on the observed waves (buoy) | yes | yes |
 | Pre- and post-storm DEMs, change map | yes | **no**: the ground file and the waterline cron's lock are never touched |
+| Storm frames for the weekly videos (docs/WEEKLY_FRAMES.md) | yes, once the frame spec exists | **no** (no DEM to draw) |
 | When the storm is over | waits for the post-storm DEMs (about 9-10 days) | a **storm-over** email at once |
 | The event closes | when the 7-day post-storm map is done | **72 h after the storm's end** |
 | `archive/storm_watch/events.csv` | not written | **one row per event**, when it closes |
@@ -128,16 +129,30 @@ bulletin, alert zones, the recipients' count and where they come from; never an 
 * a key the storm watch does not know;
 * a value that does not parse (a number, a sector `a-b`, a point `lat,lon`, a time zone, a buoy id,
   `full`/`alerts`, an open quote, text after a value);
+* `STORM_PRE_DAYS` or `STORM_POST_DAYS` outside whole days 1 to 30 (`ERROR: ... is out of range`); empty
+  means the cron's `DEM_WINDOW_DAYS` (7);
 * a `storm_watch_station.conf` without one of the station facts above.
 
 `WARN:` lines (exit 0): a station other than CACO-05 using one of Marconi's facts (its buoys, points,
 zones or longitude test; check them: the nearest buoy is not always the right one on a cape), thresholds
-still at Marconi's values, no sea-cell test at all, emails on without recipients.
+still at Marconi's values, no sea-cell test at all, emails on without recipients. And the storm DEM windows
+(none at the defaults 7, 14, 3, 7, 14, 3):
+
+* `STORM_PRE_DAYS` above `STORM_PRE_MAX_DAYS` (or `STORM_POST_DAYS` above `STORM_POST_MAX_DAYS`): the
+  `_MAX_DAYS` is raised to it, so a thin window is not extended beyond its own dates;
+* `STORM_POST1_USABLE` above `STORM_POST_DAYS`: the first post-storm DEM needs more usable dates than the
+  post window has dates, so it is no first look;
+* `STORM_MIN_USABLE_DAYS` above `STORM_PRE_DAYS` or `STORM_POST_DAYS`: such a window never has enough usable
+  dates by itself, so each such DEM is extended or not built.
+
+The wordings of the emails, titles and storm frames follow these settings ("first 3 usable days", "the
+7-day post-storm DEM", "7-day map" at the defaults).
 
 coastcam-station-setup runs it after it writes `storm_watch_station.conf`, and installs no crontab line
 unless it passes. A daily run never stops on these: an unknown key is noted in `logs/storm_watch.log` and
 ignored; a value that does not parse is noted and the value before it is kept (the station file's, for a
-typo in `storm_watch_settings.conf`; else the default), never CACO-05's in place of the station's own. With
+typo in `storm_watch_settings.conf`; else the default; the same for a window outside 1 to 30 days), never
+CACO-05's in place of the station's own. With
 a `storm_watch_station.conf`, a bad place fact or `STORM_MODE` is a `WARNING` on the run line.
 
 ---

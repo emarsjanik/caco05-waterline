@@ -113,7 +113,8 @@ STORM FRAMES (for the weekly videos, docs/WEEKLY_FRAMES.md). In the run that mak
 DEM final, post3 or post7 built, a change map made) it is also drawn in the weekly frames' frozen look
 (weekly_frames.py's functions and archive/weekly/frame_spec.json, read only) with a red banner, "STORM <id>:
 BEFORE (pre-storm, <start> to <end>)", "AFTER (first 3 usable days, ...)", "AFTER (7 days, ...)" or "CHANGE
-before -> after (...)" (the numbers are STORM_POST1_USABLE's and STORM_POST_DAYS'), into events/<id>/frames/:
+before -> after (pre ... -> post ...)" (the numbers are STORM_POST1_USABLE's and STORM_POST_DAYS'; a change frame
+names them in its title), into events/<id>/frames/:
 dem_<part>.png, waterlines_<part>.png (the window's waterline points), change_<part>.png and frames.json
 [{part, series (dem|waterlines|change), date (the window's end), window, png, ...}]. weekly_frames.py's video
 builder reads them there, so this job still writes only under archive/storm_watch/ and logs/. No frame spec
@@ -3696,16 +3697,15 @@ def drop_frames(ctx, E, key):
 
 def storm_banner(cfg, E, key, window, pre_window=None):
     """The red band of a storm frame: the event, BEFORE / AFTER / CHANGE, with the settings' own numbers (at the
-    defaults 'first 3 usable days' and '7 days')."""
+    defaults 'first 3 usable days' and '7 days'; a change frame names them in its title: the band stays one line
+    wide)."""
     a, b = window
     if key == "pre":
         return f"STORM {E['id']}: BEFORE (pre-storm, {a} to {b})"
     p3, p7 = post_words(cfg)
     if key in ("post3", "post7"):
         return f"STORM {E['id']}: AFTER ({p3 if key == 'post3' else p7}, {a} to {b})"
-    part = key[7:]
-    return (f"STORM {E['id']}: CHANGE before -> after (pre-storm {pre_window[0]} to {pre_window[1]} -> "
-            f"post-storm {p3 if part == 'post3' else p7}, {a} to {b})")
+    return f"STORM {E['id']}: CHANGE before -> after (pre {pre_window[0]} to {pre_window[1]} -> post {a} to {b})"
 
 
 def window_words(cfg, key):
@@ -3757,7 +3757,7 @@ def draw_storm_frame(ctx, E, key, spec, wf):
     station = spec.get("station_name") or station_of(cfg)
     label = spec.get("frame_label", "")
     sd = E.get("storm_dates")
-    sd_text = (f"the storm dates {sd[0]} to {sd[1]} are in no DEM" if sd else "the storm dates are in no DEM")
+    sd_text = (f"the storm dates {sd[0]} to {sd[1]} are in no DEM" if sd else "no storm date in the DEM")
     entries, notes = [], []
     if key.startswith("change_"):
         part = key[7:]
@@ -3765,13 +3765,13 @@ def draw_storm_frame(ctx, E, key, spec, wf):
         pre_w = (c.get("pre") or {}).get("window") or E["pre"]["window"]
         post_w = (c.get("post") or {}).get("window") or E[part]["window"]
         banner = storm_banner(cfg, E, key, post_w, pre_w)
-        title = f"{station}: change, pre-storm {pre_w[0]} to {pre_w[1]} -> post-storm {post_w[0]} to {post_w[1]} (UTC dates)"
+        title = f"{station}: change, post-storm ({post_words(cfg)[0 if part == 'post3' else 1]}) minus pre-storm DEM"
         e_, a_ = c.get("erosion") or {}, c.get("accretion") or {}
-        sub = (f"post minus pre over {c.get('cells_compared')} cells (>= 5 crossings in both DEMs): median "
+        sub = (f"post minus pre, {c.get('cells_compared')} cells (>= 5 crossings in both): median "
                f"{fnum(c.get('median_m'), '%+.2f')} m; significant erosion {fnum(e_.get('volume_m3'), '%+.1f')} m3, "
                f"accretion {fnum(a_.get('volume_m3'), '%+.1f')} m3, net {fnum(c.get('net_m3'), '%+.1f')} m3; level of "
-               f"detection (95 %) median {fnum(c.get('lod_median_m'), '%.3f')} m; the pre DEM rebuilt like for like; "
-               f"{sd_text}; intertidal beach only; {label}")
+               f"detection (95 %) {fnum(c.get('lod_median_m'), '%.3f')} m; pre rebuilt like for like; UTC dates; "
+               f"{sd_text}; {label}")
         png = f"change_{part}.png"
         wf.draw_change_frame(ed / c["stem"], fdir / png, spec, title, sub, banner)
         entries.append({"part": part, "series": "change", "date": post_w[1], "window": list(post_w),
