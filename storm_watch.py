@@ -109,10 +109,23 @@ GNSS-R runs about 2 days behind, so a date can be built only once the ground
 file covers it: the final pre DEM about 2 days after onset, post3 about 5 and
 post7 about 9-10 days after the storm ends.
 
+STORM FRAMES (for the weekly videos, docs/WEEKLY_FRAMES.md). In the run that makes a product final (the pre
+DEM final, post3 or post7 built, a change map made) it is also drawn in the weekly frames' frozen look
+(weekly_frames.py's functions and archive/weekly/frame_spec.json, read only) with a red banner, "STORM <id>:
+BEFORE (pre-storm, <start> to <end>)", "AFTER (first 3 usable days, ...)", "AFTER (7 days, ...)" or "CHANGE
+before -> after (pre ... -> post ...)" (the numbers are STORM_POST1_USABLE's and STORM_POST_DAYS'; a change frame
+names them in its title), into events/<id>/frames/:
+dem_<part>.png, waterlines_<part>.png (the window's waterline points), change_<part>.png and frames.json
+[{part, series (dem|waterlines|change), date (the window's end), window, png, ...}]. weekly_frames.py's video
+builder reads them there, so this job still writes only under archive/storm_watch/ and logs/. No frame spec
+yet (the cron's weekly_frames.py daily makes it): a NOTE, tried again while the event is open. A drawing
+failure is a NOTE in the event's log.txt and never stops the event. Alerts mode: no frames.
+
 FILES (on the station, BASE = /mnt/I2Rgus_Data/waterline):
   archive/storm_watch/state.json       the events (survives reboots and missed days)
   archive/storm_watch/events/<id>/     one folder per event: pre/, post3/, post7/,
-                                       change_post3/, change_post7/, emails/, event.json, log.txt
+                                       change_post3/, change_post7/, emails/, event.json, log.txt,
+                                       frames/ (the storm frames and frames.json, below)
   archive/storm_watch/events.csv       alerts mode: one row per closed event
   archive/storm_watch/forecasts/<date>/  each run's raw responses, gzipped (an audit trail)
   archive/storm_watch/work/            the working copy of the ground rows (removed when idle)
@@ -566,6 +579,9 @@ STATION_FACTS = ("STORM_STATION", "STORM_SITE", "STORM_TZ", "STORM_POINT", "STOR
 MARCONI_FACTS = ("STORM_SITE", "STORM_POINT", "STORM_MARINE_POINT", "STORM_BUOY_POINT", "STORM_BUOY", "STORM_BUOY2",
                  "STORM_ALERT_ZONES", "STORM_MIN_CELL_LON")
 ID_RE = re.compile(r"^[A-Za-z0-9]{3,8}$")
+# whole days a window setting may give (empty = the cron's DEM_WINDOW_DAYS); outside: refused by --check-settings,
+# and a run keeps the value before it (a note), as for a value that does not parse
+DAY_RANGES = {"STORM_PRE_DAYS": (1, 30), "STORM_POST_DAYS": (1, 30)}
 ONSET_RATIO = (0.4, 0.8)        # --check-settings: STORM_ONSET_HS_M within these times STORM_HS_M (CACO-05: 0.51)
 
 
@@ -582,6 +598,14 @@ def in_sector(deg, sector):
     d = np.asarray(deg, float) % 360
     with np.errstate(invalid="ignore"):
         return ((d >= a) & (d <= b)) if a <= b else ((d >= a) | (d <= b))
+
+
+def range_problem(key, value):
+    """Why a parsed value of `key` lies outside its range (DAY_RANGES), or None."""
+    lim = DAY_RANGES.get(key)
+    if lim is None or value is None or lim[0] <= value <= lim[1]:
+        return None
+    return f"whole days, {lim[0]} to {lim[1]}; empty = the cron's DEM_WINDOW_DAYS"
 
 
 def settings_paths(path):
@@ -610,12 +634,14 @@ def load_settings(path, cron=None):
             kind = SETTINGS[k][1]
             for v in vals:                               # in order: a bad line keeps the valid value before it
                 try:
-                    parse_setting(v, kind)
+                    out_of = range_problem(k, parse_setting(v, kind))
                 except (ValueError, TypeError):
+                    out_of = kind
+                if out_of:
                     kept = f"{src[k]}'s {raw[k]!r}" if k in raw else f"the default {SETTINGS[k][0]!r}"
                     warn = station_file and (k in STATION_FACTS or k == "STORM_MODE")
                     notes.append(("WARNING: " if warn else "") + f"setting {k}={v!r} in {p.name} is not valid "
-                                 f"({kind}): {kept} is used")
+                                 f"({out_of}): {kept} is used")
                     continue
                 raw[k], src[k] = v, p.name
     cfg = {}
@@ -761,18 +787,51 @@ def strict_lines(path):
             continue
         v = var_value(rest)
         try:
-            parse_setting(v, SETTINGS[k][1])
+            parsed = parse_setting(v, SETTINGS[k][1])
         except (ValueError, TypeError) as exc:
             errs.append(f"{name}:{n}: {k}={v!r} does not parse ({SETTINGS[k][1]}: {exc})")
+            continue
+        out_of = range_problem(k, parsed)
+        if out_of:
+            errs.append(f"{name}:{n}: {k}={v!r} is out of range ({out_of})")
             continue
         vals[k] = (v, n)
     return vals, errs
 
 
+def window_warnings(cfg, given):
+    """--check-settings' cross-checks of the storm DEM windows (cfg: as load_settings resolved them, an empty
+    STORM_PRE_DAYS/STORM_POST_DAYS = the cron's DEM_WINDOW_DAYS; given: the values the files gave). None at the
+    defaults (7, 14, 3, 7, 14, 3)."""
+    out = []
+    pre, post = cfg["STORM_PRE_DAYS"], cfg["STORM_POST_DAYS"]
+    for k, n, mk in (("STORM_PRE_DAYS", pre, "STORM_PRE_MAX_DAYS"), ("STORM_POST_DAYS", post, "STORM_POST_MAX_DAYS")):
+        try:
+            mx = int(str(given.get(mk, (SETTINGS[mk][0],))[0]).strip())
+        except ValueError:
+            continue
+        if n > mx:
+            out.append(f"{k} {n} is more than {mk} {mx}: {mk} is raised to {n}, so a thin window is not extended "
+                       "beyond its own dates")
+    p1 = cfg["STORM_POST1_USABLE"]
+    if p1 > post:
+        out.append(f"STORM_POST1_USABLE {p1} is more than STORM_POST_DAYS {post}: the first post-storm DEM needs more "
+                   f"usable dates than the post window has dates (it reaches past that window, up to "
+                   f"STORM_POST_MAX_DAYS {cfg['STORM_POST_MAX_DAYS']}), so it is no first look")
+    mu = cfg["STORM_MIN_USABLE_DAYS"]
+    for k, n in (("STORM_PRE_DAYS", pre), ("STORM_POST_DAYS", post)):
+        if mu > n:
+            out.append(f"STORM_MIN_USABLE_DAYS {mu} is more than {k} {n}: a window of {plural(n, 'date')} never has "
+                       f"{mu} usable dates, so each such DEM is extended (to the _MAX_DAYS) or not built")
+    return out
+
+
 def check_settings(base, settings_path=None):
     """--check-settings. -> (exit code, report lines). Errors (exit 1): a line that is not KEY=VALUE (e.g. 'KEY = v'),
-    an unknown key, a value that does not parse, a storm_watch_station.conf missing a station fact (STATION_FACTS).
-    Warnings (exit 0): another station using CACO-05's (Marconi's) facts or thresholds, emails on without recipients."""
+    an unknown key, a value that does not parse, STORM_PRE_DAYS/STORM_POST_DAYS outside 1..30 whole days (DAY_RANGES),
+    a storm_watch_station.conf missing a station fact (STATION_FACTS). Warnings (exit 0): another station using
+    CACO-05's (Marconi's) facts or thresholds, emails on without recipients, the storm DEM windows' cross-checks
+    (window_warnings)."""
     base = Path(base)
     station = base / STATION_FILE
     spath = Path(settings_path) if settings_path else base / SETTINGS_FILE
@@ -812,6 +871,7 @@ def check_settings(base, settings_path=None):
                    else "too close to the trigger height to mark an onset")
             warns.append(f"STORM_ONSET_HS_M {on:g} m is {on / hs_m:.2f} x STORM_HS_M {hs_m:g} m (CACO-05: 1.8 / 3.5 = "
                          f"0.51): {why} (--emit-settings suggests one)")
+    warns += window_warnings(cfg, given)
     to, where = recipients(base, cfg)
     out.append(f"  station {station_of(cfg)}, site {site_of(cfg)}, time zone {cfg['STORM_TZ']}, mode {cfg['STORM_MODE']}")
     b1, b2 = buoys(cfg)
@@ -2929,13 +2989,34 @@ def waves_ready(ctx, E, key, obs, a, b):
     return False, f"waiting for the wave record on {', '.join(gaps)}"
 
 
-def part_title(E, kind, a, b, site=None):
+def plural(n, word):
+    """'3 usable days', '1 usable day' (the wordings below follow the settings; at the defaults they are as before)."""
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def post_words(cfg):
+    """(post3's words, post7's words) from STORM_POST1_USABLE and STORM_POST_DAYS: at the defaults
+    ('first 3 usable days', '7 days')."""
+    c = cfg or {}
+    return (f"first {plural(c.get('STORM_POST1_USABLE', 3), 'usable day')}",
+            plural(c.get("STORM_POST_DAYS") or 7, "day"))
+
+
+def cron_window_days(cron):
+    """The cron's window-DEM length (DEM_WINDOW_DAYS; 7), for 'the cron's 7-day DEM options'."""
+    try:
+        return int((cron or {}).get("DEM_WINDOW_DAYS") or 7)
+    except ValueError:
+        return 7
+
+
+def part_title(E, kind, a, b, site=None, cfg=None):
     sd = E.get("storm_dates")
     if kind.startswith("pre"):
         return (f"{site or CACO05['STORM_SITE']} PRE-storm DEM, {a} to {b} (UTC dates)"
                 + (f", before the {sd[0]}..{sd[1]} storm" if sd else
                    f", before the storm forecast for {onset_date(E)}"))
-    which = "first 3 usable days" if kind == "post3" else "7 days"
+    which = post_words(cfg)[0 if kind == "post3" else 1]
     return f"{site or CACO05['STORM_SITE']} POST-storm DEM ({which}), {a} to {b}"
 
 
@@ -2979,7 +3060,7 @@ def try_pre(ctx, state, E, segs, gi, obs, provisional=False, window=None):
                                     + (f" (after {after[-1]})" if after else "")}
             return True
         rec = build_dem(ctx, E, ed / "pre_provisional" / f"pre_{start}_{end}", start, end,
-                        title=part_title(E, "pre", start, end, site_of(cfg)) + " (PROVISIONAL)", kind="pre (provisional)")
+                        title=part_title(E, "pre", start, end, site_of(cfg), cfg) + " (PROVISIONAL)", kind="pre (provisional)")
         rec["usable"] = usable_dates(gi, start, end, cfg)
         rec["status"] = "built" if rec["adequate"] else "inadequate"
         E["pre_provisional"] = rec
@@ -3039,7 +3120,7 @@ def try_pre(ctx, state, E, segs, gi, obs, provisional=False, window=None):
         lo = fl
     for attempt in range(4):
         rec = build_dem(ctx, E, ed / "pre" / f"pre_{start}_{end}", start, end,
-                        title=part_title(E, "pre", start, end, site_of(cfg)), kind="pre")
+                        title=part_title(E, "pre", start, end, site_of(cfg), cfg), kind="pre")
         if rec["adequate"] or attempt == 3 or start <= lo:
             break
         hist(ctx, E, f"pre {start}..{end} not adequate ({rec['why']}): one more day back")
@@ -3083,7 +3164,7 @@ def try_post3(ctx, state, E, gi, obs, segs):
         hist(ctx, E, "post3: DEM stage disabled")
         return True
     rec = build_dem(ctx, E, evdir(ctx, E) / "post3" / f"post3_{fp}_{d3}", fp, d3,
-                    title=part_title(E, "post3", fp, d3, site_of(cfg)), kind="post3")
+                    title=part_title(E, "post3", fp, d3, site_of(cfg), cfg), kind="post3")
     rec.update(usable=u[:need], status="built" if rec["adequate"] else "inadequate", flags=[why] if why else [])
     E["post3"] = rec
     hist(ctx, E, f"post3 {fp}..{d3}: {rec.get('cells')} cells" + ("" if rec["adequate"] else f" ({rec['why']})"))
@@ -3122,7 +3203,7 @@ def try_post7(ctx, state, E, gi, obs):
         reason = f"extended to {cap} for {cfg['STORM_MIN_USABLE_DAYS']} usable dates"
     if p3.get("window") == [fp, cap]:
         why = (f"cut by the next storm (wave event from {ob['cut_date'] and dadd(ob['cut_date'], 1)})" if cut else
-               f"the 7-day window holds only the usable dates of the first post DEM ({len(u)})")
+               f"the {cfg['STORM_POST_DAYS']}-day window holds only the usable dates of the first post DEM ({len(u)})")
         E["post7"] = {"status": "same as post3", "why": why, "window": [fp, cap]}
         return True
     ok, wwhy = waves_ready(ctx, E, "post7", obs, fp, cap)
@@ -3132,7 +3213,7 @@ def try_post7(ctx, state, E, gi, obs):
         E["post7"] = {"status": "disabled", "window": [fp, cap], "usable": u}
         return True
     rec = build_dem(ctx, E, evdir(ctx, E) / "post7" / f"post7_{fp}_{cap}", fp, cap,
-                    title=part_title(E, "post7", fp, cap, site_of(cfg)), kind="post7")
+                    title=part_title(E, "post7", fp, cap, site_of(cfg), cfg), kind="post7")
     flags = [f for f in (wwhy, reason, ("cut short by the next storm (from %s)" % dadd(ob["cut_date"], 1)) if cut
                          else "") if f]
     rec.update(usable=u, status="built" if rec["adequate"] else "inadequate", flags=flags)
@@ -3179,7 +3260,8 @@ def merge_or_cut(ctx, state, E, segs, gi):
                 queue_email(ctx, X, "merged", into=E["id"], peak=X["observed"].get("peak_hs"))
                 merged.append(X["id"])
         E["merged_from"] += merged
-        E["notes"].append(f"COMPOUND: the next storm ({cs['start'][:13]}Z) came before 3 usable post-storm dates "
+        E["notes"].append(f"COMPOUND: the next storm ({cs['start'][:13]}Z) came before "
+                          f"{plural(cfg['STORM_MIN_USABLE_DAYS'], 'usable post-storm date')} "
                           f"({len(u)}: {', '.join(u) or 'none'}): one event, its storm dates extended")
         ob.update(end=None, cut_segment=None, cut_date=None, cut_state=None)
         E.update(status="storm", first_post=None, first_post_exact=False, storm_dates=None, post3=None, post7=None)
@@ -3554,6 +3636,242 @@ def open_observed(ctx, state, segs, obs):
         update_storm(ctx, state, E, segs)
 
 
+# ---- storm frames: the final products drawn in the weekly frames' look (weekly_frames.py) --------------------------
+
+FRAME_KEYS = ("pre", "post3", "change_post3", "post7", "change_post7")
+
+
+def weekly_frames_mod():
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import weekly_frames
+    return weekly_frames
+
+
+def frame_owed(E, key):
+    """True when `key`'s product is final: the pre DEM final, post3/post7 built, a change map made."""
+    if key.startswith("change_"):
+        c = (E.get("change") or {}).get(key[7:]) or {}
+        post = E.get(key[7:]) or {}
+        return (c.get("status") == "map" and bool(c.get("stem")) and post.get("status") == "built"
+                and bool(post.get("window")) and list(post["window"]) == list((c.get("post") or {}).get("window") or []))
+    rec = E.get(key) or {}
+    return rec.get("status") == ("final" if key == "pre" else "built") and bool(rec.get("stem")) \
+        and bool(rec.get("window"))
+
+
+def frame_window(E, key):
+    """The window a key's frames show (a change map: its post window), or None."""
+    rec = E.get(key[7:] if key.startswith("change_") else key) or {}
+    w = rec.get("window")
+    return list(w) if w else None
+
+
+def frame_series(key):
+    """-> (frames.json part, its series) of a key."""
+    return (key[7:], ("change",)) if key.startswith("change_") else (key, ("dem", "waterlines"))
+
+
+def drop_frames(ctx, E, key):
+    """A key's frames out of frames/ and frames.json (a product rebuilt or withdrawn: a merge resets post3/post7)."""
+    fdir = evdir(ctx, E) / "frames"
+    part, series = frame_series(key)
+    p = fdir / "frames.json"
+    try:
+        old = json.loads(p.read_text())
+    except (OSError, ValueError):
+        old = None
+    if isinstance(old, list):
+        keep = [e for e in old if not (isinstance(e, dict) and e.get("part") == part and e.get("series") in series)]
+        for e in old:
+            if e not in keep and isinstance(e.get("png"), str) and "/" not in e["png"]:
+                try:
+                    (fdir / e["png"]).unlink()
+                except OSError:
+                    pass
+        tmp = fdir / "frames.json.tmp"
+        tmp.write_text(json.dumps(keep, indent=1) + "\n")
+        os.replace(str(tmp), str(p))
+    (E.get("frames") or {}).pop(key, None)
+
+
+def storm_banner(cfg, E, key, window, pre_window=None):
+    """The red band of a storm frame: the event, BEFORE / AFTER / CHANGE, with the settings' own numbers (at the
+    defaults 'first 3 usable days' and '7 days'; a change frame names them in its title: the band stays one line
+    wide)."""
+    a, b = window
+    if key == "pre":
+        return f"STORM {E['id']}: BEFORE (pre-storm, {a} to {b})"
+    p3, p7 = post_words(cfg)
+    if key in ("post3", "post7"):
+        return f"STORM {E['id']}: AFTER ({p3 if key == 'post3' else p7}, {a} to {b})"
+    return f"STORM {E['id']}: CHANGE before -> after (pre {pre_window[0]} to {pre_window[1]} -> post {a} to {b})"
+
+
+def window_words(cfg, key):
+    """What a storm frame's window is, in the settings' numbers."""
+    if key == "pre":
+        return (f"the pre-storm window: the {plural(cfg['STORM_PRE_DAYS'], 'date')} before the onset date "
+                f"(STORM_PRE_DAYS), back to {cfg['STORM_PRE_MAX_DAYS']} when thin")
+    if key == "post3":
+        return (f"the first post-storm DEM: the first {plural(cfg['STORM_POST1_USABLE'], 'usable date')} after the "
+                "storm (STORM_POST1_USABLE)")
+    return (f"the post-storm window: {plural(cfg['STORM_POST_DAYS'], 'date')} from the first post-storm date "
+            f"(STORM_POST_DAYS), up to {cfg['STORM_POST_MAX_DAYS']} when thin")
+
+
+def event_log(ctx, E, line):
+    """A line in events/<id>/log.txt (the builds' log)."""
+    try:
+        d = evdir(ctx, E)
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "log.txt", "a") as f:
+            f.write(f"[{iso_z(ctx.now)}] {line}\n")
+    except OSError:
+        pass
+
+
+def write_frames_json(fdir, entries):
+    """frames/frames.json: the entries of every part drawn so far (a part drawn again replaces its own), atomic."""
+    p = fdir / "frames.json"
+    try:
+        old = json.loads(p.read_text())
+        old = old if isinstance(old, list) else []
+    except (OSError, ValueError):
+        old = []
+    keys = {(e["part"], e["series"]) for e in entries}
+    out = [e for e in old if isinstance(e, dict) and (e.get("part"), e.get("series")) not in keys] + entries
+    out.sort(key=lambda e: (str(e.get("date")), e.get("series") == "change", str(e.get("png"))))
+    tmp = fdir / "frames.json.tmp"
+    tmp.write_text(json.dumps(out, indent=1) + "\n")
+    os.replace(str(tmp), str(p))
+
+
+def draw_storm_frame(ctx, E, key, spec, wf):
+    """The frame(s) of one final product into events/<id>/frames/: dem_<part>.png and waterlines_<part>.png, or
+    change_<part>.png; frames.json updated. -> (entries, notes)."""
+    cfg = ctx.cfg
+    ed = evdir(ctx, E)
+    fdir = ed / "frames"
+    fdir.mkdir(parents=True, exist_ok=True)
+    station = spec.get("station_name") or station_of(cfg)
+    label = spec.get("frame_label", "")
+    sd = E.get("storm_dates")
+    sd_text = (f"the storm dates {sd[0]} to {sd[1]} are in no DEM" if sd else "no storm date in the DEM")
+    entries, notes = [], []
+    if key.startswith("change_"):
+        part = key[7:]
+        c = E["change"][part]
+        pre_w = (c.get("pre") or {}).get("window") or E["pre"]["window"]
+        post_w = (c.get("post") or {}).get("window") or E[part]["window"]
+        banner = storm_banner(cfg, E, key, post_w, pre_w)
+        title = f"{station}: change, post-storm ({post_words(cfg)[0 if part == 'post3' else 1]}) minus pre-storm DEM"
+        e_, a_ = c.get("erosion") or {}, c.get("accretion") or {}
+        sub = (f"post minus pre, {c.get('cells_compared')} cells (>= 5 crossings in both): median "
+               f"{fnum(c.get('median_m'), '%+.2f')} m; significant erosion {fnum(e_.get('volume_m3'), '%+.1f')} m3, "
+               f"accretion {fnum(a_.get('volume_m3'), '%+.1f')} m3, net {fnum(c.get('net_m3'), '%+.1f')} m3; level of "
+               f"detection (95 %) {fnum(c.get('lod_median_m'), '%.3f')} m; pre rebuilt like for like; UTC dates; "
+               f"{sd_text}; {label}")
+        png = f"change_{part}.png"
+        wf.draw_change_frame(ed / c["stem"], fdir / png, spec, title, sub, banner)
+        entries.append({"part": part, "series": "change", "date": post_w[1], "window": list(post_w),
+                        "pre_window": list(pre_w), "png": png, "banner": banner, "title": title,
+                        "spec": spec.get("hash")})
+    else:
+        rec = E[key]
+        a, b = rec["window"]
+        banner = storm_banner(cfg, E, key, [a, b])
+        what = "pre-storm" if key == "pre" else "post-storm"
+        fr = rec.get("frames") or {}
+        nfr = sum(v for v in fr.values() if isinstance(v, (int, float))) if isinstance(fr, dict) else 0
+        title = f"{station}: {what} DEM, {a} to {b} (UTC dates)"
+        sub = (f"{plural(len(rec.get('usable') or []), 'usable date')}, {nfr} camera frames"
+               + (f" ({', '.join(f'{k} {v}' for k, v in sorted(fr.items()))})" if fr else "")
+               + f", {rec.get('cells', 0)} cells with >= 5 crossings; {window_words(cfg, key)}; the cron's "
+               f"window-DEM options; {sd_text}; elevations m NAVD88; {label}")
+        png = f"dem_{key}.png"
+        wf.draw_dem_frame(ed / rec["stem"], fdir / png, spec, title, sub, "", banner)
+        entries.append({"part": key, "series": "dem", "date": b, "window": [a, b], "png": png, "banner": banner,
+                        "title": title, "spec": spec.get("hash")})
+        if Path(ctx.ground_src).is_file():
+            mh = float(ctx.cron["DEM_MAX_HS"]) if (ctx.has_hs and ctx.cron.get("DEM_MAX_HS")) else None
+            pts = wf.read_points(ctx.ground_src, a, b, mh)
+            lines = len({(q["camera"], q["source_file"] or q["capture_time_utc"]) for q in pts})
+            wtitle = f"{station}: {what} waterlines, {a} to {b} (UTC dates)"
+            wsub = (f"{lines} waterlines, {len(pts)} points from both cameras, in time order"
+                    + (f"; frames with offshore Hs above {mh:g} m left out, as the DEM leaves them out" if mh is not None
+                       else "")
+                    + f"; the DEM's day test is not applied to these points; {window_words(cfg, key)}; "
+                    f"elevations m NAVD88; {label}")
+            wpng = f"waterlines_{key}.png"
+            n = wf.draw_waterline_frame(pts, fdir / wpng, spec, wtitle, wsub, "" if pts else
+                                        "EMPTY: no waterline points", banner)
+            entries.append({"part": key, "series": "waterlines", "date": b, "window": [a, b], "png": wpng,
+                            "banner": banner, "title": wtitle, "points": n, "spec": spec.get("hash")})
+        else:
+            notes.append(f"waterlines not drawn: the ground rows are not at hand ({Path(ctx.ground_src).name})")
+    write_frames_json(fdir, entries)
+    return entries, notes
+
+
+def storm_frames(ctx, E):
+    """The storm frames of every final product of E not yet drawn (FRAME_KEYS, in order), drawn with weekly_frames'
+    functions in the frozen look (archive/weekly/frame_spec.json) into events/<id>/frames/ with a frames.json;
+    weekly_frames.py's video builder reads them from there (this job never writes outside archive/storm_watch/).
+    No frame spec yet: a NOTE, tried again by the next run while the event is open (weekly_frames.py daily, run by
+    the cron, makes the spec). A drawing failure: a NOTE in the event's log, never a stop. Alerts mode: none
+    (no DEM). -> True when E changed."""
+    if ctx.alerts or not ctx.writes:
+        return False
+    done = E.setdefault("frames", {})
+    changed = False
+    for k in [k for k in FRAME_KEYS if k in done]:
+        if not frame_owed(E, k) or done[k].get("window") != frame_window(E, k):
+            drop_frames(ctx, E, k)
+            hist(ctx, E, f"frames {k} withdrawn (the product was reset or rebuilt)")
+            changed = True
+    todo = [k for k in FRAME_KEYS if k not in done and frame_owed(E, k)]
+    if not todo:
+        return changed
+    try:
+        wf = weekly_frames_mod()
+        spec = wf.load_spec(ctx.base)
+    except Exception as exc:             # never a stop
+        msg = f"{E['id']}: storm frames not drawn (weekly_frames.py: {type(exc).__name__}: {str(exc)[:120]})"
+        if msg not in ctx.notes:
+            event_log(ctx, E, "NOTE: " + msg)
+        ctx.note(msg)
+        return changed
+    if spec is None:
+        msg = (f"{E['id']}: storm frames of {', '.join(todo)} not drawn yet: no frame spec (archive/weekly/"
+               "frame_spec.json; the cron's weekly_frames.py daily makes it)")
+        if msg not in ctx.notes:
+            event_log(ctx, E, "NOTE: " + msg)
+        ctx.note(msg)
+        return changed
+    for k in todo:
+        try:
+            entries, notes = draw_storm_frame(ctx, E, k, spec, wf)
+            done[k] = {"status": "drawn", "utc": iso_z(ctx.now), "spec": spec.get("hash"), "window": frame_window(E, k),
+                       "png": [e["png"] for e in entries], "notes": notes}
+            hist(ctx, E, f"frames {k}: {', '.join(done[k]['png'])}" + (f" ({'; '.join(notes)})" if notes else ""))
+            for n in notes:
+                event_log(ctx, E, f"NOTE: frames {k}: {n}")
+        except Exception as exc:         # a drawing failure never stops the event or the run
+            why = f"{type(exc).__name__}: {str(exc)[:160]}"
+            done[k] = {"status": "failed", "utc": iso_z(ctx.now), "why": why, "window": frame_window(E, k)}
+            msg = f"{E['id']}: storm frames of {k} not drawn ({why})"
+            ctx.note(msg)
+            event_log(ctx, E, "NOTE: " + msg)
+            hist(ctx, E, "NOTE: " + msg)
+    return True
+
+
+def frames_step(ctx, state, E):
+    if storm_frames(ctx, E):
+        save_state(ctx, state)
+
+
 def ground_steps(ctx, state, E, gi, obs, segs):
     """Builds owed by an event, in order; each finished step is saved."""
     if E["status"] == "post" and not E["first_post_exact"]:
@@ -3565,6 +3883,7 @@ def ground_steps(ctx, state, E, gi, obs, segs):
     if E["status"] in ("storm", "post") and E["pre"].get("status") not in ("final", "inadequate", "disabled"):
         if try_pre(ctx, state, E, segs, gi, obs):
             save_state(ctx, state)
+    frames_step(ctx, state, E)              # the frames of every final product not drawn yet (the pre's here)
     if E["status"] == "watch" and E["pre_provisional"] is None and ctx.cron.get("DEM_ENABLE") == "1":
         try_pre(ctx, state, E, segs, gi, obs, provisional=True)
         save_state(ctx, state)
@@ -3577,6 +3896,7 @@ def ground_steps(ctx, state, E, gi, obs, segs):
             else:
                 change_for(ctx, E, "post3", segs)
             save_state(ctx, state)
+        frames_step(ctx, state, E)          # post3 and its change map
         if E["post3"] is not None and E["post7"] is None and try_post7(ctx, state, E, gi, obs):
             p7 = E["post7"]
             if p7.get("status") == "built":
@@ -3588,6 +3908,7 @@ def ground_steps(ctx, state, E, gi, obs, segs):
             E["status"], E["closed_reason"] = "closed", "complete"
             hist(ctx, E, "closed: complete")
             save_state(ctx, state)
+            frames_step(ctx, state, E)      # post7 and its change map, in the run that closes the event
     if is_open(E):
         waits(ctx, state, E, gi)
 
@@ -3599,7 +3920,10 @@ def pending_steps(ctx, state, E, gi, obs, segs):
     for p in E["pending"]:
         if p["what"] == "pre_final" and p.get("window"):
             if covered(gi, p["window"][1]):
-                if ctx.cron.get("DEM_ENABLE") != "1" or try_pre(ctx, state, E, segs, gi, obs, window=list(p["window"])):
+                if ctx.cron.get("DEM_ENABLE") != "1":
+                    continue
+                if try_pre(ctx, state, E, segs, gi, obs, window=list(p["window"])):
+                    storm_frames(ctx, E)            # the closed event's pre DEM: its frames now (saved by the caller)
                     continue
             if ddiff(ctx.today, p["window"][1]) > ctx.cfg["STORM_MAX_WAIT_DAYS"]:
                 E["notes"].append(f"{ctx.today}: pre {p['window']} " + (
@@ -3837,7 +4161,8 @@ def plan_lines(ctx, E, observed=False):
                    f"and this one; if fewer than {cfg['STORM_MIN_USABLE_DAYS']} usable dates lie between them, the two "
                    "storms become one compound event")
     else:
-        out.append(f"  pre-storm DEM: {win[0]} to {win[1]}, built with the cron's 7-day DEM options ({opts_text(ctx)}); "
+        out.append(f"  pre-storm DEM: {win[0]} to {win[1]}, built with the cron's {cron_window_days(ctx.cron)}-day DEM "
+                   f"options ({opts_text(ctx)}); "
                    f"fixed about 2 days after the onset (GNSS-R runs ~2 days behind), expected ~{dadd(od, 3)}")
     pp = E.get("pre_provisional")
     if pp and pp.get("status") in ("built", "inadequate") and pp.get("window"):
@@ -3848,8 +4173,9 @@ def plan_lines(ctx, E, observed=False):
         out.append(f"  no provisional pre-storm DEM: {pp.get('why')}")
     elif not observed:
         out.append(f"  no provisional pre-storm DEM this run: {ctx.ground_why or 'the ground steps did not run'}")
-    out.append("  first post-storm DEM (3 usable days) about 5 days after the storm ends; the 7-day post-storm DEM "
-               "and the main change map about 9-10 days after")
+    p1, pd = cfg["STORM_POST1_USABLE"], cfg["STORM_POST_DAYS"]
+    out.append(f"  first post-storm DEM ({plural(p1, 'usable day')}) about {p1 + 2} days after the storm ends; the "
+               f"{pd}-day post-storm DEM and the main change map about {pd + 2}-{pd + 3} days after")
     if not observed:
         out.append("  a storm that does not arrive is closed as a false alarm")
     return out
@@ -3895,7 +4221,7 @@ def dem_line(name, rec):
             + ("" if rec.get("adequate", True) else f" -- NOT ADEQUATE: {rec.get('why')}"))
 
 
-def change_lines(c, part):
+def change_lines(c, part, cfg=None):
     out = []
     if not c or c.get("status") != "map":
         out.append(f"  NO CHANGE MAP: {(c or {}).get('why', 'not made')}")
@@ -3929,8 +4255,9 @@ def change_lines(c, part):
             out.append(f"  waves above the calm level inside the {k} window (their rough frames are left out; the "
                        f"sand they moved is not): {'; '.join(ww[k])}")
     if part == "post3":
-        out.append("  first look: the 3-day DEM is closest to the most eroded state; the 7-day one includes some "
-                   "recovery and more cells")
+        p1, pd = (cfg or {}).get("STORM_POST1_USABLE", 3), (cfg or {}).get("STORM_POST_DAYS") or 7
+        out.append(f"  first look: the {p1}-day DEM is closest to the most eroded state; the {pd}-day one includes "
+                   "some recovery and more cells")
     return out
 
 
@@ -4031,7 +4358,8 @@ def compose(ctx, state, E, m):
                                  else "") + "." + tail]
         else:
             lines = [f"Event {E['id']} is closed: {what} part of the storm that event {into} follows (one compound "
-                     "event: fewer than 3 usable calm dates between the two storms)"
+                     f"event: fewer than {plural(cfg['STORM_MIN_USABLE_DAYS'], 'usable calm date')} between the two "
+                     "storms)"
                      + (f"; observed {short} peak {fnum(data.get('peak'))} m" if data.get("peak") is not None else "")
                      + f". Its pre-storm and post-storm DEMs and change maps come with the emails of {into}; this event "
                      "builds none of its own."]
@@ -4066,8 +4394,10 @@ def compose(ctx, state, E, m):
         part = kind.split("_")[1]
         c = E["change"].get(part) or {}
         subj = (f"Beach change after the {sdt} storm: "
-                + ("first look (3 usable days)" if part == "post3" else "7-day map"))
-        lines = ["STORM:"] + storm_lines(E, cfg) + ["", f"DEMS (dem_from_contours.py, the cron's 7-day DEM options: "
+                + (f"first look ({plural(cfg['STORM_POST1_USABLE'], 'usable day')})" if part == "post3"
+                   else f"{cfg['STORM_POST_DAYS']}-day map"))
+        lines = ["STORM:"] + storm_lines(E, cfg) + ["", f"DEMS (dem_from_contours.py, the cron's "
+                                                    f"{cron_window_days(ctx.cron)}-day DEM options: "
                                                     f"{opts_text(ctx)}):", dem_line("pre", E["pre"]),
                                                dem_line(part, E[part])]
         if c.get("status") == "map":
@@ -4075,7 +4405,7 @@ def compose(ctx, state, E, m):
         for k in ("pre", part):
             for fl in (E.get(k) or {}).get("flags") or []:
                 lines.append(f"  {k}: {fl}")
-        lines += ["", "CHANGE (post minus pre; blue = accretion, red = erosion):"] + change_lines(c, part)
+        lines += ["", "CHANGE (post minus pre; blue = accretion, red = erosion):"] + change_lines(c, part, cfg)
         pl = pointing_lines(c)
         if pl:
             lines += [""] + pl

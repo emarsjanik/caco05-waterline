@@ -1,0 +1,36 @@
+# weekly_frames_settings.conf: the weekly DEM and waterline frames (weekly_frames.py, docs/WEEKLY_FRAMES.md)
+#
+# Copy this file to weekly_frames_settings.conf in the waterline folder (BASE, /mnt/I2Rgus_Data/waterline on
+# CACO-05) and remove the '#' in front of a line to change it. Every line here shows the default. A key the
+# script does not know, or a value that does not parse, is a NOTE in the cron's log and the default is used.
+#
+# THE LOOK IS FROZEN. The first run (the cron's daily step or a backfill) writes archive/weekly/frame_spec.json
+# from these settings and the ground file, and every frame after it is drawn with that look, so the frames
+# play as one video. A value changed here later (FPS, EXTENT, Z_LIMITS, CHANGE_LIMIT, SIZE) is NOT applied:
+# the daily step logs a NOTE. To apply it, run once:
+#     python3 weekly_frames.py respec --base /mnt/I2Rgus_Data/waterline
+# which re-freezes the look and redraws every frame from the kept grids and points (no DEM is rebuilt).
+
+# 1: the cron's daily step makes the weekly frames; 0: it does nothing.
+#WEEKLY_ENABLE=1
+
+# Frames per second of the two videos: each frame (a week, or a storm frame) is shown 1/FPS seconds.
+#WEEKLY_FPS=2
+
+# An ended week is final once the ground file covers its Sunday, or at the latest this many days after its
+# Sunday (GNSS-R runs about 2 days behind; a longer gap would otherwise hold the week open for ever).
+#WEEKLY_MAX_WAIT_DAYS=7
+
+# The map extent, "e_min,e_max,n_min,n_max" in metres (UTM, the grids' frame). Empty = auto: every usable
+# ground point, padded 20 m and rounded outward to 10 m.
+#WEEKLY_EXTENT=""
+
+# The elevation colour limits, "z_min,z_max" in m NAVD88. Empty = auto: the 1st-99th percentiles of every
+# usable ground point, rounded outward to 0.25 m.
+#WEEKLY_Z_LIMITS=""
+
+# The change frames' (storm watch: before -> after) symmetric colour limit, in metres.
+#WEEKLY_CHANGE_LIMIT=0.5
+
+# The frame size in pixels, WIDTHxHEIGHT (even numbers: the videos are H.264).
+#WEEKLY_SIZE=1920x1080

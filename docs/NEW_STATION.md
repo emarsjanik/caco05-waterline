@@ -14,8 +14,9 @@ NUC (`./setup.sh`, then `./setup.sh --waterline`). This page covers:
 
 **CACO-05 has no `waterline_station.conf`.** Without the file the cron runs the same commands and writes
 the same files and logs as before. `test_station_overlay.py` checks this against the cron as it was
-before the station file existed (docs/VALIDATION.md section 2.11). Never run coastcam-station-setup on
-CACO-05.
+before the station file existed (docs/VALIDATION.md section 2.11); the one step added since on purpose, the
+weekly frames (`weekly_frames.py daily`, step 7c), is the only difference it allows. Never run
+coastcam-station-setup on CACO-05.
 
 The storm watch has its own station file and an alerts mode; see `docs/STORM_WATCH_ALERTS_MODE.md`.
 
@@ -93,6 +94,17 @@ Do not use them at a new station. `TIMING_MODE` stays `legacy` there, and the fi
 |---|---|---|---|
 | 1 | From install day until the calibration, OPUS height and GNSS water levels are in | `WATERLINE_STAGE="archive"`, `OWG_ENABLE="0"`, `ARCHIVE_PRODUCTS=""` and `STATION_NAME` | Copies the new timex pictures into `archive/images_timex` (never overwriting one), then logs `stage 1 (WATERLINE_STAGE=archive): timex kept: N; ...` and `=== run end ===`. No detection, maps or DEM; no Python but the check. |
 | 2 | After `./setup.sh --waterline` (setup's "continue" step) | The full file (below), without `WATERLINE_STAGE` | The whole pipeline, with the station's values. |
+
+The products of a stage-2 run, in `/mnt/I2Rgus_Data/waterline`: the waterline points
+(`contour_points_timex.csv`, `contour_points_ground.csv`), the 7- and 30-day elevation maps per camera
+(`elevation_map_<cam>_{7,30}day.png`), the whole-archive and 7-day DEMs (`dem_intertidal*`, with the 7-day
+DEM's map and GeoTIFF and its copy in `archive/dems/`), `station_status.txt` (no runup at a new station),
+and the
+**weekly frames** (`archive/weekly/`, docs/WEEKLY_FRAMES.md): every week (Monday to Sunday, UTC dates) a new
+DEM frame and waterline frame in one frozen look, and the two MP4 videos made from the final weeks
+(`archive/weekly/video/`; they need ffmpeg). The storm watch in full mode adds its storm frames to those
+videos (docs/STORM_WATCH_ALERTS_MODE.md). The weekly step runs only while `DEM_ENABLE=1`; in stage 1 the
+cron stops before it.
 
 Setup's full file (the CACO07 names and numbers are examples):
 
@@ -205,7 +217,7 @@ The file is git-ignored, like `storm_watch_station.conf`, `station_calibration/`
 | `GNSSR_ANTENNA_NAVD88_M` | `extract_elevation_contours.py`, and `compare_gnssr_to_tidemodel.py` and `gnssir_reflection_audit.py` through it: the GNSS antenna's height, m NAVD88, which turns reflector heights into water levels. An empty or non-numeric value stops the script with an ERROR; it never falls back to 19.014, which would put another station's levels metres off. | `19.014` | the OPUS (GEOID18) height |
 | `STATION_TZ` | `extract_elevation_contours.py`, `dem_from_contours.py`: which local day a frame belongs to. An IANA name. | `America/New_York` | the station's zone |
 | `GEOTIFF_EPSG` | `asc_to_geotiff.py` (the GeoTIFF's tag; `--epsg` still wins), and the axis labels of `dem_map.py` and `dem_change.py`. NAD83(2011) UTM zone N is EPSG 6329+N (zones 1-19). | `6348` (UTM 19N) | the calibration's zone |
-| `STATION_NAME` | The titles of the DEM page (`dem_figure.py`) and the map (`dem_map.py`). | the built-in CACO-05 titles | the station's name |
+| `STATION_NAME` | The titles of the DEM page (`dem_figure.py`) and the map (`dem_map.py`), and the weekly frames' titles (frozen in `archive/weekly/frame_spec.json` when it is made; a later change needs `weekly_frames.py respec`). | the built-in CACO-05 titles | the station's name |
 | `STATION_PROVISIONAL` | Free text: what is provisional about the products. It goes into `<dem>_info.json` (`station_provisional`) and appears as a `PROVISIONAL: ...` line under the DEM page's heading. Section 3. | none | what is provisional |
 | `STATION_WAVE_CURRENCY` | The wave record C was fitted with, as `<kind>:<height>/<period>`. With a setup on, frames tagged with raw buoy waves that are not this record get a WARNING on every run. Section 4. | `marconi:hs_best/tp_s` | not set while C = 0 |
 | `GNSSR_QC_GROSS_M` | `gnssr_qc.py`'s gross range for a GNSS-R level, `"lo,hi"` in m NAVD88. | `-2.5,3.5` | set only when the gauge's MLLW or MHHW falls outside -2.5 to +3.5 m |

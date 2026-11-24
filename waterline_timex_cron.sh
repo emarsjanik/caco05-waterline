@@ -974,6 +974,16 @@ if [ "$POINTING_LOG_ENABLE" = "1" ]; then
         || log "WARNING: camera pointing log failed (see above); the products are unaffected"
 fi
 
+# 7c. Weekly DEM and waterline frames, and their videos (weekly_frames.py,
+#     docs/WEEKLY_FRAMES.md): once per UTC date (a later run that day prints
+#     one line and returns), only while the DEM stage is on. This run holds the
+#     cron's lock, so --have-lock: the script reads the ground file directly and
+#     never waits for the lock. Its settings are weekly_frames_settings.conf's.
+if [ "$DEM_ENABLE" = "1" ]; then
+    python3 "$BASE/weekly_frames.py" daily --base "$BASE" --have-lock >> "$LOG" 2>&1 \
+        || log "WARNING: weekly frames failed (see above)"
+fi
+
 # 8. Station health summary (station_status.py): also written to
 #    station_status.txt; exit status 1 = warnings, 2 = alerts. The buoy and
 #    gauge files are this script's (on CACO-05 the same as its defaults).

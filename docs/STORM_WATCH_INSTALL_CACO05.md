@@ -203,3 +203,13 @@ Where things are: `logs/storm_watch.log` (one line a day), `logs/storm_watch_det
 run printed), `archive/storm_watch/events/` (one folder per storm: the maps, GeoTIFFs, change map and
 the emails). The full description is in `docs/VALIDATION.md` section 2.10 and at the top of
 `storm_watch.py`.
+
+**Storm frames for the weekly videos.** Each storm's final products (the pre-storm DEM, the first and the
+7-day post-storm DEMs, and both change maps) are also drawn in the look of the weekly frames, with a red
+banner such as `STORM <event>: BEFORE (pre-storm, ...)`, into `archive/storm_watch/events/<event>/frames/`
+(with a `frames.json` list). The waterline cron's weekly step (`weekly_frames.py daily`, see
+`docs/WEEKLY_FRAMES.md`) puts them into `archive/weekly/video/dem_weekly.mp4` and `waterlines_weekly.mp4`
+at their dates. The frames need that step's frozen look (`archive/weekly/frame_spec.json`, made by the
+cron's first run after the pull): until it exists the storm watch logs a NOTE and draws them on a later
+run while the event is open. A frame that cannot be drawn is a NOTE in the event's `log.txt`; the event and
+its emails go on. The video needs ffmpeg (`sudo apt-get install -y ffmpeg`).

@@ -31,7 +31,10 @@ WHAT (docs/VALIDATION.md 2.10):
       listed as a wave event in its windows; again with 4 missed run days.
   T8  a whole event with the REAL dem_from_contours.py and dem_change.py on a synthetic station: planted
       erosion recovered, storm dates in no DEM, like for like after a +0.10 m reprocessing shift, no write
-      outside archive/storm_watch/ and logs/, no --series-dir or --last-days.
+      outside archive/storm_watch/ and logs/, no --series-dir or --last-days; with a frozen weekly frame spec
+      (archive/weekly/frame_spec.json, made first as the cron's weekly_frames.py daily makes it): the storm frames
+      of pre, post3, post7 and both change maps in events/<id>/frames/ (frames.json, the banners, the waterline
+      points, one pixel size and the spec's hash), read in place by weekly_frames.py's video lists.
   T9  false alarm, unverified (its pre DEM built after the wave-record wait), a missed storm, an update, a second
       storm after the first, a camera that turned (and one with no pointing log), first install, a crash while
       sending, a build that raises, the cron's DEM_ENABLE=0, msmtp retries (addresses only counted), the first
@@ -58,6 +61,11 @@ WHAT (docs/VALIDATION.md 2.10):
   T15 alerts mode: a storm-over email, the event closed 72 h after the storm's end (and a forecast for its tail inside
       those hours no new event), one events.csv row, no DEM call and no DEM or NAVD88 wording; a false alarm with no
       pending pre DEM; full mode unchanged.
+  T17 storm frames with a fake builder: no frame spec yet (a NOTE; drawn once the spec appears while the event is
+      open); STORM_PRE_DAYS=5, STORM_POST1_USABLE=4, STORM_POST_DAYS=6 in the banners, titles, subjects, report and
+      plan; a drawing failure (a NOTE, the event still closes); no waterline frame without the ground rows; a reset
+      product's frames withdrawn; none in alerts mode or a dry run. --check-settings: STORM_PRE_DAYS /
+      STORM_POST_DAYS refused outside 1..30, the window cross-checks as warnings.
   T16 storm_watch.sh: --install-cron / --remove-cron refused on a setup-managed NUC (~/stationTools/
       crontab_new_station.txt, a temporary HOME); waterline_station.conf checked, sourced, its exports reach python.
 
@@ -91,6 +99,7 @@ os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.dont_write_bytecode = True
 import storm_watch as sw   # noqa: E402
 import dem_change          # noqa: E402
+import weekly_frames as wf  # noqa: E402
 
 UTC = timezone.utc
 FIX = HERE / "test_fixtures/storm_watch"
@@ -1261,6 +1270,10 @@ def t8():
             calls.append(list(argv))
             return sw.subprocess_runner(argv, log_path)
         mine = {"contour_points_ground.csv", "archive/waves_marconi.csv"}
+        # the frozen frame look, made as the cron's weekly_frames.py daily makes it (before the snapshot: the storm
+        # watch only reads it, so it stays inside the write contract below)
+        write_station_ground(base / "contour_points_ground.csv", 20)
+        spec = wf.ensure_spec(base, base / "contour_points_ground.csv", log=lambda s: None)
         before = tree(base)
         heads_up = None
         for day in range(3, 23):
@@ -1373,7 +1386,72 @@ def t8():
               and not (base / "archive/dems_model").exists(),
               "contour_points_timex.csv and dem_intertidal_7day_dem.tif unchanged; archive/dems empty; no archive/dems_model")
         check(not (base / "archive/storm_watch/work").exists(), "the working ground copy is removed once no event is open")
+        t8_frames(base, E, ed, spec)
     print(f"  ({time.time() - t_start:.1f} s)")
+
+
+def t8_frames(base, E, ed, spec):
+    """T8's storm frames: each final product drawn in the weekly frames' frozen look into events/<id>/frames/, with
+    frames.json, the banners at the default settings, the waterline points of each window, and weekly_frames.py's
+    video lists picking them up at their dates."""
+    check(spec is not None and (base / "archive/weekly/frame_spec.json").exists(), "the frame spec was made for T8")
+    if spec is None:
+        return
+    fdir = ed / "frames"
+    fj = json.loads((fdir / "frames.json").read_text()) if (fdir / "frames.json").exists() else []
+    eid, w0, w3, w7 = E["id"], ["2026-11-03", "2026-11-09"], ["2026-11-12", "2026-11-14"], ["2026-11-12", "2026-11-18"]
+    want = [("pre", "dem", w0[1], w0, "dem_pre.png"), ("pre", "waterlines", w0[1], w0, "waterlines_pre.png"),
+            ("post3", "dem", w3[1], w3, "dem_post3.png"), ("post3", "waterlines", w3[1], w3, "waterlines_post3.png"),
+            ("post3", "change", w3[1], w3, "change_post3.png"),
+            ("post7", "dem", w7[1], w7, "dem_post7.png"), ("post7", "waterlines", w7[1], w7, "waterlines_post7.png"),
+            ("post7", "change", w7[1], w7, "change_post7.png")]
+    got = [(e.get("part"), e.get("series"), e.get("date"), e.get("window"), e.get("png")) for e in fj]
+    check(got == want, f"frames.json: pre, post3 (+ change), post7 (+ change), each dated by its window's end (a change "
+                       f"map by its post window's end), in date order, change last on its date ({got})")
+    pngs = sorted(p.name for p in fdir.glob("*.png")) if fdir.is_dir() else []
+    sizes = {n: wf.png_size(fdir / n) for n in pngs}
+    hashes = {n: wf.png_text(fdir / n).get("weekly_frames_spec") for n in pngs}
+    check(pngs == sorted(w[4] for w in want) and set(sizes.values()) == {tuple(spec["size"])}
+          and set(hashes.values()) == {spec["hash"]} and all(e.get("spec") == spec["hash"] for e in fj),
+          f"8 frames, all {spec['size'][0]}x{spec['size'][1]} px and carrying the frozen spec's hash ({sizes})")
+    ban = {(e["part"], e["series"]): e.get("banner") for e in fj}
+    check(ban.get(("pre", "dem")) == f"STORM {eid}: BEFORE (pre-storm, 2026-11-03 to 2026-11-09)"
+          and ban.get(("post3", "dem")) == f"STORM {eid}: AFTER (first 3 usable days, 2026-11-12 to 2026-11-14)"
+          and ban.get(("post7", "dem")) == f"STORM {eid}: AFTER (7 days, 2026-11-12 to 2026-11-18)"
+          and ban.get(("post3", "change")) == f"STORM {eid}: CHANGE before -> after (pre 2026-11-03 to 2026-11-09 -> "
+                                              f"post 2026-11-12 to 2026-11-14)"
+          and [e["title"] for e in fj if e["series"] == "change"]
+          == ["CACO-05 Marconi Beach: change, post-storm (first 3 usable days) minus pre-storm DEM",
+              "CACO-05 Marconi Beach: change, post-storm (7 days) minus pre-storm DEM"]
+          and ban.get(("pre", "waterlines")) == ban.get(("pre", "dem")),
+          f"the banners at the default settings (BEFORE / AFTER first 3 usable days / AFTER 7 days / CHANGE) ({ban})")
+    pts = {e["part"]: e.get("points") for e in fj if e["series"] == "waterlines"}
+    ref = {k: len(wf.read_points(base / "contour_points_ground.csv", w[0], w[1], 1.5))
+           for k, w in (("pre", w0), ("post3", w3), ("post7", w7))}
+    check(pts == ref and all(n > 0 for n in pts.values()),
+          f"the waterline frames: each window's ground points as weekly_frames.read_points gives them (UTC dates, DEM_MAX_HS 1.5 m) ({pts} = {ref})")
+    fr = E.get("frames") or {}
+    check(sorted(fr) == sorted(sw.FRAME_KEYS) and all(v.get("status") == "drawn" for v in fr.values())
+          and "storm frames" not in (ed / "log.txt").read_text(),
+          f"the event records every part's frames as drawn, no NOTE about frames in its log ({sorted(fr)})")
+    dem, _ = wf.collect_frames(base, "dem")
+    wl, _ = wf.collect_frames(base, "waterlines")
+    check([n for n, _ in dem] == [f"2026-11-09_storm_{eid}_pre.png", f"2026-11-14_storm_{eid}_post3.png",
+                                  f"2026-11-14_storm_{eid}_change_post3.png", f"2026-11-18_storm_{eid}_post7.png",
+                                  f"2026-11-18_storm_{eid}_change_post7.png"]
+          and [n for n, _ in wl] == [f"2026-11-09_storm_{eid}_pre.png", f"2026-11-14_storm_{eid}_post3.png",
+                                     f"2026-11-18_storm_{eid}_post7.png"],
+          f"weekly_frames.py's video lists read the storm frames in place, at their dates ({[n for n, _ in dem]})")
+    r3 = next((m for m in E["emails"] if m["kind"] == "report_post3"), {})
+    body3 = (ed / r3["body_file"]).read_text() if r3.get("body_file") else ""
+    check(r3.get("subject", "").endswith("storm: first look (3 usable days)")
+          and "the cron's 7-day DEM options" in body3
+          and "first look: the 3-day DEM is closest to the most eroded state; the 7-day one includes some recovery "
+              "and more cells" in body3
+          and f"{sw.CACO05['STORM_SITE']} POST-storm DEM (first 3 usable days), 2026-11-12 to 2026-11-14"
+          == sw.part_title(E, "post3", *w3, sw.CACO05["STORM_SITE"], sw.load_settings(None, sw.cron_settings(base)[0])[0]),
+          "at the default settings the wordings are as before: 'first look (3 usable days)', 'the cron's 7-day DEM "
+          "options', 'the 3-day DEM ... the 7-day one', 'POST-storm DEM (first 3 usable days)'")
 
 
 def evdir_file(base, E, kind):
@@ -1960,6 +2038,185 @@ def t9b():
 
 def first_run_of(E, prefix):
     return next((h[:10] for h in E["history"] if h[12:].startswith(prefix)), None)
+
+
+def frames_spec(base, size="640x360"):
+    """A frozen frame spec as the cron's weekly_frames.py daily makes it, here from its settings (the fake builds'
+    grids lie at E 420000-420040, N 4638000-4638040) and a ground file without rows."""
+    (base / "weekly_frames_settings.conf").write_text(f"WEEKLY_EXTENT=419980,420060,4637980,4638060\n"
+                                                      f"WEEKLY_Z_LIMITS=-1,1.5\nWEEKLY_SIZE={size}\n")
+    g = base / "archive/frames_spec_ground.csv"
+    g.write_text("capture_time_utc,camera,source_file,easting_utm19,northing_utm19,beach_elevation_navd88\n")
+    return wf.ensure_spec(base, g, log=lambda s: None)
+
+
+def t17():
+    print("T17 storm frames (fake builder): no frame spec yet, the settings' own numbers in every wording, a drawing "
+          "failure, alerts mode, a product withdrawn; --check-settings' window ranges and cross-checks")
+    start = datetime(2026, 10, 20, tzinfo=UTC)
+    gi = simple_ground(days_of("2026-10-20", "2026-12-31"))
+    A = datetime(2026, 11, 14, 3, tzinfo=UTC)
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "frames")
+        write_marconi(base / "archive/waves_marconi.csv", wave_rows(start, 60, storms_at(A)))
+        extra = "STORM_PRE_DAYS=5\nSTORM_POST_DAYS=6\nSTORM_POST1_USABLE=4\n"
+        cfg_for(base, extra)
+        seen, E = {}, None
+        for d in days_of("2026-11-12", "2026-11-17"):
+            ev, ctx, _ = run_day(base, d, gi)
+            E = ev.get("2026-11-14_obs")
+            seen[d] = (E or {}).get("pre", {}).get("status"), list(ctx.notes)
+        ed = base / "archive/storm_watch/events/2026-11-14_obs"
+        d_pre = next((d for d, v in sorted(seen.items()) if v[0] == "final"), None)
+        nospec = [n for n in seen.get(d_pre, (None, []))[1] if "no frame spec" in n]
+        log = (ed / "log.txt").read_text() if (ed / "log.txt").exists() else ""
+        check(E is not None and d_pre is not None and nospec
+              and nospec[0] == "2026-11-14_obs: storm frames of pre not drawn yet: no frame spec (archive/weekly/"
+                               "frame_spec.json; the cron's weekly_frames.py daily makes it)"
+              and "NOTE: " + nospec[0] in log and not (ed / "frames").exists() and not E.get("frames")
+              and not (base / "archive/weekly").exists(),
+              f"no frame spec yet: the final pre DEM ({d_pre}) has no frames, a NOTE in the run line and the event's "
+              f"log, nothing written under archive/weekly/ ({nospec})")
+        spec = frames_spec(base)
+        check(spec is not None and spec["size"] == [640, 360], "the frame spec made (WEEKLY_SIZE 640x360)")
+        real_dem = wf.draw_dem_frame
+
+        def failing_dem(stem, out_png, *a, **k):
+            if "post7" in Path(out_png).name:
+                raise RuntimeError("a drawing failure (test)")
+            return real_dem(stem, out_png, *a, **k)
+        wf.draw_dem_frame = failing_dem
+        closed_on = None
+        try:
+            for d in days_of("2026-11-18", "2026-11-30"):
+                ev, ctx, line = run_day(base, d, gi)
+                E = ev["2026-11-14_obs"]
+                if d == "2026-11-18":
+                    check(E["frames"].get("pre", {}).get("status") == "drawn" and (ed / "frames/dem_pre.png").exists(),
+                          "the spec made later (the event still open): the pre DEM's frame drawn on the next run")
+                if E["status"] == "closed":
+                    closed_on = d
+                    break
+        finally:
+            wf.draw_dem_frame = real_dem
+        fr = E.get("frames") or {}
+        log = (ed / "log.txt").read_text()
+        check(E["status"] == "closed" and E["closed_reason"] == "complete" and closed_on
+              and fr.get("post7", {}).get("status") == "failed" and "a drawing failure (test)" in fr["post7"].get("why", "")
+              and "NOTE: 2026-11-14_obs: storm frames of post7 not drawn (RuntimeError: a drawing failure (test))" in log
+              and fr.get("change_post7", {}).get("status") == "drawn"
+              and "report_post7" in [m["kind"] for m in E["emails"]],
+              f"a drawing failure: a NOTE in the event's log, the event still closes complete ({closed_on}) with its "
+              f"report, the other frames drawn ({ {k: v.get('status') for k, v in fr.items()} })")
+        fj = json.loads((ed / "frames/frames.json").read_text())
+        got = [(e["part"], e["series"], e["date"], e["png"]) for e in fj]
+        check(got == [("pre", "dem", "2026-11-13", "dem_pre.png"), ("post3", "dem", "2026-11-18", "dem_post3.png"),
+                      ("post3", "change", "2026-11-18", "change_post3.png"),
+                      ("post7", "change", "2026-11-20", "change_post7.png")]
+              and all(wf.png_size(ed / "frames" / e["png"]) == (640, 360) for e in fj),
+              f"frames.json: the frames drawn, 640 x 360 (the frozen WEEKLY_SIZE); no waterline frame without the "
+              f"ground rows, no post7 DEM frame after its failure ({got})")
+        check(all("waterlines not drawn: the ground rows are not at hand" in " ".join(fr[k].get("notes") or [])
+                  for k in ("pre", "post3")) and "NOTE: frames pre: waterlines not drawn" in log,
+              "no ground rows at hand (the ground override): the waterline frames left out, with a NOTE")
+        ban = {(e["part"], e["series"]): e["banner"] for e in fj}
+        check(ban.get(("pre", "dem")) == "STORM 2026-11-14_obs: BEFORE (pre-storm, 2026-11-09 to 2026-11-13)"
+              and ban.get(("post3", "dem")) == "STORM 2026-11-14_obs: AFTER (first 4 usable days, 2026-11-15 to 2026-11-18)"
+              and ban.get(("post7", "change")) == "STORM 2026-11-14_obs: CHANGE before -> after (pre 2026-11-09 to "
+                                                  "2026-11-13 -> post 2026-11-15 to 2026-11-20)"
+              and [e["title"] for e in fj if e["series"] == "change"]
+              == ["CACO-05 Marconi Beach: change, post-storm (first 4 usable days) minus pre-storm DEM",
+                  "CACO-05 Marconi Beach: change, post-storm (6 days) minus pre-storm DEM"]
+              and sw.storm_banner(ctx.cfg, E, "post7", ["2026-11-15", "2026-11-20"])
+              == "STORM 2026-11-14_obs: AFTER (6 days, 2026-11-15 to 2026-11-20)",
+              f"STORM_PRE_DAYS=5, STORM_POST1_USABLE=4, STORM_POST_DAYS=6: the banners carry 5 dates, 'first 4 usable "
+              f"days' and '6 days' ({ban})")
+        subj = {m["kind"]: m.get("subject") or "" for m in E["emails"]}
+        bodies3 = body_of(base, E, "report_post3")
+        missed = body_of(base, E, "missed_storm")
+        check(subj.get("report_post3", "").endswith("first look (4 usable days)") and subj.get("report_post7", "")
+              .endswith("storm: 6-day map")
+              and "first look: the 4-day DEM is closest to the most eroded state; the 6-day one includes some recovery"
+                  in bodies3
+              and "the cron's 7-day DEM options" in bodies3
+              and "first post-storm DEM (4 usable days) about 6 days after the storm ends; the 6-day post-storm DEM "
+                  "and the main change map about 8-9 days after" in missed
+              and sw.part_title(E, "post3", "a", "b", "X", ctx.cfg) == "X POST-storm DEM (first 4 usable days), a to b"
+              and sw.part_title(E, "post7", "a", "b", "X", ctx.cfg) == "X POST-storm DEM (6 days), a to b",
+              f"the subjects, report, plan and titles use the settings (4 usable days, 6-day), the cron's own window "
+              f"stays 7 days ({subj})")
+        # a product withdrawn (a merge resets post3/post7): its frames leave frames/ and frames.json
+        st = json.loads((base / "archive/storm_watch/state.json").read_text())
+        X = next(e for e in st["events"] if e["id"] == "2026-11-14_obs")
+        X["post3"] = None
+        ctx = ctx_for(base, datetime(2026, 12, 1, 12, 50, tzinfo=UTC), runner=fake_runner_factory())
+        changed = sw.storm_frames(ctx, X)
+        left = [e["part"] for e in json.loads((ed / "frames/frames.json").read_text())]
+        check(changed and "post3" not in X["frames"] and "change_post3" not in X["frames"]
+              and not (ed / "frames/dem_post3.png").exists() and not (ed / "frames/change_post3.png").exists()
+              and left == ["pre", "post7"],
+              f"post3 reset: its DEM and change frames withdrawn from frames/ and frames.json ({left})")
+        # alerts mode and a dry run: no frames at all
+        Y = dict(X, id="2026-12-01_obs", frames={}, post3=E["post3"])
+        for mode, extra2 in (("live", "STORM_MODE=alerts\n"), ("dry", "")):
+            c2 = ctx_for(base, datetime(2026, 12, 1, 12, 50, tzinfo=UTC), mode=mode, extra=extra2)
+            r = sw.storm_frames(c2, Y)
+            check(r is False and not Y["frames"] and not (base / "archive/storm_watch/events/2026-12-01_obs").exists(),
+                  f"{'alerts mode' if mode == 'live' else 'a dry run'}: no storm frames, nothing written")
+
+    # --check-settings: STORM_PRE_DAYS / STORM_POST_DAYS whole days 1..30 (empty = the cron's DEM_WINDOW_DAYS); the
+    # cross-checks are warnings
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp, "ranges", settings=None)
+        got = []
+        for text in ("STORM_PRE_DAYS=0\n", "STORM_PRE_DAYS=31\n", "STORM_POST_DAYS=-2\n", "STORM_POST_DAYS=45\n"):
+            (base / "storm_watch_settings.conf").write_text(text)
+            rc, out = check_settings_run(base)
+            got.append((text.strip(), rc, "is out of range (whole days, 1 to 30; empty = the cron's DEM_WINDOW_DAYS)"
+                        in out and "settings REFUSED" in out))
+        check(all(rc == 1 and ok for _, rc, ok in got), f"--check-settings refuses STORM_PRE_DAYS / STORM_POST_DAYS "
+                                                          f"outside 1..30 ({got})")
+        ok = []
+        for text in ('STORM_PRE_DAYS=""\nSTORM_POST_DAYS=""\n', "STORM_PRE_DAYS=1\nSTORM_POST_DAYS=3\n",
+                     "STORM_PRE_DAYS=14\nSTORM_POST_DAYS=14\n"):
+            (base / "storm_watch_settings.conf").write_text(text)
+            rc, out = check_settings_run(base)
+            ok.append((text.strip(), rc, "WARN" in out))
+        check([x[1:] for x in ok] == [(0, False), (0, True), (0, False)],
+              f"empty (the cron's 7) and values in 1..30 accepted: 1 and 3 with the STORM_MIN_USABLE_DAYS warning, "
+              f"14 and 14 with none ({ok})")
+        (base / "storm_watch_settings.conf").write_text("STORM_PRE_DAYS=0\nSTORM_POST_DAYS=31\n")
+        cfg, notes = sw.load_settings(base / "storm_watch_settings.conf", sw.cron_settings(base)[0])
+        check(cfg["STORM_PRE_DAYS"] == 7 and cfg["STORM_POST_DAYS"] == 7
+              and any("STORM_PRE_DAYS='0'" in n and "whole days, 1 to 30" in n and "the default ''" in n for n in notes),
+              "a run with an out-of-range window keeps the earlier value (the default: the cron's 7), with a note")
+        (base / "storm_watch_settings.conf").write_text("STORM_PRE_DAYS=10\nSTORM_PRE_DAYS=0\n")
+        cfg, notes = sw.load_settings(base / "storm_watch_settings.conf", sw.cron_settings(base)[0])
+        check(cfg["STORM_PRE_DAYS"] == 10 and any("'10' is used" in n for n in notes),
+              "... or the earlier valid line's value")
+        cases = [("STORM_PRE_DAYS=20\n", ["STORM_PRE_DAYS 20 is more than STORM_PRE_MAX_DAYS 14: STORM_PRE_MAX_DAYS is "
+                                          "raised to 20"]),
+                 ("STORM_POST_DAYS=21\nSTORM_POST_MAX_DAYS=15\n",
+                  ["STORM_POST_DAYS 21 is more than STORM_POST_MAX_DAYS 15: STORM_POST_MAX_DAYS is raised to 21"]),
+                 ("STORM_POST1_USABLE=8\n", ["STORM_POST1_USABLE 8 is more than STORM_POST_DAYS 7"]),
+                 ("STORM_MIN_USABLE_DAYS=5\nSTORM_PRE_DAYS=4\n",
+                  ["STORM_MIN_USABLE_DAYS 5 is more than STORM_PRE_DAYS 4: a window of 4 dates never has 5 usable dates"]),
+                 ("STORM_MIN_USABLE_DAYS=8\n", ["STORM_MIN_USABLE_DAYS 8 is more than STORM_PRE_DAYS 7",
+                                                 "STORM_MIN_USABLE_DAYS 8 is more than STORM_POST_DAYS 7"])]
+        bad = []
+        for text, wants in cases:
+            (base / "storm_watch_settings.conf").write_text(text)
+            rc, out = check_settings_run(base)
+            warns = [ln for ln in out.splitlines() if ln.startswith("WARN: ")]
+            if not (rc == 0 and len(warns) == len(wants) and all(any(w in ln for ln in warns) for w in wants)):
+                bad.append((text.strip(), rc, warns))
+        check(not bad, f"--check-settings warns (exit 0) when STORM_PRE_DAYS/STORM_POST_DAYS raise their _MAX_DAYS, "
+                       f"STORM_POST1_USABLE exceeds STORM_POST_DAYS, STORM_MIN_USABLE_DAYS exceeds either ({bad})")
+        (base / "storm_watch_settings.conf").write_text("STORM_PRE_DAYS=7\nSTORM_POST_DAYS=7\nSTORM_PRE_MAX_DAYS=14\n"
+                                                        "STORM_POST_MAX_DAYS=14\nSTORM_POST1_USABLE=3\n"
+                                                        "STORM_MIN_USABLE_DAYS=3\n")
+        rc, out = check_settings_run(base)
+        check(rc == 0 and "WARN" not in out, "the defaults written out: no window warning")
 
 
 # --------------------------------------------------------------------------------------------
@@ -3056,7 +3313,7 @@ def main():
         real_captures(sys.argv[sys.argv.index("--real-captures") + 1])
     else:
         os.environ.setdefault("MPLCONFIGDIR", tempfile.mkdtemp(prefix="mpl_storm_watch_"))
-        for t in (t1, t2, t3, t4, t5, t6, t7, t8, t9, t9b, t10, t11, t12, t13, t14, t15, t16):
+        for t in (t1, t2, t3, t4, t5, t6, t7, t8, t9, t9b, t10, t11, t12, t13, t14, t15, t16, t17):
             t()
     if FAILED:
         print(f"{len(FAILED)} storm watch check(s) FAILED:")
