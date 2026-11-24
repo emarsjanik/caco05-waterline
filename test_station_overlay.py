@@ -35,11 +35,21 @@ CACO-05 has no such file, so there the cron must run exactly as before:
   g. the weekly frames step (7c, weekly_frames.py daily --base BASE --have-lock,
      docs/WEEKLY_FRAMES.md): called once, after the pointing log and before
      station_status.py, only while DEM_ENABLE=1; a failure is the cron's
-     "WARNING: weekly frames failed (see above)" and the run goes on.
+     "WARNING: weekly frames failed (see above)" and the run goes on;
+  h. the extra timex (:15/:45, /mnt/I2Rgus_Data/extra_timex/YYYY-MM-DD/; the
+     cron's EXTRA TIMEX): with that folder, a second detector call right after
+     the first, the same options plus --source-dir, its source folder holding
+     only the window's (3 days) timex pictures with no detection yet; their
+     CSVs archived with cp -pn, the pictures kept in archive/images_timex; a
+     frame already detected skipped, a later run with nothing new makes no
+     call; the station's DETECTOR_ARGS on it too; stage 1 keeps the pictures;
+     --extra-timex-backfill takes every day, one call per day, and nothing
+     else; any other argument is refused. Without the folder (parts a-g) the
+     cron is as before.
 
-HOW. The cron is copied into a temporary folder ($BASE, with ImageProducts
-and the GNSS-R file there too) and run by bash with a stand-in python3 that
-records each call (and runs waterline_station_check.py for real) and a
+HOW. The cron is copied into a temporary folder ($BASE, with ImageProducts,
+the GNSS-R file and the extra timex folder there too) and run by bash with a
+stand-in python3 that records each call (and runs waterline_station_check.py for real) and a
 stand-in owg.sh. REV (default BASELINE below: the commit before the overlay)
 gives the cron "as before"; update it when the cron changes on purpose. Without
 git or REV, part (a)'s comparison and part (d) are skipped with a SKIP line.
@@ -125,14 +135,17 @@ def with_weekly(calls):
 
 
 def localise(text, b):
-    """The cron's text with $BASE, ImageProducts and the GNSS-R file in folder b."""
+    """The cron's text with $BASE, ImageProducts, the extra timex folder and the GNSS-R file in folder b."""
     n_base = len(re.findall(r"^BASE=/mnt/I2Rgus_Data/waterline$", text, re.M))
     n_spl = len(re.findall(r"^GNSSR_SPLINE=.*$", text, re.M))
     if n_base != 1 or n_spl != 1:
         raise SystemExit(f"the cron's BASE= / GNSSR_SPLINE= lines not found once ({n_base}, {n_spl})")
     text = re.sub(r"^BASE=/mnt/I2Rgus_Data/waterline$", f"BASE={b}", text, flags=re.M)
     text = re.sub(r"^GNSSR_SPLINE=.*$", f"GNSSR_SPLINE={b}/gnss/usgs_spline_out.txt", text, flags=re.M)
-    return text.replace("/mnt/I2Rgus_Data/ImageProducts", f"{b}/ImageProducts")
+    # the extra timex folder too, so a station that has one (CACO-05 once it is installed) never shows it to
+    # a run (parts a-g have none; part h makes one in b)
+    return text.replace("/mnt/I2Rgus_Data/ImageProducts", f"{b}/ImageProducts").replace(
+        "/mnt/I2Rgus_Data/extra_timex", f"{b}/extra_timex")
 
 
 def make_base(root, name, cron_text, caco05_cal=True, station_cal=()):
@@ -193,13 +206,13 @@ class Run:
         return out
 
 
-def run_cron(b, extra_env=None):
+def run_cron(b, extra_env=None, args=()):
     env = {"PATH": f"{b}/bin:{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(b), "LC_ALL": "C",
            "CALLS": str(b / "calls.txt"), "ENVS": str(b / "envs.txt"), "REAL_PY": sys.executable}
     if os.environ.get("TZ"):
         env["TZ"] = os.environ["TZ"]
     env.update(extra_env or {})
-    r = subprocess.run(["bash", str(b / "waterline_timex_cron.sh")], stdout=subprocess.PIPE,
+    r = subprocess.run(["bash", str(b / "waterline_timex_cron.sh")] + list(args), stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, universal_newlines=True, env=env, cwd=str(b))
     return Run(b, r.returncode, r.stdout)
 
@@ -785,6 +798,230 @@ def test_weekly_step(d):
 
 
 # ---------------------------------------------------------------------
+# h. the extra timex (:15/:45)
+# ---------------------------------------------------------------------
+
+# the stand-in python3, but the detector also writes one CSV per timex picture of its source folder (--source-dir,
+# else ImageProducts) into --output-dir (cleared first, as the detector clears it) and lists its source folder
+DET_STUB = STUB.replace('prev=""\n', r"""case "$1" in
+    *waterline_detector_v5.py)
+        src="$SRCDEF"; out=""; prev=""
+        for a in "$@"; do
+            [ "$prev" = "--source-dir" ] && src="$a"
+            [ "$prev" = "--output-dir" ] && out="$a"
+            prev="$a"
+        done
+        echo "SRC $src: $(cd "$src" && find . -type f | sed 's|^\./||' | sort | tr '\n' ' ')" >> "$SRCS"
+        rm -f "$out"/*
+        for f in "$src"/*.timex.jpg; do
+            [ -f "$f" ] || continue
+            n="${f##*/}"
+            echo "det $n" > "$out/${n%.jpg}.csv"
+            echo "$(stat -c %Y "$f") $n" >> "$SRCS.mtimes"
+        done
+        exit "${DET_RC:-0}" ;;
+esac
+prev=""
+""", 1)
+DET_CALL = ("PY waterline_detector_v5.py --image-suffix timex.jpg --timing-mode legacy --input-dir /B/input_timex "
+            "--output-dir /B/processed_timex --debug-dir /B/debug")
+XT_CALL = ("PY waterline_detector_v5.py --image-suffix timex.jpg --timing-mode legacy --source-dir "
+           "/B/extra_timex_source --input-dir /B/input_timex --output-dir /B/processed_timex --debug-dir /B/debug")
+
+
+def local_day(days_ago):
+    """The local date days_ago days before today, as the cron's date reads it."""
+    return subprocess.run(["date", "-d", f"today -{days_ago} days", "+%F"], stdout=subprocess.PIPE,
+                          universal_newlines=True).stdout.strip()
+
+
+def xt_name(day, cam, minute):
+    """An extra timex picture's name (Argus style) at <minute> past 14 local on <day>."""
+    e = int(subprocess.run(["date", "-d", f"{day} 14:{minute:02d}", "+%s"], stdout=subprocess.PIPE,
+                           universal_newlines=True).stdout.strip())
+    return f"{e}.Mon.Jan.01_14_{minute:02d}_00.GMT.2026.CACO05.{cam}.timex.jpg"
+
+
+def make_extra(b, detected=True):
+    """b/extra_timex as extra_timex.sh leaves it: dated folders of today and 1, 2, 3 days ago (3 is outside the
+    window), a snap, a raw/ run folder and ArgusEyes' products/ folder; one frame (1 day ago, c1) already detected
+    when `detected`. -> {name: day} of every timex picture in a dated folder."""
+    xt = b / "extra_timex"
+    days = [local_day(k) for k in range(4)]
+    pics = {}
+    for k, cams_minutes in enumerate(([("c1", 15), ("c2", 15)], [("c1", 45), ("c2", 45)], [("c1", 15)],
+                                      [("c1", 15)])):
+        (xt / days[k]).mkdir(parents=True)
+        for cam, m in cams_minutes:
+            n = xt_name(days[k], cam, m)
+            (xt / days[k] / n).write_bytes(b"xt " + n.encode())
+            pics[n] = days[k]
+    snap = xt_name(days[0], "c1", 15).replace("timex", "snap")
+    (xt / days[0] / snap).write_bytes(b"snap")
+    (xt / days[0] / "raw/1792500000000").mkdir(parents=True)
+    (xt / days[0] / "raw/1792500000000" / xt_name(days[0], "c1", 16)).write_bytes(b"raw")
+    (xt / "products").mkdir()
+    (xt / "products" / xt_name(days[0], "c2", 17)).write_bytes(b"in progress")
+    (xt / "raw").mkdir()
+    (xt / "notes").mkdir()
+    (xt / "notes" / xt_name(days[0], "c2", 18)).write_bytes(b"not a dated folder")
+    os.utime(str(xt / days[0] / xt_name(days[0], "c1", 15)), (1792500000, 1792500000))
+    if detected:
+        (b / "archive/processed_timex").mkdir(parents=True)
+        (b / "archive/processed_timex" / xt_name(days[1], "c1", 45).replace(".jpg", ".csv")).write_text("old\n")
+    return days, pics
+
+
+def xt_run(b, args=(), **env):
+    for f in ("calls.txt", "envs.txt", "srcs.txt", "srcs.txt.mtimes"):
+        if (b / f).exists():
+            (b / f).unlink()
+    r = run_cron(b, dict({"SRCDEF": str(b / "ImageProducts"), "SRCS": str(b / "srcs.txt")}, **env), args)
+    r.srcs = [x.replace(str(b), "/B") for x in
+              ((b / "srcs.txt").read_text().splitlines() if (b / "srcs.txt").exists() else [])]
+    mt = b / "srcs.txt.mtimes"
+    r.mtimes = dict(ln.split(" ", 1)[::-1] for ln in (mt.read_text().splitlines() if mt.exists() else []))
+    return r
+
+
+def src_line(folder, names):
+    return f"SRC {folder}: " + "".join(n + " " for n in sorted(names))
+
+
+def test_extra_timex(d):
+    print("h. the extra timex (:15/:45): a second detector call on the window's undetected pictures, archived as the others")
+    text = CRON.read_text()
+    lines = [ln for ln in text.splitlines() if "/mnt/I2Rgus_Data/extra_timex" in ln]
+    check("the extra timex folder is a local of extra_timex_step (no column-0 NAME= line for it)",
+          [ln.strip() for ln in lines if not ln.lstrip().startswith("#")]
+          == ['local mode="$1" xt=/mnt/I2Rgus_Data/extra_timex cut="" d days=()'], lines)
+    b = make_base(d, "h_extra", text)
+    (b / "bin/python3").write_text(DET_STUB)
+    days, pics = make_extra(b)
+    old = xt_name(days[1], "c1", 45)
+    new = sorted(n for n, day in pics.items() if day != days[3] and n != old)
+    r = xt_run(b)
+    dets = r.py("waterline_detector_v5.py")
+    check("the run ends cleanly, no WARNING about the extra timex",
+          r.rc == 0 and "=== run end ===" in r.log and "WARNING: extra timex" not in r.log, r.log[-600:])
+    check("two detector calls, the second right after the first: the same options plus --source-dir "
+          "/B/extra_timex_source", dets == [DET_CALL, XT_CALL] and r.calls[:2] == dets, r.calls[:3])
+    check("its source folder: only the window's (today and the 2 days before) timex pictures with no detection yet "
+          "(not the one detected, not 3 days ago, no snap, nothing from raw/, products/ or a folder not dated)",
+          len(r.srcs) == 2 and r.srcs[0].startswith("SRC /B/ImageProducts: ")
+          and r.srcs[1] == src_line("/B/extra_timex_source", new) and len(new) == 4, (r.srcs, new))
+    arch = b / "archive/processed_timex"
+    got = sorted(p.name for p in arch.iterdir())
+    want = sorted([n.replace(".jpg", ".csv") for n in list(TIMEX) + new] + [old.replace(".jpg", ".csv")])
+    check("their CSVs archived beside the first run's; the frame already detected keeps its CSV (cp -pn); none for "
+          "the day outside the window", got == want and (arch / old.replace(".jpg", ".csv")).read_text() == "old\n"
+          and all((arch / n.replace(".jpg", ".csv")).read_text() == f"det {n}\n" for n in new), got)
+    img = b / "archive/images_timex"
+    kept = sorted(p.name for p in img.iterdir())
+    check("the window's extra timex pictures kept in archive/images_timex (the one detected before too), with "
+          "their times (cp -p); not 3 days ago's, no snap",
+          kept == sorted(list(TIMEX) + new + [old])
+          and int((img / xt_name(days[0], "c1", 15)).stat().st_mtime) == 1792500000, kept)
+    check("the detector saw each picture with its own time (cp -p into the source folder: its file-name/file-time "
+          "check)", r.mtimes.get(xt_name(days[0], "c1", 15)) == "1792500000", r.mtimes)
+    check("logged: the extra run's count, then the archive's images with them; the source folder removed",
+          "extra timex detections archived: +4 of 4 new picture(s) (total 7)" in r.log
+          and "images in archive: 7" in r.log and not (b / "extra_timex_source").exists(), r.log)
+    check("the extra timex folder left as it was (nothing moved or removed)",
+          sorted(p.name for p in (b / "extra_timex" / days[0]).iterdir())
+          == sorted([xt_name(days[0], "c1", 15), xt_name(days[0], "c2", 15),
+                     xt_name(days[0], "c1", 15).replace("timex", "snap"), "raw"]))
+    r = xt_run(b)
+    check("a second run with nothing new: no second detector call, a line in the log, no WARNING",
+          r.py("waterline_detector_v5.py") == [DET_CALL] and r.rc == 0
+          and "extra timex: nothing new to detect (3 dated folder(s), every picture detected)" in r.log
+          and "WARNING: extra timex" not in r.log and not (b / "extra_timex_source").exists(),
+          (r.calls[:3], r.log[-500:]))
+    late = xt_name(days[0], "c1", 45)
+    (b / "extra_timex" / days[0] / late).write_bytes(b"late")
+    r = xt_run(b, DET_RC="1")
+    check("a new picture: the second call's source folder holds it alone; the detector failing is a WARNING and "
+          "what it wrote is still archived",
+          r.srcs[1:] == [src_line("/B/extra_timex_source", [late])]
+          and "WARNING: extra timex: detector exited 1 (archiving whatever it produced)" in r.log
+          and (arch / late.replace(".jpg", ".csv")).exists() and (img / late).exists(), (r.srcs, r.log[-500:]))
+
+    # the station's DETECTOR_ARGS on the second call too
+    b = make_base(d, "h_station", text, caco05_cal=False, station_cal=STATION_CAL)
+    (b / "bin/python3").write_text(DET_STUB)
+    (b / "waterline_station.conf").write_text(station_conf(b))
+    make_extra(b)
+    r = xt_run(b)
+    args = " --no-bias-correction --profile-json /B/station_calibration/detector_profile.json"
+    check("with a station file: both detector calls carry its DETECTOR_ARGS",
+          r.py("waterline_detector_v5.py") == [DET_CALL + args, XT_CALL + args] and r.rc == 0, r.calls[:3])
+
+    # stage 1: the pictures kept, no detection
+    b = make_base(d, "h_stage1", text, caco05_cal=False)
+    (b / "bin/python3").write_text(DET_STUB)
+    (b / "waterline_station.conf").write_text(station_conf(b, stage="archive"))
+    days, pics = make_extra(b, detected=False)
+    r = xt_run(b)
+    win = [n for n, day in pics.items() if day != days[3]]
+    check("stage 1: the only Python call is the check; the window's extra timex kept with the others",
+          r.calls == ["PY /B/waterline_station_check.py check-overlay --conf /B/waterline_station.conf"]
+          and sorted(os.listdir(b / "archive/images_timex")) == sorted(list(TIMEX) + win)
+          and "timex kept: 7;" in r.log, (r.calls, r.log))
+    r = xt_run(b, ["--extra-timex-backfill"])
+    check("stage 1 with --extra-timex-backfill: every day's extra timex kept, still nothing detected",
+          r.calls == ["PY /B/waterline_station_check.py check-overlay --conf /B/waterline_station.conf"]
+          and sorted(os.listdir(b / "archive/images_timex")) == sorted(list(TIMEX) + list(pics))
+          and "timex kept: 8;" in r.log, (r.calls, r.log))
+
+    # the backfill: every day, one detector call per day, oldest first, nothing else run
+    b = make_base(d, "h_backfill", text)
+    (b / "bin/python3").write_text(DET_STUB)
+    days, pics = make_extra(b)
+    old = xt_name(days[1], "c1", 45)
+    r = xt_run(b, ["--extra-timex-backfill"])
+    bf = XT_CALL.replace("--debug-dir /B/debug", "--debug-dir /B/extra_timex_backfill_debug")
+    by_day = [sorted(n for n, day in pics.items() if day == days[k] and n != old) for k in (3, 2, 1, 0)]
+    check("--extra-timex-backfill: one detector call per dated folder, oldest first, each on that day's undetected "
+          "pictures, its debug images in a scratch folder removed after; no other Python call, no owg.sh",
+          r.calls == [bf] * 4 and r.srcs == [src_line("/B/extra_timex_source", x) for x in by_day]
+          and not (b / "extra_timex_backfill_debug").exists() and not (b / "extra_timex_source").exists()
+          and r.rc == 0, (r.calls, r.srcs))
+    check("... every day's CSVs and pictures archived (3 days ago's too), the one detected before kept; logged",
+          sorted(p.name for p in (b / "archive/processed_timex").iterdir())
+          == sorted(n.replace(".jpg", ".csv") for n in pics)
+          and (b / "archive/processed_timex" / old.replace(".jpg", ".csv")).read_text() == "old\n"
+          and sorted(os.listdir(b / "archive/images_timex")) == sorted(pics)
+          and "extra timex backfill: 4 dated folder(s) in /B/extra_timex" in r.log
+          and f"extra timex backfill: {days[3]}" in r.log and "extra timex backfill: done;" in r.log
+          and r.log.rstrip().endswith("=== run end ===") and "detections archived: +" not in
+          r.log.replace("extra timex detections archived: +", ""), r.log)
+    r = xt_run(b, ["--extra-timex-backfill"])
+    check("run again: nothing to detect, no call", r.calls == [] and r.rc == 0
+          and r.log.count("extra timex: nothing new to detect") >= 4, (r.calls, r.log[-400:]))
+    r = xt_run(make_base(d, "h_backfill_none", text), ["--extra-timex-backfill"])
+    check("--extra-timex-backfill without the extra timex folder: says so, nothing run",
+          r.calls == [] and r.rc == 0 and "extra timex backfill: no /B/extra_timex (extra timex not installed): "
+          "nothing to do" in r.log, r.log)
+    bb = make_base(d, "h_badarg", text)
+    r = xt_run(bb, ["--extra-timex-backfil"])
+    check("any other argument: usage, exit 2, nothing run, nothing written",
+          r.rc == 2 and "usage:" in r.out and r.calls == [] and not (bb / "logs").exists(), (r.rc, r.out))
+
+    # the folder there, no dated folder in the window: a line, no call
+    b = make_base(d, "h_old_only", text)
+    (b / "bin/python3").write_text(DET_STUB)
+    days, pics = make_extra(b)
+    for k in (0, 1, 2):
+        shutil.rmtree(str(b / "extra_timex" / days[k]))
+    r = xt_run(b)
+    check("only folders older than the window: one detector call, a line in the log, no WARNING, nothing kept",
+          r.py("waterline_detector_v5.py") == [DET_CALL]
+          and "extra timex: no dated folder of the last 3 days in /B/extra_timex: nothing to detect" in r.log
+          and "WARNING: extra timex" not in r.log
+          and sorted(os.listdir(b / "archive/images_timex")) == sorted(TIMEX), r.log[-500:])
+
+
+# ---------------------------------------------------------------------
 # Python 3.8
 # ---------------------------------------------------------------------
 
@@ -818,6 +1055,7 @@ def main():
         test_check_overlay(d)
         test_fresh_base(d)
         test_weekly_step(d)
+        test_extra_timex(d)
         test_py38()
     finally:
         if not args.keep:

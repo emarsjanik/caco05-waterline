@@ -25,8 +25,25 @@
 #   30 12 * * * /mnt/I2Rgus_Data/waterline/waterline_timex_cron.sh
 #   25 19 * * * /mnt/I2Rgus_Data/waterline/waterline_timex_cron.sh
 #   55 20 * * * /mnt/I2Rgus_Data/waterline/waterline_timex_cron.sh
+#
+# By hand, once, never from cron (EXTRA TIMEX below): detect every extra timex
+# (:15/:45) already on the NUC that has no detection yet, all days, then stop:
+#   /mnt/I2Rgus_Data/waterline/waterline_timex_cron.sh --extra-timex-backfill
 
 set -u
+
+# The one argument there is (cron passes none). Anything else: usage, exit 2,
+# nothing run. xt_window: the days of extra timex a run looks at (EXTRA TIMEX
+# below); "" = every day (the backfill).
+case "${1:-}" in
+    "")
+        xt_backfill=0; xt_window=3 ;;
+    --extra-timex-backfill)
+        xt_backfill=1; xt_window="" ;;
+    *)
+        echo "usage: $0 [--extra-timex-backfill]   (cron: no argument)" >&2
+        exit 2 ;;
+esac
 
 BASE=/mnt/I2Rgus_Data/waterline
 SCRATCH="$BASE/processed_timex"
@@ -532,6 +549,147 @@ build_model_series() {
     return 0
 }
 
+# EXTRA TIMEX: four samples an hour (steps 2b and 3, stage 1, --extra-timex-backfill).
+# coastcam-station-setup's extra_timex.sh (on CACO-05 installed by its
+# tools/extra_timex_install.sh, never by setup.sh) records one more 10-min timex
+# of each camera at :15 and at :45, between the half-hourly captures, into
+# /mnt/I2Rgus_Data/extra_timex/YYYY-MM-DD/ (the picture's local date; the timex
+# and snap; never into ImageProducts, never stamped, never to latest/). Named as
+# the capture names its timex, so every step after detection takes them as it
+# takes the :00/:30 ones. Without that folder (no extra timex installed) none of
+# this runs and the run logs nothing more: the cron as before.
+#   * A SECOND detector run, after step 2 has archived the first one's CSVs (the
+#     detector clears its input and output folders on start), with --source-dir
+#     a scratch folder holding only the extra timex pictures with no detection
+#     yet (no <photo>.csv in ARCHIVE_CSV) in the dated folders of the last
+#     xt_window days (3: today and the 2 days before, by folder name; enough for
+#     a missed run or two). Its other options are step 1's (TIMING_MODE,
+#     DETECTOR_ARGS, the scratch and debug folders). Older days: the backfill.
+#   * Separate runs keep each sequence at 30-min spacing, :00/:30 in the first
+#     and :15/:45 in the second: the detector's temporal blend (legacy mode: 30%
+#     of the same camera's previous frame, up to 35 min earlier) and the v6.8
+#     timex bias were tuned at that spacing. One run over all four would blend
+#     each frame with one 15 min older. Within the second run the first new
+#     frame of each camera has no previous frame (its predecessor was detected
+#     by an earlier run), so it is detected unblended, as the first frame after
+#     any gap already is (e.g. the 20:00 frame at the 20:55 run, after
+#     cleanup.sh has moved 19:30 away).
+#   * Its CSVs are archived as step 2 archives (cp -pn), and step 3 keeps the
+#     extra timex pictures of the same days in ARCHIVE_IMG (cp -pn,
+#     BACKDROP_PATTERN as for the others), so the maps draw them on their own
+#     photo. A picture the detector rejects (no CSV) is tried again by every
+#     run while it is in the window.
+#   * Stage 1 (WATERLINE_STAGE=archive) keeps the extra timex pictures of the
+#     window too, nothing else.
+#   * --extra-timex-backfill (by hand, once, e.g. after the 20:55 run: it holds
+#     the cron's lock, and a cron run meanwhile is SKIPPED): every dated folder,
+#     oldest first, one detector run per day (each a sequence of its own), the
+#     pictures kept; the debug images of a backfill go to a scratch folder,
+#     removed after each day. No maps or DEM: the next cron run rebuilds them
+#     from the archive. Stopped or run again, it takes only what is missing.
+# extra_timex_step MODE: detect (step 2b), keep (step 3), stage1 or backfill.
+extra_timex_step() {
+    local mode="$1" xt=/mnt/I2Rgus_Data/extra_timex cut="" d days=()
+    if [ ! -d "$xt" ]; then
+        [ "$mode" = backfill ] && log "extra timex backfill: no $xt (extra timex not installed): nothing to do"
+        return 0
+    fi
+    if [ -n "$xt_window" ]; then
+        cut=$(date -d "today -$((xt_window - 1)) days" +%F)
+    fi
+    for d in "$xt"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]; do
+        [ -d "$d" ] || continue
+        if [ -n "$cut" ] && [[ "${d##*/}" < "$cut" ]]; then
+            continue
+        fi
+        days+=("$d")
+    done
+    if [ ${#days[@]} -eq 0 ]; then
+        case "$mode" in
+            detect) log "extra timex: no dated folder of the last $xt_window days in $xt: nothing to detect" ;;
+            backfill) log "extra timex backfill: no dated folder in $xt: nothing to do" ;;
+        esac
+        return 0
+    fi
+    case "$mode" in
+        detect)
+            detect_extra_timex "$DEBUG_DIR" "${days[@]}" ;;
+        keep)
+            keep_extra_timex "$BACKDROP_PATTERN" "${days[@]}" ;;
+        stage1)
+            keep_extra_timex all "${days[@]}" ;;
+        backfill)
+            log "extra timex backfill: ${#days[@]} dated folder(s) in $xt"
+            for d in "${days[@]}"; do
+                log "extra timex backfill: ${d##*/}"
+                detect_extra_timex "$BASE/extra_timex_backfill_debug" "$d"
+                rm -rf "$BASE/extra_timex_backfill_debug"
+                keep_extra_timex "$BACKDROP_PATTERN" "$d"
+            done
+            log "extra timex backfill: done; the next cron run rebuilds the maps and DEMs with them" ;;
+    esac
+    return 0
+}
+
+# keep_extra_timex PATTERN FOLDER...: the extra timex pictures of the folders
+# into ARCHIVE_IMG (cp -pn); PATTERN "all" = every timex, else BACKDROP_PATTERN.
+keep_extra_timex() {
+    local pat="$1" d
+    shift
+    for d in "$@"; do
+        if [ "$pat" = "all" ]; then
+            cp -pn "$d"/*.timex.jpg "$ARCHIVE_IMG"/ 2>/dev/null
+        else
+            # shellcheck disable=SC2086  # the pattern is a glob, as in step 3
+            cp -pn "$d"/$pat "$ARCHIVE_IMG"/ 2>/dev/null
+        fi
+    done
+    return 0
+}
+
+# detect_extra_timex DEBUG FOLDER...: the second detector run (EXTRA TIMEX) on
+# the folders' timex pictures with no detection in ARCHIVE_CSV yet, its CSVs
+# archived with cp -pn. Its scratch source folder is made new and removed after.
+detect_extra_timex() {
+    local dbg="$1" src="$BASE/extra_timex_source" d f n=0 before after rc
+    shift
+    rm -rf "$src"
+    if ! mkdir -p "$src"; then
+        log "WARNING: extra timex: cannot make $src: not detected this run"
+        return 0
+    fi
+    for d in "$@"; do
+        for f in "$d"/*.timex.jpg; do
+            [ -f "$f" ] || continue
+            [ -e "$ARCHIVE_CSV/$(basename "$f" .jpg).csv" ] && continue
+            cp -p "$f" "$src"/ && n=$((n + 1))
+        done
+    done
+    if [ "$n" -eq 0 ]; then
+        log "extra timex: nothing new to detect (${#} dated folder(s), every picture detected)"
+        rm -rf "$src"
+        return 0
+    fi
+    before=$(find "$ARCHIVE_CSV" -name '*.csv' 2>/dev/null | wc -l)
+    # shellcheck disable=SC2086  # DETECTOR_ARGS word-split on purpose, as in step 1
+    python3 waterline_detector_v5.py \
+        --image-suffix timex.jpg \
+        --timing-mode "$TIMING_MODE" \
+        --source-dir "$src" \
+        --input-dir "$SCRATCH_INPUT" \
+        --output-dir "$SCRATCH" \
+        --debug-dir "$dbg" $DETECTOR_ARGS >> "$LOG" 2>&1
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        log "WARNING: extra timex: detector exited $rc (archiving whatever it produced)"
+    fi
+    cp -pn "$SCRATCH"/*.csv "$ARCHIVE_CSV"/ 2>/dev/null
+    after=$(find "$ARCHIVE_CSV" -name '*.csv' 2>/dev/null | wc -l)
+    log "extra timex detections archived: +$((after - before)) of $n new picture(s) (total $after)"
+    rm -rf "$src"
+    return 0
+}
+
 # One run at a time. The detector clears its scratch folders on start,
 # so an overlapping run (a slow run meeting the next cron slot, or a
 # manual run) would delete the files the first run is still working on.
@@ -569,7 +727,16 @@ fi
 # until setup's continue step (./setup.sh --waterline) installs the full file.
 if [ "$WATERLINE_STAGE" = "archive" ]; then
     cp -pn /mnt/I2Rgus_Data/ImageProducts/*.timex.jpg "$ARCHIVE_IMG"/ 2>/dev/null
+    extra_timex_step stage1          # the extra timex pictures too (EXTRA TIMEX above)
     log "stage 1 (WATERLINE_STAGE=archive): timex kept: $(find "$ARCHIVE_IMG" -name '*.jpg' 2>/dev/null | wc -l); no detection, maps or DEM until setup's continue step"
+    log "=== run end ==="
+    exit 0
+fi
+
+# --extra-timex-backfill (by hand; EXTRA TIMEX above): only the extra timex of
+# every day, detected and kept; no other step.
+if [ "$xt_backfill" = "1" ]; then
+    extra_timex_step backfill
     log "=== run end ==="
     exit 0
 fi
@@ -601,12 +768,18 @@ cp -pn "$SCRATCH"/*.csv "$ARCHIVE_CSV"/ 2>/dev/null
 after=$(find "$ARCHIVE_CSV" -name '*.csv' 2>/dev/null | wc -l)
 log "detections archived: +$((after - before)) (total $after)"
 
+# 2b. The extra timex (:15/:45; EXTRA TIMEX above): a second detector run on
+#     those of the last xt_window days with no detection yet, archived as in 2.
+#     Nothing at all without /mnt/I2Rgus_Data/extra_timex.
+extra_timex_step detect
+
 # 3. Keep the source images before cleanup.sh moves them to S3.
 if [ "$BACKDROP_PATTERN" = "all" ]; then
     cp -pn /mnt/I2Rgus_Data/ImageProducts/*.timex.jpg "$ARCHIVE_IMG"/ 2>/dev/null
 else
     cp -pn /mnt/I2Rgus_Data/ImageProducts/$BACKDROP_PATTERN "$ARCHIVE_IMG"/ 2>/dev/null
 fi
+extra_timex_step keep            # the extra timex pictures of step 2b's days (EXTRA TIMEX above)
 img_count=$(find "$ARCHIVE_IMG" -name '*.jpg' 2>/dev/null | wc -l)
 log "images in archive: $img_count"
 for prod in $ARCHIVE_PRODUCTS; do

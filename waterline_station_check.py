@@ -493,7 +493,9 @@ TRIAL_MARKER = ".waterline_station_check_trial"
 STATION_DATA = Path("/mnt/I2Rgus_Data")
 # the station's own folders (the cron's, the detector's defaults, the calibration): never a trial's
 NEVER_WRITE = ("input", "input_timex", "processed", "processed_timex", "archive", "debug",
-               "calibration", "station_calibration")
+               "calibration", "station_calibration",
+               # the cron's extra timex scratch folders (EXTRA TIMEX in waterline_timex_cron.sh: made new, removed)
+               "extra_timex_source", "extra_timex_backfill_debug")
 
 # pointing (correction 7)
 POINTING_PASS_DEG = 0.3
@@ -1087,7 +1089,7 @@ def _inside(path, folder):
 def trial_dir_problem(work):
     """Why `work` may not hold the trial's scratch folders, or None: never inside the station's
     own folders (input/, processed_timex/, archive/ ... of this checkout or of the station's
-    waterline folder), nor the camera's ImageProducts."""
+    waterline folder), nor the camera's ImageProducts or extra timex folder."""
     w = Path(os.path.abspath(str(work)))
     try:
         w = w.resolve()
@@ -1095,6 +1097,7 @@ def trial_dir_problem(work):
         pass
     roots = [HERE / name for name in NEVER_WRITE] + [STATION_DATA / "waterline" / name for name in NEVER_WRITE]
     roots.append(STATION_DATA / "ImageProducts")
+    roots.append(STATION_DATA / "extra_timex")      # extra_timex.sh's pictures (coastcam-station-setup)
     for r in roots:
         for f in {r, Path(os.path.realpath(str(r)))}:
             if _inside(w, f):
