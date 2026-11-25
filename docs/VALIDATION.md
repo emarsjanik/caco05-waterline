@@ -1036,11 +1036,26 @@ Now the cron:
 second. In legacy mode the detector blends 30% of the same camera's previous frame (up to 35 min
 earlier, `TEMPORAL_MAX_GAP_MINUTES`), and the blend and the v6.8 timex bias were tuned at 30 min. One
 run over all four would blend every frame with one 15 min older: a different lag from the one the
-bias absorbed (section 2.7). The first new extra frame of each camera in a run has no previous frame
-in that run (its predecessor was detected by an earlier run), so it is detected unblended. The first
-frame after any gap already is, e.g. the 20:00 frame at the 20:55 run, after `cleanup.sh` has moved
-19:30 away. That is up to about 2 frames per camera a day. In mid mode the blend is off, and nothing
-depends on the spacing.
+bias absorbed (section 2.7). The first new extra frame of each camera in a run would have no previous
+frame in that run, because its predecessor was detected by an earlier run. With the extra frames filed
+at about :27/:57, these are the previous day's 20:45 (at the 12:30 run), 12:45 (19:25 run) and 19:15
+(20:55 run): 3 frames per camera a day, mostly daylight ones, that would be detected unblended but with
+the bias fitted with the blend on. So when a new frame's predecessor of the same camera, at most 35 min
+older, was detected by an earlier run, that predecessor goes into the source folder too, as the blend's
+previous frame. Its CSV is already archived and `cp -pn` keeps it; the log line counts it apart
+(`... (total N; k frame(s) detected before given as the blend's previous frame, their CSVs kept)`).
+The new frame is then blended as in one long sequence (with the predecessor's line re-detected
+unblended, a second-order difference). The first frame after a real gap stays unblended, as in the
+first run, e.g. the 20:00 frame at the 20:55 run, after `cleanup.sh` has moved 19:30 away. In mid mode
+the blend is off: the predecessor is detected for nothing (about 3 frames per camera a day).
+
+**Empty or uncopyable pictures.** `extra_timex.sh` files whatever timex a stopped (timeout or KILL)
+extra run left, which can be a 0-byte file. The detector cannot read it and would print `ERROR`
+(the station status's last-cron-run row: ALERT) on every run for 3 days, so it is skipped with a
+line (`extra timex: N empty picture(s) ... skipped, never detected`), never given to the detector.
+A picture `cp` cannot copy into the source folder (a full disk) is a `WARNING` naming it, with
+`cp`'s message in the log, and the run never says "every picture detected". A truncated but
+non-empty picture is given to the detector as any other.
 
 **Why 3 days.** The window covers a missed run or two and keeps each run short: the frames of the
 day so far, plus those a missed run left. Older pictures, and everything already on the NUC when the
@@ -1048,7 +1063,8 @@ detection is switched on, take the backfill below. A picture the detector reject
 again by each run while it is in the window: at most 3 days of retries.
 
 **Backfill, once, by hand (never from cron).** Run it after the 20:55 run. It holds the cron's lock,
-and a cron run that starts meanwhile logs `SKIPPED`.
+and a cron run that starts meanwhile logs `SKIPPED`; the storm watch (07:50) waits 30 min for that lock and then skips
+its ground steps that day (`cron busy`), so let it end by about 08:00.
 
 ```
 cd /mnt/I2Rgus_Data/waterline
@@ -1068,11 +1084,12 @@ run). Cron passes none.
 |---|---|---|---|---|
 | No extra timex folder: the cron as before | [SYNTH] section 2.11's harness, parts a-g unchanged (the harness now also points `/mnt/I2Rgus_Data/extra_timex` into its temporary folder, so a NUC that has one never shows it to a test) | the same commands, log, files and exit status as before; no extra line in the log | `python3 test_station_overlay.py` (a) | same |
 | The second detector call | [SYNTH] the same harness; a stand-in detector writes a CSV per picture of its source folder and lists that folder; dated folders of today and 1, 2 and 3 days ago, a snap, a `raw/` run folder, ArgusEyes' `products/`, a folder not dated, one frame already detected | the second call comes right after the first, with the same options plus `--source-dir /B/extra_timex_source`. Its folder holds the 4 undetected pictures of the window only (not the detected one, not 3 days ago's, no snap, nothing from `raw/`, `products/` or the undated folder), each with its own file time. Their CSVs are archived and the old CSV is kept. The window's 5 pictures go to `archive/images_timex` (7 with the 2 ImageProducts ones), none from 3 days ago. Logged: `extra timex detections archived: +4 of 4 new picture(s) (total 7)`. The scratch folder is removed and the extra timex folder left as it was. | same (h) | `grep -n "extra timex" logs/timex_cron.log \| tail` |
-| Nothing new; one new; a failing detector; the station's options | [SYNTH] | nothing new: no second call, `extra timex: nothing new to detect`, no WARNING. A new picture: the call holds it alone. Detector exit 1: `WARNING: extra timex: detector exited 1 ...`, what it wrote still archived. A station file: both calls carry its `DETECTOR_ARGS`. Only folders older than the window: a line, no call, nothing kept | same (h) | - |
+| Nothing new; one new; a failing detector; the station's options | [SYNTH] | nothing new: no second call, `extra timex: nothing new to detect`, no WARNING. A new picture: the call holds it and the same camera's frame 30 min before it, detected by an earlier run, as the blend's previous frame (its CSV kept, logged `+1 of 1 new picture(s) (total 8; 1 frame(s) detected before ...)`). Detector exit 1: `WARNING: extra timex: detector exited 1 ...`, what it wrote still archived. A station file: both calls carry its `DETECTOR_ARGS`. Only folders older than the window: a line, no call, nothing kept | same (h) | - |
+| The blend's previous frame; empty and uncopyable pictures; the local date | [SYNTH] | a 15:15 c1 frame gets its 14:45 one (30 min); a 15:15 c2 frame none (its last detected frame 60 min before); an empty 14:45 c2 picture skipped with a line, no `ERROR`, no CSV, skipped again on the next run. A picture `cp` fails on (a stand-in `cp`): `WARNING: extra timex: 1 picture(s) could not be copied ...`, `cp`'s message, no second call, no "every picture detected". Part h runs in a time zone (UTC-12 or UTC+14) whose date is not UTC's at that moment, so the window is proven to be by the LOCAL date (a `date -u` there fails it) | same (h) | `grep -n "extra timex" logs/timex_cron.log \| tail` |
 | Stage 1 and the backfill | [SYNTH] | stage 1: the only Python call is the check, the window's extra pictures kept (`timex kept: 7`); with `--extra-timex-backfill`, every day's (8). The backfill: one call per dated folder, oldest first, each on that day's undetected pictures, `--debug-dir` its scratch folder (removed); no other Python call, no owg.sh; every CSV and picture archived. Run again: no call. Without the folder: says so. A wrong argument: exit 2, nothing written | same (h) | the backfill's lines in the log |
 | No new column-0 `NAME=` line; the readers of the `VAR=` lines | [SYNTH] | the folder is a `local` of `extra_timex_step`; the window and the backfill switch are set inside the argument `case`; every column-0 line as before | same (d, h) | - |
 | A trial's work folder | [SYNTH] | `waterline_station_check.py trial` refuses `extra_timex_source/`, `extra_timex_backfill_debug/` and `/mnt/I2Rgus_Data/extra_timex` as work folders (the cron makes and removes the first two) | `python3 test_waterline_station_check.py` | - |
-| What counts or reports frames, at 4 an hour | code read, 24 Nov 2026 | `station_status.py`: newest file times only (timex images, detections), and its lens check reads `owg_live.py`'s c2 bright scores (`extra_timex.sh` deletes the extra bright images), so it is unchanged. Step 4 (no detection today): any CSV of today. `daily_elevation_map.py`: no cap (`MAP_MONTH_MAX_LINES=0`), so the 30-day map draws about twice the lines and its "Lines per day" doubles. `weekly_frames.py`: the ground file's points, no frame count. `pointing_daily.py`: up to 3 frames a day spread over it. The DEM: more crossings a cell (`DEM_MIN_POINTS` counts frames, so more cells reach 3). `survey_products.py frames_per_day`: a report of counts. | read the code | the first maps after the switch: about twice the lines, the same picture |
+| What counts or reports frames, at 4 an hour | code read, 24 Nov 2026; [SYNTH] for the weekly frames | `station_status.py`: newest file times only (timex images, detections), and its lens check reads `owg_live.py`'s c2 bright scores, and `owg_live.py` reads only `archive/images_bright` and ImageProducts, never `extra_timex/` or the upload staging folder `extra_timex_upload/` (where, with the upload on, as on CACO-05, the extra bright images wait for S3; without it `extra_timex.sh` deletes them), so it is unchanged. Step 4 (no detection today): any CSV of today. `daily_elevation_map.py`: no cap (`MAP_MONTH_MAX_LINES=0`), so the 30-day map draws about twice the lines and its "Lines per day" doubles. `weekly_frames.py`: the ground file's points, no frame count. `pointing_daily.py`: up to 3 frames a day spread over it. The DEM: more crossings a cell (`DEM_MIN_POINTS` counts frames, so more cells reach 3; a weaker guard, see the caveats). `survey_products.py frames_per_day`: a report of counts. `storm_watch.py`: a date is usable at `STORM_MIN_FRAMES_PER_DAY` (4) frames passing `--max-hs`, reached sooner (in half the time of day: a weaker guard, see the caveats); its ground-file check only flags frames that drop. `station_status.py`'s last-cron-run row reads the last `=== run start ===` block: a backfill's, until the next cron run. Run: a week of frames every 15 min keeps every line and point and goes final with both frames | read the code; `python3 test_weekly_frames.py` (T9) | the first maps after the switch: about twice the lines, the same picture |
 
 **Caveats.**
 
@@ -1085,6 +1102,30 @@ run). Cron passes none.
   cron. Not changed here: `detect_original_view.py` may not be edited. Mid mode (blend off) and
   `recalibrate_timing.py`'s backfill, which is mid, are unaffected. Until such a tool splits its photos
   by sequence, read its legacy numbers with this in mind, or give it only the :00/:30 photos.
+- **QC gates that count frames as if they were 30 min apart (not retuned).** At 15-min spacing
+  consecutive frames are less independent, and these gates were set on 30-min data:
+  - `waterline_consistency.py` `seaward_end()`: the most seaward line is judged only while fewer
+    than `SEAWARD_RUN` (3) other lines lie within the guard of it. One hour of glare or fog at slack
+    low water now gives 4 strays a few px apart: the most seaward has 3 lines near it, so the peel
+    stops at once and the whole run is kept, where at 30 min the same hour gave 2 strays, held back
+    and judged.
+  - `extract_elevation_contours.py` `tide_agreement_by_day()`: it judges consecutive frames of a
+    camera (at most 90 min apart, tide change > 0.05 m) against `--min-tide-agreement` 0.70 and
+    `--min-agreement-transitions` 5. A 15-min transition carries half the tide change, so more of
+    them sit near the 0.05 m floor, where detector noise sets the sign: a marginal good camera-day
+    can fall below 0.70 and be dropped whole. The size of this is unmeasured.
+  - `DEM_MIN_POINTS` (3) and `STORM_MIN_FRAMES_PER_DAY` (4) count frames: 3 frames can now come
+    from 30 min of one glare or fog episode, and a storm-watch date is usable on half the hours.
+  None of these is retuned here (no 4-an-hour data yet to tune on). Check on the NUC after the
+  switch: the consistency step's dropped-line counts and the `Tide-direction agreement` table in
+  `logs/timex_cron.log` against the weeks before; a fix would pair or count by sequence (:00/:30
+  and :15/:45 apart), or retune with 4-an-hour data.
+- **The cron runs at :25 and :55**, the minutes in which `extra_timex.sh`'s ArgusEyes makes its
+  products (its timeout stops it about 25 s before :29/:59). Step 1's detector already ran in that
+  window before this change; step 2b runs after step 1 and step 2, so it adds to the overlap only
+  when step 1 is short. CPU contention could push an extra run past its timeout: that extra timex
+  is lost and `extra_timex.sh` logs FAIL (an empty picture it leaves is skipped, above)
+  [NUC: not timed]. The cron minutes are the station's crontab, not changed here.
 - **The extra snap** stays in `extra_timex/YYYY-MM-DD/` and is not copied into `archive/images_snap`
   (`ARCHIVE_PRODUCTS` covers ImageProducts only).
 

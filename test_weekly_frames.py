@@ -25,6 +25,7 @@ only; nothing named for that date is created or opened (an audit hook watches ev
       (rc 0), the frame size exact on matplotlib 3.3 (854x480), waterline_station.conf applied in a run by
       hand, missed weeks capped per daily run, re-processed rows rebuild an open week, the failed-build retry
       wording
+  T9  four frames an hour (the extra :15/:45 timex): every line and point of the week kept, the week final
 Every command's writes are checked to land under archive/weekly/ or logs/.
 """
 
@@ -89,12 +90,12 @@ def make_base(tmp, name="base", settings=None):
     return base
 
 
-def rows_for(d, rng, hs=0.8, cams=("c1", "c2"), frames=25, shift=0.0, first_hour=11):
-    """A day of a small station: frames every 30 min from first_hour UTC, 20 points per camera line."""
+def rows_for(d, rng, hs=0.8, cams=("c1", "c2"), frames=25, shift=0.0, first_hour=11, step_min=30):
+    """A day of a small station: frames every step_min (30) min from first_hour UTC, 20 points per camera line."""
     out = []
     t0 = datetime.fromisoformat(d + "T00:00:00+00:00") + timedelta(hours=first_hour)
     for k in range(frames):
-        t = t0 + timedelta(minutes=30 * k)
+        t = t0 + timedelta(minutes=step_min * k)
         e_ = int(t.timestamp())
         tide = 0.6 + 1.2 * np.sin(W_TIDE * e_)
         for cam in cams:
@@ -267,6 +268,25 @@ def t1():
               "coordinates skipped; Hs 2.4 > 1.5 dropped, blank Hs kept; beach elevation, else the tide's")
         pts = wf.read_points(p, "2026-11-23", "2026-11-29", None)
         check([x["source_file"] for x in pts] == ["b", "d", "e"], "read_points without --max-hs keeps the rough frame")
+
+
+def t9():
+    print("T9 four frames an hour (the extra :15/:45 timex, docs/VALIDATION.md 2.12): the week as with two")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = make_base(tmp)
+        calls = []
+        write_ground(base, dates("2026-11-02", "2026-11-16"), frames=50, step_min=15)
+        rc, out = run(base, ["backfill"], "2026-11-17T03:00:00Z", fake_runner(calls))
+        W = wk(base, "2026-11-09")
+        pts = (base / "archive/weekly/weeks/2026-11-09/points.csv").read_text().splitlines()[1:]
+        times = sorted({ln.split(",")[0] for ln in pts if ln.split(",")[1] == "c1"})
+        check(rc == 0 and W["status"] == "final" and W["lines"] == 7 * 50 * 2 and W["points"] == 7 * 50 * 2 * 20
+              and len(pts) == W["points"] and times[:4] == ["2026-11-09T11:00:00+00:00", "2026-11-09T11:15:00+00:00",
+                                                           "2026-11-09T11:30:00+00:00", "2026-11-09T11:45:00+00:00"]
+              and (base / "archive/weekly/frames/dem/2026-11-15_week.png").exists()
+              and (base / "archive/weekly/frames/waterlines/2026-11-15_week.png").exists(),
+              f"frames every 15 min: every line and point of the week kept (lines {W.get('lines')}, points "
+              f"{W.get('points')}), the :15 and :45 ones too, and the week FINAL with both frames")
 
 
 # --------------------------------------------------------------------------------------------
@@ -981,7 +1001,7 @@ def main():
     os.environ.setdefault("MPLBACKEND", "Agg")
     wf.local_now = lambda: datetime(2026, 1, 1, 3, 0)       # far from every station job
     t_all = time.time()
-    for t in (t1, t2, t3, t4, t5, t6, t7, t8):
+    for t in (t1, t2, t3, t4, t5, t6, t7, t8, t9):
         t()
     shutil.rmtree(os.environ["MPLCONFIGDIR"], ignore_errors=True)
     print(f"\n{str(len(FAILED)) + ' check(s) FAILED' if FAILED else 'all weekly frames tests passed'} "

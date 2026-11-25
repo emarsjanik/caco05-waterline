@@ -87,8 +87,9 @@ ARCHIVE_RAS="$BASE/archive/ras_c2"
 LOG="$BASE/logs/timex_cron.log"
 
 # Keep every timex image. Disk is not the constraint (1.7 TB free, this
-# grows ~9 GB/year) and keeping them is what allows the whole archive
-# to be REPROCESSED when the detector or its thresholds change -- which
+# grows ~9 GB/year, about twice that with the extra :15/:45 timex) and
+# keeping them is what allows the whole archive to be REPROCESSED when
+# the detector or its thresholds change -- which
 # has already been necessary several times. Set to a glob such as
 # "*12_00_00*.timex.jpg" to keep only a daily backdrop instead.
 BACKDROP_PATTERN="all"
@@ -570,10 +571,17 @@ build_model_series() {
 #     of the same camera's previous frame, up to 35 min earlier) and the v6.8
 #     timex bias were tuned at that spacing. One run over all four would blend
 #     each frame with one 15 min older. Within the second run the first new
-#     frame of each camera has no previous frame (its predecessor was detected
-#     by an earlier run), so it is detected unblended, as the first frame after
-#     any gap already is (e.g. the 20:00 frame at the 20:55 run, after
-#     cleanup.sh has moved 19:30 away).
+#     frame of each camera would have no previous frame (its predecessor was
+#     detected by an earlier run: at the 12:30, 19:25 and 20:55 runs the
+#     previous day's 20:45, 12:45 and 19:15, 3 a camera a day), so that
+#     predecessor, when it is at most 35 min older, goes into the source folder
+#     too, as the blend's previous frame (its CSV is already archived and
+#     cp -pn keeps it); the new frame is then blended as in one long sequence.
+#     The first frame after a real gap stays unblended, as in the first run
+#     (e.g. the 20:00 frame at the 20:55 run, after cleanup.sh has moved 19:30).
+#     An empty picture (0 bytes: an extra run stopped while writing it) is
+#     skipped with a line in the log, never given to the detector (it would
+#     log an ERROR every run); one cp cannot copy is a WARNING.
 #   * Its CSVs are archived as step 2 archives (cp -pn), and step 3 keeps the
 #     extra timex pictures of the same days in ARCHIVE_IMG (cp -pn,
 #     BACKDROP_PATTERN as for the others), so the maps draw them on their own
@@ -650,23 +658,72 @@ keep_extra_timex() {
 # detect_extra_timex DEBUG FOLDER...: the second detector run (EXTRA TIMEX) on
 # the folders' timex pictures with no detection in ARCHIVE_CSV yet, its CSVs
 # archived with cp -pn. Its scratch source folder is made new and removed after.
+# Each new picture whose camera's previous extra frame, at most 35 min earlier
+# (the detector's TEMPORAL_MAX_GAP_MINUTES), was detected by an earlier run
+# gets that frame in the source folder too, as the blend's previous frame, so
+# that the new one is blended as in one long sequence; that frame's CSV is
+# already archived and cp -pn keeps it. An empty picture (0 bytes: an extra run
+# killed while writing it) is never detected: skipped, with a line in the log.
 detect_extra_timex() {
-    local dbg="$1" src="$BASE/extra_timex_source" d f n=0 before after rc
+    local dbg="$1" src="$BASE/extra_timex_source" d f name ep cam n=0 seeds=0 empty=0 failed=0 first_fail=""
+    local before after rc
+    local -A last_ep=() last_det=()
     shift
     rm -rf "$src"
     if ! mkdir -p "$src"; then
         log "WARNING: extra timex: cannot make $src: not detected this run"
         return 0
     fi
-    for d in "$@"; do
-        for f in "$d"/*.timex.jpg; do
-            [ -f "$f" ] || continue
-            [ -e "$ARCHIVE_CSV/$(basename "$f" .jpg).csv" ] && continue
-            cp -p "$f" "$src"/ && n=$((n + 1))
-        done
-    done
+    # every timex picture of the folders as "epoch path", in time order (a name
+    # with no leading epoch as 0: copied, never a blend's previous frame)
+    while read -r ep f; do
+        name=${f##*/}
+        cam=${name%.timex.jpg}
+        cam=${cam##*.}
+        if [ -e "$ARCHIVE_CSV/${name%.jpg}.csv" ]; then
+            if [ "$ep" != 0 ]; then
+                last_ep[$cam]=$ep
+                last_det[$cam]=$f
+            fi
+            continue
+        fi
+        if [ ! -s "$f" ]; then
+            empty=$((empty + 1))
+            continue
+        fi
+        if [ "$ep" != 0 ]; then
+            if [ -n "${last_det[$cam]:-}" ] && [ $((ep - last_ep[$cam])) -le 2100 ]; then
+                if cp -p "${last_det[$cam]}" "$src"/ 2>> "$LOG"; then
+                    seeds=$((seeds + 1))
+                else
+                    failed=$((failed + 1)); first_fail=${first_fail:-${last_det[$cam]}}
+                fi
+            fi
+            last_ep[$cam]=$ep
+            last_det[$cam]=""
+        fi
+        if cp -p "$f" "$src"/ 2>> "$LOG"; then
+            n=$((n + 1))
+        else
+            failed=$((failed + 1)); first_fail=${first_fail:-$f}
+        fi
+    done < <(for d in "$@"; do
+                 for f in "$d"/*.timex.jpg; do
+                     [ -f "$f" ] || continue
+                     ep=${f##*/}
+                     ep=${ep%%.*}
+                     [[ "$ep" =~ ^[1-9][0-9]{8,9}$ ]] || ep=0     # the detector's leading epoch
+                     printf '%s %s\n' "$ep" "$f"
+                 done
+             done | sort -s -n -k1,1)
+    [ "$empty" -eq 0 ] || log "extra timex: $empty empty picture(s) (0 bytes: an extra run stopped while writing them) skipped, never detected"
+    if [ "$failed" -gt 0 ]; then
+        log "WARNING: extra timex: $failed picture(s) could not be copied into $src (e.g. $first_fail; see above): not detected this run"
+    fi
     if [ "$n" -eq 0 ]; then
-        log "extra timex: nothing new to detect (${#} dated folder(s), every picture detected)"
+        if [ "$failed" -eq 0 ]; then
+            log "extra timex: nothing new to detect (${#} dated folder(s), every picture detected)"
+        fi
         rm -rf "$src"
         return 0
     fi
@@ -685,7 +742,11 @@ detect_extra_timex() {
     fi
     cp -pn "$SCRATCH"/*.csv "$ARCHIVE_CSV"/ 2>/dev/null
     after=$(find "$ARCHIVE_CSV" -name '*.csv' 2>/dev/null | wc -l)
-    log "extra timex detections archived: +$((after - before)) of $n new picture(s) (total $after)"
+    if [ "$seeds" -eq 0 ]; then
+        log "extra timex detections archived: +$((after - before)) of $n new picture(s) (total $after)"
+    else
+        log "extra timex detections archived: +$((after - before)) of $n new picture(s) (total $after; $seeds frame(s) detected before given as the blend's previous frame, their CSVs kept)"
+    fi
     rm -rf "$src"
     return 0
 }

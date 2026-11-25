@@ -70,6 +70,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -835,11 +836,11 @@ def local_day(days_ago):
                           universal_newlines=True).stdout.strip()
 
 
-def xt_name(day, cam, minute):
-    """An extra timex picture's name (Argus style) at <minute> past 14 local on <day>."""
-    e = int(subprocess.run(["date", "-d", f"{day} 14:{minute:02d}", "+%s"], stdout=subprocess.PIPE,
+def xt_name(day, cam, minute, hour=14):
+    """An extra timex picture's name (Argus style) at <hour>:<minute> local on <day>."""
+    e = int(subprocess.run(["date", "-d", f"{day} {hour}:{minute:02d}", "+%s"], stdout=subprocess.PIPE,
                            universal_newlines=True).stdout.strip())
-    return f"{e}.Mon.Jan.01_14_{minute:02d}_00.GMT.2026.CACO05.{cam}.timex.jpg"
+    return f"{e}.Mon.Jan.01_{hour}_{minute:02d}_00.GMT.2026.CACO05.{cam}.timex.jpg"
 
 
 def make_extra(b, detected=True):
@@ -888,8 +889,36 @@ def src_line(folder, names):
     return f"SRC {folder}: " + "".join(n + " " for n in sorted(names))
 
 
+CP_FAIL_STUB = """#!/bin/bash
+# cp, failing (as on a full disk) when an argument holds $CP_FAIL
+if [ -n "${CP_FAIL:-}" ]; then
+    for a in "$@"; do
+        case "$a" in *"$CP_FAIL"*) echo "cp: cannot create regular file '$a': No space left on device" >&2; exit 1 ;; esac
+    done
+fi
+exec %s "$@"
+"""
+
+
 def test_extra_timex(d):
     print("h. the extra timex (:15/:45): a second detector call on the window's undetected pictures, archived as the others")
+    # A time zone whose date differs from UTC's right now (UTC-12 before 12:00 UTC, UTC+14 after), so the window
+    # is proven to use the LOCAL date (the 20:55 run on the NUC is the next day in UTC): `date -u` fails here.
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = "XST12" if time.gmtime().tm_hour < 12 else "XST-14"
+    try:
+        utc = subprocess.run(["date", "-u", "+%F"], stdout=subprocess.PIPE, universal_newlines=True).stdout.strip()
+        check(f"part h runs in TZ={os.environ['TZ']}, where today is not UTC's today", local_day(0) != utc,
+              (local_day(0), utc))
+        extra_timex_cases(d)
+    finally:
+        if saved is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved
+
+
+def extra_timex_cases(d):
     text = CRON.read_text()
     lines = [ln for ln in text.splitlines() if "/mnt/I2Rgus_Data/extra_timex" in ln]
     check("the extra timex folder is a local of extra_timex_step (no column-0 NAME= line for it)",
@@ -938,13 +967,56 @@ def test_extra_timex(d):
           and "WARNING: extra timex" not in r.log and not (b / "extra_timex_source").exists(),
           (r.calls[:3], r.log[-500:]))
     late = xt_name(days[0], "c1", 45)
+    seed = xt_name(days[0], "c1", 15)
+    seed_csv = (arch / seed.replace(".jpg", ".csv")).read_text()
     (b / "extra_timex" / days[0] / late).write_bytes(b"late")
     r = xt_run(b, DET_RC="1")
-    check("a new picture: the second call's source folder holds it alone; the detector failing is a WARNING and "
-          "what it wrote is still archived",
-          r.srcs[1:] == [src_line("/B/extra_timex_source", [late])]
+    check("a new picture: the second call's source folder holds it, and the same camera's frame 30 min before it "
+          "(detected by an earlier run) as the blend's previous frame, whose CSV is kept; the detector failing is "
+          "a WARNING and what it wrote is still archived",
+          r.srcs[1:] == [src_line("/B/extra_timex_source", [late, seed])]
+          and "extra timex detections archived: +1 of 1 new picture(s) (total 8; 1 frame(s) detected before given "
+              "as the blend's previous frame, their CSVs kept)" in r.log
+          and (arch / seed.replace(".jpg", ".csv")).read_text() == seed_csv
           and "WARNING: extra timex: detector exited 1 (archiving whatever it produced)" in r.log
           and (arch / late.replace(".jpg", ".csv")).exists() and (img / late).exists(), (r.srcs, r.log[-500:]))
+    # the blend's previous frame only within 35 min (TEMPORAL_MAX_GAP_MINUTES), of the same camera; an empty
+    # picture (an extra run killed while writing it) skipped with a line, never given to the detector
+    c1_new, c2_new = xt_name(days[0], "c1", 15, 15), xt_name(days[0], "c2", 15, 15)
+    c2_empty = xt_name(days[0], "c2", 45)
+    for n, data in ((c1_new, b"new"), (c2_new, b"new"), (c2_empty, b"")):
+        (b / "extra_timex" / days[0] / n).write_bytes(data)
+    r = xt_run(b)
+    last = r.log[r.log.rfind("=== run start ==="):]     # the log holds every run of this base
+    check("15:15 c1 gets its 14:45 frame (30 min, detected before); 15:15 c2 none (its last detected frame 60 min "
+          "before, the empty 14:45 one never detected); the empty one skipped, logged, no ERROR, no extra timex WARNING",
+          r.srcs[1:] == [src_line("/B/extra_timex_source", [c1_new, late, c2_new])]
+          and "extra timex: 1 empty picture(s) (0 bytes: an extra run stopped while writing them) skipped, never "
+              "detected" in last
+          and "extra timex detections archived: +2 of 2 new picture(s) (total 10; 1 frame(s) detected before" in last
+          and "ERROR" not in last and "WARNING: extra timex" not in last
+          and not (arch / c2_empty.replace(".jpg", ".csv")).exists(), (r.srcs, last))
+    r = xt_run(b)
+    last = r.log[r.log.rfind("=== run start ==="):]     # the log holds every run of this base
+    check("run again: the empty picture skipped again, nothing new to detect, no second call",
+          r.py("waterline_detector_v5.py") == [DET_CALL] and "1 empty picture(s)" in last
+          and "extra timex: nothing new to detect (3 dated folder(s), every picture detected)" in last, last)
+    # a picture that cannot be copied into the source folder (a full disk): a WARNING, never "every picture
+    # detected"
+    stuck = xt_name(days[0], "c1", 45, 15)
+    (b / "extra_timex" / days[0] / stuck).write_bytes(b"new")
+    (b / "bin/cp").write_text(CP_FAIL_STUB % shutil.which("cp"))
+    (b / "bin/cp").chmod(0o755)
+    r = xt_run(b, CP_FAIL=stuck)
+    last = r.log[r.log.rfind("=== run start ==="):]
+    check("a picture cp cannot copy into the source folder: a WARNING naming it, cp's message in the log, no second "
+          "call, no 'every picture detected', the source folder removed",
+          r.py("waterline_detector_v5.py") == [DET_CALL]
+          and f"WARNING: extra timex: 1 picture(s) could not be copied into /B/extra_timex_source (e.g. "
+              f"/B/extra_timex/{days[0]}/{stuck}; see above): not detected this run" in last
+          and "No space left on device" in last and "nothing new to detect" not in last
+          and not (b / "extra_timex_source").exists(), last)
+    (b / "bin/cp").unlink()
 
     # the station's DETECTOR_ARGS on the second call too
     b = make_base(d, "h_station", text, caco05_cal=False, station_cal=STATION_CAL)
