@@ -92,7 +92,7 @@ Do not use them at a new station. `TIMING_MODE` stays `legacy` there, and the fi
 
 | Stage | When | The file | What a cron run does |
 |---|---|---|---|
-| 1 | From install day until the calibration, OPUS height and GNSS water levels are in | `WATERLINE_STAGE="archive"`, `OWG_ENABLE="0"`, `ARCHIVE_PRODUCTS=""` and `STATION_NAME` | Copies the new timex pictures into `archive/images_timex` (never overwriting one), then logs `stage 1 (WATERLINE_STAGE=archive): timex kept: N; ...` and `=== run end ===`. No detection, maps or DEM; no Python but the check. |
+| 1 | From install day until the calibration, OPUS height and GNSS water levels are in | `WATERLINE_STAGE="archive"`, `OWG_ENABLE="0"`, `ARCHIVE_PRODUCTS=""` and `STATION_NAME` | Copies the new timex pictures into `archive/images_timex` (never overwriting one; with extra timex, `EXTRA_TIMEX_MINUTES`, also those of the last 3 days in `/mnt/I2Rgus_Data/extra_timex`: docs/VALIDATION.md 2.12), then logs `stage 1 (WATERLINE_STAGE=archive): timex kept: N; ...` and `=== run end ===`. No detection, maps or DEM; no Python but the check. |
 | 2 | After `./setup.sh --waterline` (setup's "continue" step) | The full file (below), without `WATERLINE_STAGE` | The whole pipeline, with the station's values. |
 
 The products of a stage-2 run, in `/mnt/I2Rgus_Data/waterline`: the waterline points
@@ -575,7 +575,9 @@ Every step writes into `trial_c1/`, and the steps' output goes to `trial_c1/tria
 
 **The work folder.**
 - It may not be inside the station's own folders (`input`, `input_timex`, `processed`,
-  `processed_timex`, `archive`, `debug`, `calibration`, `station_calibration`) or ImageProducts.
+  `processed_timex`, `archive`, `debug`, `calibration`, `station_calibration`, and the cron's extra
+  timex scratch folders `extra_timex_source`, `extra_timex_backfill_debug`), ImageProducts or
+  `/mnt/I2Rgus_Data/extra_timex`.
   Such a folder is refused with exit 2.
 - `trial_c1/` is replaced on each run, but only if it carries the trial's marker file.
 

@@ -5,6 +5,8 @@ debug/
 processed/
 processed_timex/
 input/
+extra_timex_source/
+extra_timex_backfill_debug/
 logs/
 work/
 reports/

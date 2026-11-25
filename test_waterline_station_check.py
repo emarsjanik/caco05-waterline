@@ -555,7 +555,8 @@ def test_trial(d):
     c2.unlink()
 
     for bad in (HERE / "archive" / "trial_test_scratch", HERE / "processed_timex" / "x", HERE / "input",
-                Path("/mnt/I2Rgus_Data/waterline/archive/x")):
+                Path("/mnt/I2Rgus_Data/waterline/archive/x"), HERE / "extra_timex_source" / "x",
+                Path("/mnt/I2Rgus_Data/waterline/extra_timex_backfill_debug"), Path("/mnt/I2Rgus_Data/extra_timex/x")):
         existed = bad.exists()
         rc, js, out, err = cli("trial", "--camera", "c1", "--io", IO["c1"], "--eo", EO["c1"], "--profile-json", geo,
                                "--spline", spline, "--frames", src / names[0], "--work-dir", bad,
